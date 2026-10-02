@@ -1,0 +1,9 @@
+# local environment and caches
+.venv/
+__pycache__/
+
+# benchmark code and results stay local
+benchmark/
+
+# personal notes and project files that stay on this machine
+local/

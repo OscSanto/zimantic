@@ -1,0 +1,32 @@
+# zimsearch settings. Relative paths are relative to the folder you run the command from.
+
+# Folder holding the .zim files. `build <name>` looks for <name>.zim in here.
+zim_dir: C:/Users/oscar/Documents/vm_shared_folder
+
+# Folder where indexes are written: <zim name>.sqlite and <zim name>.faiss per ZIM.
+# To index on a faster machine, build there and copy both files into this folder.
+index_dir: C:/zimsearch/indexes
+
+# Folder holding the embedding model (multilingual-e5-small, int8 ONNX) as model.onnx
+# and its tokenizer as sentencepiece.bpe.model.
+model_dir: C:/zimsearch/model
+
+# Kiwix base URL. Result links become <kiwix_url>/<zim name>/<article path>.
+kiwix_url: http://localhost:8080/content
+
+# Port for the search page (http://<this machine>:<port>). It is reachable from other devices on the network.
+port: 8090
+
+# Articles embedded at once while indexing. 
+# Higher is faster on a laptop 
+# keep ~8 on a Pi 2w .
+batch_size: 32
+
+# Results shown per search.
+# Redirects collapsed during searches:
+results: 30
+
+# For large ZIMs: how many vector lists each search scans. Higher = better results, slower.
+# lower it if searches are slow on a Pi.
+# During testing: 64 seemed as accurate as searching through everything on 28k+ articles. (IVF(4*sqrt(n))sq8 VS. FLAT)
+nprobe: 64
