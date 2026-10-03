@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zimantic</title>
+
+<style>
+body{font:16px system-ui,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#222}
+form{display:flex;flex-wrap:wrap;gap:.5rem}#q{flex:1;min-width:12rem;padding:.6rem;font-size:1rem}button{padding:.6rem}
+#picker{flex-basis:100%;color:#444}#picker summary{cursor:pointer;padding:.3rem 0}
+#zims{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))}
+#zims label{display:flex;gap:.5rem;align-items:flex-start;padding:.35rem .4rem;border-radius:4px;cursor:pointer}
+#zims label:hover{background:#f2f2f2}#zims input{margin-top:.2rem}
+.r{border-top:1px solid #ddd;padding:.8rem 0}.r a{font-size:1.1rem}.r small{color:#666}.r p{margin:.3rem 0}
+</style>
+
+<h1>Zimantic</h1>
+<form id="f">
+  <input id="q" type="search" placeholder="Search…" autofocus>
+  <button>Search</button>
+  <details id="picker" hidden>
+    <summary id="summary">Collections</summary>
+    <div id="zims"></div>
+  </details>
+</form>
+<p id="status"></p>
+<main id="results"></main>
+<script>
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => "&#" + c.charCodeAt(0) + ";");
+const boxes = () => [...$("zims").querySelectorAll("input")];
+
+// Summary line of the collapsed picker. None ticked searches everything, like all ticked.
+function updateSummary() {
+  const all = boxes().length, on = boxes().filter(b => b.checked).length;
+  $("summary").textContent = on === all || on === 0 ? `Collections: All (${all})` : `Collections: ${on} of ${all}`;
+}
+
+// Collection picker: one checkbox per ZIM, all ticked.
+fetch("/api/zims").then(r => r.json()).then(zims => {
+  if (zims.length < 2) return;  // one collection: nothing to choose
+  $("zims").innerHTML = zims.map(z =>
+    `<label><input type="checkbox" value="${esc(z)}" checked> ${esc(z)}</label>`).join("");
+  $("picker").hidden = false;
+  updateSummary();
+});
+
+$("zims").onchange = updateSummary;
+
+$("f").onsubmit = async e => {
+  e.preventDefault();
+
+  const q = $("q").value.trim();
+  if (!q) return;
+
+  $("status").textContent = "Searching…";
+
+  const params = new URLSearchParams({q});
+  const ticked = boxes().filter(b => b.checked);
+  if (ticked.length < boxes().length)  // all ticked (or none): send no zim, which searches everything
+    for (const box of ticked) params.append("zim", box.value);  // ?zim=a&zim=b
+  const r = await fetch("/api/search?" + params);
+
+  if (!r.ok) { $("status").textContent = "Search failed"; return; }
+  const results = await r.json();
+
+  $("status").textContent = results.length ? "" : "No results.";
+  $("results").innerHTML = results.map(x =>
+    `<div class="r"><a href="${esc(x.url)}">${esc(x.title)}</a> <small>${esc(x.zim)}</small><p>${esc(x.lead)}</p></div>`).join("");
+};
+</script>
+
+</html>

@@ -1,6 +1,6 @@
-# zimsearch settings.
+# zimantic settings.
 
-# Relative paths (like ./zims) are relative to the folder you run `python -m zimsearch` from (this project folder)
+# Relative paths (like ./zims) are relative to the folder you run `python -m zimantic` from (this project folder)
 #  Absolute paths also work, e.g. /mnt/usb/zims or C:/zims.
 
 # ---------------------------------------------------------------------------------------------
@@ -9,17 +9,17 @@
 # ---------------------------------------------------------------------------------------------
 
 # Your .zim files: (download them from https://library.kiwix.org).
-# `python -m zimsearch build <name>`    looks for <name>.zim in this folder.
-zim_dir: ./zims
+# `python -m zimantic build <name>`    looks for <name>.zim in this folder.
+zim_dir: C:/Users/oscar/Documents/vm_shared_folder
 
 # The embedding model: this folder must contain model.onnx and sentencepiece.bpe.model
 # (see "Download the model" in the README).
-model_dir: ./model
+model_dir: C:/zimsearch/model
 
 # Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.
 # Created automatically. 
 # (Recomended; for large ZIMs, build the index on a faster machine and copy both files here)
-index_dir: ./indexes
+index_dir: C:/zimsearch/indexes
 
 # ---------------------------------------------------------------------------------------------
 # SERVER
