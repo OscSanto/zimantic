@@ -9,14 +9,16 @@ as a Raspberry Pi Zero 2 W.
 
 | You type | Kiwix search | Zimantic |
 |---|---|---|
-| "comet that comes back every 76 years" | *Halley's Comet* at #4 | *Halley's Comet* at **#1** |
-| "moon" | *Moon* at #9 | *Moon* at **#1** |
-| "الشمس" (Arabic for "the sun") | *Sun* not in the top 20 | *Sun* at **#1** |
+| "what causes lockjaw" | *Tetanus* not in the top 20 | *Tetanus* at **#1** |
+| "diabetis" (misspelled) | *Diabetes* not in the top 20 | *Diabetes* at **#1** |
+| "糖尿病" (Chinese for "diabetes") | *Diabetes* not in the top 20 | *Diabetes* at **#1** |
+
+*Searched in WikiMed, the Wikipedia medical encyclopedia ZIM. Results below.*
 
 ## Features
 
 - **Search by meaning**: questions and descriptions find articles even when they share no words with the title.
-- **Alternate names and misspellings**: "andromeda galaxie" finds *Andromeda Galaxy*.
+- **Alternate names and misspellings**: "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another.
   Strongest in widely used languages (see the results below).
 - **Several collections at once**: search any combination of your ZIMs, ranked together in one list.
@@ -63,7 +65,7 @@ Input is capped at 256 tokens.
 | ZIM size | Vector index | Why |
 |---|---|---|
 | Under 10,000 articles | **Flat**: the query is compared with every vector | Exact, and small enough (a few MB) that comparing everything is fast |
-| 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search only scans the closest `nprobe` clusters (64 by default) | Comparing millions of vectors per search is too slow. On the 28k-article astronomy ZIM, scanning 64 of 672 clusters (~10%) was about as accurate as scanning everything. 8-bit numbers were nearly exact. **heavier compression methods (e.g. PQ48) lost ~25% of the top hits.** |
+| 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search only scans the closest `nprobe` clusters (64 by default) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters (6%) was within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). 8-bit numbers were nearly exact. **Heavier compression (e.g. PQ48) lost ~25% of the top hits in earlier testing.** |
 
 The `.faiss` file is memory-mapped: the operating system reads only the **clusters** a search touches instead of loading
 the whole index into RAM. Clusters are found relative to the distance of query-to-cluster centres in vector space.
@@ -74,7 +76,7 @@ If a build stops, running it again resumes from the last saved batch.
 
 At startup Zimantic loads the embedding model and opens every **finished** index; that is, the SQLite file
 , the FAISS file, and the ZIM.
-These stay open for as long as the server runs; **nothing is reloaded per search**.
+These stay open for as long as the server runs; **nothing is reloaded per search**. 
 
 A lightweight HTML page is served through FastAPI and is accessible from any browser at `http://<host>:8090`
 (the `port` in `config.yaml`).
@@ -86,9 +88,9 @@ A lightweight HTML page is served through FastAPI and is accessible from any bro
 
    | Search | Finds | Good at | Time |
    |---|---|---|---|
-   | **Meaning** (FAISS) | Articles whose first-paragraph vector is closest to the query (cosine similarity) | Questions, descriptions, other languages | ~5 ms |
-   | **Title words** (SQLite FTS5, BM25 ranking) | Titles containing every word of the query, including redirect titles | Exact titles, alternate names (via redirect titles) | ~2 ms |
-   | **Full text** (the ZIM's own Kiwix index) | Articles containing the words anywhere | Words buried deep inside an article | ~5 ms |
+   | **Meaning** (FAISS) | Articles whose first-paragraph vector is closest to the query (cosine similarity) | Questions, descriptions, other languages | ~13 ms |
+   | **Title words** (SQLite FTS5, BM25 ranking) | Titles containing every word of the query, including redirect titles | Exact titles, alternate names (via redirect titles) | ~4 ms |
+   | **Full text** (the ZIM's own Kiwix index) | Articles containing the words anywhere | Words buried deep inside an article | ~8 ms |
 
 3. **Collapse redirects**: every hit on a redirect is replaced by the article it points to, and duplicates are
    merged, so each article appears only once.
@@ -97,7 +99,8 @@ A lightweight HTML page is served through FastAPI and is accessible from any bro
    an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top
    by several searches beats one that's first in just one.
 
-*Timings may vary.*
+*Timings measured on WikiMed; a whole search took 26 ms (median over 785 benchmark queries).
+A Raspberry Pi Zero 2 W is much slower (around 150 ms).*
 
 ## Compared with Kiwix search
 
@@ -106,7 +109,8 @@ A lightweight HTML page is served through FastAPI and is accessible from any bro
 ![Ask in another language](docs/images/3-languages.png)
 ![How often the right article comes first: Zimantic vs Kiwix](docs/images/0-scorecard.png)
 
-*Measured on the Wikipedia astronomy ZIM (28k articles), against kiwix-serve's full-text search.*
+*Measured on WikiMed, the Wikipedia medical encyclopedia ZIM (`wikipedia_en_medicine_maxi_2026-04`, 70,523 articles),
+against kiwix-serve's full-text search.*
 
 ### Results by type of search
 
@@ -115,38 +119,42 @@ A lightweight HTML page is served through FastAPI and is accessible from any bro
 
 | Type of search | Example query → article wanted | Kiwix | Zimantic | #1 Kiwix → Zimantic | Top 5 Kiwix → Zimantic | Queries |
 |---|---|---|---|---|---|---|
-| Common single words | "moon" → *Moon* | #9 | **#1** | 33% → **93%** | 80% → **93%** | 15 |
-| Exact titles | "Jupiter" → *Jupiter* | #2 | **#1** | 58% → **83%** | **100%** → 83% | 12 |
-| Alternate names | "Cosmic rays" → *Cosmic ray* | #2 | **#1** | 70% → **90%** | 80% → **98%** | 200¹ |
-| Misspellings | "andromeda galaxie" → *Andromeda Galaxy* | #3 | **#1** | 20% → **40%** | 40% → **60%** | 5² |
-| First-sentence descriptions | "is a blue supergiant star in the constellation of Major." → *Eta Canis Majoris* | #4 | **#1** | 66% → **80%** | 80% → **89%** | 200¹ |
-| Describing it without the name | "device that automatically keeps a telescope locked onto the target it is observing" → *Autoguider* | not in top 20 | **#1** | 21% → **54%** | 29% → **74%** | 100 |
-| Questions | "comet that comes back every 76 years" → *Halley's Comet* | #4 | **#1** | 0% → **31%** | 25% → **69%** | 16 |
-| Questions & phrases in other languages³ | "¿por qué la luna tiene fases?" (Spanish) → *Lunar phase* | not in top 20 | **#1** | 0% → **7%** | 0% → **20%** | 15 |
-| Words deep inside an article | "In 1998, was awarded the Swiss Marcel Benoist Prize…" → *Michel Mayor* | **#1** | #2 | **53%** → 15% | **65%** → 58% | 200¹ |
+| Common single words | "tuberculosis" → *Tuberculosis* | #3 | **#1** | 33% → **100%** | 93% → **100%** | 15 |
+| Exact titles | "Malaria" → *Malaria* | #2 | **#1** | 72% → **100%** | 100% → 100% | 25 |
+| Alternate names | "Leber's disease" → *Leber's hereditary optic neuropathy* | #2 | **#1** | 52% → **82%** | 70% → **99%** | 200¹ |
+| Misspellings | "diabetis" → *Diabetes* | not in top 20 | **#1** | 0% → **60%** | 7% → **83%** | 30 |
+| First-sentence descriptions | "(INN) is a non-steroidal anti-inflammatory drug (NSAID)." → *Ampiroxicam* | #5 | **#1** | 72% → **83%** | 82% → **92%** | 200¹ |
+| Describing it without the name | "poor blood flow to part of the brain that kills brain cells" → *Stroke* | #17 | **#1** | 8% → **37%** | 37% → **78%** | 60 |
+| Questions | "what causes lockjaw" → *Tetanus* | not in top 20 | **#1** | 12% → **45%** | 28% → **80%** | 40 |
+| Questions & phrases in other languages² | "Herzinfarkt" (German: heart attack) → *Myocardial infarction* | not in top 20 | **#1** | 0% → **33%** | 0% → **53%** | 30 |
+| Words deep inside an article | "When undergoing lymphadenopathy, these are described as feeling like a "firm pea"." → *Facial lymph nodes* | **#1** | #2 | **68%** → 28% | **78%** → 76% | 200¹ |
 
-¹ Generated automatically from the articles, not typed by real users.
-² Small sample: treat as a direction, not a precise number.
-³ Spanish, French, German, Chinese, Arabic, Hindi, Swahili, Russian, Japanese and Portuguese, mixed.
+¹ Generated automatically from the articles, not typed by real users. The other sets were written by hand; with 25–60 queries
+each, treat their numbers as accurate to roughly ±12–18 points.
+² Spanish, French, German, Chinese, Hindi, Arabic, Russian, Japanese, Swahili and Portuguese, mixed.
 
 ### Single words in other languages
 
-The English articles searched with one word in another language (for example "moon" in that language), 15 words per language.
+The English articles searched with one word in another language, 15 common medical words per language
+(malaria, diabetes, fever, cough, pregnancy, heart, blood, …). Translations were written for this test, so less common
+languages may contain mistakes.
 
 | Language | Example query → article wanted | Kiwix | Zimantic | #1 Kiwix → Zimantic | Top 5 Kiwix → Zimantic |
 |---|---|---|---|---|---|
-| English | "sun" → *Sun* | #2 | **#1** | 33% → **93%** | 80% → **93%** |
-| French | "télescope" → *Telescope* | #4 | **#1** | 20% → **33%** | 33% → **47%** |
-| Portuguese | "sol" → *Sun* | not in top 20 | **#3** | 7% → **27%** | 27% → **67%** |
-| Arabic | "الشمس" → *Sun* | not in top 20 | **#1** | 0% → **20%** | 0% → **33%** |
-| Afrikaans | "planeet" → *Planet* | not in top 20 | **#1** | 0% → **13%** | 7% → **33%** |
-| Amharic | "ፀሐይ" → *Sun* | not in top 20 | **#1** | 0% → **13%** | 0% → **20%** |
-| Swahili | "mwezi" → *Moon* | not in top 20 | **#6** | 0% → **13%** | 7% → 13% |
-| Somali | | | | 0% → **7%** | 7% → 7% |
-| Hausa, Yoruba, Igbo, Zulu, Kinyarwanda | | | | 0% → 0% | 0% → 0% |
+| English | "tuberculosis" → *Tuberculosis* | #3 | **#1** | 33% → **100%** | 93% → **100%** |
+| Spanish | "dolor de cabeza" → *Headache* | not in top 20 | **#1** | 13% → **60%** | 20% → **73%** |
+| French | "tuberculose" → *Tuberculosis* | #15 | **#1** | 13% → **53%** | 27% → **60%** |
+| Portuguese | "coração" → *Heart* | #4 | **#1** | 13% → **53%** | 40% → **80%** |
+| Afrikaans | "bloed" → *Blood* | not in top 20 | **#1** | 7% → **33%** | 20% → **33%** |
+| Arabic | "سعال" → *Cough* | not in top 20 | **#1** | 0% → **20%** | 0% → **33%** |
+| Hindi | "मलेरिया" → *Malaria* | not in top 20 | **#1** | 0% → **20%** | 0% → **33%** |
+| Amharic | "ልብ" → *Heart* | not in top 20 | **#1** | 0% → **13%** | 0% → **13%** |
+| Somali | "madax xanuun" → *Headache* | not in top 20 | **#1** | 0% → **13%** | 0% → **13%** |
+| Swahili, Igbo, Zulu, Kinyarwanda | e.g. "ikholera" (Zulu) → *Cholera* | not in top 20 | **#1** | 0% → **7%** | 0–7% → 7% |
+| Hausa, Yoruba | | | | 0% → 0% | 0% → 0% |
 
 **Where Kiwix is still better, or cheaper:**
-- **Words buried deep inside an article.** Kiwix indexes every word thus performs better on deeper searches(53% first vs 15%). While Zimantic only indexes each article's title and first paragraph.
+- **Words buried deep inside an article.** Kiwix indexes every word thus performs better on deeper searches (68% first vs 28%; in the top 5 they're nearly tied, 78% vs 76%). While Zimantic only indexes each article's title and first paragraph.
 - **No setup.** Kiwix search works the moment a ZIM is added. Zimantic must index each ZIM
   first.
 - **Smaller footprint.** Zimantic adds a `.sqlite` and `.faiss` per ZIM and needs more RAM.
@@ -219,13 +227,13 @@ Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `mod
 ## Use
 
 ```bash
-python -m zimantic build wikipedia_en_astronomy_maxi_2025-11   # index ZIMs in zim_dir by name (one or more)
+python -m zimantic build wikipedia_en_medicine_maxi_2026-04   # index ZIMs in zim_dir by name (one or more)
 python -m zimantic build --path /some/where/x.zim             # or index one ZIM file by its path
 python -m zimantic serve                                      # web page on http://<host>:8090 after build is succesful
 ```
 
-The name is the ZIM's file name without `.zim` (for `zims/wikipedia_en_astronomy_maxi_2025-11.zim`,
-use `wikipedia_en_astronomy_maxi_2025-11`).
+The name is the ZIM's file name without `.zim` (for `zims/wikipedia_en_medicine_maxi_2026-04.zim`,
+use `wikipedia_en_medicine_maxi_2026-04`).
 
 To open articles from the results, run kiwix-serve with the same ZIMs, in a second terminal:
 
