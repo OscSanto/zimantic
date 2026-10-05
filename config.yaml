@@ -10,16 +10,16 @@
 
 # Your .zim files: (download them from https://library.kiwix.org).
 # `python -m zimantic build <name>`    looks for <name>.zim in this folder.
-zim_dir: C:/Users/oscar/Documents/vm_shared_folder
+zim_dir: ./zims
 
 # The embedding model: this folder must contain model.onnx and sentencepiece.bpe.model
 # (see "Download the model" in the README).
-model_dir: C:/zimsearch/model
+model_dir: ./model
 
 # Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.
 # Created automatically. 
 # (Recomended; for large ZIMs, build the index on a faster machine and copy both files here)
-index_dir: C:/zimsearch/indexes
+index_dir: ./indexes
 
 # ---------------------------------------------------------------------------------------------
 # SERVER
@@ -49,3 +49,9 @@ batch_size: 32
 # Higher = more accurate but slower. Lower it if searches are slow or memory runs out on a Pi.
 # In testing on a 28k-article ZIM, 64 was about as accurate as scanning everything.
 nprobe: 64
+
+# A naive approach to determining if query requires a deeper search (e.g. pasted sentences from article)
+# Searches with 'long_query' words or more will double kiwix's full-text result weights.
+# Rule of thumb: long searchs are usually pasted sentence or remembered text.  
+# Set very high (e.g. 1000) to turn the doubling off.
+long_query: 10
