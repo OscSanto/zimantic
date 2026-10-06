@@ -24,6 +24,8 @@ as a Raspberry Pi Zero 2 W.
 - **Several collections at once**: search any combination of your ZIMs, ranked together in one list.
 - **Best of three searches**: combines meaning, title-word and Kiwix full-text search into a single ranking.
 - **Clean results & previews**: redirects are merged into their article, so each article appears once, with its first paragraph as a preview.
+- **Progressive results**: sources search in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
+- **Source-aware UI**: discover available sources, filter without searching again, tolerate individual source failures, and optionally load thumbnails after text results appear.
 - **Lightweight and offline**: runs on low resource devices, such as on a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
 - **Web page and JSON API**: search from any browser on the network, or from your own programs.
 
@@ -48,7 +50,8 @@ questions and descriptions.
 - it takes the first `<p>` with at least 50 characters, so pages that open with a one-liner like
   "Mercury may refer to:" (disambiguation pages, lists) are stored as title-only;
 - it skips stylesheets, scripts and footnote markers like `[1]` inside the paragraph;
-- it keeps at most 1,000 characters.
+- it keeps at most 1,000 characters and inspects at most the first 1 MiB of each HTML page.
+  An unusually large page whose first paragraph starts later is stored as title-only.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) aren't refused: `build` runs on any ZIM and applies the same
 first-paragraph rule to every HTML page. But nothing has been tuned or tested for them, so results depend on how
@@ -70,21 +73,25 @@ Input is capped at 256 tokens.
 The `.faiss` file is memory-mapped: the operating system reads only the **clusters** a search touches instead of loading
 the whole index into RAM. Clusters are found relative to the distance of query-to-cluster centres in vector space.
 
-If a build stops, running it again resumes from the last saved batch.
+If a build stops, running it again resumes from the last saved batch. The FAISS file is
+written atomically and the SQLite `done` marker is written only after it is complete, so an
+interrupted finalization can be resumed safely.
 
 ### 2. Starting the server (`serve`, once)
 
-At startup Zimantic loads the embedding model and opens every **finished** index; that is, the SQLite file
-, the FAISS file, and the ZIM.
-These stay open for as long as the server runs; **nothing is reloaded per search**. 
+At startup Zimantic loads the embedding model and opens every **finished** index; that is, the SQLite file,
+the FAISS file, and the ZIM. These stay open for as long as the server runs; **nothing is reloaded per search**.
+The page lists local indexes automatically. If `kiwix_server` is configured, it also refreshes the Kiwix catalog
+and can search catalog sources without a local semantic index using Kiwix full-text search.
 
 A lightweight HTML page is served through FastAPI and is accessible from any browser at `http://<host>:8090`
 (the `port` in `config.yaml`).
 
 ### 3. Each search
 
-1. **Embed the query** with the same model used to index
-2. **Run three searches** on each selected ZIM. They find the best matches in different ways:
+1. **Embed the query** with the same model used to index. This happens once per search, not once per ZIM.
+2. **Run three searches** on each selected local ZIM. Independent sources run in bounded parallel workers.
+   They find the best matches in different ways:
 
    | Search | Finds | Good at | Time |
    |---|---|---|---|
@@ -97,7 +104,13 @@ A lightweight HTML page is served through FastAPI and is accessible from any bro
 4. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared
    (a cosine similarity, a BM25 score, a position in Kiwix's list), so RRF ignores scores and uses positions only:
    an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top
-   by several searches beats one that's first in just one.
+   by several searches beats one that's first in just one. Title coverage, phrase matches, snippet coverage,
+   and configured source intent provide bounded deterministic tie-breaking signals.
+
+The streaming endpoint sends a source completion and a provisional ranked snapshot as each source finishes.
+The browser preserves result identities while reranking, so moved results animate into their new positions and
+new results enter without rebuilding the whole list. Users who prefer no animation are covered by
+`prefers-reduced-motion`.
 
 *Timings measured on WikiMed; a whole search took 26 ms (median over 785 benchmark queries).
 A Raspberry Pi Zero 2 W is much slower (around 150 ms).*
@@ -250,4 +263,8 @@ Restart `serve` after building a new index so it picks it up.
 Each ZIM gets two files in `index_dir`: `<name>.sqlite` (titles, first paragraphs) and
 `<name>.faiss` (vectors). If building index is slow, consider building on a more powerful PC and copying over both files.
 
-JSON API Example: `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=20` (no `zim` = all) and `GET /api/zims`.
+JSON API examples:
+
+- `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=20` returns the final JSON result list (`zim` may be omitted).
+- `GET /api/search/stream?q=...&limit=20` returns newline-delimited JSON events: `started`, `source`, `snapshot`, and `done`.
+- `GET /api/sources` returns source metadata and readiness; `GET /api/zims` remains as the local-index compatibility endpoint.

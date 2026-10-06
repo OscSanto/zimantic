@@ -2,7 +2,9 @@
 
 Rerunning an unfinished build resumes where it stopped. To rebuild, delete both files first.
 """
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
 
 import faiss
@@ -24,36 +26,39 @@ def build(zim_path: Path, index_dir, embedder, batch_size: int) -> None:
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(db_path)
-    db.executescript(SCHEMA)
-    meta = dict(db.execute("SELECT key, value FROM meta"))
-    if meta.get("done"):
-        print(f"{zim_path.stem}: already built (delete its .sqlite and .faiss in index_dir to rebuild)")
-        return
+    try:
+        db.executescript(SCHEMA)
+        meta = dict(db.execute("SELECT key, value FROM meta"))
+        if str(meta.get("done")) == "1":
+            if faiss_path.exists():
+                print(f"{zim_path.stem}: already built (delete its .sqlite and .faiss in index_dir to rebuild)")
+                return
+            raise RuntimeError(
+                f"{zim_path.stem}: index is marked done but {faiss_path} is missing; "
+                "delete both index files and rebuild"
+            )
 
-    zim = Archive(str(zim_path))
-    start = int(meta.get("next", 0))
-    batch, articles = [], 0  # articles: rows in the batch that have a first paragraph to embed
-    for i in tqdm(range(start, zim.entry_count), initial=start, total=zim.entry_count, desc=zim_path.stem):
-        try:
+        zim = Archive(str(zim_path))
+        start = int(meta.get("next", 0))
+        batch, articles = [], 0  # articles: rows in the batch that have a first paragraph to embed
+        for i in tqdm(range(start, zim.entry_count), initial=start, total=zim.entry_count, desc=zim_path.stem):
             row = read_entry(zim, i)
-        except Exception as e:  # one corrupt entry shouldn't stop a days-long build
-            tqdm.write(f"skipping entry {i}: {e}")
-            continue
-        if row:
-            batch.append(row)
-            articles += bool(row[2])
-        if articles >= batch_size:
-            _save(db, embedder, batch, i + 1)
-            batch, articles = [], 0
-    _save(db, embedder, batch, zim.entry_count)
+            if row:
+                batch.append(row)
+                articles += bool(row[2])
+            if articles >= batch_size:
+                _save(db, embedder, batch, i + 1)
+                batch, articles = [], 0
+        _save(db, embedder, batch, zim.entry_count)
 
-    print(f"{zim_path.stem}: writing vector index")
-    _write_faiss(db, faiss_path)
-    with db:
-        db.execute("DROP TABLE vecs")
-        db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
-    db.execute("VACUUM")
-    db.close()
+        print(f"{zim_path.stem}: writing vector index")
+        _write_faiss(db, faiss_path)
+        with db:
+            db.execute("DROP TABLE vecs")
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
+        db.execute("VACUUM")
+    finally:
+        db.close()
 
 
 def _save(db, embedder, rows, next_entry: int) -> None:
@@ -98,4 +103,12 @@ def _write_faiss(db, path: Path) -> None:
         ids, vectors = _load(rows)
         index.add_with_ids(vectors, ids)
         last = int(ids[-1])
-    faiss.write_index(index, str(path))
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+    ) as temp:
+        temp_path = Path(temp.name)
+    try:
+        faiss.write_index(index, str(temp_path))
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)

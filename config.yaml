@@ -34,6 +34,13 @@ port: 8090
 # localhost if people open the search page from other devices.
 kiwix_url: http://localhost:8080/content
 
+# Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
+# sources that do not have a local Zimantic index. Leave blank to use local
+# indexes only. With the standard Kiwix proxy setup this is often http://localhost:8080.
+kiwix_server: ""
+kiwix_catalog_path: /kiwix/catalog/v2/entries?count=-1
+kiwix_search_path: /kiwix/search
+
 # ---------------------------------------------------------------------------------------------
 # TUNING (the defaults are fine to start with)
 # ---------------------------------------------------------------------------------------------
@@ -55,3 +62,13 @@ nprobe: 64
 # Rule of thumb: long searchs are usually pasted sentence or remembered text.  
 # Set very high (e.g. 1000) to turn the doubling off.
 long_query: 10
+
+# Search performance and resource limits.
+# Source searches run in parallel up to this many workers. Keep this modest on a Pi.
+search_workers: 4
+# Maximum simultaneous user searches. Each search may use all source workers.
+max_concurrent_searches: 1
+# Number of candidates requested from each retrieval backend before fusion.
+candidate_count: 16
+# Timeout for catalog and Kiwix fallback requests, in seconds.
+source_timeout: 12
