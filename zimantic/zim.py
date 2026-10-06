@@ -10,11 +10,45 @@ set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
 
 MIN_LEAD = 50    # shorter first paragraphs? -> page searchable by title only
 MAX_LEAD = 1000  # characters kept for display; the model reads at most 256 tokens anyway
-
-REFRESH = re.compile(rb"http-equiv=\"refresh\" content=\"0;\s*URL='?([^'\"]+)", re.I)
+MAX_HTML_BYTES = 1 << 20  # cap extraction work and temporary memory for unusually large pages
+REFRESH_SCAN_BYTES = 64 << 10
+REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
 
 class _Found(Exception): # stop feed() early
     pass
+
+
+class _MetaRefresh(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.url = None
+
+    def handle_starttag(self, tag, attrs):
+        if self.url is not None or tag != "meta":
+            return
+
+        attributes = dict(attrs)
+        http_equiv = (attributes.get("http-equiv") or "").strip().lower()
+        content = attributes.get("content") or ""
+        if http_equiv != "refresh":
+            return
+
+        match = REFRESH_CONTENT.fullmatch(content)
+        if not match:
+            return
+
+        url = match.group(1).strip()
+        if len(url) >= 2 and url[0] == url[-1] and url[0] in "'\"":
+            url = url[1:-1].strip()
+        if url:
+            self.url = url
+
+
+def _refresh_url(html: bytes):
+    parser = _MetaRefresh()
+    parser.feed(html[:REFRESH_SCAN_BYTES].decode("utf-8", "ignore"))
+    return parser.url
+
 
 class _FirstParagraph(HTMLParser):
     """Collects the text of the first <p> that is long enough, skipping styles and [1] footnotes.
@@ -95,11 +129,13 @@ def read_entry(zim: Archive, i: int):
     if not item.mimetype.startswith("text/html"): 
         return None
     
-    html = bytes(item.content)
-    refresh = REFRESH.search(html[:2000]) if len(html) < 2000 else None
+    content = item.content
+    html = bytes(content[:MAX_HTML_BYTES])
+    del content, item
+    refresh_url = _refresh_url(html)
     
-    if refresh:
-        url = unquote(refresh.group(1).decode("utf-8", "ignore").split("#")[0])
+    if refresh_url:
+        url = unquote(refresh_url).split("#", 1)[0]
         path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), url))
         if not zim.has_entry_by_path(path):
             return None

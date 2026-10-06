@@ -1,73 +1,726 @@
 <!doctype html>
 <html lang="en">
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Zimantic</title>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Zimantic</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a2f3a;
+      --text: #e6e8eb;
+      --muted: #9aa3af;
+      --accent: #4f9cf9;
+      --mark-bg: rgba(79, 156, 249, .18);
+      --ok: #7fd99a;
+      --ok-border: #2e5c3f;
+      --err: #e06a6a;
+      --err-border: #5c2e2e;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f7f9;
+        --panel: #fff;
+        --border: #dde1e7;
+        --text: #1b1f24;
+        --muted: #5d6673;
+        --accent: #1f6fd6;
+        --mark-bg: rgba(31, 111, 214, .12);
+        --ok: #1f7a3d;
+        --ok-border: #a8d8b8;
+        --err: #b42318;
+        --err-border: #f0b4ae;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.5 system-ui, sans-serif;
+      margin: 0;
+      padding: 24px 16px 60px;
+    }
+    .wrap { max-width: 820px; margin: 0 auto; }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    .subtitle, .help, .status, .filter-line, .result-meta { color: var(--muted); }
+    .subtitle { font-size: .9rem; margin-bottom: 20px; }
+    form { display: flex; gap: 8px; }
+    input[type="search"] {
+      flex: 1;
+      min-width: 0;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 12px 14px;
+      border-radius: 8px;
+      font-size: 1rem;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      padding: 12px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { cursor: default; opacity: .6; }
+    button.secondary, button.badge {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-weight: 400;
+    }
+    button.secondary { padding: 6px 12px; font-size: .85rem; }
+    .status { min-height: 1.4em; margin: 12px 0 6px; font-size: .85rem; }
+    .query-used { color: var(--accent); font-family: var(--mono); }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+    button.badge { border-radius: 100px; font-size: .75rem; padding: 3px 10px; }
+    button.badge.ok { border-color: var(--ok-border); color: var(--ok); cursor: pointer; }
+    button.badge.err { border-color: var(--err-border); color: var(--err); }
+    button.badge[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .filter-line { min-height: 1.2em; font-size: .85rem; margin-bottom: 14px; }
+    .linklike { background: none; border: 0; color: var(--accent); padding: 0; text-decoration: underline; }
+    .notice {
+      background: var(--panel);
+      border: 1px solid var(--err-border);
+      border-radius: 8px;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      font-size: .9rem;
+    }
+    ol.results { list-style: none; margin: 0; padding: 0; }
+    .result {
+      align-items: flex-start;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      display: flex;
+      gap: 14px;
+      margin-bottom: 10px;
+      padding: 14px 16px;
+      transition: opacity .18s ease, transform .18s ease;
+      will-change: transform;
+    }
+    .result-body { flex: 1; min-width: 0; }
+    .result-title { font-size: 1.02rem; font-weight: 600; }
+    .result-title a { color: var(--text); text-decoration: none; }
+    .result-title a:hover { color: var(--accent); text-decoration: underline; }
+    .result-meta { font-size: .8rem; margin: 2px 0 6px; }
+    .result-match { color: var(--muted); font: .72rem var(--mono); }
+    .result-snippet { font-size: .92rem; margin-top: 6px; overflow-wrap: anywhere; }
+    .result-snippet mark { background: var(--mark-bg); border-radius: 2px; font-weight: 600; }
+    .result-snippet.none { color: var(--muted); font-style: italic; }
+    .result-thumb {
+      background: var(--mark-bg);
+      border-radius: 6px;
+      flex: 0 0 104px;
+      height: 78px;
+      overflow: hidden;
+    }
+    .result-thumb img { display: block; height: 100%; object-fit: cover; width: 100%; }
+    .empty { color: var(--muted); padding: 16px 0; }
+    .source-list { display: grid; gap: 4px; }
+    .source-list label { align-items: flex-start; display: flex; gap: 8px; padding: 4px; }
+    .source-list label.unavailable { opacity: .55; }
+    .source-list code { color: var(--muted); font: .75rem var(--mono); }
+    details { border-top: 1px solid var(--border); margin-top: 28px; padding-top: 14px; }
+    summary { color: var(--muted); cursor: pointer; font-size: .88rem; }
+    .help { font-size: .85rem; margin: 10px 0; }
+    .settings-actions { align-items: center; display: flex; gap: 8px; margin-top: 8px; }
+    .settings-status { color: var(--muted); font-size: .82rem; }
+    .result-enter { opacity: 0; transform: translateY(8px); }
+    .result-exit { pointer-events: none; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+      }
+    }
+    @media (max-width: 480px) {
+      .result-thumb { flex-basis: 72px; height: 56px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Zimantic</h1>
+  <div class="subtitle">Meaning, title, and full-text search over your offline library. Results arrive as sources finish.</div>
 
-<style>
-body{font:16px system-ui,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#222}
-form{display:flex;flex-wrap:wrap;gap:.5rem}#q{flex:1;min-width:12rem;padding:.6rem;font-size:1rem}button{padding:.6rem}
-#picker{flex-basis:100%;color:#444}#picker summary{cursor:pointer;padding:.3rem 0}
-#zims{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))}
-#zims label{display:flex;gap:.5rem;align-items:flex-start;padding:.35rem .4rem;border-radius:4px;cursor:pointer}
-#zims label:hover{background:#f2f2f2}#zims input{margin-top:.2rem}
-.r{border-top:1px solid #ddd;padding:.8rem 0}.r a{font-size:1.1rem}.r small{color:#666}.r p{margin:.3rem 0}
-</style>
+  <form id="searchForm" autocomplete="off">
+    <input id="question" type="search" placeholder="how to change a tire" aria-label="Question">
+    <button id="searchButton" type="submit">Search</button>
+  </form>
 
-<h1>Zimantic</h1>
-<form id="f">
-  <input id="q" type="search" placeholder="Search…" autofocus>
-  <button>Search</button>
-  <details id="picker" hidden>
-    <summary id="summary">Collections</summary>
-    <div id="zims"></div>
+  <div class="status" id="status"></div>
+  <div class="badges" id="badges" role="group" aria-label="Filter by source"></div>
+  <div class="filter-line" id="filterLine"></div>
+  <div id="notice"></div>
+  <div id="results"><div class="empty">Type a question and press Enter.</div></div>
+
+  <details>
+    <summary>Settings: sources and previews</summary>
+    <label><input id="thumbnails" type="checkbox"> Show thumbnails <span class="help">(loaded after text results, with at most four article reads at once)</span></label>
+    <div class="help" id="sourceStatus"></div>
+    <div class="source-list" id="sourceList"></div>
+    <div class="settings-actions">
+      <button class="secondary" id="resetSettings" type="button">Reset settings</button>
+      <span class="settings-status" id="settingsStatus"></span>
+    </div>
   </details>
-</form>
-<p id="status"></p>
-<main id="results"></main>
+</div>
+
 <script>
+(function () {
+  "use strict";
 
-const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/[&<>"']/g, c => "&#" + c.charCodeAt(0) + ";");
-const boxes = () => [...$("zims").querySelectorAll("input")];
+  const $ = id => document.getElementById(id);
+  const RESULT_LIMIT = 30;
+  const STORAGE_KEY = "zimantic_search_config_v1";
+  const THUMB_LIMIT = 128 * 1024;
+  const THUMB_CONCURRENCY = 4;
+  const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let config = loadConfig();
+  let sources = [];
+  let current = null;
+  let activeSource = null;
+  let requestController = null;
+  let searchSequence = 0;
+  let resultList = null;
+  let thumbnailGeneration = 0;
+  const thumbnailCache = new Map();
+  const thumbnailQueue = [];
+  const thumbnailControllers = new Set();
+  let activeThumbnails = 0;
 
-// Summary line of the collapsed picker. None ticked searches everything, like all ticked.
-function updateSummary() {
-  const all = boxes().length, on = boxes().filter(b => b.checked).length;
-  $("summary").textContent = on === all || on === 0 ? `Collections: All (${all})` : `Collections: ${on} of ${all}`;
-}
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
 
-// Collection picker: one checkbox per ZIM, all ticked.
-fetch("/api/zims").then(r => r.json()).then(zims => {
-  if (zims.length < 2) return;  // one collection: nothing to choose
-  $("zims").innerHTML = zims.map(z =>
-    `<label><input type="checkbox" value="${esc(z)}" checked> ${esc(z)}</label>`).join("");
-  $("picker").hidden = false;
-  updateSummary();
-});
+  function loadConfig() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      return {
+        thumbnails: parsed.thumbnails !== false,
+        disabled: Array.isArray(parsed.disabled) ? parsed.disabled : []
+      };
+    } catch (_) {
+      return { thumbnails: true, disabled: [] };
+    }
+  }
 
-$("zims").onchange = updateSummary;
+  function saveConfig() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
-$("f").onsubmit = async e => {
-  e.preventDefault();
+  function resultKey(item) {
+    return item.id || `${item.source_key}:${item.path || item.url || item.title}`;
+  }
 
-  const q = $("q").value.trim();
-  if (!q) return;
+  function queryTerms(text) {
+    return (text.toLowerCase().match(/[a-z0-9]+/g) || [])
+      .filter(word => !new Set([
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "how", "what", "where", "when", "why", "who", "which", "can", "could",
+        "do", "does", "did", "i", "you", "my", "me", "to", "of", "in", "on",
+        "at", "for", "with", "about", "find", "some", "any", "there", "it",
+        "that", "this", "and", "or", "if", "so", "will", "would", "should"
+      ]).has(word));
+  }
 
-  $("status").textContent = "Searching…";
+  function highlight(text, terms) {
+    const wanted = new Set(terms);
+    return String(text).split(/([A-Za-z0-9]+)/).map((part, index) => {
+      if (index % 2 && wanted.has(part.toLowerCase())) return `<mark>${escapeHtml(part)}</mark>`;
+      return escapeHtml(part);
+    }).join("");
+  }
 
-  const params = new URLSearchParams({q});
-  const ticked = boxes().filter(b => b.checked);
-  if (ticked.length < boxes().length)  // all ticked (or none): send no zim, which searches everything
-    for (const box of ticked) params.append("zim", box.value);  // ?zim=a&zim=b
-  const r = await fetch("/api/search?" + params);
+  function activeSources() {
+    return sources.filter(source => source.available && !config.disabled.includes(source.key));
+  }
 
-  if (!r.ok) { $("status").textContent = "Search failed"; return; }
-  const results = await r.json();
+  function renderSourceList() {
+    const ready = sources.filter(source => source.available);
+    $("sourceStatus").textContent = sources.length
+      ? `${ready.length} searchable source${ready.length === 1 ? "" : "s"} available.`
+      : "No sources are indexed yet.";
+    $("sourceList").innerHTML = sources.map(source => {
+      const checked = source.available && !config.disabled.includes(source.key);
+      const mode = source.mode === "kiwix" ? "Kiwix full-text" : source.mode;
+      return `<label class="${source.available ? "" : "unavailable"}">
+        <input type="checkbox" data-source="${escapeHtml(source.key)}"
+          ${checked ? "checked" : ""} ${source.available ? "" : "disabled"}>
+        <div>${escapeHtml(source.name)} <code>${escapeHtml(source.book)} · ${escapeHtml(mode)}</code>
+          ${source.error ? `<div>${escapeHtml(source.error)}</div>` : ""}</div>
+      </label>`;
+    }).join("");
+  }
 
-  $("status").textContent = results.length ? "" : "No results.";
-  $("results").innerHTML = results.map(x =>
-    `<div class="r"><a href="${esc(x.url)}">${esc(x.title)}</a> <small>${esc(x.zim)}</small><p>${esc(x.lead)}</p></div>`).join("");
-};
+  function renderBadges() {
+    if (!current) {
+      $("badges").innerHTML = "";
+      return;
+    }
+    const all = `<button class="badge" type="button" data-source="" aria-pressed="${activeSource ? "false" : "true"}">All sources</button>`;
+    const entries = [...current.outcomes.values()].map(outcome => {
+      const usable = outcome.items && outcome.items.length > 0;
+      const cls = outcome.error ? "badge err" : usable ? "badge ok" : "badge";
+      const count = outcome.items ? outcome.items.length : 0;
+      const label = outcome.error ? `${outcome.source.name}: ${outcome.error}` : `${outcome.source.name}: ${count}`;
+      return `<button class="${cls}" type="button" data-source="${escapeHtml(outcome.source.key)}"
+        ${usable ? `aria-pressed="${activeSource === outcome.source.key}"` : "disabled"}>${escapeHtml(label)}</button>`;
+    }).join("");
+    $("badges").innerHTML = all + entries;
+  }
+
+  function renderFilterLine(list) {
+    $("filterLine").innerHTML = activeSource
+      ? `Showing only <strong>${escapeHtml(current.outcomes.get(activeSource)?.source.name || activeSource)}</strong>: ${list.length} result${list.length === 1 ? "" : "s"}.
+         <button class="linklike" type="button" data-source="">Show all sources</button>`
+      : "";
+  }
+
+  function setText(node, selector, text) {
+    node.querySelector(selector).textContent = text;
+  }
+
+  function setResultNode(node, item) {
+    node.dataset.key = resultKey(item);
+    const title = node.querySelector(".result-title");
+    title.replaceChildren();
+    if (item.url) {
+      const link = document.createElement("a");
+      link.href = item.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = item.title || "(untitled)";
+      title.appendChild(link);
+    } else {
+      title.textContent = item.title || "(untitled)";
+    }
+    setText(node, ".result-meta", `${item.source || ""} · source rank ${item.rank || item.source_rank || "—"}`);
+    setText(node, ".result-match", item.explain || "Source result");
+    const snippet = node.querySelector(".result-snippet");
+    const lead = item.lead || "";
+    if (lead) {
+      snippet.className = "result-snippet";
+      snippet.innerHTML = highlight(lead, current ? current.terms : []);
+    } else {
+      snippet.className = "result-snippet none";
+      snippet.textContent = "No text preview for this result.";
+    }
+    let thumb = node.querySelector(".result-thumb");
+    if (config.thumbnails && item.url) {
+      if (!thumb) {
+        thumb = document.createElement("div");
+        thumb.className = "result-thumb";
+        node.appendChild(thumb);
+      }
+      thumb.dataset.url = item.url;
+    } else if (thumb) {
+      thumb.remove();
+    }
+  }
+
+  function newResultNode(item) {
+    const node = document.createElement("li");
+    node.className = "result";
+    node.innerHTML = `<div class="result-body">
+      <div class="result-title"></div>
+      <div class="result-meta"></div>
+      <div class="result-match"></div>
+      <div class="result-snippet"></div>
+    </div>`;
+    setResultNode(node, item);
+    return node;
+  }
+
+  function animateRemoval(node) {
+    if (reducedMotion() || !node.animate) {
+      node.remove();
+      return;
+    }
+    node.classList.add("result-exit");
+    const animation = node.animate(
+      [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(-6px)" }],
+      { duration: 180, easing: "ease-in", fill: "forwards" }
+    );
+    animation.finished.then(() => node.remove(), () => node.remove());
+  }
+
+  function renderResults(items) {
+    if (!items.length) {
+      const oldList = resultList;
+      if (oldList) {
+        [...oldList.children].forEach(animateRemoval);
+        resultList = null;
+        setTimeout(() => {
+          if (!oldList.children.length) oldList.remove();
+        }, reducedMotion() ? 0 : 200);
+      }
+      $("results").querySelectorAll(".empty").forEach(node => node.remove());
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = current && current.completed === current.total
+        ? "No results from the selected sources. Try different words."
+        : "Waiting for source results…";
+      $("results").appendChild(empty);
+      return;
+    }
+    $("results").querySelectorAll(".empty").forEach(node => node.remove());
+    if (!resultList) {
+      resultList = document.createElement("ol");
+      resultList.className = "results";
+      $("results").appendChild(resultList);
+    }
+    const existing = new Map([...resultList.children].map(node => [node.dataset.key, node]));
+    const before = new Map([...resultList.children].map(node => [node.dataset.key, node.getBoundingClientRect()]));
+    const wanted = new Set(items.map(resultKey));
+    existing.forEach((node, key) => {
+      if (!wanted.has(key)) animateRemoval(node);
+    });
+    const added = [];
+    items.forEach(item => {
+      const key = resultKey(item);
+      const node = existing.get(key) || newResultNode(item);
+      setResultNode(node, item);
+      if (!existing.has(key)) added.push(node);
+      resultList.appendChild(node);
+    });
+    const after = new Map([...resultList.children].map(node => [node.dataset.key, node.getBoundingClientRect()]));
+    if (!reducedMotion()) {
+      for (const [key, node] of [...resultList.children].map(node => [node.dataset.key, node])) {
+        const oldBox = before.get(key);
+        const newBox = after.get(key);
+        if (oldBox && newBox && node.animate) {
+          const dx = oldBox.left - newBox.left;
+          const dy = oldBox.top - newBox.top;
+          if (dx || dy) {
+            node.animate(
+              [{ transform: `translate(${dx}px,${dy}px)` }, { transform: "translate(0,0)" }],
+              { duration: 220, easing: "ease-out" }
+            );
+          }
+        }
+      }
+      added.forEach(node => {
+        node.classList.add("result-enter");
+        requestAnimationFrame(() => node.classList.remove("result-enter"));
+      });
+    }
+    loadThumbnails(items);
+  }
+
+  function renderView() {
+    if (!current) return;
+    const list = activeSource
+      ? (current.sourceItems.get(activeSource) || []).slice(0, RESULT_LIMIT)
+      : current.ranked;
+    renderBadges();
+    renderFilterLine(list);
+    renderResults(list);
+  }
+
+  function renderNotice() {
+    if (!current) {
+      $("notice").textContent = "";
+      return;
+    }
+    const outcomes = [...current.outcomes.values()];
+    const errors = outcomes.filter(outcome => outcome.error);
+    $("notice").innerHTML = current.completed === current.total && outcomes.length > 0 &&
+      errors.length === outcomes.length
+      ? "<div class='notice'><strong>Every selected source failed.</strong> Check the source settings or the Kiwix service.</div>"
+      : "";
+  }
+
+  function cancelThumbnails() {
+    thumbnailGeneration++;
+    thumbnailQueue.length = 0;
+    thumbnailControllers.forEach(controller => controller.abort());
+    thumbnailControllers.clear();
+  }
+
+  function pumpThumbnails() {
+    while (activeThumbnails < THUMB_CONCURRENCY && thumbnailQueue.length) {
+      const task = thumbnailQueue.shift();
+      activeThumbnails++;
+      fetchThumbnail(task.url).then(task.resolve, () => task.resolve(null)).finally(() => {
+        activeThumbnails--;
+        pumpThumbnails();
+      });
+    }
+  }
+
+  async function readStart(response, maxBytes) {
+    if (!response.body || !response.body.getReader) return (await response.text()).slice(0, maxBytes);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let bytes = 0;
+    try {
+      while (bytes < maxBytes) {
+        const part = await reader.read();
+        if (part.done) break;
+        bytes += part.value.byteLength;
+        text += decoder.decode(part.value, { stream: true });
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    return text;
+  }
+
+  function pickThumbnail(html, articleUrl) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    for (const image of doc.querySelectorAll("img")) {
+      const src = (image.getAttribute("src") || "").trim();
+      if (!src || src.startsWith("data:") || /\.svg(?:[?#]|$)/i.test(src)) continue;
+      if (/(^|[\W_])(icon|logo|avatar|symbol|sprite|spacer|blank)/i.test(src)) continue;
+      try { return new URL(src, articleUrl).href; } catch (_) {}
+    }
+    return null;
+  }
+
+  async function fetchThumbnail(url) {
+    const controller = new AbortController();
+    thumbnailControllers.add(controller);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) return null;
+      return pickThumbnail(await readStart(response, THUMB_LIMIT), url);
+    } catch (_) {
+      return null;
+    } finally {
+      thumbnailControllers.delete(controller);
+    }
+  }
+
+  function thumbnailFor(url) {
+    if (!thumbnailCache.has(url)) {
+      thumbnailCache.set(url, new Promise(resolve => {
+        thumbnailQueue.push({ url, resolve });
+        pumpThumbnails();
+      }));
+    }
+    return thumbnailCache.get(url);
+  }
+
+  function loadThumbnails(items) {
+    if (!config.thumbnails) return;
+    const generation = thumbnailGeneration;
+    items.forEach(item => {
+      if (!item.url) return;
+      thumbnailFor(item.url).then(src => {
+        if (generation !== thumbnailGeneration) return;
+        const node = resultList && [...resultList.children].find(child => child.dataset.key === resultKey(item));
+        const slot = node && node.querySelector(".result-thumb");
+        if (!slot || slot.firstChild) return;
+        if (!src) { slot.remove(); return; }
+        const image = document.createElement("img");
+        image.alt = "";
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.src = src;
+        image.addEventListener("error", () => slot.remove());
+        slot.appendChild(image);
+      });
+    });
+  }
+
+  async function consumeStream(response, sequence) {
+    if (!response.body) throw new Error("streaming response has no body");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const consumeLine = line => {
+      if (!line.trim() || sequence !== searchSequence) return;
+      const event = JSON.parse(line);
+      if (event.type === "started") {
+        current.total = event.total;
+        current.completed = 0;
+        $("status").textContent = `Searching ${event.total} source${event.total === 1 ? "" : "s"}…`;
+      } else if (event.type === "source") {
+        current.completed = event.completed;
+        current.outcomes.set(event.source.key, event);
+        current.sourceItems.set(event.source.key, event.items || []);
+        $("status").textContent = `${event.completed}/${event.total} sources complete`;
+        renderBadges();
+        renderNotice();
+      } else if (event.type === "snapshot") {
+        current.completed = event.completed;
+        current.ranked = event.results || [];
+        renderView();
+      } else if (event.type === "done") {
+        current.completed = event.completed;
+        current.ranked = event.results || [];
+        $("status").textContent = current.total
+          ? `${current.completed}/${current.total} sources complete · ${current.ranked.length} results`
+          : "No searchable sources.";
+        renderView();
+      } else if (event.type === "error") {
+        $("status").textContent = event.error || "Search failed";
+      }
+    };
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      buffer += decoder.decode(part.value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+    }
+    if (buffer) consumeLine(buffer);
+  }
+
+  async function runSearch(question, source = null) {
+    question = question.trim();
+    if (!question) return;
+    if (requestController) requestController.abort();
+    cancelThumbnails();
+    thumbnailCache.clear();
+    const controller = new AbortController();
+    requestController = controller;
+    const sequence = ++searchSequence;
+    activeSource = source;
+    current = {
+      question,
+      terms: queryTerms(question),
+      ranked: [],
+      outcomes: new Map(),
+      sourceItems: new Map(),
+      completed: 0,
+      total: 0
+    };
+    $("searchButton").disabled = true;
+    $("status").innerHTML = `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
+    $("notice").textContent = "";
+    renderResults([]);
+    try {
+      const selected = activeSources();
+      if (!selected.length) {
+        $("status").textContent = "No sources selected.";
+        return;
+      }
+      const params = new URLSearchParams({ q: question, limit: String(RESULT_LIMIT) });
+      if (selected.length < sources.filter(sourceItem => sourceItem.available).length) {
+        selected.forEach(item => params.append("zim", item.key));
+      }
+      const response = await fetch("/api/search/stream?" + params, { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await consumeStream(response, sequence);
+    } catch (error) {
+      if (error.name !== "AbortError" && sequence === searchSequence) {
+        $("status").textContent = `Search failed: ${error.message}`;
+      }
+    } finally {
+      if (sequence === searchSequence) {
+        $("searchButton").disabled = false;
+        requestController = null;
+      }
+    }
+  }
+
+  function makeHash(question, source) {
+    const params = new URLSearchParams({ q: question });
+    if (source) params.set("src", source);
+    return "#" + params;
+  }
+
+  function readHash() {
+    const params = new URLSearchParams(location.hash.slice(1));
+    return { question: (params.get("q") || "").trim(), source: params.get("src") || null };
+  }
+
+  $("badges").addEventListener("click", event => {
+    const button = event.target.closest("button[data-source]");
+    if (!button || button.disabled || !current) return;
+    activeSource = button.dataset.source || null;
+    history.replaceState(null, "", makeHash(current.question, activeSource));
+    renderView();
+  });
+
+  $("filterLine").addEventListener("click", event => {
+    const button = event.target.closest("button[data-source]");
+    if (button) {
+      activeSource = null;
+      history.replaceState(null, "", makeHash(current.question, null));
+      renderView();
+    }
+  });
+
+  $("searchForm").addEventListener("submit", event => {
+    event.preventDefault();
+    const question = $("question").value.trim();
+    if (!question) return;
+    history.pushState(null, "", makeHash(question, null));
+    runSearch(question);
+  });
+
+  $("sourceList").addEventListener("change", event => {
+    const input = event.target.closest("input[data-source]");
+    if (!input) return;
+    config.disabled = config.disabled.filter(key => key !== input.dataset.source);
+    if (!input.checked) config.disabled.push(input.dataset.source);
+    saveConfig();
+    $("settingsStatus").textContent = "Applies to the next search.";
+  });
+
+  $("thumbnails").addEventListener("change", event => {
+    config.thumbnails = event.target.checked;
+    saveConfig();
+    renderView();
+  });
+
+  $("resetSettings").addEventListener("click", () => {
+    config = { thumbnails: true, disabled: [] };
+    saveConfig();
+    $("thumbnails").checked = true;
+    renderSourceList();
+    $("settingsStatus").textContent = "Reset.";
+  });
+
+  window.addEventListener("popstate", () => {
+    const state = readHash();
+    if (state.question) {
+      $("question").value = state.question;
+      runSearch(state.question, state.source);
+    }
+  });
+
+  async function initialize() {
+    $("thumbnails").checked = config.thumbnails;
+    try {
+      const response = await fetch("/api/sources?refresh=true");
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      sources = await response.json();
+      renderSourceList();
+    } catch (error) {
+      $("sourceStatus").textContent = `Could not load sources: ${error.message}`;
+    }
+    const state = readHash();
+    if (state.question) {
+      $("question").value = state.question;
+      runSearch(state.question, state.source);
+    } else {
+      $("question").focus();
+    }
+  }
+
+  initialize();
+})();
 </script>
-
+</body>
 </html>

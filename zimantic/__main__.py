@@ -44,8 +44,6 @@ def main() -> None:
         for zim in zims:
             if not zim.exists():
                 sys.exit(f"zimantic: ZIM not found: {zim}")
-            if (Path(cfg["index_dir"]) / f"{zim.stem}.faiss").exists():
-                sys.exit(f"zimantic: {zim.stem} is already indexed")
 
         embedder = Embedder(cfg["model_dir"])
         for zim in zims:
