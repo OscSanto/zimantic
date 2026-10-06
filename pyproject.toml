@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zimantic"
+version = "0.1.0"
+description = "Offline semantic search for Kiwix ZIM files"
+readme = "README.md"
+requires-python = "~=3.14"
+dependencies = [
+    "numpy",
+    "PyYAML",
+    "tqdm",
+    "onnxruntime",
+    "sentencepiece",
+    "faiss-cpu",
+    "libzim",
+    "fastapi",
+    "uvicorn",
+]
+
+[project.scripts]
+zimantic = "zimantic.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["zimantic*"]
+
+[tool.setuptools.package-data]
+zimantic = ["index.html"]
