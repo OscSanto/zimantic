@@ -211,7 +211,7 @@ Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `mod
    ```bash
    python3 -m venv .venv
    . .venv/bin/activate              # Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
+   pip install .
    ```
 
 3. **Download the model into `model/`** (keep these exact file names):
