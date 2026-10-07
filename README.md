@@ -312,7 +312,7 @@ To open articles from the results, run kiwix-serve with the same ZIMs, in a seco
 
 ```bash
 sudo apt install kiwix-tools             # Debian/Ubuntu/Raspberry Pi OS; other systems: kiwix.org/en/applications
-kiwix-serve --port 8080 zims/*.zim       # matches the default kiwix_url in config.toml
+kiwix-serve --port 8085 zims/*.zim       # matches the default kiwix_url in config.toml
 ```
 
 If a build stops, run it again and it will automatically pick up where it left off.
