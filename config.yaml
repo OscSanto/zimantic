@@ -66,9 +66,14 @@ long_query: 10
 # Search performance and resource limits.
 # Source searches run in parallel up to this many workers. Keep this modest on a Pi.
 search_workers: 4
-# Maximum simultaneous user searches. Each search may use all source workers.
-max_concurrent_searches: 1
+# Maximum simultaneous user searches. Several people can search at once up to
+# this many; each search may still use all source workers. Lower it on a Pi.
+max_concurrent_searches: 4
 # Number of candidates requested from each retrieval backend before fusion.
 candidate_count: 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
 source_timeout: 12
+# Small LRU cache of exact queries (query + selected sources + limit). A finished
+# streamed search is cached too, so the JSON endpoint gets it for free.
+# Set to 0 to disable.
+cache_size: 256

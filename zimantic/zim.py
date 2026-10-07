@@ -114,11 +114,15 @@ def first_paragraph(html: bytes) -> str: # "" if no paragraph was long enough (t
     return parser.lead  
 
 
-def read_entry(zim: Archive, i: int):
+def read_entry(zim: Archive, i: int, fast: bool = False):
     """Return (id, title, lead, path, target_id) for an HTML page, or None for anything else.
 
     Redirects (real ones, and small meta refresh pages) get lead "" and the
     path and id of the page they point to, so they are searchable by title only.
+
+    fast=True stores the title and path without reading the article body, so no
+    first paragraph (and therefore no vector) is produced. Meta-refresh
+    forwarding pages are not merged in this mode.
     """
     entry = zim._get_entry_by_id(i)
     if entry.is_redirect:
@@ -128,7 +132,10 @@ def read_entry(zim: Archive, i: int):
     item = entry.get_item()
     if not item.mimetype.startswith("text/html"): 
         return None
-    
+
+    if fast:
+        return i, entry.title, "", entry.path, None
+
     content = item.content
     html = bytes(content[:MAX_HTML_BYTES])
     del content, item

@@ -27,6 +27,8 @@ as a Raspberry Pi Zero 2 W.
 - **Progressive results**: sources search in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover available sources, filter without searching again, tolerate individual source failures, and optionally load thumbnails after text results appear.
 - **Lightweight and offline**: runs on low resource devices, such as on a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
+- **Degrades gracefully**: title and full-text search work as soon as an index exists; vectors are optional. A "fast" index and `serve --fast` skip the model and FAISS entirely.
+- **Multi-user**: several searches run at once (`max_concurrent_searches`), and repeated exact queries are answered from a small in-memory cache.
 - **Web page and JSON API**: search from any browser on the network, or from your own programs.
 
 Zimantic finds articles; [kiwix-serve](https://kiwix.org/en/applications/) displays them. Searching itself does not
@@ -84,8 +86,16 @@ the FAISS file, and the ZIM. These stay open for as long as the server runs; **n
 The page lists local indexes automatically. If `kiwix_server` is configured, it also refreshes the Kiwix catalog
 and can search catalog sources without a local semantic index using Kiwix full-text search.
 
+An index does not need its FAISS file to be usable. If the vectors are missing or unreadable, the server keeps
+serving that index with **title and ZIM full-text search** instead of refusing to start. `serve --fast` takes
+this further and starts without the embedding model or any vectors at all, which is much quicker on a Pi.
+
 A lightweight HTML page is served through FastAPI and is accessible from any browser at `http://<host>:8090`
 (the `port` in `config.yaml`).
+
+**Adding indexes without a restart.** `POST /api/reload` (or `python -m zimantic reload`) rescans `index_dir`,
+opens new finished indexes, forgets deleted ones and upgrades a fast index once its vectors appear. It is cheap
+enough to trigger from `systemd.path`, so the server never has to poll the directory. See [Use](#use).
 
 ### 3. Each search
 
@@ -240,13 +250,60 @@ Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `mod
 ## Use
 
 ```bash
-python -m zimantic build wikipedia_en_medicine_maxi_2026-04   # index ZIMs in zim_dir by name (one or more)
-python -m zimantic build --path /some/where/x.zim             # or index one ZIM file by its path
-python -m zimantic serve                                      # web page on http://<host>:8090 after build is succesful
+python -m zimantic build                        # index every .zim in zim_dir (the default)
+python -m zimantic build zims/x.zim             # index one file
+python -m zimantic build zims/a.zim zims/b.zim  # several files
+python -m zimantic build /media/usb             # every .zim in a folder
+python -m zimantic build zims/a.zim /media/usb  # mix files and folders
+python -m zimantic build --fast                 # quick title + full-text index (no vectors)
+python -m zimantic serve                        # web page on http://<host>:8090 after a build
+python -m zimantic serve --fast                 # start now: no model, no vectors
+python -m zimantic reload                       # ask a running server to rescan index_dir
 ```
 
-The name is the ZIM's file name without `.zim` (for `zims/wikipedia_en_medicine_maxi_2026-04.zim`,
-use `wikipedia_en_medicine_maxi_2026-04`).
+`build` takes zero or more files or folders. A folder means its `*.zim`; with no arguments it uses `zim_dir`
+from `config.yaml`. Already-built ZIMs are skipped, so rerunning it is cheap.
+
+**Fast indexes.** `build --fast` stores titles and paths but never reads article bodies or runs the model, so it
+finishes much sooner and needs no vectors. The result is still searched by **title words (SQLite FTS) and the
+ZIM's own full-text index** — both of which live in the ZIM/SQLite, not FAISS — so only *meaning* search is
+missing. Run a normal `build` later and it re-reads the entries and adds vectors in place.
+
+**Automatic pickup with systemd.** Instead of the server polling directories, let systemd watch `zims/` and
+build + reload when a ZIM is added. Example units (adjust paths, user and port):
+
+```ini
+# ~/.config/systemd/user/zimantic.service
+[Unit]
+Description=Zimantic search server
+[Service]
+WorkingDirectory=%h/zimantic
+ExecStart=%h/zimantic/.venv/bin/python -m zimantic serve
+Restart=on-failure
+
+# ~/.config/systemd/user/zimantic-zims.path
+[Unit]
+Description=Index new ZIMs and rescan Zimantic
+[Path]
+PathChanged=%h/zimantic/zims
+[Install]
+WantedBy=default.target
+
+# ~/.config/systemd/user/zimantic-index.service
+[Unit]
+Description=Index new ZIMs (fast) and tell Zimantic to rescan
+[Service]
+Type=oneshot
+WorkingDirectory=%h/zimantic
+ExecStart=%h/zimantic/.venv/bin/python -m zimantic build --fast
+ExecStart=%h/zimantic/.venv/bin/python -m zimantic reload
+```
+
+(`reload` alone does not need `config.yaml` when given `--url`; without it, it uses the configured port.)
+
+Watch `zims/`, not `indexes/`: `build` writes into `indexes/`, so a path unit there would fire on its own
+output. `build` skips already-indexed ZIMs, so this is cheap once the library is indexed. If you instead copy
+finished indexes in from another machine, point `PathChanged` at `indexes/` and run only `reload`.
 
 To open articles from the results, run kiwix-serve with the same ZIMs, in a second terminal:
 
@@ -258,13 +315,19 @@ kiwix-serve --port 8080 zims/*.zim       # matches the default kiwix_url in conf
 If a build stops, run it again and it will automatically pick up where it left off.
 
 To rebuild a ZIM, delete its `.sqlite` and `.faiss` from `index_dir` first.
-Restart `serve` after building a new index so it picks it up.
+A running `serve` picks up new indexes when you run `python -m zimantic reload` (no restart needed);
+a fast-only index is upgraded in place the next time it is built normally.
 
-Each ZIM gets two files in `index_dir`: `<name>.sqlite` (titles, first paragraphs) and
-`<name>.faiss` (vectors). If building index is slow, consider building on a more powerful PC and copying over both files.
+Each ZIM gets `<name>.sqlite` (titles, first paragraphs) in `index_dir`, plus `<name>.faiss` (vectors) once a
+normal build finishes. If building is slow, consider building on a more powerful PC and copying the files over.
 
 JSON API examples:
 
 - `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=20` returns the final JSON result list (`zim` may be omitted).
 - `GET /api/search/stream?q=...&limit=20` returns newline-delimited JSON events: `started`, `source`, `snapshot`, and `done`.
 - `GET /api/sources` returns source metadata and readiness; `GET /api/zims` remains as the local-index compatibility endpoint.
+- `POST /api/reload` rescans `index_dir` and the Kiwix catalog, returning what was added, upgraded and removed.
+- `GET /api/health` reports served indexes, source count, and cache statistics.
+
+Exact queries (same text, same selected sources, same limit) are answered from a small LRU cache controlled by
+`cache_size`. A streamed search caches its finished results too, so the regular JSON endpoint gets them for free.

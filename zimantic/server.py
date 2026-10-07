@@ -25,6 +25,23 @@ def create_app(searchClass) -> FastAPI:
             searchClass.refresh_sources()
         return searchClass.source_dicts()
 
+    @app.post("/api/reload")
+    def reload_indexes():
+        """Rescan index_dir and the Kiwix catalog without restarting.
+
+        Cheap enough to trigger from systemd.path when a new index appears.
+        """
+        return searchClass.reload()
+
+    @app.get("/api/health")
+    def health():
+        return {
+            "status": "ok",
+            "indexes": searchClass.local_names(),
+            "sources": len(searchClass.source_dicts()),
+            "cache": searchClass.cache.stats(),
+        }
+
     @app.get("/api/search")
     def api_search(
         q: str = Query(..., min_length=1, max_length=4096),
