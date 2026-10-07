@@ -2,7 +2,8 @@
 fast, <name>.faiss (vectors).
 
 Rerunning an unfinished build resumes where it stopped. A fast build marks the
-index done='fast' and can later be upgraded in place by a normal build.
+index done='fast' and can later be upgraded by building a replacement beside
+the fast index and publishing it atomically.
 To rebuild from scratch, delete both files first.
 """
 import os
@@ -38,14 +39,18 @@ def build(
     fast=True builds title + ZIM full-text search only: it never reads article
     bodies or runs the embedding model, so it is much quicker. Otherwise,
     first_paragraph selects whether the stored text is the first substantial
-    paragraph or the whole page. A later full build upgrades the same index
-    in place.
+    paragraph or the whole page. A later full build upgrades the fast index
+    through a staged replacement.
     """
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(db_path)
+    build_db_path = db_path
+    build_faiss_path = faiss_path
+    publish_upgrade = False
+    db = None
     try:
+        db = sqlite3.connect(build_db_path)
         db.executescript(SCHEMA)
         meta = dict(db.execute("SELECT key, value FROM meta"))
         done = str(meta.get("done", ""))
@@ -61,12 +66,23 @@ def build(
             if fast:
                 print(f"{zim_path.stem}: already indexed for title/full-text search")
                 return
-            print(f"{zim_path.stem}: upgrading title-only index to full (re-reading entries)")
-            with db:
-                db.execute("DELETE FROM docs")
-                db.execute("DELETE FROM vecs")
-                db.execute("DELETE FROM meta")
-            meta = {}
+            print(f"{zim_path.stem}: upgrading title-only index to full (re-reading entries beside current index)")
+            db.close()
+            db = None
+            build_db_path, build_faiss_path = _upgrade_paths(db_path, faiss_path)
+            db = sqlite3.connect(build_db_path)
+            db.executescript(SCHEMA)
+            meta = dict(db.execute("SELECT key, value FROM meta"))
+            staged_done = str(meta.get("done", ""))
+            if staged_done == "1":
+                db.close()
+                db = None
+                _publish_upgrade(build_db_path, build_faiss_path, db_path, faiss_path)
+                print(f"{zim_path.stem}: full index ready")
+                return
+            if staged_done == "fast":
+                raise RuntimeError(f"{zim_path.stem}: upgrade staging file is marked fast; delete it and retry")
+            publish_upgrade = True
 
         zim = Archive(str(zim_path))
         start = int(meta.get("next", 0))
@@ -95,13 +111,53 @@ def build(
             return
 
         print(f"{zim_path.stem}: writing vector index")
-        _write_faiss(db, faiss_path)
+        _write_faiss(db, build_faiss_path)
         with db:
             db.execute("DROP TABLE vecs")
+            db.execute("DELETE FROM meta WHERE key = 'next'")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
-        db.execute("VACUUM")
+        if publish_upgrade:
+            db.close()
+            db = None
+            _publish_upgrade(build_db_path, build_faiss_path, db_path, faiss_path)
+        else:
+            db.execute("VACUUM")
     finally:
-        db.close()
+        if db is not None:
+            db.close()
+
+
+def _upgrade_paths(db_path: Path, faiss_path: Path) -> tuple[Path, Path]:
+    """Return staging paths used while replacing a valid fast index."""
+    return (
+        db_path.with_name(f"{db_path.name}.upgrade"),
+        faiss_path.with_name(f"{faiss_path.name}.upgrade"),
+    )
+
+
+def _publish_upgrade(
+    staging_db_path: Path,
+    staging_faiss_path: Path,
+    db_path: Path,
+    faiss_path: Path,
+) -> None:
+    """Publish a completed full index without exposing a partial replacement."""
+    if staging_db_path.exists() and staging_faiss_path.exists():
+        # Fast indexes ignore FAISS files, so publish vectors first and the
+        # done=1 SQLite file last. Readers see either the old fast index or
+        # the new one.
+        os.replace(staging_faiss_path, faiss_path)
+        os.replace(staging_db_path, db_path)
+        return
+    if staging_db_path.exists() and faiss_path.exists():
+        # Recover if the process stopped after publishing FAISS but before
+        # publishing SQLite.
+        os.replace(staging_db_path, db_path)
+        return
+    if db_path.exists() and faiss_path.exists() and not staging_db_path.exists():
+        return
+    if not staging_db_path.exists() or not staging_faiss_path.exists():
+        raise RuntimeError("full index upgrade is missing its completed SQLite or FAISS file")
 
 
 def _save(db, embedder, rows, next_entry: int) -> None:
