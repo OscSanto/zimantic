@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import re
 import sqlite3
@@ -17,12 +17,14 @@ import faiss
 from libzim.reader import Archive
 from libzim.search import Query, Searcher
 
+from .cache import DEFAULT_CACHE_SIZE, QueryCache
 from .contracts import SourceInfo, SourceResult
 
 
 MAX_QUERY_LENGTH = 4096
 DEFAULT_CANDIDATES = 16
 DEFAULT_SOURCE_TIMEOUT = 12
+DEFAULT_MAX_CONCURRENT_SEARCHES = 4
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "how", "what", "where", "when", "why", "who", "which", "can", "could",
@@ -38,10 +40,18 @@ INTENT_RULES = (
 @dataclass
 class _LocalIndex:
     db: sqlite3.Connection
-    faiss_index: Any
+    faiss_index: Any | None
     archive: Archive | None
     searcher: Searcher | None
     lock: threading.Lock
+    db_path: str | None = None  # read-only sqlite URI, used for per-thread connections
+    _thread: threading.local = field(default_factory=threading.local)
+    _conns: list[sqlite3.Connection] = field(default_factory=list)
+
+    @property
+    def semantic(self) -> bool:
+        """True when vectors are loaded and meaning search can run."""
+        return self.faiss_index is not None
 
 
 class SearchQueryError(ValueError):
@@ -138,52 +148,137 @@ def _intent_match(source: SourceInfo, question: str) -> float:
 
 
 class Search:
-    def __init__(self, cfg: dict, embedder):
+    def __init__(self, cfg: dict, embedder=None, semantic: bool = True):
         self.cfg = cfg
         self.embedder = embedder
+        # semantic=False is the "fast" mode: start without loading FAISS or the
+        # model and serve title + ZIM full-text results only.
+        self.semantic = bool(semantic)
         self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
-        self.max_concurrent_searches = _int_config(cfg, "max_concurrent_searches", 1)
+        self.max_concurrent_searches = _int_config(
+            cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
+        )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
         self._executor = ThreadPoolExecutor(max_workers=self.source_workers, thread_name_prefix="zimantic-search")
+        self.cache = QueryCache(_int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0))
         self._load_indexes()
         self.refresh_sources()
 
+    @staticmethod
+    def _index_uri(db_path: Path) -> str:
+        return db_path.resolve().as_uri() + "?mode=ro"
+
+    def _open_index(self, db_path: Path) -> _LocalIndex | None:
+        """Open one finished index. Missing or unreadable vectors degrade the
+        index to title + full-text only instead of failing the whole server."""
+        try:
+            uri = self._index_uri(db_path)
+            db = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        except sqlite3.Error:
+            return None
+
+        try:
+            done = db.execute("SELECT value FROM meta WHERE key = 'done'").fetchone()
+            if not done or str(done[0]) not in {"1", "fast"}:
+                db.close()
+                return None
+
+            faiss_index = None
+            faiss_path = db_path.with_suffix(".faiss")
+            if self.semantic and faiss_path.exists():
+                try:
+                    faiss_index = faiss.read_index(
+                        str(faiss_path),
+                        faiss.IO_FLAG_MMAP_IFC | faiss.IO_FLAG_READ_ONLY,
+                    )
+                    if hasattr(faiss_index, "nprobe"):
+                        faiss_index.nprobe = _int_config(self.cfg, "nprobe", 64)
+                except Exception as error:  # corrupt/unreadable vectors: keep going
+                    print(f"{db_path.stem}: vectors unavailable ({error}); using title and full-text search")
+                    faiss_index = None
+
+            archive = None
+            searcher = None
+            zim_path = Path(self.cfg["zim_dir"]) / f"{db_path.stem}.zim"
+            if zim_path.exists():
+                try:
+                    archive = Archive(str(zim_path))
+                    searcher = Searcher(archive) if archive.has_fulltext_index else None
+                except Exception as error:  # unreadable ZIM: title search still works
+                    print(f"{db_path.stem}: ZIM unavailable ({error}); title search only")
+                    archive = None
+                    searcher = None
+            return _LocalIndex(db, faiss_index, archive, searcher, threading.Lock(), db_path=uri)
+        except sqlite3.Error:
+            db.close()
+            return None
+
     def _load_indexes(self) -> None:
         for db_path in sorted(Path(self.cfg["index_dir"]).glob("*.sqlite")):
-            db = sqlite3.connect(
-                db_path.resolve().as_uri() + "?mode=ro",
-                uri=True,
-                check_same_thread=False,
-            )
-            done = db.execute("SELECT value FROM meta WHERE key = 'done'").fetchone()
-            if not done or str(done[0]) != "1":
-                db.close()
+            index = self._open_index(db_path)
+            if index:
+                self.indexes[db_path.stem] = index
+
+    def reload(self) -> dict[str, Any]:
+        """Rescan index_dir without restarting. Picks up new finished indexes,
+        forgets removed ones, upgrades fast indexes that gained vectors, and
+        refreshes the Kiwix catalog. Cheap enough for systemd.path to trigger."""
+        found = {path.stem: path for path in sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))}
+        removed = [name for name in self.indexes if name not in found]
+        added = []
+        upgraded = []
+
+        for name in removed:
+            self._close_index(self.indexes.pop(name))
+
+        for name, db_path in found.items():
+            current = self.indexes.get(name)
+            if current is None:
+                index = self._open_index(db_path)
+                if index:
+                    self.indexes[name] = index
+                    added.append(name)
                 continue
+            if self.semantic and not current.semantic and db_path.with_suffix(".faiss").exists():
+                fresh = self._open_index(db_path)
+                if fresh and fresh.semantic:
+                    self._close_index(current)
+                    self.indexes[name] = fresh
+                    upgraded.append(name)
 
-            faiss_path = db_path.with_suffix(".faiss")
-            if not faiss_path.exists():
-                db.close()
-                raise RuntimeError(
-                    f"{db_path}: completed index is missing {faiss_path}; delete both files and rebuild"
-                )
+        self.cache.clear()
+        self.refresh_sources()
+        return {
+            "indexes": sorted(self.indexes),
+            "added": sorted(added),
+            "removed": sorted(removed),
+            "upgraded": sorted(upgraded),
+        }
 
-            faiss_index = faiss.read_index(
-                str(faiss_path),
-                faiss.IO_FLAG_MMAP_IFC | faiss.IO_FLAG_READ_ONLY,
-            )
-            if hasattr(faiss_index, "nprobe"):
-                faiss_index.nprobe = _int_config(self.cfg, "nprobe", 64)
+    @staticmethod
+    def _close_index(index: _LocalIndex) -> None:
+        for conn in [index.db, *index._conns]:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
-            zim_path = Path(self.cfg["zim_dir"]) / f"{db_path.stem}.zim"
-            archive = Archive(str(zim_path)) if zim_path.exists() else None
-            searcher = Searcher(archive) if archive and archive.has_fulltext_index else None
-            self.indexes[db_path.stem] = _LocalIndex(
-                db, faiss_index, archive, searcher, threading.Lock()
-            )
+    def _db_for(self, index: _LocalIndex) -> sqlite3.Connection:
+        """A read-only SQLite connection per worker thread, so concurrent
+        searches on the same index do not share one connection."""
+        if index.db_path is None:
+            return index.db
+        conn = getattr(index._thread, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(index.db_path, uri=True, check_same_thread=False)
+            index._thread.conn = conn
+            with index.lock:
+                index._conns.append(conn)
+        return conn
 
     def refresh_sources(self) -> list[dict[str, Any]]:
         """Refresh source metadata without making local indexes unavailable."""
@@ -225,6 +320,8 @@ class Search:
                     )
 
         self.sources = dict(sorted(merged.items(), key=lambda pair: pair[1].name.casefold()))
+        # Availability or catalog may have changed, so cached answers can be stale.
+        self.cache.clear()
         return self.source_dicts()
 
     def _catalog_entries(self, server: str) -> list[dict[str, str]]:
@@ -297,8 +394,38 @@ class Search:
             raise SearchQueryError(f"query must be at most {MAX_QUERY_LENGTH} characters")
         return query
 
+    @staticmethod
+    def _cache_key(query: str, zim: list[str] | None, limit: int) -> tuple:
+        selection = tuple(sorted(zim)) if zim else None
+        normalized = re.sub(r"\s+", " ", query).strip().casefold()
+        return (normalized, selection, int(limit))
+
+    def _query_vector(self, sources: list[SourceInfo], query: str):
+        """Embed the query only when a selected local index actually has vectors.
+        A failed embedding degrades to title + full-text rather than failing."""
+        if self.embedder is None or not self.semantic:
+            return None
+        wants_semantic = any(
+            source.mode == "local"
+            and source.local_name in self.indexes
+            and self.indexes[source.local_name].semantic
+            for source in sources
+        )
+        if not wants_semantic:
+            return None
+        try:
+            return self.embedder.embed([f"query: {query}"])
+        except Exception as error:
+            print(f"zimantic: query embedding failed ({error}); using title and full-text search")
+            return None
+
     def search(self, query: str, zim: list[str] | None = None, limit: int = 20) -> list[dict]:
         """Return the final result set using the same coordinator as streaming."""
+        query = self._validate_query(query)
+        limit = max(1, min(int(limit), 100))
+        cached = self.cache.get(self._cache_key(query, zim, limit))
+        if cached is not None:
+            return list(cached)
         events = self.stream_search(query, zim, limit)
         final: list[dict] = []
         for event in events:
@@ -317,7 +444,22 @@ class Search:
         """Yield source progress and provisional ranked snapshots."""
         query = self._validate_query(query)
         limit = max(1, min(int(limit), 100))
+        key = self._cache_key(query, zim, limit)
         sources = self._selected_sources(zim)
+
+        cached = self.cache.get(key)
+        if cached is not None:
+            total = len(sources)
+            yield {
+                "type": "started",
+                "query": query,
+                "sources": [source.to_dict() for source in sources],
+                "total": total,
+            }
+            yield {"type": "snapshot", "results": list(cached), "completed": total, "total": total}
+            yield {"type": "done", "results": list(cached), "completed": total, "total": total}
+            return
+
         acquired = self._search_slots.acquire()
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
@@ -329,16 +471,11 @@ class Search:
                 "total": len(sources),
             }
             if not sources:
+                self.cache.put(key, [])
                 yield {"type": "done", "results": [], "completed": 0, "total": 0}
                 return
 
-            try:
-                query_vector = self.embedder.embed([f"query: {query}"])
-            except Exception as error:
-                message = f"query embedding failed: {error}"
-                yield {"type": "error", "error": message}
-                yield {"type": "done", "results": [], "completed": 0, "total": len(sources)}
-                return
+            query_vector = self._query_vector(sources, query)
 
             keyword_query = _keyword_query(query)
             for source in sources:
@@ -379,9 +516,12 @@ class Search:
                     "total": len(sources),
                 }
 
+            final = self._rank_results(completed, query, limit)
+            # A finished stream is cached for the regular JSON endpoint too.
+            self.cache.put(key, final)
             yield {
                 "type": "done",
-                "results": self._rank_results(completed, query, limit),
+                "results": final,
                 "completed": len(completed),
                 "total": len(sources),
             }
@@ -414,8 +554,7 @@ class Search:
         limit: int,
     ) -> SourceResult:
         index = self.indexes[source.local_name]
-        with index.lock:
-            return self._search_local_locked(source, query, keyword_query, query_vector, limit, index)
+        return self._search_local_locked(source, query, keyword_query, query_vector, limit, index)
 
     def _search_local_locked(
         self,
@@ -427,39 +566,55 @@ class Search:
         index: _LocalIndex,
     ) -> SourceResult:
         count = max(self.candidate_count, limit * 2)
+        db = self._db_for(index)
         semantic: list[tuple[float, dict[str, Any]]] = []
         keyword: list[tuple[float, dict[str, Any]]] = []
         fulltext: list[tuple[int, dict[str, Any]]] = []
         rowids: set[int] = set()
         errors: list[str] = []
 
-        similarities, ids = index.faiss_index.search(query_vector, count)
-        semantic_ids = [(float(score), int(rowid)) for score, rowid in zip(similarities[0], ids[0]) if rowid >= 0]
-        rowids.update(rowid for _, rowid in semantic_ids)
+        # FAISS search is read-only and thread-safe; skip it when this index has
+        # no vectors or the query could not be embedded (fast mode).
+        if query_vector is not None and index.faiss_index is not None:
+            try:
+                similarities, ids = index.faiss_index.search(query_vector, count)
+                semantic_ids = [
+                    (float(score), int(rowid))
+                    for score, rowid in zip(similarities[0], ids[0])
+                    if rowid >= 0
+                ]
+                rowids.update(rowid for _, rowid in semantic_ids)
+            except Exception as error:
+                errors.append(f"meaning search unavailable: {error}")
+                semantic_ids = []
+        else:
+            semantic_ids = []
 
         if keyword_query:
             title_search = (
                 "SELECT rowid, bm25(docs) FROM docs "
                 "WHERE docs MATCH ? ORDER BY rank LIMIT ?"
             )
-            for rowid, bm25 in index.db.execute(title_search, (keyword_query, count)):
+            for rowid, bm25 in db.execute(title_search, (keyword_query, count)):
                 rowids.add(int(rowid))
                 keyword.append((float(bm25), {"rowid": int(rowid)}))
 
         fulltext_paths: list[tuple[int, str]] = []
         if index.searcher and index.archive:
-            try:
-                paths = index.searcher.search(Query().set_query(keyword_query or query)).getResults(0, count)
-                fulltext_paths = [(rank, path) for rank, path in enumerate(paths)]
-                for _, path in fulltext_paths:
-                    try:
-                        rowids.add(index.archive.get_entry_by_path(path)._index)
-                    except (KeyError, RuntimeError, ValueError):
-                        continue
-            except (RuntimeError, ValueError) as error:
-                errors.append(f"full-text search unavailable: {error}")
+            # libzim's Searcher is not documented as thread-safe: serialise it.
+            with index.lock:
+                try:
+                    paths = index.searcher.search(Query().set_query(keyword_query or query)).getResults(0, count)
+                    fulltext_paths = [(rank, path) for rank, path in enumerate(paths)]
+                    for _, path in fulltext_paths:
+                        try:
+                            rowids.add(index.archive.get_entry_by_path(path)._index)
+                        except (KeyError, RuntimeError, ValueError):
+                            continue
+                except (RuntimeError, ValueError) as error:
+                    errors.append(f"full-text search unavailable: {error}")
 
-        docs = self._fetch_docs(source, index.db, rowids)
+        docs = self._fetch_docs(source, db, rowids)
         for score, rowid in semantic_ids:
             doc = docs.get(rowid)
             if doc:
