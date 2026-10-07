@@ -86,6 +86,82 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(first[0]["id"], "manual:tire")
         self.assertIn("title 100%", first[0]["explain"])
 
+    def test_ranking_deduplicates_redirect_hits_and_preserves_source_rank(self):
+        semantic_source = SourceInfo("semantic", "Semantic", "semantic", "local")
+        title_source = SourceInfo("titles", "Titles", "titles", "local")
+        unrelated = {
+            "id": "semantic:index",
+            "source_key": "semantic",
+            "source": "Semantic",
+            "title": "index.html",
+            "lead": "",
+            "path": "index.html",
+            "source_rank": 1,
+        }
+        exact = {
+            "id": "titles:intuition",
+            "source_key": "titles",
+            "source": "Titles",
+            "title": "Intuition",
+            "lead": "",
+            "path": "intuition",
+            "source_rank": 3,
+        }
+        result = SourceResult(
+            source=semantic_source,
+            items=[unrelated],
+            semantic=[(0.99, unrelated)] * 10,
+        )
+        result_with_title = SourceResult(
+            source=title_source,
+            items=[exact],
+            keyword=[(-1.0, exact)],
+            fulltext=[(0, exact)],
+        )
+        search = object.__new__(Search)
+        search.cfg = {"long_query": 10, "candidate_count": 16}
+        search.candidate_count = 16
+
+        ranked = search._rank_results([result, result_with_title], "intuition", 10)
+
+        self.assertEqual(ranked[0]["id"], "titles:intuition")
+        self.assertEqual(ranked[0]["rank"], 3)
+        self.assertEqual(ranked[1]["score"], 0.016666666666666666)
+
+    def test_compact_title_with_all_query_words_beats_longer_title(self):
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        compact = {
+            "id": "manual:compact",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Change Tire",
+            "lead": "",
+            "path": "compact",
+            "source_rank": 2,
+        }
+        long = {
+            "id": "manual:long",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Change Tire Maintenance and Safety Guide",
+            "lead": "",
+            "path": "long",
+            "source_rank": 1,
+        }
+        result = SourceResult(
+            source=source,
+            items=[compact, long],
+            keyword=[(-2.0, long), (-3.0, compact)],
+        )
+        search = object.__new__(Search)
+        search.cfg = {"long_query": 10, "candidate_count": 16}
+        search.candidate_count = 16
+
+        ranked = search._rank_results([result], "change tire", 10)
+
+        self.assertEqual([item["id"] for item in ranked], ["manual:compact", "manual:long"])
+        self.assertIn("density 100%", ranked[0]["explain"])
+
     def test_stream_emits_source_snapshots_and_final_results(self):
         sources = [
             SourceInfo("one", "One", "one", "local"),

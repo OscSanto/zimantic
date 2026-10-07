@@ -114,8 +114,10 @@ enough to trigger from `systemd.path`, so the server never has to poll the direc
 4. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared
    (a cosine similarity, a BM25 score, a position in Kiwix's list), so RRF ignores scores and uses positions only:
    an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top
-   by several searches beats one that's first in just one. Title coverage, phrase matches, snippet coverage,
-   and configured source intent provide bounded deterministic tie-breaking signals.
+   by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article
+   can contribute at most once per search list. A bounded lexical bonus favors titles containing more query
+   words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured
+   source intent provide additional deterministic signals.
 
 The streaming endpoint sends a source completion and a provisional ranked snapshot as each source finishes.
 The browser preserves result identities while reranking, so moved results animate into their new positions and

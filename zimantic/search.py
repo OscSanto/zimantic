@@ -778,21 +778,33 @@ class Search:
         source_by_key = {result.source.key: result.source for result in source_results}
 
         for result in source_results:
-            for score, doc in result.semantic:
+            for doc in result.items:
                 docs[doc["id"]] = doc
+            for score, doc in result.semantic:
                 semantic.append((score, result.source.key, doc))
             for score, doc in result.keyword:
-                docs[doc["id"]] = doc
                 keyword.append((score, result.source.key, doc))
             for rank, doc in result.fulltext:
-                docs[doc["id"]] = doc
                 fulltext.append((rank, result.source.key, doc))
-            for doc in result.items:
-                docs.setdefault(doc["id"], doc)
 
         semantic.sort(key=lambda item: (-item[0], source_by_key[item[1]].name.casefold(), item[2]["path"]))
         keyword.sort(key=lambda item: (item[0], source_by_key[item[1]].name.casefold(), item[2]["path"]))
         fulltext.sort(key=lambda item: (item[0], source_by_key[item[1]].name.casefold(), item[2]["path"]))
+
+        def deduplicate(ranked):
+            seen: set[str] = set()
+            unique = []
+            for item in ranked:
+                identity = item[2]["id"]
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                unique.append(item)
+            return unique
+
+        semantic = deduplicate(semantic)
+        keyword = deduplicate(keyword)
+        fulltext = deduplicate(fulltext)
 
         scores: dict[str, float] = {}
         for ranked, weight in (
@@ -807,7 +819,12 @@ class Search:
         for identity, doc in docs.items():
             title_tokens = _content_terms(doc["title"])
             lead_tokens = _content_terms(doc.get("lead", ""))
-            title_coverage = _coverage(query_words, title_tokens)
+            title_matches = sum(term in set(title_tokens) for term in query_words)
+            title_coverage = title_matches / len(query_words) if query_words else 0.0
+            title_density = _density(query_words, title_tokens)
+            # Coverage is primary; density rewards concise titles among equally
+            # complete matches without letting a short partial match win.
+            title_quality = title_coverage * (1.0 + title_density) / 2.0
             phrase_hit = _phrase(query_words, title_tokens)
             snippet_coverage = _coverage(query_words, lead_tokens)
             intent = max(
@@ -815,15 +832,17 @@ class Search:
                 default=0.0,
             )
             lexical = (
-                4.0 * title_coverage
+                5.0 * title_quality
                 + 2.0 * phrase_hit
                 + intent
                 + 0.5 * snippet_coverage
-            ) / 7.5
+            ) / 8.5
             source_rank = int(doc.get("source_rank", 100000))
-            total = scores.get(identity, 0.0) + 0.01 * lexical
+            total = scores.get(identity, 0.0) + 0.02 * lexical
             explanation = (
-                f"title {round(title_coverage * 100)}%, "
+                f"title {round(title_coverage * 100)}% "
+                f"({title_matches}/{len(query_words) if query_words else 0}, "
+                f"density {round(title_density * 100)}%), "
                 f"phrase {'yes' if phrase_hit else 'no'}, "
                 f"intent {'yes' if intent else 'no'}, "
                 f"snippet {round(snippet_coverage * 100)}%"
@@ -837,7 +856,7 @@ class Search:
             scored.append((
                 total,
                 lexical,
-                _density(query_words, title_tokens),
+                title_quality,
                 source_rank,
                 doc["source"].casefold(),
                 doc["path"],
