@@ -14,7 +14,7 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 from libzim.reader import Archive
-from .zim import read_entry
+from .zim import DEFAULT_MAX_HTML_BYTES, read_entry
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
@@ -24,12 +24,22 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry
 """
 
 
-def build(zim_path: Path, index_dir, embedder, batch_size: int, fast: bool = False) -> None:
+def build(
+    zim_path: Path,
+    index_dir,
+    embedder,
+    batch_size: int,
+    fast: bool = False,
+    first_paragraph: bool = False,
+    max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
+) -> None:
     """Index a ZIM.
 
     fast=True builds title + ZIM full-text search only: it never reads article
-    bodies or runs the embedding model, so it is much quicker. A later full
-    build upgrades the same index in place.
+    bodies or runs the embedding model, so it is much quicker. Otherwise,
+    first_paragraph selects whether the stored text is the first substantial
+    paragraph or the whole page. A later full build upgrades the same index
+    in place.
     """
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
@@ -60,9 +70,15 @@ def build(zim_path: Path, index_dir, embedder, batch_size: int, fast: bool = Fal
 
         zim = Archive(str(zim_path))
         start = int(meta.get("next", 0))
-        batch, articles = [], 0  # articles: rows in the batch that have a first paragraph to embed
+        batch, articles = [], 0  # articles: rows in the batch that have text to embed
         for i in tqdm(range(start, zim.entry_count), initial=start, total=zim.entry_count, desc=zim_path.stem):
-            row = read_entry(zim, i, fast=fast)
+            row = read_entry(
+                zim,
+                i,
+                fast=fast,
+                first_paragraph=first_paragraph,
+                max_html_bytes=max_html_bytes,
+            )
             if row:
                 batch.append(row)
                 articles += bool(row[2])
@@ -119,7 +135,7 @@ def _write_faiss(db, path: Path) -> None:
         # Large ZIM: vectors grouped into lists, 1 byte per number (384 bytes per article). 
         # Squeezing to 48 bytes (PQ48) lost ~25% of top hits in testing; this 8-bit form was nearly exact. 
         # The file is memorymapped at search time, so only the lists a query probes are read from disk.
-        # TODO dynamic nprobe. Currenlty nprobe = 64 (check .yaml). On large 6M zim -> only 0.6% vector comparison due to large cluster count.
+        # TODO dynamic nprobe. Currenlty nprobe = 64 (check .toml). On large 6M zim -> only 0.6% vector comparison due to large cluster count.
         cluster_centre_count = int(4 * n ** 0.5) # TODO: dyanmically size in relation to zim's vec count 
         index = faiss.index_factory(dim, f"IVF{cluster_centre_count},SQ8", faiss.METRIC_INNER_PRODUCT) #IVF{cluster_centre_count}
        

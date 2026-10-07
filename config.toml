@@ -10,16 +10,16 @@
 
 # Your .zim files: (download them from https://library.kiwix.org).
 # `python -m zimantic build <name>`    looks for <name>.zim in this folder.
-zim_dir: ./zims
+zim_dir = "./zims"
 
 # The embedding model: this folder must contain model.onnx and sentencepiece.bpe.model
 # (see "Download the model" in the README).
-model_dir: ./model
+model_dir = "./model"
 
 # Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.
 # Created automatically. 
 # (Recomended; for large ZIMs, build the index on a faster machine and copy both files here)
-index_dir: ./indexes
+index_dir = "./indexes"
 
 # ---------------------------------------------------------------------------------------------
 # SERVER
@@ -27,53 +27,60 @@ index_dir: ./indexes
 
 # Port for the search page: http://<this machine>:<port>. 
 # Reachable from other devices on the network.
-port: 8090
+port = 8090
 
 # Where result links open the article, served by kiwix-serve (optional; search works without it).
 # Links become <kiwix_url>/<zim name>/<article path>. Use this machine's address instead of
 # localhost if people open the search page from other devices.
-kiwix_url: http://localhost:8080/content
+kiwix_url = "http://localhost:8080/content"
 
 # Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
 # sources that do not have a local Zimantic index. Leave blank to use local
 # indexes only. With the standard Kiwix proxy setup this is often http://localhost:8080.
-kiwix_server: ""
-kiwix_catalog_path: /kiwix/catalog/v2/entries?count=-1
-kiwix_search_path: /kiwix/search
+kiwix_server = ""
+kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
+kiwix_search_path = "/kiwix/search"
 
 # ---------------------------------------------------------------------------------------------
 # TUNING (the defaults are fine to start with)
 # ---------------------------------------------------------------------------------------------
 
 # Results shown per search.
-results: 30
+results = 30
 
 # Articles embedded at once while indexing. Higher is faster but uses more memory.
 # Use ~8 on a Raspberry Pi Zero 2 W.
-batch_size: 32
+batch_size = 32
+
+# Text stored and embedded for each HTML article. false reads the whole page;
+# true keeps only the first substantial paragraph.
+first_paragraph = false
+
+# Maximum HTML read from each article while extracting text.
+max_html_bytes = 4_194_304
 
 # Large ZIMs only (10,000+ articles): how many groups of vectors each search scans.
 # Higher = more accurate but slower. Lower it if searches are slow or memory runs out on a Pi.
 # In testing on a 28k-article ZIM, 64 was about as accurate as scanning everything.
-nprobe: 64
+nprobe = 64
 
 # A naive approach to determining if query requires a deeper search (e.g. pasted sentences from article)
 # Searches with 'long_query' words or more will double kiwix's full-text result weights.
 # Rule of thumb: long searchs are usually pasted sentence or remembered text.  
 # Set very high (e.g. 1000) to turn the doubling off.
-long_query: 10
+long_query = 10
 
 # Search performance and resource limits.
 # Source searches run in parallel up to this many workers. Keep this modest on a Pi.
-search_workers: 4
+search_workers = 4
 # Maximum simultaneous user searches. Several people can search at once up to
 # this many; each search may still use all source workers. Lower it on a Pi.
-max_concurrent_searches: 4
+max_concurrent_searches = 4
 # Number of candidates requested from each retrieval backend before fusion.
-candidate_count: 16
+candidate_count = 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
-source_timeout: 12
+source_timeout = 12
 # Small LRU cache of exact queries (query + selected sources + limit). A finished
 # streamed search is cached too, so the JSON endpoint gets it for free.
 # Set to 0 to disable.
-cache_size: 256
+cache_size = 256

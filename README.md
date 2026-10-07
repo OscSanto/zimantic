@@ -43,28 +43,28 @@ Redirects, including the small "forwarding" pages some
 ZIMs use instead of real redirects, are stored as **title-only** entries that point to their article.
 Thus, searching "USA" still finds the United States page.
 
-**Why the first paragraph.** For each article, Zimantic keeps the title plus the **first paragraph**.
-Wikipedia's writer's guidelines require opening paragraph to summarize the whole article, so it's the
-most compact description. That makes it the best text to compare with
-questions and descriptions.
+**Text extraction.** By default, Zimantic reads the whole visible text of each HTML article.
+Set `first_paragraph = true` in `config.toml` to keep only the first substantial paragraph instead.
+Wikipedia's writer's guidelines require opening paragraph to summarize the whole article, so it is
+the most compact description and can be the best text to compare with questions and descriptions.
 
-**Forming a clean paragraph.** Zimantic uses Wikipedia's page structure:
-- it takes the first `<p>` with at least 50 characters, so pages that open with a one-liner like
-  "Mercury may refer to:" (disambiguation pages, lists) are stored as title-only;
-- it skips stylesheets, scripts and footnote markers like `[1]` inside the paragraph;
-- it keeps at most 1,000 characters and inspects at most the first 1 MiB of each HTML page.
-  An unusually large page whose first paragraph starts later is stored as title-only.
+**Forming clean text.** Zimantic skips stylesheets, scripts and footnote markers like `[1]`.
+In `first_paragraph` mode, it takes the first `<p>` with at least 50 characters, so pages that open
+with a one-liner like "Mercury may refer to:" (disambiguation pages, lists) are stored as title-only.
+The first-paragraph result is capped at 1,000 characters. Both modes inspect at most the first 4 MiB
+of each HTML page by default; change `max_html_bytes` to tune that limit.
 
-**Other ZIMs** (Stack Exchange, Gutenberg, TED, …) aren't refused: `build` runs on any ZIM and applies the same
-first-paragraph rule to every HTML page. But nothing has been tuned or tested for them, so results depend on how
-each site lays out its pages. PDFs inside a ZIM are skipped.
+**Other ZIMs** (Stack Exchange, Gutenberg, TED, …) aren't refused: `build` runs on any ZIM and
+extracts their visible HTML text. In `first_paragraph` mode, the same paragraph rule applies to
+every HTML page, but nothing has been tuned or tested for them, so results depend on how each site
+lays out its pages. PDFs inside a ZIM are skipped.
 
-**Embedding.** The title and first paragraph are turned into a vector (a list of numbers describing their meaning), currently by
+**Embedding.** The title and extracted text are turned into a vector (a list of numbers describing their meaning), currently by
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
 Input is capped at 256 tokens.
 
 **Storage.** Each ZIM gets two files in `index_dir`:
-- `<name>.sqlite`: titles, first paragraphs, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
+- `<name>.sqlite`: titles, extracted text, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
 - `<name>.faiss`: the vectors, in one of two layouts depending on aritlce count:
 
 | ZIM size | Vector index | Why |
@@ -91,7 +91,7 @@ serving that index with **title and ZIM full-text search** instead of refusing t
 this further and starts without the embedding model or any vectors at all, which is much quicker on a Pi.
 
 A lightweight HTML page is served through FastAPI and is accessible from any browser at `http://<host>:8090`
-(the `port` in `config.yaml`).
+(the `port` in `config.toml`).
 
 **Adding indexes without a restart.** `POST /api/reload` (or `python -m zimantic reload`) rescans `index_dir`,
 opens new finished indexes, forgets deleted ones and upgrades a fast index once its vectors appear. It is cheap
@@ -187,15 +187,15 @@ languages may contain mistakes.
 - About 120 MB for the embedding model, plus your ZIM files
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find the first paragraph)
 - *Searching does not require Kiwix.* To open the articles from the result links, run
-  [kiwix-serve](https://kiwix.org/en/applications/) with the same ZIMs (set its address as `kiwix_url` in `config.yaml`).
+  [kiwix-serve](https://kiwix.org/en/applications/) with the same ZIMs (set its address as `kiwix_url` in `config.toml`).
 
 ## Where your files go
 
-By default everything lives inside the project folder, so `config.yaml` works without changes:
+By default everything lives inside the project folder, so `config.toml` works without changes:
 
 ```
 zimantic/
-├── config.yaml          ← settings (paths below are its defaults)
+├── config.toml          ← settings (paths below are its defaults)
 ├── model/               ← model_dir: model.onnx + sentencepiece.bpe.model   (you download)
 ├── zims/                ← zim_dir:   your .zim files                          (you download)
 ├── indexes/             ← index_dir: <name>.sqlite + <name>.faiss            (created by build)
@@ -203,13 +203,13 @@ zimantic/
 ```
 
 Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `model_dir` or `index_dir` in
-`config.yaml` at them instead. These three folders are git-ignored, so ZIMs, models and indexes never get committed.
+`config.toml` at them instead. These three folders are git-ignored, so ZIMs, models and indexes never get committed.
 
 ## Install
 
 1. **Get the code** and enter the folder 
 - run the next commands from here 
-- `config.yaml` is read from this folder, so configure appropriately
+- `config.toml` is read from this folder, so configure appropriately
 
    ```bash
    git clone https://github.com/OscSanto/zimantic.git
@@ -237,7 +237,7 @@ Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `mod
 4. **Put your ZIM files in `zims/`.** Download them from [library.kiwix.org](https://library.kiwix.org)
    or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. **Check `config.yaml`.** If you used the folders above, nothing needs changing. Otherwise point
+5. **Check `config.toml`.** If you used the folders above, nothing needs changing. Otherwise point
    `zim_dir` / `model_dir` / `index_dir` at your folders. To open articles from the results, set
    `kiwix_url` to where kiwix-serve runs.
 
@@ -262,7 +262,7 @@ python -m zimantic reload                       # ask a running server to rescan
 ```
 
 `build` takes zero or more files or folders. A folder means its `*.zim`; with no arguments it uses `zim_dir`
-from `config.yaml`. Already-built ZIMs are skipped, so rerunning it is cheap.
+from `config.toml`. Already-built ZIMs are skipped, so rerunning it is cheap.
 
 **Fast indexes.** `build --fast` stores titles and paths but never reads article bodies or runs the model, so it
 finishes much sooner and needs no vectors. The result is still searched by **title words (SQLite FTS) and the
@@ -299,7 +299,7 @@ ExecStart=%h/zimantic/.venv/bin/python -m zimantic build --fast
 ExecStart=%h/zimantic/.venv/bin/python -m zimantic reload
 ```
 
-(`reload` alone does not need `config.yaml` when given `--url`; without it, it uses the configured port.)
+(`reload` alone does not need `config.toml` when given `--url`; without it, it uses the configured port.)
 
 Watch `zims/`, not `indexes/`: `build` writes into `indexes/`, so a path unit there would fire on its own
 output. `build` skips already-indexed ZIMs, so this is cheap once the library is indexed. If you instead copy
@@ -309,7 +309,7 @@ To open articles from the results, run kiwix-serve with the same ZIMs, in a seco
 
 ```bash
 sudo apt install kiwix-tools             # Debian/Ubuntu/Raspberry Pi OS; other systems: kiwix.org/en/applications
-kiwix-serve --port 8080 zims/*.zim       # matches the default kiwix_url in config.yaml
+kiwix-serve --port 8080 zims/*.zim       # matches the default kiwix_url in config.toml
 ```
 
 If a build stops, run it again and it will automatically pick up where it left off.
@@ -318,7 +318,7 @@ To rebuild a ZIM, delete its `.sqlite` and `.faiss` from `index_dir` first.
 A running `serve` picks up new indexes when you run `python -m zimantic reload` (no restart needed);
 a fast-only index is upgraded in place the next time it is built normally.
 
-Each ZIM gets `<name>.sqlite` (titles, first paragraphs) in `index_dir`, plus `<name>.faiss` (vectors) once a
+Each ZIM gets `<name>.sqlite` (titles, extracted text) in `index_dir`, plus `<name>.faiss` (vectors) once a
 normal build finishes. If building is slow, consider building on a more powerful PC and copying the files over.
 
 JSON API examples:

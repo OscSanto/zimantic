@@ -1,6 +1,6 @@
 import argparse
 import json
-import yaml
+import tomllib
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -43,19 +43,20 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    config = Path("config.yaml")
+    config = Path("config.toml")
     cfg = {}
     if config.exists():
-        cfg = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+        cfg = tomllib.loads(config.read_text(encoding="utf-8"))
     if args.command in {"build", "serve"} and not cfg:
-        sys.exit("config.yaml not found or empty")
+        sys.exit("config.toml not found or empty")
 
    
     if args.command == "build":
         from .build import build as build_zim
+        from .zim import DEFAULT_MAX_HTML_BYTES
 
         # Expand the positional paths: files are used directly, folders mean
-        # their *.zim, and no argument at all means zim_dir from config.yaml.
+        # their *.zim, and no argument at all means zim_dir from config.toml.
         zims: list[Path] = []
         seen: set[Path] = set()
         for source in (args.paths or [Path(cfg["zim_dir"])]):
@@ -81,24 +82,37 @@ def main() -> None:
             from .embed import Embedder
             embedder = Embedder(cfg["model_dir"])
         for zim in zims:
-            build_zim(zim, cfg["index_dir"], embedder, cfg["batch_size"], fast=args.fast)
+            build_zim(
+                zim,
+                cfg["index_dir"],
+                embedder,
+                cfg["batch_size"],
+                fast=args.fast,
+                first_paragraph=bool(cfg.get("first_paragraph", False)),
+                max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
+            )
 
     elif args.command == "serve":
         from .search import Search
         from .server import serve
 
-        embedder = None
+        search = Search(cfg, semantic=not args.fast)
+        if not search.local_names():
+            print(
+                "zimantic: warning: no sources are indexed yet; "
+                "run `zimantic build --fast` before serving searches",
+                file=sys.stderr,
+            )
         if not args.fast:
             from .embed import Embedder
-            embedder = Embedder(cfg["model_dir"])
-        search = Search(cfg, embedder=embedder, semantic=not args.fast)
+            search.embedder = Embedder(cfg["model_dir"])
         if args.fast:
             print("zimantic: fast mode: title and ZIM full-text search only")
         serve(search, cfg["port"])
 
     elif args.command == "reload":
         if not args.url and "port" not in cfg:
-            sys.exit("zimantic: reload needs --url (or config.yaml with a port)")
+            sys.exit("zimantic: reload needs --url (or config.toml with a port)")
         base = args.url or f"http://127.0.0.1:{cfg['port']}"
         url = base.rstrip("/") + "/api/reload"
         try:
