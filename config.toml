@@ -32,11 +32,11 @@ port = 8090
 # Where result links open the article, served by kiwix-serve (optional; search works without it).
 # Links become <kiwix_url>/<zim name>/<article path>. Use this machine's address instead of
 # localhost if people open the search page from other devices.
-kiwix_url = "http://localhost:8080/content"
+kiwix_url = "http://localhost:8085/content"
 
 # Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
 # sources that do not have a local Zimantic index. Leave blank to use local
-# indexes only. With the standard Kiwix proxy setup this is often http://localhost:8080.
+# indexes only. With the standard Kiwix proxy setup this is often http://localhost:8085.
 kiwix_server = ""
 kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
 kiwix_search_path = "/kiwix/search"
