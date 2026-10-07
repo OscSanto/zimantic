@@ -186,10 +186,11 @@ class Search:
             if not done or str(done[0]) not in {"1", "fast"}:
                 db.close()
                 return None
+            done_value = str(done[0])
 
             faiss_index = None
             faiss_path = db_path.with_suffix(".faiss")
-            if self.semantic and faiss_path.exists():
+            if self.semantic and done_value == "1" and faiss_path.exists():
                 try:
                     faiss_index = faiss.read_index(
                         str(faiss_path),

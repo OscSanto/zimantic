@@ -77,7 +77,8 @@ the whole index into RAM. Clusters are found relative to the distance of query-t
 
 If a build stops, running it again resumes from the last saved batch. The FAISS file is
 written atomically and the SQLite `done` marker is written only after it is complete, so an
-interrupted finalization can be resumed safely.
+interrupted finalization can be resumed safely. When upgrading a `fast` index, the existing
+title/full-text index remains available until the replacement is complete.
 
 ### 2. Starting the server (`serve`, once)
 
@@ -318,7 +319,7 @@ If a build stops, run it again and it will automatically pick up where it left o
 
 To rebuild a ZIM, delete its `.sqlite` and `.faiss` from `index_dir` first.
 A running `serve` picks up new indexes when you run `python -m zimantic reload` (no restart needed);
-a fast-only index is upgraded in place the next time it is built normally.
+a fast-only index remains searchable while the normal build creates and publishes its replacement.
 
 Each ZIM gets `<name>.sqlite` (titles, extracted text) in `index_dir`, plus `<name>.faiss` (vectors) once a
 normal build finishes. If building is slow, consider building on a more powerful PC and copying the files over.
