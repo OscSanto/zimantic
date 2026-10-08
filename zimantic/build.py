@@ -22,6 +22,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
     title, lead UNINDEXED, path UNINDEXED, target UNINDEXED, tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dropped once .faiss is written
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry to resume from; done: 'fast' | 1
+CREATE TABLE IF NOT EXISTS disamb(rowid INTEGER PRIMARY KEY, members TEXT);  -- JSON links for disambiguation hubs
 """
 
 _FAISS_MIN_POINTS_PER_CENTROID = 39
@@ -165,12 +166,23 @@ def _publish_upgrade(
 
 
 def _save(db, embedder, rows, next_entry: int) -> None:
-    """Store a batch and the resume point in one transaction."""
+    """Store a batch and the resume point in one transaction.
+
+    Rows are (id, title, lead, path, target, members); members is a JSON array
+    for disambiguation hubs. Rows without the members element are still accepted
+    so resuming an old index or a fast build keeps working.
+    """
     with db:
-        db.executemany("INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)", rows)
+        db.executemany(
+            "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)",
+            [row[:5] for row in rows],
+        )
+        hubs = [(row[0], row[5]) for row in rows if len(row) > 5 and row[5] is not None]
+        if hubs:
+            db.executemany("INSERT OR REPLACE INTO disamb(rowid, members) VALUES (?, ?)", hubs)
         articles = [row for row in rows if row[2]]  # only pages with a first paragraph get a vector
         if articles and embedder is not None:
-            vectors = embedder.embed([f"passage: {title}\n{lead}" for _, title, lead, _, _ in articles])
+            vectors = embedder.embed([f"passage: {row[1]}\n{row[2]}" for row in articles])
             db.executemany("INSERT INTO vecs VALUES (?, ?)",
                            [(row[0], v.astype(np.float16).tobytes()) for row, v in zip(articles, vectors)])
         db.execute("INSERT OR REPLACE INTO meta VALUES ('next', ?)", (next_entry,))

@@ -70,6 +70,14 @@ max_html_bytes = 4_194_304
 # Set very high (e.g. 1000) to turn the doubling off.
 long_query = 10
 
+# Disambiguation hubs (pages whose title ends in "(disambiguation)" or whose
+# lead says "may refer to"). A query that names the hub's full title exactly is
+# navigation, so the hub is promoted above the normal score range and its member
+# links are clustered in the result card. Any other query that merely matches a
+# hub is demoted behind real articles. Set disambiguation_penalty = 1 to disable.
+disambiguation_boost = 0.08
+disambiguation_penalty = 0.5
+
 # Search performance and resource limits.
 # Source searches run in parallel up to this many workers. Keep this modest on a Pi.
 search_workers = 4
