@@ -21,7 +21,7 @@ from libzim.search import Query, Searcher
 
 from .cache import DEFAULT_CACHE_SIZE, QueryCache
 from .contracts import SourceInfo, SourceResult
-from .zim import DEFAULT_PREVIEW_CHARS
+from .zim import DEFAULT_PREVIEW_CHARS, truncate_at_word_boundary
 
 
 MAX_QUERY_LENGTH = 4096
@@ -855,7 +855,7 @@ class Search:
             batch = values[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                "SELECT rowid, title, preview, path, target FROM docs "
+                "SELECT rowid, title, excerpt, path, target FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
             rows.update({int(row[0]): row for row in db.execute(query, batch)})
@@ -865,7 +865,7 @@ class Search:
             batch = list(target_ids)[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                "SELECT rowid, title, preview, path, target FROM docs "
+                "SELECT rowid, title, excerpt, path, target FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
             rows.update({int(row[0]): row for row in db.execute(query, batch)})
@@ -886,13 +886,13 @@ class Search:
             row = rows.get(target)
             if not row:
                 continue
-            _, title, preview, path, _ = row
+            _, title, excerpt, path, _ = row
             doc = {
                 "id": f"{source.key}:{path}",
                 "source_key": source.key,
                 "source": source.name,
                 "title": title,
-                "lead": self._preview(preview or ""),
+                "lead": self._preview(excerpt or ""),
                 "path": path,
                 "url": (
                     f"{self.cfg['kiwix_url'].rstrip('/')}/"
@@ -912,7 +912,7 @@ class Search:
             "preview_chars",
             _int_config(self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS),
         )
-        return text[:limit]
+        return truncate_at_word_boundary(text, limit)
 
     @staticmethod
     def _fetch_hubs(db: sqlite3.Connection, rowids: set[int]) -> dict[int, str]:

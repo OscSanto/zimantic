@@ -30,17 +30,19 @@ class Embedder:
         return SPECIAL_TOKEN_COUNT + len(self.tokenizer.encode(prefix + text))
 
     def truncate(self, text: str, prefix: str = "") -> str:
-        """Keep text within the model's token budget after an optional prefix."""
+        """Keep text within the model budget without cutting through a word."""
         if self.token_count(text, prefix) <= self.max_tokens:
             return text
-        low, high = 0, len(text)
+        words = text.split()
+        low, high = 0, len(words)
         while low < high:
             midpoint = (low + high + 1) // 2
-            if self.token_count(text[:midpoint], prefix) <= self.max_tokens:
+            candidate = " ".join(words[:midpoint])
+            if self.token_count(candidate, prefix) <= self.max_tokens:
                 low = midpoint
             else:
                 high = midpoint - 1
-        return text[:low]
+        return " ".join(words[:low])
 
     def _ids(self, text: str) -> list[int]:
         # XLM-RoBERTa numbering: <s>=0 <pad>=1 </s>=2 <unk>=3, other pieces are sentencepiece id + 1.

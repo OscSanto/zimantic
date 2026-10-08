@@ -65,11 +65,11 @@ def _title_search(rows, query, limit=1):
     db = sqlite3.connect(":memory:", check_same_thread=False)
     db.execute(
         "CREATE VIRTUAL TABLE docs USING fts5("
-        "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
     )
     db.executemany(
-        "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
-        [(row[0], row[1], row[2], "", row[3], row[4]) for row in rows],
+        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+        rows,
     )
     source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
     search = _bare_search({"long_query": 10, "candidate_count": 2, "kiwix_url": "http://example/content"})
@@ -265,11 +265,11 @@ class SearchContractTests(unittest.TestCase):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED)"
+            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
         )
         db.execute(
-            "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, "Tire Change", "A useful tire change guide.", "", "tire-change", None),
+            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            (1, "Tire Change", "A useful tire change guide.", "tire-change", None),
         )
 
         class FakeFaiss:
@@ -303,11 +303,11 @@ class SearchContractTests(unittest.TestCase):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED)"
+            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
         )
         db.execute(
-            "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, "Long page", "x" * 1500, "", "long-page", None),
+            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            (1, "Long page", "one " * 400, "long-page", None),
         )
 
         source = SourceInfo("manual", "Manual", "manual", "local")
@@ -322,7 +322,8 @@ class SearchContractTests(unittest.TestCase):
         finally:
             db.close()
 
-        self.assertEqual(len(doc["lead"]), 24)
+        self.assertLessEqual(len(doc["lead"]), 24)
+        self.assertTrue(doc["lead"].endswith("one"))
 
     def test_title_search_falls_back_to_prefix_when_exact_matches_nothing(self):
         # Exact token matching misses these because the query word is a truncated
@@ -409,13 +410,13 @@ def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
     db = sqlite3.connect(index_dir / f"{name}.sqlite")
     db.executescript(
         "CREATE VIRTUAL TABLE docs USING fts5("
-        "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED, "
+        "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED, "
         "tokenize='unicode61 remove_diacritics 2');"
         "CREATE TABLE meta(key TEXT PRIMARY KEY, value);"
     )
     db.executemany(
-        "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
-        [(row[0], row[1], row[2], "", row[3], row[4]) for row in rows],
+        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+        rows,
     )
     db.execute("INSERT INTO meta VALUES ('done', ?)", (done,))
     db.commit()
