@@ -48,12 +48,15 @@ collects substantial visible blocks. Paragraphs are preferred; when a page has n
 `blockquote`, `pre`, `div`, `section`, `article` and `main` are considered before ordered-list blocks
 used by dictionary-style pages. Page chrome such as navigation, headers, footers and asides is ignored.
 
-The same prioritized block stream produces two independent excerpts. The preview is capped by
-`max_preview_chars` (1,000 by default), while the embedding text is capped by `max_embedding_tokens`
-(256 by default, including the model's two special tokens). `preview_overflow = "skip"` keeps looking
-for another block when one does not fit; `embedding_overflow = "truncate"` fills the remaining model
-budget. If no block fits, the best available block is truncated as a last resort. Both modes inspect
-at most the first 4 MiB of each HTML page by default; change `max_html_bytes` to tune that limit.
+The same prioritized block stream produces a single stored `excerpt`. Extraction computes the
+preview- and embedding-sized candidates and stores the longer one, so the SQLite index does not
+duplicate article text. The preview path is capped by `max_preview_chars` (1,000 by default), while
+the embedding path is capped by `max_embedding_tokens` (256 by default, including the model's two
+special tokens). `preview_overflow = "skip"` keeps looking for another block when one does not fit;
+`embedding_overflow = "truncate"` fills the remaining model budget. Truncation stops at word
+boundaries. If no block fits, the best available block is truncated as a last resort. Both modes
+inspect at most the first 4 MiB of each HTML page by default; change `max_html_bytes` to tune that
+limit.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) aren't refused: `build` runs on any ZIM and
 extracts their visible HTML text using the same block hierarchy. PDFs inside a ZIM are skipped.
@@ -61,12 +64,12 @@ extracts their visible HTML text using the same block hierarchy. PDFs inside a Z
 **Embedding.** The title and extracted text are turned into a vector (a list of numbers describing their meaning), currently by
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
 Input is capped at `max_embedding_tokens` (256 by default, including the two special tokens).
-This is an explicit application budget; the ONNX input shape is dynamic. Only the bounded embedding
-excerpt is stored and embedded, so discarded article text is never retained for vectors. Search results
-use the separate preview excerpt and expose at most `max_preview_chars` characters.
+This is an explicit application budget; the ONNX input shape is dynamic. The stored excerpt is
+truncated at word boundaries to the available token budget before embedding. Search results use the
+same stored excerpt and expose at most `max_preview_chars` characters.
 
 **Storage.** Each ZIM gets two files in `index_dir`:
-- `<name>.sqlite`: titles, preview and embedding excerpts, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
+- `<name>.sqlite`: titles, the shared excerpt, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
 - `<name>.faiss`: the vectors, in one of two layouts depending on article count:
 
 | ZIM size | Vector index | Why |

@@ -22,8 +22,8 @@ def _create_fast_index(path: Path) -> None:
     db = sqlite3.connect(path)
     db.executescript(build_module.SCHEMA)
     db.execute(
-        "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
-        (1, "Old title", "", "", "old", None),
+        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+        (1, "Old title", "", "old", None),
     )
     db.execute("INSERT INTO meta VALUES ('done', 'fast')")
     db.commit()
@@ -45,8 +45,8 @@ class BuildUpgradeTests(unittest.TestCase):
             faiss_path = directory / "manual.faiss"
             _create_fast_index(db_path)
             rows = [
-                (1, "New title", "A preview.", "A passage.", "new", None, None),
-                (2, "Another title", "Another preview.", "Another passage.", "another", None, None),
+                (1, "New title", "A stored excerpt.", "new", None, None),
+                (2, "Another title", "Another stored excerpt.", "another", None, None),
             ]
 
             with (
@@ -114,7 +114,7 @@ class BuildBatchTests(unittest.TestCase):
             entry_count = 5
 
         rows = [
-            (index, f"Title {index}", "", "", f"path-{index}", None, None)
+            (index, f"Title {index}", "", f"path-{index}", None, None)
             for index in range(5)
         ]
         saved = []
@@ -134,10 +134,15 @@ class BuildBatchTests(unittest.TestCase):
 
         self.assertEqual(saved, [(2, 2), (2, 4), (1, 5)])
 
-    def test_saved_embedding_text_is_persisted_and_embedded(self):
+    def test_saved_excerpt_is_persisted_and_truncated_for_embedding(self):
         class _FakeEmbedder:
             def __init__(self):
+                self.truncate_calls = []
                 self.embed_calls = []
+
+            def truncate(self, text, prefix):
+                self.truncate_calls.append((text, prefix))
+                return "word-safe embedding"
 
             def embed(self, texts):
                 self.embed_calls.append(texts)
@@ -149,15 +154,19 @@ class BuildBatchTests(unittest.TestCase):
         build_module._save(
             db,
             embedder,
-            [(1, "A title", "a preview", "stored embedding", "article", None, None)],
+            [(1, "A title", "a stored excerpt", "article", None, None)],
             1,
         )
 
         self.assertEqual(
-            db.execute("SELECT preview, embedding FROM docs WHERE rowid = 1").fetchone(),
-            ("a preview", "stored embedding"),
+            db.execute("SELECT excerpt FROM docs WHERE rowid = 1").fetchone(),
+            ("a stored excerpt",),
         )
-        self.assertEqual(embedder.embed_calls, [["passage: A title\nstored embedding"]])
+        self.assertEqual(
+            embedder.truncate_calls,
+            [("a stored excerpt", "passage: A title\n")],
+        )
+        self.assertEqual(embedder.embed_calls, [["passage: A title\nword-safe embedding"]])
         db.close()
 
 

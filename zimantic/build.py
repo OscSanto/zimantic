@@ -26,7 +26,7 @@ from .zim import (
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
-    title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED,
+    title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED,
     tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dropped once .faiss is written
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry to resume from; done: 'fast' | 1
@@ -181,21 +181,25 @@ def _publish_upgrade(
 def _save(db, embedder, rows, next_entry: int) -> None:
     """Store a batch and the resume point in one transaction.
 
-    Rows are (id, title, preview, embedding, path, target, members); members is
-    a JSON array for disambiguation hubs.
+    Rows are (id, title, excerpt, path, target, members); members is a JSON
+    array for disambiguation hubs.
     """
-    article_ids = {row[0] for row in rows if row[3]}
+    article_ids = {row[0] for row in rows if row[2]}
     with db:
         db.executemany(
-            "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
-            [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in rows],
+            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            [(row[0], row[1], row[2], row[3], row[4]) for row in rows],
         )
-        hubs = [(row[0], row[6]) for row in rows if len(row) > 6 and row[6] is not None]
+        hubs = [(row[0], row[5]) for row in rows if len(row) > 5 and row[5] is not None]
         if hubs:
             db.executemany("INSERT OR REPLACE INTO disamb(rowid, members) VALUES (?, ?)", hubs)
         articles = [row for row in rows if row[0] in article_ids]
         if articles and embedder is not None:
-            vectors = embedder.embed([f"passage: {row[1]}\n{row[3]}" for row in articles])
+            passages = []
+            for row in articles:
+                prefix = f"passage: {row[1]}\n"
+                passages.append(prefix + embedder.truncate(row[2], prefix=prefix))
+            vectors = embedder.embed(passages)
             db.executemany("INSERT INTO vecs VALUES (?, ?)",
                            [(row[0], v.astype(np.float16).tobytes()) for row, v in zip(articles, vectors)])
         db.execute("INSERT OR REPLACE INTO meta VALUES ('next', ?)", (next_entry,))

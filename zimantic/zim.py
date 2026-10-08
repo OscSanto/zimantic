@@ -257,6 +257,16 @@ def _policy(value: str, default: str) -> str:
     return policy
 
 
+def truncate_at_word_boundary(text: str, max_chars: int) -> str:
+    """Limit text without cutting through a word when a boundary is available."""
+    limit = max(1, int(max_chars))
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = max(cut.rfind(" "), cut.rfind("\n"), cut.rfind("\t"))
+    return cut[:boundary].rstrip() if boundary > 0 else ""
+
+
 def _preview_excerpt(
     candidates: list[str],
     max_chars: int,
@@ -269,11 +279,13 @@ def _preview_excerpt(
         if len(candidate) <= available:
             accepted.append(candidate)
         elif overflow == "truncate" and available > 0:
-            accepted.append(candidate[:available])
+            fitted = truncate_at_word_boundary(candidate, available)
+            if fitted:
+                accepted.append(fitted)
             break
     if accepted:
         return "\n\n".join(accepted)
-    return candidates[0][:max_chars] if candidates else ""
+    return truncate_at_word_boundary(candidates[0], max_chars) if candidates else ""
 
 
 def _embedding_excerpt(
@@ -305,7 +317,7 @@ def _embedding_excerpt(
     return truncate(candidates[0], prefix=prefix)
 
 
-def extract_excerpts(
+def extract_excerpt(
     html: bytes,
     title: str = "",
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
@@ -314,21 +326,28 @@ def extract_excerpts(
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     embedding_token_count: Callable[[str, str], int] | None = None,
     embedding_truncate: Callable[[str, str], str] | None = None,
-) -> tuple[str, str]:
-    """Return bounded preview and embedding excerpts from visible article blocks."""
+) -> str:
+    """Return one stored excerpt large enough for preview or embedding use."""
     max_chars = max(1, int(max_preview_chars))
     max_tokens = max(1, int(max_embedding_tokens))
     candidates = list(iter_text_blocks(html))
-    return (
-        _preview_excerpt(candidates, max_chars, _policy(preview_overflow, DEFAULT_PREVIEW_OVERFLOW)),
-        _embedding_excerpt(
-            candidates,
-            title,
-            max_tokens,
-            _policy(embedding_overflow, DEFAULT_EMBEDDING_OVERFLOW),
-            embedding_token_count,
-            embedding_truncate,
-        ),
+    preview = _preview_excerpt(
+        candidates,
+        max_chars,
+        _policy(preview_overflow, DEFAULT_PREVIEW_OVERFLOW),
+    )
+    embedding = _embedding_excerpt(
+        candidates,
+        title,
+        max_tokens,
+        _policy(embedding_overflow, DEFAULT_EMBEDDING_OVERFLOW),
+        embedding_token_count,
+        embedding_truncate,
+    )
+    return max(
+        (preview, embedding),
+        key=len,
+        default="",
     )
 
 
@@ -343,7 +362,7 @@ def read_entry(
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     embedder=None,
 ):
-    """Return (id, title, preview, embedding, path, target_id, members), or None.
+    """Return (id, title, excerpt, path, target_id, members), or None.
 
     Redirects (real ones, and small meta refresh pages) get empty excerpts and the
     path and id of the page they point to, so they are searchable by title only.
@@ -357,14 +376,14 @@ def read_entry(
     entry = zim._get_entry_by_id(i)
     if entry.is_redirect:
         target = entry.get_redirect_entry()
-        return i, entry.title, "", "", target.path, target._index, None
+        return i, entry.title, "", target.path, target._index, None
     
     item = entry.get_item()
     if not item.mimetype.startswith("text/html"): 
         return None
 
     if fast:
-        return i, entry.title, "", "", entry.path, None, None
+        return i, entry.title, "", entry.path, None, None
 
     content = item.content
     try:
@@ -381,8 +400,8 @@ def read_entry(
         if not zim.has_entry_by_path(path):
             return None
         target = zim.get_entry_by_path(path)
-        return i, entry.title, "", "", target.path, target._index, None
-    preview, embedding = extract_excerpts(
+        return i, entry.title, "", target.path, target._index, None
+    excerpt = extract_excerpt(
         html,
         title=entry.title,
         max_preview_chars=max_preview_chars,
@@ -393,6 +412,6 @@ def read_entry(
         embedding_truncate=getattr(embedder, "truncate", None),
     )
     members = None
-    if is_disambiguation(entry.title, preview):
+    if is_disambiguation(entry.title, excerpt):
         members = json.dumps(disambiguation_members(html, entry.path))
-    return i, entry.title, preview, embedding, entry.path, None, members
+    return i, entry.title, excerpt, entry.path, None, members

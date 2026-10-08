@@ -13,7 +13,7 @@ from zimantic.zim import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     disambiguation_members,
-    extract_excerpts,
+    extract_excerpt,
     iter_text_blocks,
     is_disambiguation,
     read_entry,
@@ -93,13 +93,19 @@ class TextExtractionTests(unittest.TestCase):
     def test_generator_prefers_later_paragraph_to_list_fallback(self):
         self.assertEqual(
             list(iter_text_blocks(LIST_BEFORE_PARAGRAPH_HTML)),
-            ["The preferred paragraph summary is used whenever the page provides one."],
+            [
+                "The preferred paragraph summary is used whenever the page provides one.",
+                "A fallback definition that should lose to a later paragraph with the preferred article summary.",
+            ],
         )
 
     def test_generator_prefers_block_fallback_to_list_fallback(self):
         self.assertEqual(
             list(iter_text_blocks(LIST_BEFORE_BLOCK_HTML)),
-            ["The preferred block summary is used when no paragraph is available."],
+            [
+                "The preferred block summary is used when no paragraph is available.",
+                "A fallback definition that should lose to a later block with the article summary.",
+            ],
         )
 
     def test_html_limit_is_configurable(self):
@@ -108,26 +114,25 @@ class TextExtractionTests(unittest.TestCase):
 
     def test_preview_limit_is_configurable(self):
         self.assertEqual(DEFAULT_PREVIEW_CHARS, 1000)
-        self.assertEqual(
-            len(read_entry(_Archive(), 0, max_preview_chars=20)[2]),
-            20,
-        )
+        excerpt = read_entry(_Archive(), 0, max_preview_chars=20)[2]
+        self.assertLessEqual(len(excerpt), 20)
+        self.assertEqual(excerpt, "A sufficiently long")
 
     def test_preview_skips_oversized_blocks_and_keeps_searching(self):
         html = (
             b"<p>" + b"x" * 100 + b"</p>"
             b"<p>" + b"y" * 55 + b"</p>"
         )
-        preview, _ = extract_excerpts(html, max_preview_chars=60)
-        self.assertEqual(preview, "y" * 55)
+        excerpt = extract_excerpt(html, max_preview_chars=60)
+        self.assertEqual(excerpt, "y" * 55)
 
     def test_preview_truncates_best_block_when_none_fits(self):
-        preview, _ = extract_excerpts(
-            b"<p>" + b"x" * 80 + b"</p>",
+        excerpt = extract_excerpt(
+            b"<p>one two three four five six seven eight nine ten eleven twelve</p>",
             max_preview_chars=20,
-            preview_overflow="skip",
+            preview_overflow="truncate",
         )
-        self.assertEqual(preview, "x" * 20)
+        self.assertEqual(excerpt, "one two three four")
 
     def test_embedding_excerpt_stays_within_token_budget(self):
         def token_count(text, prefix):
@@ -137,31 +142,34 @@ class TextExtractionTests(unittest.TestCase):
             available = 8 - token_count("", prefix)
             return " ".join(text.split()[:max(0, available)])
 
-        _, embedding = extract_excerpts(
+        excerpt = extract_excerpt(
             b"<p>" + b"one two three four five six seven eight nine ten " * 5 + b"</p>",
             title="Example",
+            max_preview_chars=10,
             max_embedding_tokens=8,
             embedding_token_count=token_count,
             embedding_truncate=truncate,
         )
-        self.assertLessEqual(token_count(embedding, "passage: Example\n"), 8)
+        self.assertLessEqual(token_count(excerpt, "passage: Example\n"), 8)
+        self.assertEqual(excerpt, "one two three four")
 
     def test_embedding_skip_policy_keeps_looking_for_a_fitting_block(self):
         def token_count(text, prefix):
             return 2 + len((prefix + text).split())
 
-        _, embedding = extract_excerpts(
+        excerpt = extract_excerpt(
             (
                 b"<p>" + b"x " * 100 + b"</p>"
-                b"<p>" + b"y " * 10 + b"</p>"
+                b"<p>" + b"y" * 55 + b"</p>"
             ),
             title="Example",
+            max_preview_chars=20,
             max_embedding_tokens=20,
             embedding_overflow="skip",
             embedding_token_count=token_count,
             embedding_truncate=lambda *_args, **_kwargs: self.fail("unexpected truncation"),
         )
-        self.assertEqual(embedding, " ".join(["y"] * 10))
+        self.assertEqual(excerpt, "y" * 55)
 
 
 DISAMBIG_HTML = b"""
