@@ -32,7 +32,7 @@ _install_optional_dependency_stubs()
 
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult
-from zimantic.search import Search, _LocalIndex, _keyword_query, _nprobe, _query_terms
+from zimantic.search import Search, _LocalIndex, _fulltext_query, _nprobe, _query_terms, _title_query
 
 
 def _bare_search(cfg):
@@ -71,7 +71,8 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(_nprobe(index, {"nprobe": 64}), 10)
 
     def test_keyword_query_removes_filler_words_but_keeps_meaningful_terms(self):
-        self.assertEqual(_keyword_query("how to change tires"), '"change" AND "tires"')
+        self.assertEqual(_title_query("how to change tires"), '"change" AND "tires"')
+        self.assertEqual(_fulltext_query("how to change tires"), "change tires")
         self.assertEqual(_query_terms("how to change tires"), ["change", "tire"])
 
     def test_hybrid_ranking_is_deterministic(self):
@@ -194,7 +195,7 @@ class SearchContractTests(unittest.TestCase):
         search.cache = QueryCache(16)
         search.embedder = types.SimpleNamespace(embed=lambda _: [[1.0]])
 
-        def fake_source_search(source, query, keyword_query, query_vector, limit):
+        def fake_source_search(source, query, title_query, fulltext_query, query_vector, limit):
             doc = {
                 "id": f"{source.key}:page",
                 "source_key": source.key,
