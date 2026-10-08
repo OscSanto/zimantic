@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+import math
 from pathlib import Path
 import re
 import sqlite3
@@ -25,6 +26,7 @@ MAX_QUERY_LENGTH = 4096
 DEFAULT_CANDIDATES = 16
 DEFAULT_SOURCE_TIMEOUT = 12
 DEFAULT_MAX_CONCURRENT_SEARCHES = 4
+DEFAULT_NPROBE_FRACTION = 0.06
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "how", "what", "where", "when", "why", "who", "which", "can", "could",
@@ -63,6 +65,18 @@ def _int_config(cfg: dict, key: str, default: int, minimum: int = 1) -> int:
         return max(minimum, int(cfg.get(key, default)))
     except (TypeError, ValueError):
         return default
+
+
+def _nprobe(faiss_index: Any, cfg: dict) -> int:
+    """Choose IVF probes while allowing an explicit fixed override."""
+    nlist = getattr(faiss_index, "nlist", 0)
+    if "nprobe" in cfg:
+        probes = _int_config(cfg, "nprobe", 64)
+    elif nlist:
+        probes = math.ceil(nlist * DEFAULT_NPROBE_FRACTION)
+    else:
+        probes = 64
+    return min(probes, nlist) if nlist else probes
 
 
 def _zim_key(book: str) -> str:
@@ -197,7 +211,7 @@ class Search:
                         faiss.IO_FLAG_MMAP_IFC | faiss.IO_FLAG_READ_ONLY,
                     )
                     if hasattr(faiss_index, "nprobe"):
-                        faiss_index.nprobe = _int_config(self.cfg, "nprobe", 64)
+                        faiss_index.nprobe = _nprobe(faiss_index, self.cfg)
                 except Exception as error:  # corrupt/unreadable vectors: keep going
                     print(f"{db_path.stem}: vectors unavailable ({error}); using title and full-text search")
                     faiss_index = None
