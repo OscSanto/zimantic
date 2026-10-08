@@ -88,5 +88,23 @@ class BuildUpgradeTests(unittest.TestCase):
             self.assertFalse(staging_faiss.exists())
 
 
+class FaissTrainingTests(unittest.TestCase):
+    def test_training_stride_meets_faiss_minimum(self):
+        vector_count = 700_000
+        cluster_count = int(4 * vector_count**0.5)
+        step = build_module._faiss_training_step(vector_count, cluster_count)
+
+        self.assertGreaterEqual(
+            vector_count // step,
+            build_module._FAISS_MIN_POINTS_PER_CENTROID * cluster_count,
+        )
+
+    def test_training_stride_uses_all_vectors_when_fewer_than_target(self):
+        vector_count = 10_000
+        cluster_count = int(4 * vector_count**0.5)
+
+        self.assertEqual(build_module._faiss_training_step(vector_count, cluster_count), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

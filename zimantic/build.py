@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dr
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry to resume from; done: 'fast' | 1
 """
 
+_FAISS_MIN_POINTS_PER_CENTROID = 39
+_FAISS_MIN_TRAINING_POINTS = 100_000
+
 
 def build(
     zim_path: Path,
@@ -192,10 +195,10 @@ def _write_faiss(db, path: Path) -> None:
         # Squeezing to 48 bytes (PQ48) lost ~25% of top hits in testing; this 8-bit form was nearly exact. 
         # The file is memorymapped at search time, so only the lists a query probes are read from disk.
         # TODO dynamic nprobe. Currenlty nprobe = 64 (check .toml). On large 6M zim -> only 0.6% vector comparison due to large cluster count.
-        cluster_centre_count = int(4 * n ** 0.5) # TODO: dyanmically size in relation to zim's vec count 
-        index = faiss.index_factory(dim, f"IVF{cluster_centre_count},SQ8", faiss.METRIC_INNER_PRODUCT) #IVF{cluster_centre_count}
-       
-        step = max(1, n // 100_000)  # train on ~100k vectors spread across the ZIM
+        cluster_centre_count = int(4 * n ** 0.5)
+        index = faiss.index_factory(dim, f"IVF{cluster_centre_count},SQ8", faiss.METRIC_INNER_PRODUCT)
+
+        step = _faiss_training_step(n, cluster_centre_count)
         index.train(_load(db.execute("SELECT id, v FROM vecs WHERE id % ? = 0", (step,)).fetchall())[1])
     last = -1
     while rows := db.execute("SELECT id, v FROM vecs WHERE id > ? ORDER BY id LIMIT 50000", (last,)).fetchall():
@@ -211,3 +214,12 @@ def _write_faiss(db, path: Path) -> None:
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def _faiss_training_step(n: int, cluster_centre_count: int) -> int:
+    """Choose a sampling stride that gives FAISS enough training vectors."""
+    training_points = min(
+        n,
+        max(_FAISS_MIN_TRAINING_POINTS, _FAISS_MIN_POINTS_PER_CENTROID * cluster_centre_count),
+    )
+    return max(1, n // training_points)
