@@ -32,7 +32,7 @@ _install_optional_dependency_stubs()
 
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult
-from zimantic.search import Search, _LocalIndex, _fulltext_query, _nprobe, _query_terms, _title_query
+from zimantic.search import Search, _LocalIndex, _fulltext_query, _nprobe, _query_terms, _title_prefix_query, _title_query
 
 
 def _bare_search(cfg):
@@ -74,6 +74,15 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(_title_query("how to change tires"), '"change" AND "tires"')
         self.assertEqual(_fulltext_query("how to change tires"), "change tires")
         self.assertEqual(_query_terms("how to change tires"), ["change", "tire"])
+
+    def test_stopword_only_query_is_not_filtered_away(self):
+        self.assertEqual(_title_query("how to"), '"how" AND "to"')
+        self.assertEqual(_fulltext_query("how to"), "how to")
+        self.assertEqual(_title_query("the"), '"the"')
+
+    def test_title_prefix_query_uses_prefix_tokens_except_single_characters(self):
+        self.assertEqual(_title_prefix_query("how to change tires"), "change* AND tires*")
+        self.assertEqual(_title_prefix_query("c"), '"c"')
 
     def test_hybrid_ranking_is_deterministic(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
@@ -253,6 +262,43 @@ class SearchContractTests(unittest.TestCase):
         result = events[-1]["results"][0]
         self.assertEqual(result["title"], "Tire Change")
         self.assertEqual(result["path"], "tire-change")
+
+    def test_title_search_falls_back_to_prefix_when_exact_matches_nothing(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, lead UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        )
+        db.execute(
+            "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)",
+            (1, "Tire Changes", "How to change a tire.", "tire-changes", None),
+        )
+
+        class NoMatchFaiss:
+            def search(self, query_vector, count):
+                return np.array([[-1.0]]), np.array([[-1]])
+
+        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        search = object.__new__(Search)
+        search.cfg = {"long_query": 10, "candidate_count": 2, "kiwix_url": "http://example/content"}
+        search.candidate_count = 2
+        search.semantic = True
+        search.sources = {"manual": source}
+        search.indexes = {
+            "manual": _LocalIndex(db, NoMatchFaiss(), None, None, threading.Lock())
+        }
+        search._search_slots = threading.BoundedSemaphore(1)
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        search.cache = QueryCache(16)
+        search.embedder = types.SimpleNamespace(embed=lambda _: np.array([[1.0]]))
+
+        # "change" (singular) is not an exact token of "Changes"; only the prefix
+        # fallback surfaces the title.
+        events = list(search.stream_search("tire change", limit=1))
+        search._executor.shutdown(wait=True)
+        db.close()
+        result = events[-1]["results"][0]
+        self.assertEqual(result["title"], "Tire Changes")
 
 
 def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
