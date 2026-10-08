@@ -53,6 +53,34 @@ def _bare_search(cfg):
     return search
 
 
+def _title_search(rows, query, limit=1):
+    """Run a title-only search (no semantic or full-text) over an in-memory FTS.
+
+    Returns the final ranked result list, exercising the local title path in
+    isolation so prefix-fallback behaviour can be asserted end to end.
+    """
+    db = sqlite3.connect(":memory:", check_same_thread=False)
+    db.execute(
+        "CREATE VIRTUAL TABLE docs USING fts5("
+        "title, lead UNINDEXED, path UNINDEXED, target UNINDEXED)"
+    )
+    db.executemany(
+        "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+    source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+    search = _bare_search({"long_query": 10, "candidate_count": 2, "kiwix_url": "http://example/content"})
+    search.semantic = False
+    search.sources = {"manual": source}
+    search.indexes = {"manual": _LocalIndex(db, None, None, None, threading.Lock())}
+    try:
+        events = list(search.stream_search(query, limit=limit))
+    finally:
+        search._executor.shutdown(wait=True)
+        db.close()
+    return events[-1]["results"]
+
+
 class SearchContractTests(unittest.TestCase):
     def test_nprobe_scales_with_ivf_list_count(self):
         index = types.SimpleNamespace(nlist=10_000)
@@ -82,6 +110,7 @@ class SearchContractTests(unittest.TestCase):
 
     def test_title_prefix_query_uses_prefix_tokens_except_single_characters(self):
         self.assertEqual(_title_prefix_query("how to change tires"), "change* AND tires*")
+        self.assertEqual(_title_prefix_query("praise of fol"), "praise* AND fol*")
         self.assertEqual(_title_prefix_query("c"), '"c"')
 
     def test_hybrid_ranking_is_deterministic(self):
@@ -264,41 +293,20 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(result["path"], "tire-change")
 
     def test_title_search_falls_back_to_prefix_when_exact_matches_nothing(self):
-        db = sqlite3.connect(":memory:", check_same_thread=False)
-        db.execute(
-            "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, lead UNINDEXED, path UNINDEXED, target UNINDEXED)"
-        )
-        db.execute(
-            "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)",
-            (1, "Tire Changes", "How to change a tire.", "tire-changes", None),
-        )
-
-        class NoMatchFaiss:
-            def search(self, query_vector, count):
-                return np.array([[-1.0]]), np.array([[-1]])
-
-        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
-        search = object.__new__(Search)
-        search.cfg = {"long_query": 10, "candidate_count": 2, "kiwix_url": "http://example/content"}
-        search.candidate_count = 2
-        search.semantic = True
-        search.sources = {"manual": source}
-        search.indexes = {
-            "manual": _LocalIndex(db, NoMatchFaiss(), None, None, threading.Lock())
-        }
-        search._search_slots = threading.BoundedSemaphore(1)
-        search._executor = ThreadPoolExecutor(max_workers=1)
-        search.cache = QueryCache(16)
-        search.embedder = types.SimpleNamespace(embed=lambda _: np.array([[1.0]]))
-
-        # "change" (singular) is not an exact token of "Changes"; only the prefix
-        # fallback surfaces the title.
-        events = list(search.stream_search("tire change", limit=1))
-        search._executor.shutdown(wait=True)
-        db.close()
-        result = events[-1]["results"][0]
-        self.assertEqual(result["title"], "Tire Changes")
+        # Exact token matching misses these because the query word is a truncated
+        # or base form of the title word; only the prefix fallback surfaces them.
+        cases = [
+            ((1, "Tire Changes", "", "tire-changes", None), "tire change", "Tire Changes"),
+            ((1, "Gettysburg Address", "", "gettysburg-address", None), "gettysburg addres", "Gettysburg Address"),
+            ((1, "Collected Poems", "", "collected-poems", None), "collected poem", "Collected Poems"),
+            ((1, "Declaration of Independence", "", "declaration-independence", None), "declaration independen", "Declaration of Independence"),
+            ((1, "The Praise of Folly", "", "praise-of-folly", None), "praise of fol", "The Praise of Folly"),
+        ]
+        for row, query, expected in cases:
+            with self.subTest(query=query):
+                results = _title_search([row], query)
+                self.assertTrue(results, f"no results for {query!r}")
+                self.assertEqual(results[0]["title"], expected)
 
 
 def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
