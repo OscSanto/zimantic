@@ -194,7 +194,6 @@ def _write_faiss(db, path: Path) -> None:
         # Large ZIM: vectors grouped into lists, 1 byte per number (384 bytes per article). 
         # Squeezing to 48 bytes (PQ48) lost ~25% of top hits in testing; this 8-bit form was nearly exact. 
         # The file is memorymapped at search time, so only the lists a query probes are read from disk.
-        # TODO dynamic nprobe. Currenlty nprobe = 64 (check .toml). On large 6M zim -> only 0.6% vector comparison due to large cluster count.
         cluster_centre_count = int(4 * n ** 0.5)
         index = faiss.index_factory(dim, f"IVF{cluster_centre_count},SQ8", faiss.METRIC_INNER_PRODUCT)
 

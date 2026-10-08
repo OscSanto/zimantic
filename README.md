@@ -70,7 +70,7 @@ Input is capped at 256 tokens.
 | ZIM size | Vector index | Why |
 |---|---|---|
 | Under 10,000 articles | **Flat**: the query is compared with every vector | Exact, and small enough (a few MB) that comparing everything is fast |
-| 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search only scans the closest `nprobe` clusters (64 by default) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters (6%) was within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). 8-bit numbers were nearly exact. **Heavier compression (e.g. PQ48) lost ~25% of the top hits in earlier testing.** |
+| 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search scans about 6% of the closest clusters by default (64 of 1,062 on WikiMed's 70k articles) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters was within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). The probe count scales automatically for larger ZIMs; set `nprobe` in `config.toml` to use a fixed value instead. 8-bit numbers were nearly exact. **Heavier compression (e.g. PQ48) lost ~25% of the top hits in earlier testing.** |
 
 IVF training samples are selected across the ZIM and scale with the number of clusters, with at least 39 samples per cluster as required by FAISS. This avoids under-training warnings on larger ZIMs without loading every vector into the training set.
 

@@ -60,9 +60,9 @@ first_paragraph = false
 max_html_bytes = 4_194_304
 
 # Large ZIMs only (10,000+ articles): how many groups of vectors each search scans.
-# Higher = more accurate but slower. Lower it if searches are slow or memory runs out on a Pi.
-# In testing on a 28k-article ZIM, 64 was about as accurate as scanning everything.
-nprobe = 64
+# By default, searches scan about 6% of the groups, scaling automatically with ZIM size.
+# Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
+# nprobe = 64
 
 # A naive approach to determining if query requires a deeper search (e.g. pasted sentences from article)
 # Searches with 'long_query' words or more will double kiwix's full-text result weights.

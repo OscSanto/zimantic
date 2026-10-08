@@ -32,7 +32,7 @@ _install_optional_dependency_stubs()
 
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult
-from zimantic.search import Search, _LocalIndex, _keyword_query, _query_terms
+from zimantic.search import Search, _LocalIndex, _keyword_query, _nprobe, _query_terms
 
 
 def _bare_search(cfg):
@@ -54,6 +54,22 @@ def _bare_search(cfg):
 
 
 class SearchContractTests(unittest.TestCase):
+    def test_nprobe_scales_with_ivf_list_count(self):
+        index = types.SimpleNamespace(nlist=10_000)
+
+        self.assertEqual(_nprobe(index, {}), 600)
+
+    def test_nprobe_can_be_overridden(self):
+        index = types.SimpleNamespace(nlist=10_000)
+
+        self.assertEqual(_nprobe(index, {"nprobe": 64}), 64)
+
+    def test_nprobe_does_not_exceed_ivf_list_count(self):
+        index = types.SimpleNamespace(nlist=10)
+
+        self.assertEqual(_nprobe(index, {}), 1)
+        self.assertEqual(_nprobe(index, {"nprobe": 64}), 10)
+
     def test_keyword_query_removes_filler_words_but_keeps_meaningful_terms(self):
         self.assertEqual(_keyword_query("how to change tires"), '"change" AND "tires"')
         self.assertEqual(_query_terms("how to change tires"), ["change", "tire"])
