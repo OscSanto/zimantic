@@ -65,6 +65,7 @@ def main() -> None:
             DEFAULT_PREVIEW_CHARS,
             DEFAULT_PREVIEW_OVERFLOW,
         )
+        from tqdm import tqdm
 
         # Expand the positional paths: files are used directly, folders mean
         # their *.zim, and no argument at all means zim_dir from config.toml.
@@ -87,6 +88,9 @@ def main() -> None:
             print("zimantic: no .zim files to index")
             return
 
+        zim_sizes = {zim: zim.stat().st_size for zim in zims}
+        zims.sort(key=zim_sizes.__getitem__)
+
         by_stem: dict[str, list[Path]] = {}
         for zim in zims:
             by_stem.setdefault(zim.stem, []).append(zim)
@@ -105,20 +109,35 @@ def main() -> None:
                 cfg["model_dir"],
                 max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
             )
-        for zim in zims:
-            build_zim(
-                zim,
-                cfg["index_dir"],
-                embedder,
-                cfg["batch_size"],
-                fast=args.fast,
-                max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
-                max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
-                max_embedding_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
-                preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
-                embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
-                force=args.force,
+        global_progress = None
+        if len(zims) > 1 and sys.stdout.isatty():
+            global_progress = tqdm(
+                total=sum(zim_sizes.values()),
+                desc="all ZIMs",
+                unit="B",
+                unit_scale=True,
+                file=sys.stdout,
             )
+        try:
+            for zim in zims:
+                build_zim(
+                    zim,
+                    cfg["index_dir"],
+                    embedder,
+                    cfg["batch_size"],
+                    fast=args.fast,
+                    max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
+                    max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
+                    max_embedding_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                    preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
+                    embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
+                    force=args.force,
+                )
+                if global_progress is not None:
+                    global_progress.update(zim_sizes[zim])
+        finally:
+            if global_progress is not None:
+                global_progress.close()
 
     elif args.command == "serve":
         from .search import Search

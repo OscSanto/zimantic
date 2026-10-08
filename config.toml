@@ -50,8 +50,9 @@ results = 30
 
 # Articles embedded at once while indexing. The CPU model pads each batch to its
 # longest passage, so larger batches can be slower despite doing fewer calls.
-# Increase this on hardware where benchmarks show a gain; 8 is a good default.
-batch_size = 8
+# Increase this on hardware where benchmarks show a gain; 32 is a good default.
+# Use ~8 on a Raspberry Pi Zero 2 W.
+batch_size = 32
 
 # Maximum HTML read from each article while extracting text.
 max_html_bytes = 4_194_304

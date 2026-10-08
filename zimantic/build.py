@@ -72,11 +72,11 @@ def build(
         done = str(meta.get("done", ""))
         if done == "1":
             if faiss_path.exists():
-                print(f"{zim_path.stem}: already built (use --force to rebuild, or delete its .sqlite and .faiss in index_dir)")
+                print(f"{zim_path.stem}: already built (use --force to rebuild)")
                 return
             raise RuntimeError(
                 f"{zim_path.stem}: index is marked done but {faiss_path} is missing; "
-                "use --force to rebuild, or delete both index files and rebuild"
+                "use --force to rebuild"
             )
         if done == "fast":
             if fast:
@@ -131,7 +131,6 @@ def build(
             print(f"{zim_path.stem}: title + full-text index ready")
             return
 
-        print(f"{zim_path.stem}: writing vector index")
         _write_faiss(db, build_faiss_path)
         with db:
             db.execute("DROP TABLE vecs")

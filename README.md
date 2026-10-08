@@ -284,7 +284,9 @@ python -m zimantic reload                       # ask a running server to rescan
 ```
 
 `build` takes zero or more files or folders. A folder means its `*.zim`; with no arguments it uses `zim_dir`
-from `config.toml`. Already-built ZIMs are skipped, so rerunning it is cheap.
+from `config.toml`. When multiple ZIMs are selected, they are processed from smallest to largest file size.
+In an interactive terminal, `build` also shows a size-weighted overall progress bar with a global ETA.
+Already-built ZIMs are skipped, so rerunning it is cheap.
 Pass `--force` to rebuild the selected ZIMs even when their indexes are complete. A forced rebuild replaces
 both the SQLite and FAISS files.
 
@@ -293,7 +295,7 @@ finishes much sooner and needs no vectors. The result is still searched by **tit
 ZIM's own full-text index** — both of which live in the ZIM/SQLite, not FAISS — so only *meaning* search is
 missing. Run a normal `build` later and it re-reads the entries and adds vectors in place.
 
-Normal builds embed eight articles at a time by default. This is intentionally a small CPU batch: the model
+Normal builds embed 32 articles at a time by default. This is intentionally a moderate CPU batch: the model
 pads each batch to its longest passage, so larger batches can use more memory and take longer. Tune
 `batch_size` in `config.toml` on faster hardware, and benchmark it against your ZIM.
 
