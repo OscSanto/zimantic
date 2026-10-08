@@ -25,7 +25,7 @@ as a Raspberry Pi Zero 2 W.
 - **Best of three searches**: combines meaning, title-word and Kiwix full-text search into a single ranking.
 - **Clean results & previews**: redirects are merged into their article, so each article appears once, with a bounded content excerpt as a preview.
 - **Progressive results**: sources search in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Source-aware UI**: discover available sources, filter without searching again, tolerate individual source failures, and optionally load thumbnails after text results appear.
+- **Source-aware UI**: discover available sources, filter results without re-searching, tolerate individual source failures, and optionally load thumbnails after text results appear. Every search always covers **all** available sources; the source filters only change what is displayed, never what is searched.
 - **Lightweight and offline**: runs on low resource devices, such as on a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
 - **Degrades gracefully**: title and full-text search work as soon as an index exists; vectors are optional. A "fast" index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: several searches run at once (`max_concurrent_searches`), and repeated exact queries are answered from a small in-memory cache.
@@ -113,9 +113,12 @@ this further and starts without the embedding model or any vectors at all, which
 A lightweight HTML page is served through FastAPI and is accessible from any browser at `http://<host>:8090`
 (the `port` in `config.toml`).
 
-**Adding indexes without a restart.** `POST /api/reload` (or `python -m zimantic reload`) rescans `index_dir`,
-opens new finished indexes, forgets deleted ones and upgrades a fast index once its vectors appear. It is cheap
-enough to trigger from `systemd.path`, so the server never has to poll the directory. See [Use](#use).
+**Adding indexes without a restart.** `python -m zimantic reload` sends `SIGHUP` to the running server (it
+records its PID in `zimantic.pid` next to `config.toml` at startup) and the server rescans `index_dir`, opens new
+finished indexes, forgets deleted ones and upgrades a fast index once its vectors appear. A plain `kill -HUP <pid>`
+works too; the server also tolerates a second signal during an in-flight reload. It is cheap enough to trigger from
+`systemd.path` or `cron`, so the server never has to poll the directory. Clients cannot trigger a refresh or reload
+from the web page or the HTTP API; source discovery is read-only.
 
 ### 3. Each search
 
@@ -338,7 +341,8 @@ ExecStart=%h/zimantic/.venv/bin/python -m zimantic build --fast
 ExecStart=%h/zimantic/.venv/bin/python -m zimantic reload
 ```
 
-(`reload` alone does not need `config.toml` when given `--url`; without it, it uses the configured port.)
+(`reload` does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by default, or from
+the file passed with `--pid`. A stale PID file (left over after a crash or a signal shutdown) is reported and ignored.)
 
 Watch `zims/`, not `indexes/`: `build` writes into `indexes/`, so a path unit there would fire on its own
 output. `build` skips already-indexed ZIMs, so this is cheap once the library is indexed. If you instead copy
@@ -364,8 +368,11 @@ JSON API examples:
 - `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=20` returns the final JSON result list (`zim` may be omitted).
 - `GET /api/search/stream?q=...&limit=20` returns newline-delimited JSON events: `started`, `source`, `snapshot`, and `done`.
 - `GET /api/sources` returns source metadata and readiness; `GET /api/zims` remains as the local-index compatibility endpoint.
-- `POST /api/reload` rescans `index_dir` and the Kiwix catalog, returning what was added, upgraded and removed.
 - `GET /api/health` reports served indexes, source count, and cache statistics.
+
+Reloading indexes is **not** an HTTP API: running servers rescale via `python -m zimantic reload` or `kill -HUP <pid>`.
 
 Exact queries (same text, same selected sources, same limit) are answered from a small LRU cache controlled by
 `cache_size`. A streamed search caches its finished results too, so the regular JSON endpoint gets them for free.
+The cache is only invalidated when the set of searchable sources actually changes (an index is added, removed, or
+rebuilt), so repeated queries — including full page reloads — are served from the cache as long as nothing changed.

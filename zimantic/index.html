@@ -82,6 +82,8 @@
     button.badge.err { border-color: var(--err-border); color: var(--err); }
     button.badge[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
     .filter-line { min-height: 1.2em; font-size: .85rem; margin-bottom: 14px; }
+    .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 18px 0 8px; font-size: .85rem; }
+    .pager:empty { display: none; }
     .linklike { background: none; border: 0; color: var(--accent); padding: 0; text-decoration: underline; }
     .notice {
       background: var(--panel);
@@ -114,18 +116,6 @@
     .result-snippet { font-size: .92rem; margin-top: 6px; overflow-wrap: anywhere; }
     .result-snippet mark { background: var(--mark-bg); border-radius: 2px; font-weight: 600; }
     .result-snippet.none { color: var(--muted); font-style: italic; }
-    .result.is-cluster { border-left: 3px solid var(--accent); }
-    .result-kind {
-      background: var(--mark-bg);
-      border-radius: 100px;
-      color: var(--muted);
-      font: 600 .66rem var(--mono);
-      letter-spacing: .04em;
-      margin-left: 8px;
-      padding: 1px 8px;
-      text-transform: uppercase;
-      vertical-align: middle;
-    }
     .result-members { border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; margin: 8px 0 0; padding: 8px 0 0; }
     .result-members:empty { display: none; }
     .result-members li { font-size: .88rem; }
@@ -178,18 +168,8 @@
   <div class="badges" id="badges" role="group" aria-label="Filter by source"></div>
   <div class="filter-line" id="filterLine"></div>
   <div id="notice"></div>
-  <div id="results"><div class="empty">Type a question and press Enter.</div></div>
-
-  <details>
-    <summary>Settings: sources and previews</summary>
-    <label><input id="thumbnails" type="checkbox"> Show thumbnails <span class="help">(loaded after text results, with at most four article reads at once)</span></label>
-    <div class="help" id="sourceStatus"></div>
-    <div class="source-list" id="sourceList"></div>
-    <div class="settings-actions">
-      <button class="secondary" id="resetSettings" type="button">Reset settings</button>
-      <span class="settings-status" id="settingsStatus"></span>
-    </div>
-  </details>
+  <div id="results"><div class="empty"></div></div>
+  <nav class="pager" id="pager" aria-label="Results pagination"></nav>
 </div>
 
 <script>
@@ -197,12 +177,11 @@
   "use strict";
 
   const $ = id => document.getElementById(id);
-  const RESULT_LIMIT = 30;
-  const STORAGE_KEY = "zimantic_search_config_v1";
+  const PAGE_SIZE = 10;
+  const REQUESTED_RESULTS = 100;
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let config = loadConfig();
   let debugMode = false;
   let sources = [];
   let current = null;
@@ -220,27 +199,6 @@
     return String(value).replace(/[&<>"']/g, c => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     }[c]));
-  }
-
-  function loadConfig() {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-      return {
-        thumbnails: parsed.thumbnails !== false,
-        disabled: Array.isArray(parsed.disabled) ? parsed.disabled : []
-      };
-    } catch (_) {
-      return { thumbnails: true, disabled: [] };
-    }
-  }
-
-  function saveConfig() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-      return true;
-    } catch (_) {
-      return false;
-    }
   }
 
   function resultKey(item) {
@@ -267,24 +225,9 @@
   }
 
   function activeSources() {
-    return sources.filter(source => source.available && !config.disabled.includes(source.key));
-  }
-
-  function renderSourceList() {
-    const ready = sources.filter(source => source.available);
-    $("sourceStatus").textContent = sources.length
-      ? `${ready.length} searchable source${ready.length === 1 ? "" : "s"} available.`
-      : "No sources are indexed yet.";
-    $("sourceList").innerHTML = sources.map(source => {
-      const checked = source.available && !config.disabled.includes(source.key);
-      const mode = source.mode === "kiwix" ? "Kiwix full-text" : source.mode;
-      return `<label class="${source.available ? "" : "unavailable"}">
-        <input type="checkbox" data-source="${escapeHtml(source.key)}"
-          ${checked ? "checked" : ""} ${source.available ? "" : "disabled"}>
-        <div>${escapeHtml(source.name)} <code>${escapeHtml(source.book)} · ${escapeHtml(mode)}</code>
-          ${source.error ? `<div>${escapeHtml(source.error)}</div>` : ""}</div>
-      </label>`;
-    }).join("");
+    // Every available source is always searched; the Filter by source badges
+    // only narrow what is displayed (see renderView).
+    return sources.filter(source => source.available);
   }
 
   function renderBadges() {
@@ -298,15 +241,17 @@
       const cls = outcome.error ? "badge err" : usable ? "badge ok" : "badge";
       const count = outcome.items ? outcome.items.length : 0;
       const label = outcome.error ? `${outcome.source.name}: ${outcome.error}` : `${outcome.source.name}: ${count}`;
+      const disabled = outcome.error ? "disabled" : "";
+      const pressed = activeSource === outcome.source.key ? "true" : "false";
       return `<button class="${cls}" type="button" data-source="${escapeHtml(outcome.source.key)}"
-        ${usable ? `aria-pressed="${activeSource === outcome.source.key}"` : "disabled"}>${escapeHtml(label)}</button>`;
+        ${disabled} aria-pressed="${pressed}">${escapeHtml(label)}</button>`;
     }).join("");
     $("badges").innerHTML = all + entries;
   }
 
-  function renderFilterLine(list) {
+  function renderFilterLine(count) {
     $("filterLine").innerHTML = activeSource
-      ? `Showing only <strong>${escapeHtml(current.outcomes.get(activeSource)?.source.name || activeSource)}</strong>: ${list.length} result${list.length === 1 ? "" : "s"}.
+      ? `Showing only <strong>${escapeHtml(current.outcomes.get(activeSource)?.source.name || activeSource)}</strong>: ${count} result${count === 1 ? "" : "s"}.
          <button class="linklike" type="button" data-source="">Show all sources</button>`
       : "";
   }
@@ -319,22 +264,19 @@
     node.dataset.key = resultKey(item);
     const title = node.querySelector(".result-title");
     title.replaceChildren();
+    let displayTitle = item.title || "(untitled)";
+    if (item.kind === "disambiguation" && !/\(disambiguation\)\s*$/i.test(displayTitle)) {
+      displayTitle += " (disambiguation)";
+    }
     if (item.url) {
       const link = document.createElement("a");
       link.href = item.url;
       link.target = "_blank";
       link.rel = "noopener";
-      link.textContent = item.title || "(untitled)";
+      link.textContent = displayTitle;
       title.appendChild(link);
     } else {
-      title.textContent = item.title || "(untitled)";
-    }
-    node.classList.toggle("is-cluster", item.kind === "disambiguation");
-    if (item.kind === "disambiguation") {
-      const badge = document.createElement("span");
-      badge.className = "result-kind";
-      badge.textContent = "Disambiguation";
-      title.appendChild(badge);
+      title.textContent = displayTitle;
     }
     const members = node.querySelector(".result-members");
     members.replaceChildren();
@@ -366,7 +308,7 @@
       snippet.textContent = "No text preview for this result.";
     }
     let thumb = node.querySelector(".result-thumb");
-    if (config.thumbnails && item.url) {
+    if (item.url) {
       if (!thumb) {
         thumb = document.createElement("div");
         thumb.className = "result-thumb";
@@ -468,13 +410,49 @@
     loadThumbnails(items);
   }
 
+  function renderPager(total, pageCount) {
+    const pager = $("pager");
+    pager.innerHTML = "";
+    if (total <= PAGE_SIZE && pageCount <= 1) return;
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.textContent = "← Previous";
+    prev.disabled = current.page === 0;
+    prev.addEventListener("click", () => {
+      current.page--;
+      renderView();
+    });
+    const next = document.createElement("button");
+    next.type = "button";
+    next.textContent = "Next →";
+    next.disabled = current.page >= pageCount - 1;
+    next.addEventListener("click", () => {
+      current.page++;
+      renderView();
+    });
+    const label = document.createElement("span");
+    const from = total ? current.page * PAGE_SIZE + 1 : 0;
+    const to = Math.min((current.page + 1) * PAGE_SIZE, total);
+    label.textContent = `${from}–${to} of ${total}`;
+    pager.append(prev, label, next);
+  }
+
   function renderView() {
     if (!current) return;
-    const list = activeSource
-      ? (current.sourceItems.get(activeSource) || []).slice(0, RESULT_LIMIT)
-      : current.ranked;
+    let all;
+    if (activeSource) {
+      all = current.sourceItems.get(activeSource) || [];
+    } else {
+      // Every source is searched; narrowing to one source happens via the badges.
+      all = current.ranked;
+    }
+    const pageCount = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
+    if (current.page >= pageCount) current.page = pageCount - 1;
+    if (current.page < 0) current.page = 0;
+    const list = all.slice(current.page * PAGE_SIZE, (current.page + 1) * PAGE_SIZE);
     renderBadges();
-    renderFilterLine(list);
+    renderFilterLine(all.length);
+    renderPager(all.length, pageCount);
     renderResults(list);
   }
 
@@ -487,7 +465,7 @@
     const errors = outcomes.filter(outcome => outcome.error);
     $("notice").innerHTML = current.completed === current.total && outcomes.length > 0 &&
       errors.length === outcomes.length
-      ? "<div class='notice'><strong>Every selected source failed.</strong> Check the source settings or the Kiwix service.</div>"
+      ? "<div class='notice'><strong>Every source failed.</strong> Check your sources or the Kiwix service, then restart or reload the server.</div>"
       : "";
   }
 
@@ -564,7 +542,6 @@
   }
 
   function loadThumbnails(items) {
-    if (!config.thumbnails) return;
     const generation = thumbnailGeneration;
     items.forEach(item => {
       if (!item.url) return;
@@ -647,11 +624,13 @@
       outcomes: new Map(),
       sourceItems: new Map(),
       completed: 0,
-      total: 0
+      total: 0,
+      page: 0
     };
     $("searchButton").disabled = true;
     $("status").innerHTML = `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
     $("notice").textContent = "";
+    $("pager").innerHTML = "";
     renderResults([]);
     try {
       const selected = activeSources();
@@ -659,10 +638,10 @@
         $("status").textContent = "No sources selected.";
         return;
       }
-      const params = new URLSearchParams({ q: question, limit: String(RESULT_LIMIT) });
-      if (selected.length < sources.filter(sourceItem => sourceItem.available).length) {
-        selected.forEach(item => params.append("zim", item.key));
-      }
+      const params = new URLSearchParams({ q: question, limit: String(REQUESTED_RESULTS) });
+      // Always query every source: no zim params means the server searches all
+      // currently available sources. The same limit is used for every search so
+      // repeated queries hit the server cache; the page just slices the results.
       const response = await fetch("/api/search/stream?" + params, { signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await consumeStream(response, sequence);
@@ -703,7 +682,10 @@
   $("badges").addEventListener("click", event => {
     const button = event.target.closest("button[data-source]");
     if (!button || button.disabled || !current) return;
-    activeSource = button.dataset.source || null;
+    const key = button.dataset.source || null;
+    // Clicking the active source badge again returns to "All sources".
+    activeSource = (activeSource && activeSource === key) ? null : key;
+    current.page = 0;
     history.replaceState(null, "", makeHash(current.question, activeSource));
     renderView();
   });
@@ -712,6 +694,7 @@
     const button = event.target.closest("button[data-source]");
     if (button) {
       activeSource = null;
+      current.page = 0;
       history.replaceState(null, "", makeHash(current.question, null));
       renderView();
     }
@@ -725,29 +708,6 @@
     runSearch(question);
   });
 
-  $("sourceList").addEventListener("change", event => {
-    const input = event.target.closest("input[data-source]");
-    if (!input) return;
-    config.disabled = config.disabled.filter(key => key !== input.dataset.source);
-    if (!input.checked) config.disabled.push(input.dataset.source);
-    saveConfig();
-    $("settingsStatus").textContent = "Applies to the next search.";
-  });
-
-  $("thumbnails").addEventListener("change", event => {
-    config.thumbnails = event.target.checked;
-    saveConfig();
-    renderView();
-  });
-
-  $("resetSettings").addEventListener("click", () => {
-    config = { thumbnails: true, disabled: [] };
-    saveConfig();
-    $("thumbnails").checked = true;
-    renderSourceList();
-    $("settingsStatus").textContent = "Reset.";
-  });
-
   window.addEventListener("popstate", () => {
     const state = readHash();
     applyHashState(state);
@@ -758,14 +718,14 @@
   });
 
   async function initialize() {
-    $("thumbnails").checked = config.thumbnails;
     try {
-      const response = await fetch("/api/sources?refresh=true");
+      // Source discovery is read-only; refreshing the index/catalog set is an
+      // admin action done only via `zimantic reload` or SIGHUP.
+      const response = await fetch("/api/sources");
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       sources = await response.json();
-      renderSourceList();
     } catch (error) {
-      $("sourceStatus").textContent = `Could not load sources: ${error.message}`;
+      $("status").textContent = `Could not load sources: ${error.message}`;
     }
     const state = readHash();
     applyHashState(state);

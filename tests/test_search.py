@@ -509,6 +509,45 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(cached[0]["title"], "Tire Change")
             search._executor.shutdown(wait=True)
 
+    def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)])
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            events = list(search.stream_search("tire change", limit=1))
+            self.assertEqual(events[-1]["type"], "done")
+            key = search._cache_key("tire change", None, 1)
+            self.assertIsNotNone(search.cache.get(key))
+
+            # A plain source refresh with no changes must keep the cached answer
+            # (source discovery happens on page load without re-running searches).
+            search.refresh_sources()
+            self.assertIsNotNone(search.cache.get(key))
+
+            # Adding an index changes what is searchable, so stale answers drop.
+            _write_index(tmp, "second", rows=[(1, "Second page", "", "second", None)])
+            search.reload()
+            self.assertIsNone(search.cache.get(key))
+            search._executor.shutdown(wait=True)
+
+    def test_reload_keeps_cache_when_nothing_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)])
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+            list(search.stream_search("tire change", limit=1))
+            key = search._cache_key("tire change", None, 1)
+            self.assertIsNotNone(search.cache.get(key))
+
+            search.reload()
+            self.assertIsNotNone(search.cache.get(key))
+            search._executor.shutdown(wait=True)
+
     def test_reload_picks_up_and_forgets_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

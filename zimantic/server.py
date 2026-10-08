@@ -1,11 +1,15 @@
 import json
 from pathlib import Path
+import os
+import signal
+import threading
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from .search import SearchQueryError
 
 PAGE = Path(__file__).parent / "index.html"
+PID_FILE = Path("zimantic.pid")
 
 
 def create_app(searchClass) -> FastAPI:
@@ -20,18 +24,10 @@ def create_app(searchClass) -> FastAPI:
         return searchClass.local_names()
 
     @app.get("/api/sources")
-    def sources(refresh: bool = Query(False)):
-        if refresh:
-            searchClass.refresh_sources()
+    def sources():
+        # Source discovery only: clients can never force a refresh. Rebuilding the
+        # source set is an admin action carried out by `zimantic reload` or SIGHUP.
         return searchClass.source_dicts()
-
-    @app.post("/api/reload")
-    def reload_indexes():
-        """Rescan index_dir and the Kiwix catalog without restarting.
-
-        Cheap enough to trigger from systemd.path when a new index appears.
-        """
-        return searchClass.reload()
 
     @app.get("/api/health")
     def health():
@@ -73,8 +69,54 @@ def create_app(searchClass) -> FastAPI:
     return app
 
 
+def _handle_reload_request(searchClass, guard: threading.Lock) -> None:
+    """SIGHUP handler: reload in a worker thread so the event loop is not blocked
+    while indexes are reopened. A second signal during a reload is ignored."""
+    if not guard.acquire(blocking=False):
+        print("zimantic: reload already in progress; ignoring signal", flush=True)
+        return
+
+    def _reload():
+        try:
+            summary = searchClass.reload()
+            print(
+                "zimantic: reloaded "
+                f"{len(summary.get('indexes', []))} index(es) "
+                f"(+{len(summary.get('added', []))} new, "
+                f"~{len(summary.get('upgraded', []))} upgraded, "
+                f"-{len(summary.get('removed', []))} removed)",
+                flush=True,
+            )
+        except Exception as error:  # never let a reload take the process down
+            print(f"zimantic: reload failed: {error}", flush=True)
+        finally:
+            guard.release()
+
+    threading.Thread(target=_reload, name="zimantic-reload", daemon=True).start()
+
+
 def serve(searchClass, port: int) -> None:
     # 0.0.0.0: reachable from other devices on the network, not only this machine.
     app = create_app(searchClass)
-    print(f"zimantic: server loaded on port {port}", flush=True)
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    try:
+        PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    except OSError as error:
+        print(f"zimantic: could not write PID file {PID_FILE}: {error}", flush=True)
+
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is not None:
+        guard = threading.Lock()
+        signal.signal(sighup, lambda _signum, _frame: _handle_reload_request(searchClass, guard))
+
+    print(
+        f"zimantic: server loaded on port {port} "
+        f"(PID {os.getpid()}; reload with `zimantic reload` or `kill -HUP <pid>`)",
+        flush=True,
+    )
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    finally:
+        try:
+            PID_FILE.unlink()
+        except OSError:
+            pass
