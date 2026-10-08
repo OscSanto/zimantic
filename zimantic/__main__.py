@@ -76,6 +76,17 @@ def main() -> None:
             print("zimantic: no .zim files to index")
             return
 
+        by_stem: dict[str, list[Path]] = {}
+        for zim in zims:
+            by_stem.setdefault(zim.stem, []).append(zim)
+        for stem, paths in by_stem.items():
+            if len(paths) > 1:
+                print(
+                    f"zimantic: warning: multiple input files share the index name "
+                    f"{stem!r}: {', '.join(map(str, paths))}",
+                    file=sys.stderr,
+                )
+
         # fast builds never embed: skip loading the model so they start instantly.
         embedder = None
         if not args.fast:

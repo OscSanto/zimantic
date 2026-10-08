@@ -43,6 +43,8 @@ def _bare_search(cfg):
     search.semantic = True
     search.indexes = {}
     search.sources = {}
+    search._state_lock = threading.RLock()
+    search._reload_lock = threading.Lock()
     search.source_timeout = 12
     search.candidate_count = cfg.get("candidate_count", 16)
     search.source_workers = 2
@@ -228,6 +230,8 @@ class SearchContractTests(unittest.TestCase):
         search.semantic = False
         search.indexes = {}
         search.sources = {source.key: source for source in sources}
+        search._state_lock = threading.RLock()
+        search._reload_lock = threading.Lock()
         search._search_slots = threading.BoundedSemaphore(1)
         search._executor = ThreadPoolExecutor(max_workers=2)
         search.cache = QueryCache(16)
@@ -280,6 +284,8 @@ class SearchContractTests(unittest.TestCase):
         search.indexes = {
             "manual": _LocalIndex(db, FakeFaiss(), None, None, threading.Lock())
         }
+        search._state_lock = threading.RLock()
+        search._reload_lock = threading.Lock()
         search._search_slots = threading.BoundedSemaphore(1)
         search._executor = ThreadPoolExecutor(max_workers=1)
         search.cache = QueryCache(16)
@@ -385,6 +391,33 @@ class GracefulDegradationTests(unittest.TestCase):
             summary = search.reload()
             self.assertEqual(summary["removed"], ["manual"])
             self.assertEqual(search.indexes, {})
+            search._executor.shutdown(wait=True)
+
+    def test_reload_reopens_a_replaced_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(
+                tmp,
+                "manual",
+                rows=[(1, "Old title", "", "old", None)],
+            )
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+            old_index = search.indexes["manual"]
+
+            _write_index(
+                tmp,
+                "replacement",
+                rows=[(1, "New title", "", "new", None)],
+            )
+            (tmp / "replacement.sqlite").replace(tmp / "manual.sqlite")
+
+            search.reload()
+
+            self.assertIsNot(search.indexes["manual"], old_index)
+            self.assertEqual(search.search("new title", limit=1)[0]["title"], "New title")
+            search._close_index(search.indexes["manual"])
             search._executor.shutdown(wait=True)
 
 
