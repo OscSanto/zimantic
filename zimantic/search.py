@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+import json
 import math
 from pathlib import Path
 import re
@@ -37,6 +38,22 @@ STOPWORDS = {
 INTENT_RULES = (
     (re.compile(r"^wikihow", re.I), ("how to", "how do", "how can", "how should", "steps to")),
 )
+
+# Intent-gated disambiguation handling. A query that names the hub exactly is
+# navigation, so the hub is promoted (and clusters its members in the UI); any
+# other query that merely happens to match a hub is demoted behind real articles.
+DISAMBIGUATION = "disambiguation"
+# An exact hub query outranks the whole normal score range, which tops out near
+# 3/60 (RRF in all three lists) + 0.02 (lexical). Suffixed hubs gate on the whole
+# title, so "air (disambiguation)" is navigation but plain "air" is not.
+DEFAULT_DISAMBIGUATION_BOOST = 0.08
+DEFAULT_DISAMBIGUATION_PENALTY = 0.5
+
+
+def _exact_title_intent(query_words: list[str], title: str) -> bool:
+    """True when the query names the hub's full title exactly: navigation intent."""
+    hub = _query_terms(title)
+    return bool(query_words) and len(hub) == len(query_words) and set(hub) == set(query_words)
 
 
 @dataclass
@@ -851,6 +868,13 @@ class Search:
             )
             rows.update({int(row[0]): row for row in db.execute(query, batch)})
 
+        hub_ids = {
+            (int(rows[rowid][4]) if rows[rowid][4] is not None else rowid)
+            for rowid in values
+            if rowid in rows
+        }
+        hubs = self._fetch_hubs(db, hub_ids)
+
         docs: dict[int, dict[str, Any]] = {}
         for rowid in values:
             original = rows.get(rowid)
@@ -861,7 +885,7 @@ class Search:
             if not row:
                 continue
             _, title, lead, path, _ = row
-            docs[rowid] = {
+            doc = {
                 "id": f"{source.key}:{path}",
                 "source_key": source.key,
                 "source": source.name,
@@ -873,7 +897,50 @@ class Search:
                     f"{quote(source.book)}/{quote(path)}"
                 ),
             }
+            members_json = hubs.get(target)
+            if members_json is not None:
+                doc["kind"] = DISAMBIGUATION
+                doc["members"] = self._member_links(source, members_json)
+            docs[rowid] = doc
         return docs
+
+    @staticmethod
+    def _fetch_hubs(db: sqlite3.Connection, rowids: set[int]) -> dict[int, str]:
+        """rowid -> members JSON for disambiguation hubs ({} on older indexes)."""
+        if not rowids:
+            return {}
+        hubs: dict[int, str] = {}
+        try:
+            values = list(rowids)
+            for start in range(0, len(values), 900):
+                batch = values[start:start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                for rowid, members in db.execute(
+                    f"SELECT rowid, members FROM disamb WHERE rowid IN ({placeholders})",
+                    batch,
+                ):
+                    hubs[int(rowid)] = members
+        except sqlite3.OperationalError:
+            # Index built before disambiguation metadata existed.
+            return {}
+        return hubs
+
+    def _member_links(self, source: SourceInfo, members_json: str) -> list[dict[str, Any]]:
+        try:
+            members = json.loads(members_json)
+        except (TypeError, ValueError):
+            return []
+        base = str(self.cfg.get("kiwix_url", "")).rstrip("/")
+        links: list[dict[str, Any]] = []
+        for member in members:
+            path = member.get("path") if isinstance(member, dict) else None
+            if not path:
+                continue
+            link = {"title": member.get("title") or path, "path": path}
+            if base:
+                link["url"] = f"{base}/{quote(source.book)}/{quote(path)}"
+            links.append(link)
+        return links
 
     @staticmethod
     def _source_items(
@@ -996,6 +1063,8 @@ class Search:
             for rank, (_, _, doc) in enumerate(ranked[: max(self.candidate_count, limit * 2)]):
                 scores[doc["id"]] = scores.get(doc["id"], 0.0) + weight / (60 + rank)
 
+        disambig_boost = float(self.cfg.get("disambiguation_boost", DEFAULT_DISAMBIGUATION_BOOST))
+        disambig_penalty = float(self.cfg.get("disambiguation_penalty", DEFAULT_DISAMBIGUATION_PENALTY))
         scored: list[tuple[float, float, float, int, str, str, dict[str, Any]]] = []
         for identity, doc in docs.items():
             title_tokens = _content_terms(doc["title"])
@@ -1020,6 +1089,14 @@ class Search:
             ) / 8.5
             source_rank = int(doc.get("source_rank", 100000))
             total = scores.get(identity, 0.0) + 0.02 * lexical
+            disambig = ""
+            if doc.get("kind") == DISAMBIGUATION:
+                if _exact_title_intent(query_words, doc["title"]):
+                    total += disambig_boost
+                    disambig = f", disambiguation {'hub' if len(doc.get('members') or []) else 'exact'}"
+                else:
+                    total *= disambig_penalty
+                    disambig = ", disambiguation demoted"
             explanation = (
                 f"title {round(title_coverage * 100)}% "
                 f"({title_matches}/{len(query_words) if query_words else 0}, "
@@ -1027,6 +1104,7 @@ class Search:
                 f"phrase {'yes' if phrase_hit else 'no'}, "
                 f"intent {'yes' if intent else 'no'}, "
                 f"snippet {round(snippet_coverage * 100)}%"
+                f"{disambig}"
             )
             output = dict(doc)
             output.update({

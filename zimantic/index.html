@@ -114,6 +114,23 @@
     .result-snippet { font-size: .92rem; margin-top: 6px; overflow-wrap: anywhere; }
     .result-snippet mark { background: var(--mark-bg); border-radius: 2px; font-weight: 600; }
     .result-snippet.none { color: var(--muted); font-style: italic; }
+    .result.is-cluster { border-left: 3px solid var(--accent); }
+    .result-kind {
+      background: var(--mark-bg);
+      border-radius: 100px;
+      color: var(--muted);
+      font: 600 .66rem var(--mono);
+      letter-spacing: .04em;
+      margin-left: 8px;
+      padding: 1px 8px;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .result-members { border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; margin: 8px 0 0; padding: 8px 0 0; }
+    .result-members:empty { display: none; }
+    .result-members li { font-size: .88rem; }
+    .result-members a { color: var(--accent); text-decoration: none; }
+    .result-members a:hover { text-decoration: underline; }
     .result-thumb {
       background: var(--mark-bg);
       border-radius: 6px;
@@ -312,6 +329,31 @@
     } else {
       title.textContent = item.title || "(untitled)";
     }
+    node.classList.toggle("is-cluster", item.kind === "disambiguation");
+    if (item.kind === "disambiguation") {
+      const badge = document.createElement("span");
+      badge.className = "result-kind";
+      badge.textContent = "Disambiguation";
+      title.appendChild(badge);
+    }
+    const members = node.querySelector(".result-members");
+    members.replaceChildren();
+    if (item.kind === "disambiguation" && Array.isArray(item.members)) {
+      for (const member of item.members) {
+        const li = document.createElement("li");
+        if (member.url) {
+          const link = document.createElement("a");
+          link.href = member.url;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = member.title || member.path;
+          li.appendChild(link);
+        } else {
+          li.textContent = member.title || member.path;
+        }
+        members.appendChild(li);
+      }
+    }
     setText(node, ".result-meta", `${item.source || ""} · source rank ${item.rank || item.source_rank || "—"}`);
     setText(node, ".result-match", item.explain || "Source result");
     const snippet = node.querySelector(".result-snippet");
@@ -344,6 +386,7 @@
       <div class="result-meta"></div>
       <div class="result-match"></div>
       <div class="result-snippet"></div>
+      <ul class="result-members"></ul>
     </div>`;
     setResultNode(node, item);
     return node;
