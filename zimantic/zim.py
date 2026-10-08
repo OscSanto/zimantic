@@ -22,15 +22,18 @@ REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
 
 # Disambiguation pages are stored with kind=DISAMBIGUATION plus the entries they
 # link to, so search can cluster the hub with its members without re-reading the
-# ZIM. Detection is MediaWiki-flavoured: the "(disambiguation)" title suffix is
-# the reliable signal, and an unsuffixed hub declares itself with a "may refer
-# to" lead. The marker is matched only near the start of the visible text; that
-# keeps prose pages and navboxes that merely mention the phrase out of the hub
-# set, at the cost of the occasional template-less hub.
+# ZIM. Detection is MediaWiki-flavoured and precise: a "(disambiguation)" title
+# suffix, the "This disambiguation page" template footer, or a disambiguation
+# category (the rendered Category: link or the wgCategories JSON in the head).
 DISAMBIGUATION = "disambiguation"
 DISAMBIG_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
-MAY_REFER = re.compile(r"\bmay refer to\b", re.I)
-DISAMBIG_MARKER_WINDOW = 200
+DISAMBIG_BOILERPLATE = re.compile(r"this disambiguation page", re.I)
+DISAMBIG_HTML_MARKERS = re.compile(
+    rb"this disambiguation page"          # template footer, wherever it renders
+    rb"|category:[^\"'<>\s]{0,120}?disambig",  # rendered Category:…disambiguation link
+    re.I,
+)
+WGCATEGORIES = re.compile(rb'"wgCategories"\s*:\s*(\[[^\]]*\])')
 MAX_DISAMBIG_MEMBERS = 50
 # Namespaces whose links are not article targets (casefolded, no trailing "_").
 _NON_ARTICLE_PREFIXES = {
@@ -195,12 +198,24 @@ class _LinkExtractor(HTMLParser):
             self._text.append(data)
 
 
-def is_disambiguation(title: str, text: str) -> bool:
-    """True for a MediaWiki disambiguation page (title suffix or early marker)."""
+def is_disambiguation(title: str, text: str, html: bytes = b"") -> bool:
+    """True for a MediaWiki disambiguation page.
+
+    Signals, any of which is enough: a "(disambiguation)" title suffix, the
+    "This disambiguation page" template footer, or a disambiguation category
+    (rendered link or wgCategories). ``text`` is checked first for the footer so
+    template hubs never need the raw-HTML scan.
+    """
     if DISAMBIG_TITLE.search(title):
         return True
-    marker = MAY_REFER.search(text)
-    return marker is not None and marker.start() <= DISAMBIG_MARKER_WINDOW
+    if DISAMBIG_BOILERPLATE.search(text):
+        return True
+    if not html:
+        return False
+    if DISAMBIG_HTML_MARKERS.search(html):
+        return True
+    categories = WGCATEGORIES.search(html)
+    return bool(categories and re.search(rb"disambig", categories.group(1), re.I))
 
 
 def disambiguation_members(html: bytes, path: str, limit: int = MAX_DISAMBIG_MEMBERS) -> list[dict]:
@@ -412,6 +427,6 @@ def read_entry(
         embedding_truncate=getattr(embedder, "truncate", None),
     )
     members = None
-    if is_disambiguation(entry.title, excerpt):
+    if is_disambiguation(entry.title, excerpt, html):
         members = json.dumps(disambiguation_members(html, entry.path))
     return i, entry.title, excerpt, entry.path, None, members
