@@ -52,12 +52,20 @@ results = 30
 # Use ~8 on a Raspberry Pi Zero 2 W.
 batch_size = 32
 
-# Text stored and embedded for each HTML article. false reads the whole page;
-# true keeps only the first substantial paragraph.
-first_paragraph = false
-
 # Maximum HTML read from each article while extracting text.
 max_html_bytes = 4_194_304
+
+# Maximum characters stored and returned in each result preview.
+max_preview_chars = 1_000
+
+# Maximum embedding sequence length, including the model's two special tokens.
+# This is an application budget for the shipped model, not a preview length.
+max_embedding_tokens = 256
+
+# What to do when adding a block would exceed each independent budget.
+# "skip" keeps looking for another suitable block; "truncate" fills the remaining budget.
+preview_overflow = "skip"
+embedding_overflow = "truncate"
 
 # Large ZIMs only (10,000+ articles): how many groups of vectors each search scans.
 # By default, searches scan about 6% of the groups, scaling automatically with ZIM size.

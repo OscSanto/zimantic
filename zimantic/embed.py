@@ -5,21 +5,46 @@ import numpy as np
 import onnxruntime as ort
 import sentencepiece
 
-MAX_TOKENS = 256
+from .settings import DEFAULT_MAX_EMBEDDING_TOKENS
+SPECIAL_TOKEN_COUNT = 2
 
 # Turns text into vectors with multilingual-e5-small (ONNX, int8) currently.
 class Embedder:
-    def __init__(self, model_dir):
+    def __init__(
+        self,
+        model_dir,
+        max_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+    ):
         """model_dir holds model.onnx and sentencepiece.bpe.model."""
+        self.max_tokens = int(max_tokens)
+        if self.max_tokens < SPECIAL_TOKEN_COUNT:
+            raise ValueError(f"max_tokens must be at least {SPECIAL_TOKEN_COUNT}")
         opts = ort.SessionOptions()
         opts.enable_cpu_mem_arena = False  # the arena kept ~600 MB after indexing; without it memory is freed
         self.session = ort.InferenceSession(str(Path(model_dir) / "model.onnx"), opts, providers=["CPUExecutionProvider"])
         # sentencepiece loads this vocabulary in ~45 MB; Hugging Face `tokenizers` needed ~250 MB.
         self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(Path(model_dir) / "sentencepiece.bpe.model"))
 
+    def token_count(self, text: str, prefix: str = "") -> int:
+        """Count special tokens and SentencePiece pieces for the full input."""
+        return SPECIAL_TOKEN_COUNT + len(self.tokenizer.encode(prefix + text))
+
+    def truncate(self, text: str, prefix: str = "") -> str:
+        """Keep text within the model's token budget after an optional prefix."""
+        if self.token_count(text, prefix) <= self.max_tokens:
+            return text
+        low, high = 0, len(text)
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            if self.token_count(text[:midpoint], prefix) <= self.max_tokens:
+                low = midpoint
+            else:
+                high = midpoint - 1
+        return text[:low]
+
     def _ids(self, text: str) -> list[int]:
         # XLM-RoBERTa numbering: <s>=0 <pad>=1 </s>=2 <unk>=3, other pieces are sentencepiece id + 1.
-        pieces = self.tokenizer.encode(text)[:MAX_TOKENS - 2]
+        pieces = self.tokenizer.encode(text)[:self.max_tokens - SPECIAL_TOKEN_COUNT]
         return [0] + [p + 1 if p else 3 for p in pieces] + [2]
 
     def embed(self, texts: list[str]) -> np.ndarray:

@@ -11,9 +11,10 @@ reader.set_cluster_cache_max_size = lambda size: None
 
 from zimantic.zim import (
     DEFAULT_MAX_HTML_BYTES,
+    DEFAULT_PREVIEW_CHARS,
     disambiguation_members,
-    first_paragraph,
-    full_text,
+    extract_excerpts,
+    iter_text_blocks,
     is_disambiguation,
     read_entry,
 )
@@ -30,6 +31,30 @@ HTML = b"""
     <style>.ignored { display: none; }</style>
   </body>
 </html>
+"""
+
+
+LIST_DEFINITION_HTML = b"""
+<html><body>
+  <h2>Noun</h2>
+  <table><tr><td><p>Singular tire</p></td></tr></table>
+  <ol><li>A tire is the outer part of a car wheel. It is usually made of rubber.</li></ol>
+  <div class="zim-footer">This article is issued from Wiktionary. The text is available under a permissive license.</div>
+</body></html>
+"""
+
+LIST_BEFORE_PARAGRAPH_HTML = b"""
+<html><body>
+  <ol><li>A fallback definition that should lose to a later paragraph with the preferred article summary.</li></ol>
+  <p>The preferred paragraph summary is used whenever the page provides one.</p>
+</body></html>
+"""
+
+LIST_BEFORE_BLOCK_HTML = b"""
+<html><body>
+  <ol><li>A fallback definition that should lose to a later block with the article summary.</li></ol>
+  <div>The preferred block summary is used when no paragraph is available.</div>
+</body></html>
 """
 
 
@@ -53,22 +78,90 @@ class _Archive:
 
 
 class TextExtractionTests(unittest.TestCase):
-    def test_default_extraction_reads_full_visible_text(self):
+    def test_extraction_prefers_first_substantial_paragraph(self):
         self.assertEqual(
             read_entry(_Archive(), 0)[2],
-            "Heading Short lead. A sufficiently long paragraph with useful text "
-            "that passes the minimum lead length. Second paragraph with more information.",
+            "A sufficiently long paragraph with useful text that passes the minimum lead length.",
         )
 
-    def test_first_paragraph_mode_keeps_first_substantial_paragraph(self):
+    def test_generator_accepts_ordered_list_definitions(self):
         self.assertEqual(
-            read_entry(_Archive(), 0, first_paragraph=True)[2],
-            "A sufficiently long paragraph with useful text that passes the minimum lead length.",
+            list(iter_text_blocks(LIST_DEFINITION_HTML)),
+            ["A tire is the outer part of a car wheel. It is usually made of rubber."],
+        )
+
+    def test_generator_prefers_later_paragraph_to_list_fallback(self):
+        self.assertEqual(
+            list(iter_text_blocks(LIST_BEFORE_PARAGRAPH_HTML)),
+            ["The preferred paragraph summary is used whenever the page provides one."],
+        )
+
+    def test_generator_prefers_block_fallback_to_list_fallback(self):
+        self.assertEqual(
+            list(iter_text_blocks(LIST_BEFORE_BLOCK_HTML)),
+            ["The preferred block summary is used when no paragraph is available."],
         )
 
     def test_html_limit_is_configurable(self):
         self.assertEqual(DEFAULT_MAX_HTML_BYTES, 4 * 1024 * 1024)
         self.assertEqual(read_entry(_Archive(), 0, max_html_bytes=20)[2], "")
+
+    def test_preview_limit_is_configurable(self):
+        self.assertEqual(DEFAULT_PREVIEW_CHARS, 1000)
+        self.assertEqual(
+            len(read_entry(_Archive(), 0, max_preview_chars=20)[2]),
+            20,
+        )
+
+    def test_preview_skips_oversized_blocks_and_keeps_searching(self):
+        html = (
+            b"<p>" + b"x" * 100 + b"</p>"
+            b"<p>" + b"y" * 55 + b"</p>"
+        )
+        preview, _ = extract_excerpts(html, max_preview_chars=60)
+        self.assertEqual(preview, "y" * 55)
+
+    def test_preview_truncates_best_block_when_none_fits(self):
+        preview, _ = extract_excerpts(
+            b"<p>" + b"x" * 80 + b"</p>",
+            max_preview_chars=20,
+            preview_overflow="skip",
+        )
+        self.assertEqual(preview, "x" * 20)
+
+    def test_embedding_excerpt_stays_within_token_budget(self):
+        def token_count(text, prefix):
+            return 2 + len((prefix + text).split())
+
+        def truncate(text, prefix):
+            available = 8 - token_count("", prefix)
+            return " ".join(text.split()[:max(0, available)])
+
+        _, embedding = extract_excerpts(
+            b"<p>" + b"one two three four five six seven eight nine ten " * 5 + b"</p>",
+            title="Example",
+            max_embedding_tokens=8,
+            embedding_token_count=token_count,
+            embedding_truncate=truncate,
+        )
+        self.assertLessEqual(token_count(embedding, "passage: Example\n"), 8)
+
+    def test_embedding_skip_policy_keeps_looking_for_a_fitting_block(self):
+        def token_count(text, prefix):
+            return 2 + len((prefix + text).split())
+
+        _, embedding = extract_excerpts(
+            (
+                b"<p>" + b"x " * 100 + b"</p>"
+                b"<p>" + b"y " * 10 + b"</p>"
+            ),
+            title="Example",
+            max_embedding_tokens=20,
+            embedding_overflow="skip",
+            embedding_token_count=token_count,
+            embedding_truncate=lambda *_args, **_kwargs: self.fail("unexpected truncation"),
+        )
+        self.assertEqual(embedding, " ".join(["y"] * 10))
 
 
 DISAMBIG_HTML = b"""
