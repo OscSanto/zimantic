@@ -128,11 +128,25 @@ def _query_terms(query: str) -> list[str]:
     return terms
 
 
-def _keyword_query(query: str) -> str:
+def _query_words(query: str) -> list[str]:
     words = re.findall(r"[^\W_]+", query.casefold(), re.UNICODE)
     kept = [word for word in words if word not in STOPWORDS]
-    words = kept or words
-    return " AND ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words)
+    return kept or words
+
+
+def _title_query(query: str) -> str:
+    """FTS5 MATCH expression: every word must appear as an exact title token."""
+    return " AND ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in _query_words(query))
+
+
+def _fulltext_query(query: str) -> str:
+    """Query for the ZIM full-text index (libzim/Xapian): bare words.
+
+    libzim parses this with only Xapian's FLAG_CJK_NGRAM, so quotes, ``AND`` and
+    ``OR`` are treated as literal text rather than operators. We therefore send
+    plain words and rely on its default OP_AND to combine them.
+    """
+    return " ".join(_query_words(query))
 
 
 def _coverage(query: list[str], tokens: list[str]) -> float:
@@ -492,14 +506,16 @@ class Search:
 
             query_vector = self._query_vector(sources, query)
 
-            keyword_query = _keyword_query(query)
+            title_query = _title_query(query)
+            fulltext_query = _fulltext_query(query)
             for source in sources:
                 futures.append(
                     self._executor.submit(
                         self._search_source,
                         source,
                         query,
-                        keyword_query,
+                        title_query,
+                        fulltext_query,
                         query_vector,
                         limit,
                     )
@@ -550,32 +566,35 @@ class Search:
         self,
         source: SourceInfo,
         query: str,
-        keyword_query: str,
+        title_query: str,
+        fulltext_query: str,
         query_vector,
         limit: int,
     ) -> SourceResult:
         if source.mode == "kiwix":
-            return self._search_kiwix(source, keyword_query, limit)
+            return self._search_kiwix(source, fulltext_query, limit)
         if not source.local_name or source.local_name not in self.indexes:
             return SourceResult(source=replace(source, available=False), error="source is not indexed", status="error")
-        return self._search_local(source, query, keyword_query, query_vector, limit)
+        return self._search_local(source, query, title_query, fulltext_query, query_vector, limit)
 
     def _search_local(
         self,
         source: SourceInfo,
         query: str,
-        keyword_query: str,
+        title_query: str,
+        fulltext_query: str,
         query_vector,
         limit: int,
     ) -> SourceResult:
         index = self.indexes[source.local_name]
-        return self._search_local_locked(source, query, keyword_query, query_vector, limit, index)
+        return self._search_local_locked(source, query, title_query, fulltext_query, query_vector, limit, index)
 
     def _search_local_locked(
         self,
         source: SourceInfo,
         query: str,
-        keyword_query: str,
+        title_query: str,
+        fulltext_query: str,
         query_vector,
         limit: int,
         index: _LocalIndex,
@@ -605,12 +624,12 @@ class Search:
         else:
             semantic_ids = []
 
-        if keyword_query:
+        if title_query:
             title_search = (
                 "SELECT rowid, bm25(docs) FROM docs "
                 "WHERE docs MATCH ? ORDER BY rank LIMIT ?"
             )
-            for rowid, bm25 in db.execute(title_search, (keyword_query, count)):
+            for rowid, bm25 in db.execute(title_search, (title_query, count)):
                 rowids.add(int(rowid))
                 keyword.append((float(bm25), {"rowid": int(rowid)}))
 
@@ -619,7 +638,7 @@ class Search:
             # libzim's Searcher is not documented as thread-safe: serialise it.
             with index.lock:
                 try:
-                    paths = index.searcher.search(Query().set_query(keyword_query or query)).getResults(0, count)
+                    paths = index.searcher.search(Query().set_query(fulltext_query or query)).getResults(0, count)
                     fulltext_paths = [(rank, path) for rank, path in enumerate(paths)]
                     for _, path in fulltext_paths:
                         try:
