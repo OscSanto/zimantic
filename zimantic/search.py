@@ -622,7 +622,7 @@ class Search:
         limit = max(1, min(int(limit), 100))
         cached = self.cache.get(self._cache_key(query, zim, limit))
         if cached is not None:
-            return list(cached)
+            return list(cached["results"] if isinstance(cached, dict) else cached)
         events = self.stream_search(query, zim, limit)
         final: list[dict] = []
         for event in events:
@@ -646,6 +646,13 @@ class Search:
 
         cached = self.cache.get(key)
         if cached is not None:
+            if isinstance(cached, dict):
+                cached_results = list(cached["results"])
+                cached_sources = cached.get("sources", [])
+            else:
+                # Accept entries written by older in-memory cache users.
+                cached_results = list(cached)
+                cached_sources = []
             total = len(sources)
             yield {
                 "type": "started",
@@ -653,8 +660,25 @@ class Search:
                 "sources": [source.to_dict() for source in sources],
                 "total": total,
             }
-            yield {"type": "snapshot", "results": list(cached), "completed": total, "total": total}
-            yield {"type": "done", "results": list(cached), "completed": total, "total": total}
+            for completed, source_event in enumerate(cached_sources, 1):
+                yield {
+                    "type": "source",
+                    **source_event,
+                    "completed": completed,
+                    "total": total,
+                }
+            yield {
+                "type": "snapshot",
+                "results": cached_results,
+                "completed": total,
+                "total": total,
+            }
+            yield {
+                "type": "done",
+                "results": cached_results,
+                "completed": total,
+                "total": total,
+            }
             return
 
         acquired = self._search_slots.acquire()
@@ -716,8 +740,15 @@ class Search:
                 }
 
             final = self._rank_results(completed, query, limit)
-            # A finished stream is cached for the regular JSON endpoint too.
-            self.cache.put(key, final)
+            # Keep source outcomes so cached streams preserve the per-source
+            # progress and filtering UI on page reloads.
+            self.cache.put(
+                key,
+                {
+                    "results": final,
+                    "sources": [result.to_event() for result in completed],
+                },
+            )
             yield {
                 "type": "done",
                 "results": final,

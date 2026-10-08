@@ -1,9 +1,9 @@
 """Small thread-safe LRU cache for finalized search results.
 
-The cache is deliberately tiny and cheap: it stores only the final ranked list
-for an exact (query, source selection, limit) key, so a repeated search is
-served without touching SQLite, FAISS or the embedding model. Results are
-treated as read-only by callers.
+The cache is deliberately tiny and cheap: it stores the final ranked list and
+completed source outcomes for an exact (query, source selection, limit) key, so
+a repeated search is served without touching SQLite, FAISS or the embedding
+model. Results are treated as read-only by callers.
 """
 from __future__ import annotations
 
