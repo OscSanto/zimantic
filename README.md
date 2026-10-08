@@ -40,8 +40,17 @@ require Kiwix, but serving the article pages does, so Zimantic works alongside K
 
 **What gets read.** Every entry in the ZIM is visited once. Images, stylesheets and scripts are skipped.
 Redirects, including the small "forwarding" pages some
-ZIMs use instead of real redirects, are stored as **title-only** entries that point to their article.
+ZIMs use instead of real redirects, are stored as **title-only** entries that point to their article
+(app-shell stubs are the exception, below).
 Thus, searching "USA" still finds the United States page.
+
+**App-shell ZIMs.** Some ZIMs render every article through a JavaScript app: the HTML entry is a tiny
+stub that forwards to a route such as `index.html#/Bookshelves/…`, and the real body is stored as JSON
+(`content/page_content_<id>.json`, key `htmlBody`). Zimantic reads that JSON, indexes its text, and
+keeps the article's own ZIM path (for example `index/page_3941`) as a deep link into the route, so
+title, full-text and meaning search all agree on the real article instead of collapsing every result
+onto the app shell. Stubs whose only visible text is an "enable JavaScript" notice, and the shared
+app shell itself, are skipped so that one boilerplate vector cannot surface as a result.
 
 **Text extraction.** Zimantic skips stylesheets, scripts and footnote markers like `[1]`, then
 collects substantial visible blocks. Paragraphs are preferred; when a page has no suitable paragraph,
