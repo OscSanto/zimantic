@@ -33,6 +33,11 @@ def main() -> None:
         action="store_true",
         help="title + ZIM full-text only: skip article bodies, the model and FAISS (much faster)",
     )
+    build.add_argument(
+        "--force",
+        action="store_true",
+        help="rebuild the selected ZIM indexes even if they are already complete",
+    )
 
     reload_cmd = commands.add_parser(
         "reload",
@@ -112,6 +117,7 @@ def main() -> None:
                 max_embedding_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
                 preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
                 embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
+                force=args.force,
             )
 
     elif args.command == "serve":

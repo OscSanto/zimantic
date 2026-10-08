@@ -30,6 +30,18 @@ def _create_fast_index(path: Path) -> None:
     db.close()
 
 
+def _create_done_index(path: Path) -> None:
+    db = sqlite3.connect(path)
+    db.executescript(build_module.SCHEMA)
+    db.execute(
+        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+        (1, "Old title", "Old excerpt", "old", None),
+    )
+    db.execute("INSERT INTO meta VALUES ('done', '1')")
+    db.commit()
+    db.close()
+
+
 def _meta(path: Path) -> dict[str, str]:
     db = sqlite3.connect(path)
     values = dict(db.execute("SELECT key, value FROM meta"))
@@ -88,6 +100,57 @@ class BuildUpgradeTests(unittest.TestCase):
             self.assertEqual(faiss_path.read_bytes(), b"vectors")
             self.assertFalse(staging_db.exists())
             self.assertFalse(staging_faiss.exists())
+
+    def test_force_fast_rebuild_replaces_sqlite_and_removes_faiss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            db_path = directory / "manual.sqlite"
+            faiss_path = directory / "manual.faiss"
+            _create_done_index(db_path)
+            faiss_path.write_bytes(b"existing vectors")
+            rows = [
+                (1, "New title", "", "new", None, None),
+                (2, "Another title", "", "another", None, None),
+            ]
+
+            with (
+                patch.object(build_module, "Archive", _FakeArchive),
+                patch.object(build_module, "read_entry", side_effect=rows),
+            ):
+                build_module.build(directory / "manual.zim", directory, None, 1, fast=True, force=True)
+
+            meta = _meta(db_path)
+            self.assertEqual(str(meta["done"]), "fast")
+            self.assertEqual(str(meta["next"]), "2")
+            db = sqlite3.connect(db_path)
+            self.assertEqual(db.execute("SELECT title FROM docs").fetchone(), ("New title",))
+            db.close()
+            self.assertFalse(faiss_path.exists())
+
+    def test_force_full_rebuild_replaces_existing_faiss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            db_path = directory / "manual.sqlite"
+            faiss_path = directory / "manual.faiss"
+            _create_done_index(db_path)
+            faiss_path.write_bytes(b"old vectors")
+            rows = [
+                (1, "New title", "New excerpt", "new", None, None),
+                (2, "Another title", "Another excerpt", "another", None, None),
+            ]
+
+            def write_fake_faiss(_db, path):
+                path.write_bytes(b"new vectors")
+
+            with (
+                patch.object(build_module, "Archive", _FakeArchive),
+                patch.object(build_module, "read_entry", side_effect=rows),
+                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
+            ):
+                build_module.build(directory / "manual.zim", directory, None, 1, force=True)
+
+            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1"})
+            self.assertEqual(faiss_path.read_bytes(), b"new vectors")
 
 
 class FaissTrainingTests(unittest.TestCase):
