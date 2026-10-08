@@ -130,8 +130,9 @@ enough to trigger from `systemd.path`, so the server never has to poll the direc
    words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured
    source intent provide additional deterministic signals.
 5. **Treat disambiguation pages as hubs.** At build time a page is flagged when its title ends in
-   "(disambiguation)" or its lead says "may refer to", and its article links are stored as members. A query that
-   names the hub's full title is navigation: the hub is promoted above the normal score range and its members are
+   "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category
+   (the rendered `Category:` link or `wgCategories`). Its article links are stored as members. A query that names
+   the hub's full title is navigation: the hub is promoted above the normal score range and its members are
    clustered in the result card. Any other query that merely matches a hub is demoted so the real article wins.
 
 The streaming endpoint sends a source completion and a provisional ranked snapshot as each source finishes.

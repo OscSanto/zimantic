@@ -186,23 +186,32 @@ DISAMBIG_HTML = b"""
 """
 
 
-class DisambiguationTests(unittest.TestCase):
-    def test_title_suffix_and_early_marker_detect_hubs(self):
-        self.assertTrue(is_disambiguation("Air (disambiguation)", ""))
-        self.assertTrue(is_disambiguation("Advocacy", "Advocacy may refer to:"))
-        self.assertFalse(is_disambiguation("Air", "Air is a mixture of gases."))
+BOILERPLATE_HTML = b"<html><body><p>Lead.</p><p><i>This disambiguation page lists articles.</i></p></body></html>"
+WGCATEGORY_HTML = b'<html><head><script>RLCONF={"wgCategories":["Mainspace disambiguation pages"]}</script></head><body></body></html>'
+CATEGORY_LINK_HTML = b'<html><body><a href="../wiki/Category:Disambiguation_pages">cat</a></body></html>'
 
-    def test_late_marker_is_not_a_hub(self):
-        # Prose or a navbox that mentions the phrase far from the lead.
-        self.assertFalse(is_disambiguation("Absolutism", "Absolutism " + "x" * 300 + " may refer to stances."))
+
+class DisambiguationTests(unittest.TestCase):
+    def test_title_suffix_detects_hubs(self):
+        self.assertTrue(is_disambiguation("Air (disambiguation)", "Air is a mixture of gases."))
+        self.assertTrue(is_disambiguation("Foo (disambiguation)", ""))
+
+    def test_template_footer_detects_hubs(self):
+        self.assertTrue(is_disambiguation("Abigail", "Abigail This disambiguation page."))
+        self.assertTrue(is_disambiguation("Abigail", "", BOILERPLATE_HTML))
+
+    def test_category_detects_hubs(self):
+        self.assertTrue(is_disambiguation("Collected Poems", "", WGCATEGORY_HTML))
+        self.assertTrue(is_disambiguation("Air", "", CATEGORY_LINK_HTML))
+
+    def test_prose_and_plain_pages_are_not_hubs(self):
+        self.assertFalse(is_disambiguation("Air", "Air is a mixture of gases."))
+        self.assertFalse(is_disambiguation("Absolutism", "The term may refer to stances.", b"<html></html>"))
 
     def test_members_resolve_relative_links_and_drop_namespaces(self):
         members = disambiguation_members(DISAMBIG_HTML, "Advocacy_(disambiguation)")
         self.assertEqual([member["path"] for member in members], ["Advocacy", "Lawyer"])
         self.assertEqual(members[0]["title"], "Advocacy")
-
-    def test_suffix_hub_with_no_links_is_still_flagged(self):
-        self.assertTrue(is_disambiguation("Foo (disambiguation)", "Foo is a thing."))
 
 
 if __name__ == "__main__":
