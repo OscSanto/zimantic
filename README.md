@@ -72,6 +72,8 @@ Input is capped at 256 tokens.
 | Under 10,000 articles | **Flat**: the query is compared with every vector | Exact, and small enough (a few MB) that comparing everything is fast |
 | 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search only scans the closest `nprobe` clusters (64 by default) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters (6%) was within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). 8-bit numbers were nearly exact. **Heavier compression (e.g. PQ48) lost ~25% of the top hits in earlier testing.** |
 
+IVF training samples are selected across the ZIM and scale with the number of clusters, with at least 39 samples per cluster as required by FAISS. This avoids under-training warnings on larger ZIMs without loading every vector into the training set.
+
 The `.faiss` file is memory-mapped: the operating system reads only the **clusters** a search touches instead of loading
 the whole index into RAM. Clusters are found relative to the distance of query-to-cluster centres in vector space.
 
