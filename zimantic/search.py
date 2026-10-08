@@ -139,6 +139,19 @@ def _title_query(query: str) -> str:
     return " AND ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in _query_words(query))
 
 
+def _title_prefix_query(query: str) -> str:
+    """FTS5 MATCH expression with every word as a prefix token.
+
+    Used only as a fallback when exact title matching returns nothing, so a
+    truncated or base-form word still matches its title (e.g. "chang" or
+    "change" -> "Changes"). One-character words stay exact to avoid scanning
+    the whole index for prefixes like "c*".
+    """
+    return " AND ".join(
+        f"{word}*" if len(word) > 1 else f'"{word}"' for word in _query_words(query)
+    )
+
+
 def _fulltext_query(query: str) -> str:
     """Query for the ZIM full-text index (libzim/Xapian): bare words.
 
@@ -629,7 +642,15 @@ class Search:
                 "SELECT rowid, bm25(docs) FROM docs "
                 "WHERE docs MATCH ? ORDER BY rank LIMIT ?"
             )
-            for rowid, bm25 in db.execute(title_search, (title_query, count)):
+            title_rows = db.execute(title_search, (title_query, count)).fetchall()
+            if not title_rows:
+                # Exact title matching found nothing; retry with prefix tokens so a
+                # truncated or base-form word ("chang", "change" -> "Changes") still
+                # surfaces its title without broadening the common full-word case.
+                title_rows = db.execute(
+                    title_search, (_title_prefix_query(query), count)
+                ).fetchall()
+            for rowid, bm25 in title_rows:
                 rowids.add(int(rowid))
                 keyword.append((float(bm25), {"rowid": int(rowid)}))
 
