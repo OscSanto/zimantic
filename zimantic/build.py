@@ -1,4 +1,4 @@
-"""Index one ZIM into <index_dir>/<name>.sqlite (titles, leads) and, unless
+"""Index one ZIM into <index_dir>/<name>.sqlite (titles, excerpts) and, unless
 fast, <name>.faiss (vectors).
 
 Rerunning an unfinished build resumes where it stopped. A fast build marks the
@@ -15,11 +15,19 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 from libzim.reader import Archive
-from .zim import DEFAULT_MAX_HTML_BYTES, read_entry
+from .settings import DEFAULT_MAX_EMBEDDING_TOKENS
+from .zim import (
+    DEFAULT_EMBEDDING_OVERFLOW,
+    DEFAULT_MAX_HTML_BYTES,
+    DEFAULT_PREVIEW_CHARS,
+    DEFAULT_PREVIEW_OVERFLOW,
+    read_entry,
+)
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
-    title, lead UNINDEXED, path UNINDEXED, target UNINDEXED, tokenize='unicode61 remove_diacritics 2');
+    title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED,
+    tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dropped once .faiss is written
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry to resume from; done: 'fast' | 1
 CREATE TABLE IF NOT EXISTS disamb(rowid INTEGER PRIMARY KEY, members TEXT);  -- JSON links for disambiguation hubs
@@ -35,16 +43,17 @@ def build(
     embedder,
     batch_size: int,
     fast: bool = False,
-    first_paragraph: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
+    max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    max_embedding_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+    preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
+    embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
 ) -> None:
     """Index a ZIM.
 
     fast=True builds title + ZIM full-text search only: it never reads article
     bodies or runs the embedding model, so it is much quicker. Otherwise,
-    first_paragraph selects whether the stored text is the first substantial
-    paragraph or the whole page. A later full build upgrades the fast index
-    through a staged replacement.
+    A later full build upgrades the fast index through a staged replacement.
     """
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
@@ -96,8 +105,12 @@ def build(
                 zim,
                 i,
                 fast=fast,
-                first_paragraph=first_paragraph,
                 max_html_bytes=max_html_bytes,
+                max_preview_chars=max_preview_chars,
+                max_embedding_tokens=max_embedding_tokens,
+                preview_overflow=preview_overflow,
+                embedding_overflow=embedding_overflow,
+                embedder=embedder,
             )
             if row:
                 batch.append(row)
@@ -168,21 +181,21 @@ def _publish_upgrade(
 def _save(db, embedder, rows, next_entry: int) -> None:
     """Store a batch and the resume point in one transaction.
 
-    Rows are (id, title, lead, path, target, members); members is a JSON array
-    for disambiguation hubs. Rows without the members element are still accepted
-    so resuming an old index or a fast build keeps working.
+    Rows are (id, title, preview, embedding, path, target, members); members is
+    a JSON array for disambiguation hubs.
     """
+    article_ids = {row[0] for row in rows if row[3]}
     with db:
         db.executemany(
-            "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)",
-            [row[:5] for row in rows],
+            "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
+            [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in rows],
         )
-        hubs = [(row[0], row[5]) for row in rows if len(row) > 5 and row[5] is not None]
+        hubs = [(row[0], row[6]) for row in rows if len(row) > 6 and row[6] is not None]
         if hubs:
             db.executemany("INSERT OR REPLACE INTO disamb(rowid, members) VALUES (?, ?)", hubs)
-        articles = [row for row in rows if row[2]]  # only pages with a first paragraph get a vector
+        articles = [row for row in rows if row[0] in article_ids]
         if articles and embedder is not None:
-            vectors = embedder.embed([f"passage: {row[1]}\n{row[2]}" for row in articles])
+            vectors = embedder.embed([f"passage: {row[1]}\n{row[3]}" for row in articles])
             db.executemany("INSERT INTO vecs VALUES (?, ?)",
                            [(row[0], v.astype(np.float16).tobytes()) for row, v in zip(articles, vectors)])
         db.execute("INSERT OR REPLACE INTO meta VALUES ('next', ?)", (next_entry,))

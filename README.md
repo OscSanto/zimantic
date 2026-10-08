@@ -23,7 +23,7 @@ as a Raspberry Pi Zero 2 W.
   Strongest in widely used languages (see the results below).
 - **Several collections at once**: search any combination of your ZIMs, ranked together in one list.
 - **Best of three searches**: combines meaning, title-word and Kiwix full-text search into a single ranking.
-- **Clean results & previews**: redirects are merged into their article, so each article appears once, with its first paragraph as a preview.
+- **Clean results & previews**: redirects are merged into their article, so each article appears once, with a bounded content excerpt as a preview.
 - **Progressive results**: sources search in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover available sources, filter without searching again, tolerate individual source failures, and optionally load thumbnails after text results appear.
 - **Lightweight and offline**: runs on low resource devices, such as on a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
@@ -43,29 +43,31 @@ Redirects, including the small "forwarding" pages some
 ZIMs use instead of real redirects, are stored as **title-only** entries that point to their article.
 Thus, searching "USA" still finds the United States page.
 
-**Text extraction.** By default, Zimantic reads the whole visible text of each HTML article.
-Set `first_paragraph = true` in `config.toml` to keep only the first substantial paragraph instead.
-Wikipedia's writer's guidelines require opening paragraph to summarize the whole article, so it is
-the most compact description and can be the best text to compare with questions and descriptions.
+**Text extraction.** Zimantic skips stylesheets, scripts and footnote markers like `[1]`, then
+collects substantial visible blocks. Paragraphs are preferred; when a page has no suitable paragraph,
+`blockquote`, `pre`, `div`, `section`, `article` and `main` are considered before ordered-list blocks
+used by dictionary-style pages. Page chrome such as navigation, headers, footers and asides is ignored.
 
-**Forming clean text.** Zimantic skips stylesheets, scripts and footnote markers like `[1]`.
-In `first_paragraph` mode, it takes the first `<p>` with at least 50 characters, so pages that open
-with a one-liner like "Mercury may refer to:" (disambiguation pages, lists) are stored as title-only.
-The first-paragraph result is capped at 1,000 characters. Both modes inspect at most the first 4 MiB
-of each HTML page by default; change `max_html_bytes` to tune that limit.
+The same prioritized block stream produces two independent excerpts. The preview is capped by
+`max_preview_chars` (1,000 by default), while the embedding text is capped by `max_embedding_tokens`
+(256 by default, including the model's two special tokens). `preview_overflow = "skip"` keeps looking
+for another block when one does not fit; `embedding_overflow = "truncate"` fills the remaining model
+budget. If no block fits, the best available block is truncated as a last resort. Both modes inspect
+at most the first 4 MiB of each HTML page by default; change `max_html_bytes` to tune that limit.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) aren't refused: `build` runs on any ZIM and
-extracts their visible HTML text. In `first_paragraph` mode, the same paragraph rule applies to
-every HTML page, but nothing has been tuned or tested for them, so results depend on how each site
-lays out its pages. PDFs inside a ZIM are skipped.
+extracts their visible HTML text using the same block hierarchy. PDFs inside a ZIM are skipped.
 
 **Embedding.** The title and extracted text are turned into a vector (a list of numbers describing their meaning), currently by
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-Input is capped at 256 tokens.
+Input is capped at `max_embedding_tokens` (256 by default, including the two special tokens).
+This is an explicit application budget; the ONNX input shape is dynamic. Only the bounded embedding
+excerpt is stored and embedded, so discarded article text is never retained for vectors. Search results
+use the separate preview excerpt and expose at most `max_preview_chars` characters.
 
 **Storage.** Each ZIM gets two files in `index_dir`:
-- `<name>.sqlite`: titles, extracted text, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
-- `<name>.faiss`: the vectors, in one of two layouts depending on aritlce count:
+- `<name>.sqlite`: titles, preview and embedding excerpts, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
+- `<name>.faiss`: the vectors, in one of two layouts depending on article count:
 
 | ZIM size | Vector index | Why |
 |---|---|---|
@@ -81,6 +83,9 @@ If a build stops, running it again resumes from the last saved batch. The FAISS 
 written atomically and the SQLite `done` marker is written only after it is complete, so an
 interrupted finalization can be resumed safely. When upgrading a `fast` index, the existing
 title/full-text index remains available until the replacement is complete.
+Extracted excerpts are stored in the SQLite index, so changing `max_preview_chars`,
+`max_embedding_tokens`, overflow policies, `max_html_bytes`, or extraction behavior requires deleting
+that ZIM's `.sqlite` and `.faiss` files before rebuilding.
 
 ### 2. Starting the server (`serve`, once)
 
@@ -108,7 +113,7 @@ enough to trigger from `systemd.path`, so the server never has to poll the direc
 
    | Search | Finds | Good at | Time |
    |---|---|---|---|
-   | **Meaning** (FAISS) | Articles whose first-paragraph vector is closest to the query (cosine similarity) | Questions, descriptions, other languages | ~13 ms |
+   | **Meaning** (FAISS) | Articles whose bounded content-excerpt vector is closest to the query (cosine similarity) | Questions, descriptions, other languages | ~13 ms |
    | **Title words** (SQLite FTS5, BM25 ranking) | Titles containing every word of the query, including redirect titles | Exact titles, alternate names (via redirect titles) | ~4 ms |
    | **Full text** (the ZIM's own Kiwix index) | Articles containing the words anywhere | Words buried deep inside an article | ~8 ms |
 
@@ -186,7 +191,7 @@ languages may contain mistakes.
 | Hausa, Yoruba | | | | 0% → 0% | 0% → 0% |
 
 **Where Kiwix is still better, or cheaper:**
-- **Words buried deep inside an article.** Kiwix indexes every word thus performs better on deeper searches (68% first vs 28%; in the top 5 they're nearly tied, 78% vs 76%). While Zimantic only indexes each article's title and first paragraph.
+- **Words buried deep inside an article.** Kiwix indexes every word thus performs better on deeper searches (68% first vs 28%; in the top 5 they're nearly tied, 78% vs 76%). While Zimantic only indexes each article's title and bounded content excerpt.
 - **No setup.** Kiwix search works the moment a ZIM is added. Zimantic must index each ZIM
   first.
 - **Smaller footprint.** Zimantic adds a `.sqlite` and `.faiss` per ZIM and needs more RAM.
@@ -194,7 +199,7 @@ languages may contain mistakes.
 ## Requirements
 - Python 3.12, 3.13 or 3.14 (the pinned numpy needs 3.12+; libzim doesn't support 3.15 yet)
 - About 120 MB for the embedding model, plus your ZIM files
-- Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find the first paragraph)
+- Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
 - *Searching does not require Kiwix.* To open the articles from the result links, run
   [kiwix-serve](https://kiwix.org/en/applications/) with the same ZIMs (set its address as `kiwix_url` in `config.toml`).
 

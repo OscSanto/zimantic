@@ -21,6 +21,7 @@ from libzim.search import Query, Searcher
 
 from .cache import DEFAULT_CACHE_SIZE, QueryCache
 from .contracts import SourceInfo, SourceResult
+from .zim import DEFAULT_PREVIEW_CHARS
 
 
 MAX_QUERY_LENGTH = 4096
@@ -233,6 +234,7 @@ class Search:
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
+        self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
         self.max_concurrent_searches = _int_config(
             cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
         )
@@ -853,7 +855,7 @@ class Search:
             batch = values[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                "SELECT rowid, title, lead, path, target FROM docs "
+                "SELECT rowid, title, preview, path, target FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
             rows.update({int(row[0]): row for row in db.execute(query, batch)})
@@ -863,7 +865,7 @@ class Search:
             batch = list(target_ids)[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                "SELECT rowid, title, lead, path, target FROM docs "
+                "SELECT rowid, title, preview, path, target FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
             rows.update({int(row[0]): row for row in db.execute(query, batch)})
@@ -884,13 +886,13 @@ class Search:
             row = rows.get(target)
             if not row:
                 continue
-            _, title, lead, path, _ = row
+            _, title, preview, path, _ = row
             doc = {
                 "id": f"{source.key}:{path}",
                 "source_key": source.key,
                 "source": source.name,
                 "title": title,
-                "lead": lead or "",
+                "lead": self._preview(preview or ""),
                 "path": path,
                 "url": (
                     f"{self.cfg['kiwix_url'].rstrip('/')}/"
@@ -903,6 +905,14 @@ class Search:
                 doc["members"] = self._member_links(source, members_json)
             docs[rowid] = doc
         return docs
+
+    def _preview(self, text: str) -> str:
+        limit = getattr(
+            self,
+            "preview_chars",
+            _int_config(self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS),
+        )
+        return text[:limit]
 
     @staticmethod
     def _fetch_hubs(db: sqlite3.Connection, rowids: set[int]) -> dict[int, str]:
@@ -989,7 +999,7 @@ class Search:
                 continue
             title = _child_text(item, "title")
             link = _child_text(item, "link")
-            snippet = re.sub(r"\s+", " ", _child_text(item, "description")).strip()
+            snippet = self._preview(re.sub(r"\s+", " ", _child_text(item, "description")).strip())
             identity = (title.casefold(), link)
             if not title and not link or identity in seen:
                 continue
@@ -1068,7 +1078,7 @@ class Search:
         scored: list[tuple[float, float, float, int, str, str, dict[str, Any]]] = []
         for identity, doc in docs.items():
             title_tokens = _content_terms(doc["title"])
-            lead_tokens = _content_terms(doc.get("lead", ""))
+            preview_tokens = _content_terms(doc.get("lead", ""))
             title_matches = sum(term in set(title_tokens) for term in query_words)
             title_coverage = title_matches / len(query_words) if query_words else 0.0
             title_density = _density(query_words, title_tokens)
@@ -1076,7 +1086,7 @@ class Search:
             # complete matches without letting a short partial match win.
             title_quality = title_coverage * (1.0 + title_density) / 2.0
             phrase_hit = _phrase(query_words, title_tokens)
-            snippet_coverage = _coverage(query_words, lead_tokens)
+            snippet_coverage = _coverage(query_words, preview_tokens)
             intent = max(
                 (_intent_match(source_by_key[key], query) for key in {doc["source_key"]} if key in source_by_key),
                 default=0.0,

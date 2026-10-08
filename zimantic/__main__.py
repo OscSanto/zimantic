@@ -53,7 +53,13 @@ def main() -> None:
    
     if args.command == "build":
         from .build import build as build_zim
-        from .zim import DEFAULT_MAX_HTML_BYTES
+        from .embed import DEFAULT_MAX_EMBEDDING_TOKENS, Embedder
+        from .zim import (
+            DEFAULT_EMBEDDING_OVERFLOW,
+            DEFAULT_MAX_HTML_BYTES,
+            DEFAULT_PREVIEW_CHARS,
+            DEFAULT_PREVIEW_OVERFLOW,
+        )
 
         # Expand the positional paths: files are used directly, folders mean
         # their *.zim, and no argument at all means zim_dir from config.toml.
@@ -90,8 +96,10 @@ def main() -> None:
         # fast builds never embed: skip loading the model so they start instantly.
         embedder = None
         if not args.fast:
-            from .embed import Embedder
-            embedder = Embedder(cfg["model_dir"])
+            embedder = Embedder(
+                cfg["model_dir"],
+                max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+            )
         for zim in zims:
             build_zim(
                 zim,
@@ -99,8 +107,11 @@ def main() -> None:
                 embedder,
                 cfg["batch_size"],
                 fast=args.fast,
-                first_paragraph=bool(cfg.get("first_paragraph", False)),
                 max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
+                max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
+                max_embedding_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
+                embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
             )
 
     elif args.command == "serve":
@@ -115,8 +126,11 @@ def main() -> None:
                 file=sys.stderr,
             )
         if not args.fast:
-            from .embed import Embedder
-            search.embedder = Embedder(cfg["model_dir"])
+            from .embed import DEFAULT_MAX_EMBEDDING_TOKENS, Embedder
+            search.embedder = Embedder(
+                cfg["model_dir"],
+                max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+            )
         if args.fast:
             print("zimantic: fast mode: title and ZIM full-text search only")
         serve(search, cfg["port"])

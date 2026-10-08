@@ -4,15 +4,19 @@ import posixpath
 import re
 from html.parser import HTMLParser
 from urllib.parse import unquote
+from typing import Callable, Iterator
 from libzim.reader import Archive, set_cluster_cache_max_size
+from .settings import DEFAULT_MAX_EMBEDDING_TOKENS
 
 # libzim undercounts this cache: its 16 MB default really used ~170 MB. 1 MB used ~4 MB and wasn't slower.
 set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
 
-MIN_LEAD = 50    # shorter first paragraphs? -> page searchable by title only
-MAX_LEAD = 1000  # characters kept for display; the model reads at most 256 tokens anyway
+MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
+DEFAULT_PREVIEW_CHARS = 1000
 DEFAULT_MAX_HTML_BYTES = 4 << 20
-MAX_HTML_BYTES = DEFAULT_MAX_HTML_BYTES  # compatibility alias for the default extraction limit
+DEFAULT_PREVIEW_OVERFLOW = "skip"
+DEFAULT_EMBEDDING_OVERFLOW = "truncate"
+OVERFLOW_POLICIES = {"skip", "truncate"}
 REFRESH_SCAN_BYTES = 64 << 10
 REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
 
@@ -34,10 +38,6 @@ _NON_ARTICLE_PREFIXES = {
     "talk", "template", "user", "wikipedia", "wiktionary", "wikiquote",
     "wikisource", "module", "draft", "book", "timedtext",
 }
-
-class _Found(Exception): # stop feed() early
-    pass
-
 
 class _MetaRefresh(HTMLParser):
     def __init__(self):
@@ -72,69 +72,87 @@ def _refresh_url(html: bytes):
 
 
 class _TextExtractor(HTMLParser):
-    """Collect either the first substantial paragraph or all visible page text.
+    """Collect prioritized, visible text blocks from an HTML page."""
 
-    How it runs: we never call the handle_* methods ourselves. HTMLParser.feed(html) reads the
-    HTML left to right and calls them as it goes, in whatever order the HTML has:
-        <p>         -> handle_starttag("p", attrs)
-        some text   -> handle_data("some text")
-        </p>        -> handle_endtag("p")
-    HTMLParser's own versions do nothing; this class overrides them to collect the first paragraph.
-    """
-
-    BLOCK_TAGS = {
-        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl",
-        "dt", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5",
-        "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
-        "table", "td", "th", "tr", "ul",
+    CANDIDATE_PRIORITIES = {
+        "p": 0,
+        "blockquote": 1,
+        "pre": 1,
+        "div": 1,
+        "section": 1,
+        "article": 1,
+        "main": 1,
+        "ol": 2,
+        "li": 2,
     }
     SKIP_TAGS = {"head", "script", "style", "template"}
+    CHROME_TAGS = {"aside", "footer", "header", "nav"}
 
-    def __init__(self, first_paragraph: bool):
+    def __init__(self):
         super().__init__()
-        self.first_paragraph = first_paragraph
-        self.in_p = False
         self.skipping = []  # open tags whose contents are not article text
+        self.blocks = []
+        self.active = []
+        self.block_order = 0
 
-        # Text arrives in pieces, e.g. ["A ", "black hole", " is a region of ", "spacetime", "…"].
-        self.text = []
-        self.parts = []
-        self.result = ""
-
-    # Called at every opening tag.
     def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP_TAGS or (
-            tag == "sup" and "reference" in (dict(attrs).get("class") or "")
+        if self.skipping:
+            return
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").casefold().split()
+        is_footer = tag == "div" and any(
+            class_name.endswith("footer") for class_name in classes
+        )
+        if tag in self.SKIP_TAGS or is_footer or tag in self.CHROME_TAGS or (
+            tag == "sup" and "reference" in (attributes.get("class") or "")
         ):
             self.skipping.append(tag)
             return
 
-        if self.first_paragraph and tag == "p":
-            self.in_p = True
-            self.text = []
-        elif not self.first_paragraph and tag in self.BLOCK_TAGS:
-            self.parts.append("\n")
+        if tag in self.CANDIDATE_PRIORITIES:
+            block = {
+                "tag": tag,
+                "priority": self.CANDIDATE_PRIORITIES[tag],
+                "order": self.block_order,
+                "nested": False,
+                "parts": [],
+            }
+            self.blocks.append(block)
+            self.active.append(block)
+            self.block_order += 1
 
     def handle_endtag(self, tag):
         if self.skipping and self.skipping[-1] == tag:  # the <style>/<script>/<sup> we were skipping ended
             self.skipping.pop()
-        elif self.first_paragraph and tag == "p" and self.in_p:
-            self.in_p = False
-            text = " ".join("".join(self.text).split())  # glue the pieces, collapse newlines/extra spaces
-            if len(text) >= MIN_LEAD:
-                self.result = text[:MAX_LEAD]
-                raise _Found  # done: skip the rest of the article
-            # too short ("Mercury may refer to:"): drop it and wait for the next <p>
-        elif not self.first_paragraph and tag in self.BLOCK_TAGS:
-            self.parts.append("\n")
+        elif tag in self.CANDIDATE_PRIORITIES:
+            for index in range(len(self.active) - 1, -1, -1):
+                if self.active[index]["tag"] == tag:
+                    block = self.active.pop(index)
+                    text = " ".join("".join(block["parts"]).split())
+                    block["text"] = text
+                    if len(text) >= MIN_BLOCK_CHARS:
+                        for parent in self.active[:index]:
+                            parent["nested"] = True
+                    break
 
     def handle_data(self, data):
         if self.skipping:
             return
-        if self.first_paragraph and self.in_p:
-            self.text.append(data)
-        elif not self.first_paragraph:
-            self.parts.append(data)
+        for block in self.active:
+            block["parts"].append(data)
+
+    def candidates(self) -> list[str]:
+        candidates = []
+        for block in self.blocks:
+            if block["nested"]:
+                continue
+            text = block.get("text", " ".join("".join(block["parts"]).split()))
+            if len(text) >= MIN_BLOCK_CHARS:
+                candidates.append((block["priority"], block["order"], text))
+        return [
+            text
+            for _, _, text in sorted(candidates, key=lambda candidate: candidate[:2])
+    ]
 
 
 class _LinkExtractor(HTMLParser):
@@ -216,48 +234,122 @@ def disambiguation_members(html: bytes, path: str, limit: int = MAX_DISAMBIG_MEM
     return members
 
 
-CHUNK = 65536  # bytes of HTML per feed() call (64 KB); most leads are found in the first chunk
+CHUNK = 65536  # bytes of HTML per feed() call (64 KB)
 
 
-def _extract_text(html: bytes, first_paragraph: bool) -> str:
-    parser = _TextExtractor(first_paragraph)
+def iter_text_blocks(html: bytes) -> Iterator[str]:
+    """Yield substantial article blocks, preferring paragraphs over fallbacks."""
+    parser = _TextExtractor()
 
     # "ignore" drops bytes that aren't valid UTF-8 rather than crashing.
     decoder = codecs.getincrementaldecoder("utf-8")("ignore")
-    try:
-        for start in range(0, len(html), CHUNK):
-            parser.feed(decoder.decode(html[start:start + CHUNK]))  # feed() calls the handle_* methods
-        parser.feed(decoder.decode(b"", final=True))
-    except _Found:
-        pass  
-    if first_paragraph:
-        return parser.result
-    return " ".join("".join(parser.parts).split())
+    for start in range(0, len(html), CHUNK):
+        parser.feed(decoder.decode(html[start:start + CHUNK]))
+    parser.feed(decoder.decode(b"", final=True))
+    yield from parser.candidates()
 
 
-def first_paragraph(html: bytes) -> str: # "" if no paragraph was long enough
-    return _extract_text(html, first_paragraph=True)
+def _policy(value: str, default: str) -> str:
+    policy = default if value is None else str(value).casefold()
+    if policy not in OVERFLOW_POLICIES:
+        choices = ", ".join(sorted(OVERFLOW_POLICIES))
+        raise ValueError(f"overflow policy must be one of {choices}, got {value!r}")
+    return policy
 
 
-def full_text(html: bytes) -> str:
-    return _extract_text(html, first_paragraph=False)
+def _preview_excerpt(
+    candidates: list[str],
+    max_chars: int,
+    overflow: str,
+) -> str:
+    accepted: list[str] = []
+    for candidate in candidates:
+        separator = "\n\n" if accepted else ""
+        available = max_chars - len(separator) - sum(map(len, accepted)) - max(0, len(accepted) - 1) * 2
+        if len(candidate) <= available:
+            accepted.append(candidate)
+        elif overflow == "truncate" and available > 0:
+            accepted.append(candidate[:available])
+            break
+    if accepted:
+        return "\n\n".join(accepted)
+    return candidates[0][:max_chars] if candidates else ""
+
+
+def _embedding_excerpt(
+    candidates: list[str],
+    title: str,
+    max_tokens: int,
+    overflow: str,
+    token_count: Callable[[str, str], int] | None,
+    truncate: Callable[[str, str], str] | None,
+) -> str:
+    if not candidates or token_count is None or truncate is None:
+        return ""
+    prefix = f"passage: {title}\n"
+    accepted: list[str] = []
+    for candidate in candidates:
+        separator = "\n\n" if accepted else ""
+        current = "\n\n".join(accepted)
+        proposed = current + separator + candidate
+        if token_count(proposed, prefix) <= max_tokens:
+            accepted.append(candidate)
+            continue
+        if overflow == "truncate":
+            fitted = truncate(candidate, prefix=prefix + current + separator)
+            if fitted:
+                accepted.append(fitted)
+            break
+    if accepted:
+        return "\n\n".join(accepted)
+    return truncate(candidates[0], prefix=prefix)
+
+
+def extract_excerpts(
+    html: bytes,
+    title: str = "",
+    max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    max_embedding_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+    preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
+    embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
+    embedding_token_count: Callable[[str, str], int] | None = None,
+    embedding_truncate: Callable[[str, str], str] | None = None,
+) -> tuple[str, str]:
+    """Return bounded preview and embedding excerpts from visible article blocks."""
+    max_chars = max(1, int(max_preview_chars))
+    max_tokens = max(1, int(max_embedding_tokens))
+    candidates = list(iter_text_blocks(html))
+    return (
+        _preview_excerpt(candidates, max_chars, _policy(preview_overflow, DEFAULT_PREVIEW_OVERFLOW)),
+        _embedding_excerpt(
+            candidates,
+            title,
+            max_tokens,
+            _policy(embedding_overflow, DEFAULT_EMBEDDING_OVERFLOW),
+            embedding_token_count,
+            embedding_truncate,
+        ),
+    )
 
 
 def read_entry(
     zim: Archive,
     i: int,
     fast: bool = False,
-    first_paragraph: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
+    max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    max_embedding_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+    preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
+    embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
+    embedder=None,
 ):
-    """Return (id, title, lead, path, target_id, members) for an HTML page, or None.
+    """Return (id, title, preview, embedding, path, target_id, members), or None.
 
-    Redirects (real ones, and small meta refresh pages) get lead "" and the
+    Redirects (real ones, and small meta refresh pages) get empty excerpts and the
     path and id of the page they point to, so they are searchable by title only.
 
     fast=True stores the title and path without reading the article body, so no
-    text (and therefore no vector) is produced. Otherwise, first_paragraph
-    selects between the first substantial paragraph and the whole page text.
+    text (and therefore no vector) is produced.
 
     members is a JSON array of {title, path} for a disambiguation page (so
     search can cluster the hub with its entries), or None for ordinary pages.
@@ -265,14 +357,14 @@ def read_entry(
     entry = zim._get_entry_by_id(i)
     if entry.is_redirect:
         target = entry.get_redirect_entry()
-        return i, entry.title, "", target.path, target._index, None
+        return i, entry.title, "", "", target.path, target._index, None
     
     item = entry.get_item()
     if not item.mimetype.startswith("text/html"): 
         return None
 
     if fast:
-        return i, entry.title, "", entry.path, None, None
+        return i, entry.title, "", "", entry.path, None, None
 
     content = item.content
     try:
@@ -289,9 +381,18 @@ def read_entry(
         if not zim.has_entry_by_path(path):
             return None
         target = zim.get_entry_by_path(path)
-        return i, entry.title, "", target.path, target._index, None
-    text = _extract_text(html, first_paragraph)
+        return i, entry.title, "", "", target.path, target._index, None
+    preview, embedding = extract_excerpts(
+        html,
+        title=entry.title,
+        max_preview_chars=max_preview_chars,
+        max_embedding_tokens=max_embedding_tokens,
+        preview_overflow=preview_overflow,
+        embedding_overflow=embedding_overflow,
+        embedding_token_count=getattr(embedder, "token_count", None),
+        embedding_truncate=getattr(embedder, "truncate", None),
+    )
     members = None
-    if is_disambiguation(entry.title, text):
+    if is_disambiguation(entry.title, preview):
         members = json.dumps(disambiguation_members(html, entry.path))
-    return i, entry.title, text, entry.path, None, members
+    return i, entry.title, preview, embedding, entry.path, None, members

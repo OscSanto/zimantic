@@ -19,6 +19,7 @@ def _install_optional_dependency_stubs():
     libzim.__path__ = []
     reader = types.ModuleType("libzim.reader")
     reader.Archive = object
+    reader.set_cluster_cache_max_size = lambda size: None
     search = types.ModuleType("libzim.search")
     search.Query = object
     search.Searcher = object
@@ -64,11 +65,11 @@ def _title_search(rows, query, limit=1):
     db = sqlite3.connect(":memory:", check_same_thread=False)
     db.execute(
         "CREATE VIRTUAL TABLE docs USING fts5("
-        "title, lead UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED)"
     )
     db.executemany(
-        "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)",
-        rows,
+        "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
+        [(row[0], row[1], row[2], "", row[3], row[4]) for row in rows],
     )
     source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
     search = _bare_search({"long_query": 10, "candidate_count": 2, "kiwix_url": "http://example/content"})
@@ -264,11 +265,11 @@ class SearchContractTests(unittest.TestCase):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, lead UNINDEXED, path UNINDEXED, target UNINDEXED)"
+            "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED)"
         )
         db.execute(
-            "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)",
-            (1, "Tire Change", "A useful tire change guide.", "tire-change", None),
+            "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
+            (1, "Tire Change", "A useful tire change guide.", "", "tire-change", None),
         )
 
         class FakeFaiss:
@@ -297,6 +298,31 @@ class SearchContractTests(unittest.TestCase):
         result = events[-1]["results"][0]
         self.assertEqual(result["title"], "Tire Change")
         self.assertEqual(result["path"], "tire-change")
+
+    def test_local_result_preview_is_bounded(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        )
+        db.execute(
+            "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
+            (1, "Long page", "x" * 1500, "", "long-page", None),
+        )
+
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        search = object.__new__(Search)
+        search.cfg = {
+            "kiwix_url": "http://example/content",
+            "max_preview_chars": 24,
+        }
+
+        try:
+            doc = search._fetch_docs(source, db, {1})[1]
+        finally:
+            db.close()
+
+        self.assertEqual(len(doc["lead"]), 24)
 
     def test_title_search_falls_back_to_prefix_when_exact_matches_nothing(self):
         # Exact token matching misses these because the query word is a truncated
@@ -383,12 +409,13 @@ def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
     db = sqlite3.connect(index_dir / f"{name}.sqlite")
     db.executescript(
         "CREATE VIRTUAL TABLE docs USING fts5("
-        "title, lead UNINDEXED, path UNINDEXED, target UNINDEXED, "
+        "title, preview UNINDEXED, embedding UNINDEXED, path UNINDEXED, target UNINDEXED, "
         "tokenize='unicode61 remove_diacritics 2');"
         "CREATE TABLE meta(key TEXT PRIMARY KEY, value);"
     )
     db.executemany(
-        "INSERT INTO docs(rowid, title, lead, path, target) VALUES (?, ?, ?, ?, ?)", rows
+        "INSERT INTO docs(rowid, title, preview, embedding, path, target) VALUES (?, ?, ?, ?, ?, ?)",
+        [(row[0], row[1], row[2], "", row[3], row[4]) for row in rows],
     )
     db.execute("INSERT INTO meta VALUES ('done', ?)", (done,))
     db.commit()
