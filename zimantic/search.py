@@ -340,12 +340,14 @@ class Search:
             removed = sorted(current_names - set(found))
             added = []
             upgraded = []
+            any_changed = False
 
             for name in removed:
                 with self._state_lock:
                     current = self.indexes.pop(name, None)
                 if current is not None:
                     self._close_index(current)
+                    any_changed = True
 
             for name, db_path in found.items():
                 with self._state_lock:
@@ -380,11 +382,13 @@ class Search:
                     if existing is None:
                         self.indexes[name] = fresh
                         added.append(name)
+                        any_changed = True
                     elif existing is current:
                         self.indexes[name] = fresh
                         old = existing
                         if self.semantic and not existing.semantic and fresh.semantic:
                             upgraded.append(name)
+                        any_changed = True
                     else:
                         close_fresh = True
                 if old is not None:
@@ -392,7 +396,10 @@ class Search:
                 if close_fresh:
                     self._close_index(fresh)
 
-            self.cache.clear()
+            if any_changed:
+                # Index content, and therefore what is searchable, changed;
+                # cached answers under the same names can no longer be fresh.
+                self.cache.clear()
             self.refresh_sources()
             with self._state_lock:
                 indexes = sorted(self.indexes)
@@ -498,10 +505,15 @@ class Search:
                         intent_phrases=_intent_phrases(entry["book"]),
                     )
 
+            old_sources = self.sources
             self.sources = dict(sorted(merged.items(), key=lambda pair: pair[1].name.casefold()))
+            changed = self.sources != old_sources
             sources = self.source_dicts()
-        # Availability or catalog may have changed, so cached answers can be stale.
-        self.cache.clear()
+        if changed:
+            # The set of searchable sources changed, so prior answers can be stale.
+            # Keeping the cache while the source set is unchanged lets repeated
+            # queries (e.g. page reloads) be answered without recomputing.
+            self.cache.clear()
         return sources
 
     def _catalog_entries(self, server: str) -> list[dict[str, str]]:

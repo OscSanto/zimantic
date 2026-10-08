@@ -1,10 +1,9 @@
 import argparse
-import json
+import os
+import signal
+import sys
 import tomllib
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-import sys
 
 def main() -> None:
 
@@ -41,10 +40,14 @@ def main() -> None:
 
     reload_cmd = commands.add_parser(
         "reload",
-        help="ask a running serve process to rescan index_dir (fast; suitable for systemd.path)",
+        help="ask a running serve process to rescan index_dir (sends SIGHUP; suitable for systemd.path or cron)",
     )
-    reload_cmd.add_argument("--url", help="base URL of the running server (default http://127.0.0.1:<port>)")
-    reload_cmd.add_argument("--timeout", type=float, default=15.0, help="request timeout in seconds")
+    reload_cmd.add_argument(
+        "--pid",
+        type=Path,
+        default=Path("zimantic.pid"),
+        help="file holding the server's PID (default: ./zimantic.pid)",
+    )
 
     args = parser.parse_args()
 
@@ -161,23 +164,30 @@ def main() -> None:
         serve(search, cfg["port"])
 
     elif args.command == "reload":
-        if not args.url and "port" not in cfg:
-            sys.exit("zimantic: reload needs --url (or config.toml with a port)")
-        base = args.url or f"http://127.0.0.1:{cfg['port']}"
-        url = base.rstrip("/") + "/api/reload"
+        pid_file = args.pid
         try:
-            request = Request(url, method="POST", headers={"Accept": "application/json"})
-            with urlopen(request, timeout=args.timeout) as response:
-                summary = json.loads(response.read() or b"{}")
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
-            sys.exit(f"zimantic: reload failed ({error}); is `zimantic serve` running at {base}?")
-        print(
-            "zimantic: reloaded "
-            f"{len(summary.get('indexes', []))} index(es) "
-            f"(+{len(summary.get('added', []))} new, "
-            f"~{len(summary.get('upgraded', []))} upgraded, "
-            f"-{len(summary.get('removed', []))} removed)"
-        )
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            sys.exit(
+                f"zimantic: no server PID in {pid_file}; "
+                f"Is `zimantic serve` running from this folder (or pass --pid)?"
+            )
+        sighup = getattr(signal, "SIGHUP", None)
+        if sighup is None:
+            sys.exit("zimantic: reload via signals is not supported on this platform")
+        try:
+            os.kill(pid, sighup)
+        except ProcessLookupError:
+            sys.exit(
+                f"zimantic: no running process with PID {pid}; "
+                f"is the PID file {pid_file} stale?"
+            )
+        except PermissionError:
+            sys.exit(
+                f"zimantic: permission denied signalling PID {pid}; "
+                "run the reload command as the same user as the server"
+            )
+        print(f"zimantic: reload signal (SIGHUP) sent to PID {pid}")
 
 if __name__ == "__main__":
     main()

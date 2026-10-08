@@ -31,3 +31,18 @@ include = ["zimantic*"]
 
 [tool.setuptools.package-data]
 zimantic = ["index.html"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+norecursedirs = [
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "node_modules",
+    "venv",
+    "__pypackages__",
+]

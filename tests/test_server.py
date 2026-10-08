@@ -18,12 +18,6 @@ class FakeSearch:
     def source_dicts(self):
         return [{"key": "manual", "name": "Manual", "available": True}]
 
-    def refresh_sources(self):
-        return self.source_dicts()
-
-    def reload(self):
-        return {"indexes": ["manual"], "added": [], "removed": [], "upgraded": []}
-
     @staticmethod
     def _validate_query(query):
         if not query.strip():
@@ -47,6 +41,17 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/sources").json()[0]["key"], "manual")
         self.assertEqual(self.client.get("/api/search?q=page").json()[0]["title"], "Page")
 
+    def test_sources_ignores_client_refresh_parameter(self):
+        # Clients cannot force a source refresh: any refresh parameter is ignored.
+        response = self.client.get("/api/sources?refresh=true")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["key"], "manual")
+
+    def test_reload_is_not_exposed_over_http(self):
+        # Reload is an admin action via `zimantic reload` (SIGHUP), never over HTTP.
+        response = self.client.post("/api/reload")
+        self.assertEqual(response.status_code, 404)
+
     def test_streaming_search_returns_ndjson(self):
         response = self.client.get("/api/search/stream?q=page")
         self.assertTrue(response.headers["content-type"].startswith("application/x-ndjson"))
@@ -57,11 +62,6 @@ class ServerTests(unittest.TestCase):
 
     def test_streaming_search_validates_query(self):
         self.assertEqual(self.client.get("/api/search/stream?q=%20").status_code, 400)
-
-    def test_reload_endpoint_rescans(self):
-        response = self.client.post("/api/reload")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["indexes"], ["manual"])
 
     def test_health_reports_indexes_and_cache(self):
         body = self.client.get("/api/health").json()
