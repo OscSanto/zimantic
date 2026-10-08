@@ -89,7 +89,7 @@ def build(
 
         zim = Archive(str(zim_path))
         start = int(meta.get("next", 0))
-        batch, articles = [], 0  # articles: rows in the batch that have text to embed
+        batch = []
         for i in tqdm(range(start, zim.entry_count), initial=start, total=zim.entry_count, desc=zim_path.stem):
             row = read_entry(
                 zim,
@@ -100,10 +100,11 @@ def build(
             )
             if row:
                 batch.append(row)
-                articles += bool(row[2])
-            if articles >= batch_size:
+            # Keep fast builds bounded too: they have no rows with text to
+            # embed, so an article-count threshold would never flush.
+            if len(batch) >= batch_size:
                 _save(db, embedder, batch, i + 1)
-                batch, articles = [], 0
+                batch = []
         _save(db, embedder, batch, zim.entry_count)
 
         if fast:
@@ -198,7 +199,14 @@ def _write_faiss(db, path: Path) -> None:
         index = faiss.index_factory(dim, f"IVF{cluster_centre_count},SQ8", faiss.METRIC_INNER_PRODUCT)
 
         step = _faiss_training_step(n, cluster_centre_count)
-        index.train(_load(db.execute("SELECT id, v FROM vecs WHERE id % ? = 0", (step,)).fetchall())[1])
+        training_rows = db.execute(
+            "SELECT id, v FROM ("
+            "SELECT id, v, ROW_NUMBER() OVER (ORDER BY id) AS position "
+            "FROM vecs"
+            ") WHERE (position - 1) % ? = 0",
+            (step,),
+        ).fetchall()
+        index.train(_load(training_rows)[1])
     last = -1
     while rows := db.execute("SELECT id, v FROM vecs WHERE id > ? ORDER BY id LIMIT 50000", (last,)).fetchall():
         ids, vectors = _load(rows)

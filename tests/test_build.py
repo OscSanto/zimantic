@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 
 build_module = importlib.import_module("zimantic.build")
 
@@ -104,6 +106,64 @@ class FaissTrainingTests(unittest.TestCase):
         cluster_count = int(4 * vector_count**0.5)
 
         self.assertEqual(build_module._faiss_training_step(vector_count, cluster_count), 1)
+
+
+class BuildBatchTests(unittest.TestCase):
+    def test_fast_build_flushes_rows_while_scanning(self):
+        class _ManyFakeArchive(_FakeArchive):
+            entry_count = 5
+
+        rows = [
+            (index, f"Title {index}", "", f"path-{index}", None)
+            for index in range(5)
+        ]
+        saved = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+
+            def save(_db, _embedder, batch, next_entry):
+                saved.append((len(batch), next_entry))
+
+            with (
+                patch.object(build_module, "Archive", _ManyFakeArchive),
+                patch.object(build_module, "read_entry", side_effect=rows),
+                patch.object(build_module, "_save", side_effect=save),
+            ):
+                build_module.build(directory / "manual.zim", directory, None, 2, fast=True)
+
+        self.assertEqual(saved, [(2, 2), (2, 4), (1, 5)])
+
+
+class FaissTrainingSamplingTests(unittest.TestCase):
+    def test_training_samples_use_vector_positions_not_sparse_entry_ids(self):
+        class _FakeIndex:
+            def train(self, vectors):
+                self.training_vectors = vectors
+
+            def add_with_ids(self, _vectors, _ids):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            db = sqlite3.connect(directory / "manual.sqlite")
+            db.execute("CREATE TABLE vecs(id INTEGER PRIMARY KEY, v BLOB)")
+            vector = np.array([1.0, 2.0], dtype=np.float16).tobytes()
+            db.executemany(
+                "INSERT INTO vecs VALUES (?, ?)",
+                ((2 * index + 1, vector) for index in range(10_000)),
+            )
+            db.commit()
+            index = _FakeIndex()
+            with (
+                patch.object(build_module, "_faiss_training_step", return_value=2),
+                patch.object(build_module.faiss, "index_factory", return_value=index),
+                patch.object(build_module.faiss, "write_index"),
+            ):
+                build_module._write_faiss(db, directory / "manual.faiss")
+            db.close()
+
+        self.assertEqual(index.training_vectors.shape, (5_000, 2))
 
 
 if __name__ == "__main__":

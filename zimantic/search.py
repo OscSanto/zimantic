@@ -47,8 +47,14 @@ class _LocalIndex:
     searcher: Searcher | None
     lock: threading.Lock
     db_path: str | None = None  # read-only sqlite URI, used for per-thread connections
+    db_signature: tuple[int, int, int, int] | None = None
+    faiss_signature: tuple[int, int, int, int] | None = None
     _thread: threading.local = field(default_factory=threading.local)
     _conns: list[sqlite3.Connection] = field(default_factory=list)
+    _lifecycle: threading.Condition = field(default_factory=threading.Condition, repr=False)
+    _active_searches: int = 0
+    _retired: bool = False
+    _closed: bool = False
 
     @property
     def semantic(self) -> bool:
@@ -65,6 +71,14 @@ def _int_config(cfg: dict, key: str, default: int, minimum: int = 1) -> int:
         return max(minimum, int(cfg.get(key, default)))
     except (TypeError, ValueError):
         return default
+
+
+def _file_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 def _nprobe(faiss_index: Any, cfg: dict) -> int:
@@ -197,6 +211,8 @@ class Search:
         self.semantic = bool(semantic)
         self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
+        self._state_lock = threading.RLock()
+        self._reload_lock = threading.Lock()
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
@@ -254,7 +270,16 @@ class Search:
                     print(f"{db_path.stem}: ZIM unavailable ({error}); title search only")
                     archive = None
                     searcher = None
-            return _LocalIndex(db, faiss_index, archive, searcher, threading.Lock(), db_path=uri)
+            return _LocalIndex(
+                db,
+                faiss_index,
+                archive,
+                searcher,
+                threading.Lock(),
+                db_path=uri,
+                db_signature=_file_signature(db_path),
+                faiss_signature=_file_signature(faiss_path),
+            )
         except sqlite3.Error:
             db.close()
             return None
@@ -269,45 +294,120 @@ class Search:
         """Rescan index_dir without restarting. Picks up new finished indexes,
         forgets removed ones, upgrades fast indexes that gained vectors, and
         refreshes the Kiwix catalog. Cheap enough for systemd.path to trigger."""
-        found = {path.stem: path for path in sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))}
-        removed = [name for name in self.indexes if name not in found]
-        added = []
-        upgraded = []
+        with self._reload_lock:
+            found = {
+                path.stem: path
+                for path in sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))
+            }
+            with self._state_lock:
+                current_names = set(self.indexes)
+            removed = sorted(current_names - set(found))
+            added = []
+            upgraded = []
 
-        for name in removed:
-            self._close_index(self.indexes.pop(name))
-
-        for name, db_path in found.items():
-            current = self.indexes.get(name)
-            if current is None:
-                index = self._open_index(db_path)
-                if index:
-                    self.indexes[name] = index
-                    added.append(name)
-                continue
-            if self.semantic and not current.semantic and db_path.with_suffix(".faiss").exists():
-                fresh = self._open_index(db_path)
-                if fresh and fresh.semantic:
+            for name in removed:
+                with self._state_lock:
+                    current = self.indexes.pop(name, None)
+                if current is not None:
                     self._close_index(current)
-                    self.indexes[name] = fresh
-                    upgraded.append(name)
 
-        self.cache.clear()
-        self.refresh_sources()
-        return {
-            "indexes": sorted(self.indexes),
-            "added": sorted(added),
-            "removed": sorted(removed),
-            "upgraded": sorted(upgraded),
-        }
+            for name, db_path in found.items():
+                with self._state_lock:
+                    current = self.indexes.get(name)
+                db_signature = _file_signature(db_path)
+                faiss_signature = (
+                    _file_signature(db_path.with_suffix(".faiss"))
+                    if self.semantic
+                    else None
+                )
+                changed = (
+                    current is not None
+                    and (
+                        current.db_signature != db_signature
+                        or (
+                            self.semantic
+                            and current.faiss_signature != faiss_signature
+                        )
+                    )
+                )
+                if current is not None and not changed:
+                    continue
+
+                fresh = self._open_index(db_path)
+                if fresh is None:
+                    continue
+
+                old = None
+                close_fresh = False
+                with self._state_lock:
+                    existing = self.indexes.get(name)
+                    if existing is None:
+                        self.indexes[name] = fresh
+                        added.append(name)
+                    elif existing is current:
+                        self.indexes[name] = fresh
+                        old = existing
+                        if self.semantic and not existing.semantic and fresh.semantic:
+                            upgraded.append(name)
+                    else:
+                        close_fresh = True
+                if old is not None:
+                    self._close_index(old)
+                if close_fresh:
+                    self._close_index(fresh)
+
+            self.cache.clear()
+            self.refresh_sources()
+            with self._state_lock:
+                indexes = sorted(self.indexes)
+            return {
+                "indexes": indexes,
+                "added": sorted(added),
+                "removed": removed,
+                "upgraded": sorted(upgraded),
+            }
 
     @staticmethod
     def _close_index(index: _LocalIndex) -> None:
-        for conn in [index.db, *index._conns]:
+        with index._lifecycle:
+            index._retired = True
+            if index._active_searches or index._closed:
+                return
+            index._closed = True
+            connections = [index.db, *index._conns]
+        Search._close_connections(connections)
+
+    @staticmethod
+    def _close_connections(connections: list[sqlite3.Connection]) -> None:
+        for conn in connections:
             try:
                 conn.close()
             except sqlite3.Error:
                 pass
+
+    @staticmethod
+    def _acquire_index(index: _LocalIndex) -> None:
+        with index._lifecycle:
+            if index._retired:
+                raise RuntimeError("index was retired during reload")
+            index._active_searches += 1
+
+    @staticmethod
+    def _release_index(index: _LocalIndex) -> None:
+        with index._lifecycle:
+            index._active_searches -= 1
+            should_close = (
+                index._retired
+                and index._active_searches == 0
+                and not index._closed
+            )
+            if should_close:
+                index._closed = True
+                connections = [index.db, *index._conns]
+            else:
+                connections = []
+        if connections:
+            Search._close_connections(connections)
 
     def _db_for(self, index: _LocalIndex) -> sqlite3.Connection:
         """A read-only SQLite connection per worker thread, so concurrent
@@ -324,24 +424,25 @@ class Search:
 
     def refresh_sources(self) -> list[dict[str, Any]]:
         """Refresh source metadata without making local indexes unavailable."""
-        local: dict[str, SourceInfo] = {}
-        for local_name in self.indexes:
-            key = _zim_key(local_name)
-            if key in local:
-                key = local_name
-            local[key] = SourceInfo(
-                key=key,
-                name=local_name,
-                book=local_name,
-                mode="local",
-                local_name=local_name,
-                intent_phrases=_intent_phrases(local_name),
-            )
-
-        merged = dict(local)
         server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
-        if server:
-            for entry in self._catalog_entries(server):
+        entries = self._catalog_entries(server) if server else []
+        with self._state_lock:
+            local: dict[str, SourceInfo] = {}
+            for local_name in self.indexes:
+                key = _zim_key(local_name)
+                if key in local:
+                    key = local_name
+                local[key] = SourceInfo(
+                    key=key,
+                    name=local_name,
+                    book=local_name,
+                    mode="local",
+                    local_name=local_name,
+                    intent_phrases=_intent_phrases(local_name),
+                )
+
+            merged = dict(local)
+            for entry in entries:
                 key = _zim_key(entry["book"])
                 current = merged.get(key)
                 if current and current.mode == "local":
@@ -361,10 +462,11 @@ class Search:
                         intent_phrases=_intent_phrases(entry["book"]),
                     )
 
-        self.sources = dict(sorted(merged.items(), key=lambda pair: pair[1].name.casefold()))
+            self.sources = dict(sorted(merged.items(), key=lambda pair: pair[1].name.casefold()))
+            sources = self.source_dicts()
         # Availability or catalog may have changed, so cached answers can be stale.
         self.cache.clear()
-        return self.source_dicts()
+        return sources
 
     def _catalog_entries(self, server: str) -> list[dict[str, str]]:
         path = str(self.cfg.get("kiwix_catalog_path", "/kiwix/catalog/v2/entries?count=-1"))
@@ -408,13 +510,16 @@ class Search:
         return items
 
     def source_dicts(self) -> list[dict[str, Any]]:
-        return [source.to_dict() for source in self.sources.values()]
+        with self._state_lock:
+            return [source.to_dict() for source in self.sources.values()]
 
     def local_names(self) -> list[str]:
-        return list(self.indexes)
+        with self._state_lock:
+            return list(self.indexes)
 
     def _selected_sources(self, zim: list[str] | None) -> list[SourceInfo]:
-        available = [source for source in self.sources.values() if source.available]
+        with self._state_lock:
+            available = [source for source in self.sources.values() if source.available]
         if not zim:
             return available
 
@@ -447,10 +552,12 @@ class Search:
         A failed embedding degrades to title + full-text rather than failing."""
         if self.embedder is None or not self.semantic:
             return None
+        with self._state_lock:
+            indexes = dict(self.indexes)
         wants_semantic = any(
             source.mode == "local"
-            and source.local_name in self.indexes
-            and self.indexes[source.local_name].semantic
+            and source.local_name in indexes
+            and indexes[source.local_name].semantic
             for source in sources
         )
         if not wants_semantic:
@@ -586,7 +693,7 @@ class Search:
     ) -> SourceResult:
         if source.mode == "kiwix":
             return self._search_kiwix(source, fulltext_query, limit)
-        if not source.local_name or source.local_name not in self.indexes:
+        if not source.local_name:
             return SourceResult(source=replace(source, available=False), error="source is not indexed", status="error")
         return self._search_local(source, query, title_query, fulltext_query, query_vector, limit)
 
@@ -599,8 +706,27 @@ class Search:
         query_vector,
         limit: int,
     ) -> SourceResult:
-        index = self.indexes[source.local_name]
-        return self._search_local_locked(source, query, title_query, fulltext_query, query_vector, limit, index)
+        with self._state_lock:
+            index = self.indexes.get(source.local_name)
+            if index is None:
+                return SourceResult(
+                    source=replace(source, available=False),
+                    error="source is not indexed",
+                    status="error",
+                )
+            self._acquire_index(index)
+        try:
+            return self._search_local_locked(
+                source,
+                query,
+                title_query,
+                fulltext_query,
+                query_vector,
+                limit,
+                index,
+            )
+        finally:
+            self._release_index(index)
 
     def _search_local_locked(
         self,
