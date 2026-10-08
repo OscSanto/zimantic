@@ -509,6 +509,29 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(cached[0]["title"], "Tire Change")
             search._executor.shutdown(wait=True)
 
+    def test_cached_stream_replays_source_outcomes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(
+                tmp,
+                "manual",
+                rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)],
+            )
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            first_events = list(search.stream_search("tire change", limit=1))
+            cached_events = list(search.stream_search("tire change", limit=1))
+            search._executor.shutdown(wait=True)
+
+            self.assertEqual([event["type"] for event in cached_events], [
+                "started", "source", "snapshot", "done",
+            ])
+            self.assertEqual(cached_events[1]["source"]["key"], "manual")
+            self.assertEqual(len(cached_events[1]["items"]), 1)
+            self.assertEqual(cached_events[-1]["results"], first_events[-1]["results"])
+
     def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

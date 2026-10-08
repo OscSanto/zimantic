@@ -229,11 +229,11 @@ def _write_faiss(db, path: Path) -> None:
         # Small ZIM: exact search. Does not contain nprobe. 
         index = faiss.index_factory(dim, "IDMap,Flat", faiss.METRIC_INNER_PRODUCT)
 
-    else: # cluster_centre_count = 4 *sqrt(n) clusters AlSO 1 byte per number (int-8)
+    else: # ~4*sqrt(n) clusters (capped for small n) ALSO 1 byte per number (int-8)
         # Large ZIM: vectors grouped into lists, 1 byte per number (384 bytes per article). 
         # Squeezing to 48 bytes (PQ48) lost ~25% of top hits in testing; this 8-bit form was nearly exact. 
         # The file is memorymapped at search time, so only the lists a query probes are read from disk.
-        cluster_centre_count = int(4 * n ** 0.5)
+        cluster_centre_count = _faiss_cluster_count(n)
         index = faiss.index_factory(dim, f"IVF{cluster_centre_count},SQ8", faiss.METRIC_INNER_PRODUCT)
 
         step = _faiss_training_step(n, cluster_centre_count)
@@ -259,6 +259,15 @@ def _write_faiss(db, path: Path) -> None:
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def _faiss_cluster_count(n: int) -> int:
+    """Cluster count for the IVF index, capped so FAISS can train each centroid.
+
+    FAISS warns (and under-trains the coarse quantizer) below 39 points per
+    centroid, so for small indexes 4*sqrt(n) is more clusters than n can supply.
+    """
+    return max(1, min(int(4 * n**0.5), n // _FAISS_MIN_POINTS_PER_CENTROID))
 
 
 def _faiss_training_step(n: int, cluster_centre_count: int) -> int:
