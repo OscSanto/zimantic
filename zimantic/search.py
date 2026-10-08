@@ -29,6 +29,7 @@ DEFAULT_CANDIDATES = 16
 DEFAULT_SOURCE_TIMEOUT = 12
 DEFAULT_MAX_CONCURRENT_SEARCHES = 4
 DEFAULT_NPROBE_FRACTION = 0.06
+DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "how", "what", "where", "when", "why", "who", "which", "can", "could",
@@ -89,6 +90,22 @@ def _int_config(cfg: dict, key: str, default: int, minimum: int = 1) -> int:
         return max(minimum, int(cfg.get(key, default)))
     except (TypeError, ValueError):
         return default
+
+
+def _float_config(
+    cfg: dict,
+    key: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        value = float(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    return min(maximum, max(minimum, value))
 
 
 def _file_signature(path: Path) -> tuple[int, int, int, int] | None:
@@ -770,10 +787,17 @@ class Search:
         if query_vector is not None and index.faiss_index is not None:
             try:
                 similarities, ids = index.faiss_index.search(query_vector, count)
+                minimum_similarity = _float_config(
+                    self.cfg,
+                    "min_cosine_similarity",
+                    DEFAULT_MIN_COSINE_SIMILARITY,
+                    -1.0,
+                    1.0,
+                )
                 semantic_ids = [
                     (float(score), int(rowid))
                     for score, rowid in zip(similarities[0], ids[0])
-                    if rowid >= 0
+                    if rowid >= 0 and score >= minimum_similarity
                 ]
                 rowids.update(rowid for _, rowid in semantic_ids)
             except Exception as error:

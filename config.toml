@@ -72,6 +72,10 @@ embedding_overflow = "truncate"
 # Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
 # nprobe = 64
 
+# Meaning-search results below this cosine similarity are discarded. Title and
+# full-text matches are not affected. Lower this for broader semantic recall.
+min_cosine_similarity = 0.85
+
 # A naive approach to determining if query requires a deeper search (e.g. pasted sentences from article)
 # Searches with 'long_query' words or more will double kiwix's full-text result weights.
 # Rule of thumb: long searchs are usually pasted sentence or remembered text.  

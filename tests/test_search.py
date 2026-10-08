@@ -299,6 +299,49 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(result["title"], "Tire Change")
         self.assertEqual(result["path"], "tire-change")
 
+    def test_semantic_results_below_cosine_threshold_are_ignored(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        )
+        db.executemany(
+            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            [
+                (1, "Below threshold", "A weak semantic match.", "weak", None),
+                (2, "Above threshold", "A strong semantic match.", "strong", None),
+            ],
+        )
+
+        class FakeFaiss:
+            def search(self, query_vector, count):
+                return (
+                    np.array([[0.84, 0.90]]),
+                    np.array([[1, 2]]),
+                )
+
+        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        search = object.__new__(Search)
+        search.cfg = {
+            "candidate_count": 2,
+            "kiwix_url": "http://example/content",
+            "min_cosine_similarity": 0.85,
+        }
+        search.candidate_count = 2
+        result = search._search_local_locked(
+            source,
+            "unrelated",
+            _title_query("unrelated"),
+            _fulltext_query("unrelated"),
+            np.array([[1.0]]),
+            1,
+            _LocalIndex(db, FakeFaiss(), None, None, threading.Lock()),
+        )
+
+        db.close()
+        self.assertEqual([item["title"] for item in result.items], ["Above threshold"])
+        self.assertEqual(result.semantic[0][0], 0.90)
+
     def test_local_result_preview_is_bounded(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
