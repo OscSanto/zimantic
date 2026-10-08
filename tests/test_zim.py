@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 import unittest
@@ -14,6 +15,7 @@ from zimantic.zim import (
     DEFAULT_PREVIEW_CHARS,
     disambiguation_members,
     extract_excerpt,
+    is_javascript_shell,
     iter_text_blocks,
     is_disambiguation,
     read_entry,
@@ -212,6 +214,104 @@ class DisambiguationTests(unittest.TestCase):
         members = disambiguation_members(DISAMBIG_HTML, "Advocacy_(disambiguation)")
         self.assertEqual([member["path"] for member in members], ["Advocacy", "Lawyer"])
         self.assertEqual(members[0]["title"], "Advocacy")
+
+
+SPA_STUB = (
+    b"<html><head><title>Collected Poems</title>"
+    b'<meta http-equiv="refresh" content="0;URL=\'../index.html#/Bookshelves/Poetry/Collected_Poems\'" />'
+    b"</head><body></body></html>"
+)
+SPA_BODY = json.dumps({
+    "htmlBody": "<p>" + ("A real article about collected poems and their history. " * 4) + "</p>",
+}).encode("utf-8")
+
+SHELL_HTML = (
+    b'<html><body><div id="app"></div><noscript><p>JavaScript is disabled in '
+    b"your browser. Please enable JavaScript to access content inside this ZIM."
+    b"</p></noscript></body></html>"
+)
+
+
+class _SpaItem:
+    mimetype = "text/html"
+
+    def __init__(self, content):
+        self.content = content
+
+
+class _HtmlEntry:
+    is_redirect = False
+
+    def __init__(self, title, path, content):
+        self.title = title
+        self.path = path
+        self._index = 0
+        self._content = content
+
+    def get_item(self):
+        return _SpaItem(self._content)
+
+
+class _JsonEntry:
+    def __init__(self, path, content):
+        self.path = path
+        self._content = content
+
+    def get_item(self):
+        return _SpaItem(self._content)
+
+
+class _SpaArchive:
+    """Minimal Archive exposing one app-shell article and its content JSON."""
+
+    def _get_entry_by_id(self, _index):
+        return _HtmlEntry("Collected Poems", "index/page_42", SPA_STUB)
+
+    def has_entry_by_path(self, path):
+        return path in ("index.html", "content/page_content_42.json")
+
+    def get_entry_by_path(self, path):
+        if path == "content/page_content_42.json":
+            return _JsonEntry(path, SPA_BODY)
+        return _HtmlEntry("index.html", "index.html", SHELL_HTML)
+
+
+class _ShellArchive:
+    def _get_entry_by_id(self, _index):
+        return _HtmlEntry("index.html", "index.html", SHELL_HTML)
+
+
+class JavaScriptShellTests(unittest.TestCase):
+    def test_spa_stub_uses_companion_json_and_keeps_its_own_path(self):
+        row = read_entry(_SpaArchive(), 0)
+
+        self.assertEqual(row[1], "Collected Poems")
+        self.assertIn("real article about collected poems", row[2])
+        self.assertEqual(row[3], "index/page_42")  # deep link, not the shell
+        self.assertIsNone(row[4])                  # not a redirect onto index.html
+
+    def test_javascript_shell_pages_are_not_indexed(self):
+        self.assertIsNone(read_entry(_ShellArchive(), 0))
+
+    def test_javascript_shell_detection_ignores_real_articles(self):
+        article = (
+            b"<html><body><p>JavaScript is disabled by default in many browsers, "
+            b"but this article explains how to enable it safely.</p></body></html>"
+        )
+        self.assertFalse(
+            is_javascript_shell(
+                article,
+                "JavaScript is disabled by default in many browsers, but this article "
+                "explains how to enable it safely.",
+            )
+        )
+        self.assertTrue(
+            is_javascript_shell(
+                SHELL_HTML,
+                "JavaScript is disabled in your browser. Please enable JavaScript to "
+                "access content inside this ZIM.",
+            )
+        )
 
 
 if __name__ == "__main__":

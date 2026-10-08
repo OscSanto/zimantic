@@ -20,6 +20,18 @@ OVERFLOW_POLICIES = {"skip", "truncate"}
 REFRESH_SCAN_BYTES = 64 << 10
 REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
 
+# Some ZIMs render every article through a JavaScript app (an "SPA shell"): the
+# HTML entry is a tiny stub that meta-refreshes into an app route such as
+# index.html#/Bookshelves/Subject/Page, while the real body lives in a companion
+# JSON file. Read only the stub and every article collapses onto the shell
+# (title "index.html", excerpt "enable JavaScript"); read the JSON and the
+# article is searchable by title, full text, and meaning, and its own ZIM path
+# deep-links into the app route.
+SPA_PAGE_ID = re.compile(r"_(\d+)$")
+SPA_CONTENT_PATH = "content/page_content_{id}.json"
+JS_SHELL_MARKERS = (b"<noscript", b'id="app"', b"id='app'")
+JS_NOTICE_MAX_CHARS = 300
+
 # Disambiguation pages are stored with kind=DISAMBIGUATION plus the entries they
 # link to, so search can cluster the hub with its members without re-reading the
 # ZIM. Detection is MediaWiki-flavoured and precise: a "(disambiguation)" title
@@ -366,6 +378,44 @@ def extract_excerpt(
     )
 
 
+def _spa_page_body(zim: Archive, entry) -> bytes | None:
+    """Article HTML for a page rendered by a JavaScript app shell, if any.
+
+    Returns the ``htmlBody`` from the companion content JSON
+    (``content/page_content_<id>.json``) when the entry follows that convention,
+    or None for ordinary ZIMs.
+    """
+    match = SPA_PAGE_ID.search(entry.path)
+    if not match:
+        return None
+    content_path = SPA_CONTENT_PATH.format(id=match.group(1))
+    if not zim.has_entry_by_path(content_path):
+        return None
+    try:
+        payload = json.loads(bytes(zim.get_entry_by_path(content_path).get_item().content))
+    except (LookupError, RuntimeError, TypeError, ValueError):
+        return None
+    body = payload.get("htmlBody") if isinstance(payload, dict) else None
+    return body.encode("utf-8") if isinstance(body, str) else None
+
+
+def is_javascript_shell(html: bytes, text: str) -> bool:
+    """True when a page is only an "enable JavaScript" app shell.
+
+    Such pages carry no article text. Indexing them pollutes meaning search with
+    a boilerplate vector, and because they can share one shell target they also
+    surface each other. The notice must be short, mention JavaScript, and sit
+    beside a shell marker so a real article that merely discusses JavaScript is
+    not dropped.
+    """
+    if not isinstance(text, str) or len(text) > JS_NOTICE_MAX_CHARS:
+        return False
+    folded = text.casefold()
+    if "javascript" not in folded or ("enable" not in folded and "disabled" not in folded):
+        return False
+    return any(marker in html for marker in JS_SHELL_MARKERS)
+
+
 def read_entry(
     zim: Archive,
     i: int,
@@ -410,10 +460,28 @@ def read_entry(
     refresh_url = _refresh_url(html)
     
     if refresh_url:
-        url = unquote(refresh_url).split("#", 1)[0]
-        path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), url))
+        url = unquote(refresh_url)
+        base, _, fragment = url.partition("#")
+        path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), base))
         if not zim.has_entry_by_path(path):
             return None
+        body = _spa_page_body(zim, entry) if fragment else None
+        if body is not None:
+            # Keep this page's own title and path: it is a deep link into the
+            # app route, and its body is real text. Storing the shell target
+            # instead would collapse every article onto "index.html".
+            excerpt = extract_excerpt(
+                body,
+                title=entry.title,
+                max_preview_chars=max_preview_chars,
+                max_embedding_tokens=max_embedding_tokens,
+                preview_overflow=preview_overflow,
+                embedding_overflow=embedding_overflow,
+                embedding_token_count=getattr(embedder, "token_count", None),
+                embedding_truncate=getattr(embedder, "truncate", None),
+            )
+            if excerpt and not is_javascript_shell(body, excerpt):
+                return i, entry.title, excerpt, entry.path, None, None
         target = zim.get_entry_by_path(path)
         return i, entry.title, "", target.path, target._index, None
     excerpt = extract_excerpt(
@@ -426,6 +494,9 @@ def read_entry(
         embedding_token_count=getattr(embedder, "token_count", None),
         embedding_truncate=getattr(embedder, "truncate", None),
     )
+    if is_javascript_shell(html, excerpt):
+        # An app shell with no article text: nothing useful to index.
+        return None
     members = None
     if is_disambiguation(entry.title, excerpt, html):
         members = json.dumps(disambiguation_members(html, entry.path))
