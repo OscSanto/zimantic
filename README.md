@@ -122,14 +122,17 @@ enough to trigger from `systemd.path`, so the server never has to poll the direc
 
 3. **Collapse redirects**: every hit on a redirect is replaced by the article it points to, and duplicates are
    merged, so each article appears only once.
-4. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared
+4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default)
+   are discarded before ranking. Title and full-text matches still work below that floor, so the threshold
+   only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall.
+5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared
    (a cosine similarity, a BM25 score, a position in Kiwix's list), so RRF ignores scores and uses positions only:
    an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top
    by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article
    can contribute at most once per search list. A bounded lexical bonus favors titles containing more query
    words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured
    source intent provide additional deterministic signals.
-5. **Treat disambiguation pages as hubs.** At build time a page is flagged when its title ends in
+6. **Treat disambiguation pages as hubs.** At build time a page is flagged when its title ends in
    "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category
    (the rendered `Category:` link or `wgCategories`). Its article links are stored as members. A query that names
    the hub's full title is navigation: the hub is promoted above the normal score range and its members are

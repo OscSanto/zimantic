@@ -76,4 +76,5 @@ def create_app(searchClass) -> FastAPI:
 def serve(searchClass, port: int) -> None:
     # 0.0.0.0: reachable from other devices on the network, not only this machine.
     app = create_app(searchClass)
+    print(f"zimantic: server loaded on port {port}", flush=True)
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
