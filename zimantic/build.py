@@ -4,7 +4,7 @@ fast, <name>.faiss (vectors).
 Rerunning an unfinished build resumes where it stopped. A fast build marks the
 index done='fast' and can later be upgraded by building a replacement beside
 the fast index and publishing it atomically.
-To rebuild from scratch, delete both files first.
+Use force=True to rebuild from scratch.
 """
 import os
 import sqlite3
@@ -48,6 +48,7 @@ def build(
     max_embedding_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
     preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
+    force: bool = False,
 ) -> None:
     """Index a ZIM.
 
@@ -63,21 +64,23 @@ def build(
     publish_upgrade = False
     db = None
     try:
+        if force:
+            _reset_index(db_path, faiss_path)
         db = sqlite3.connect(build_db_path)
         db.executescript(SCHEMA)
         meta = dict(db.execute("SELECT key, value FROM meta"))
         done = str(meta.get("done", ""))
         if done == "1":
             if faiss_path.exists():
-                print(f"{zim_path.stem}: already built (delete its .sqlite and .faiss in index_dir to rebuild)")
+                print(f"{zim_path.stem}: already built (use --force to rebuild, or delete its .sqlite and .faiss in index_dir)")
                 return
             raise RuntimeError(
                 f"{zim_path.stem}: index is marked done but {faiss_path} is missing; "
-                "delete both index files and rebuild"
+                "use --force to rebuild, or delete both index files and rebuild"
             )
         if done == "fast":
             if fast:
-                print(f"{zim_path.stem}: already indexed for title/full-text search")
+                print(f"{zim_path.stem}: already indexed for title/full-text search (use --force to rebuild)")
                 return
             print(f"{zim_path.stem}: upgrading title-only index to full (re-reading entries beside current index)")
             db.close()
@@ -151,6 +154,13 @@ def _upgrade_paths(db_path: Path, faiss_path: Path) -> tuple[Path, Path]:
         db_path.with_name(f"{db_path.name}.upgrade"),
         faiss_path.with_name(f"{faiss_path.name}.upgrade"),
     )
+
+
+def _reset_index(db_path: Path, faiss_path: Path) -> None:
+    """Remove index state before a forced rebuild."""
+    staging_db_path, staging_faiss_path = _upgrade_paths(db_path, faiss_path)
+    for path in (db_path, faiss_path, staging_db_path, staging_faiss_path):
+        path.unlink(missing_ok=True)
 
 
 def _publish_upgrade(

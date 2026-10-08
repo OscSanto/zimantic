@@ -87,8 +87,8 @@ written atomically and the SQLite `done` marker is written only after it is comp
 interrupted finalization can be resumed safely. When upgrading a `fast` index, the existing
 title/full-text index remains available until the replacement is complete.
 Extracted excerpts are stored in the SQLite index, so changing `max_preview_chars`,
-`max_embedding_tokens`, overflow policies, `max_html_bytes`, or extraction behavior requires deleting
-that ZIM's `.sqlite` and `.faiss` files before rebuilding.
+`max_embedding_tokens`, overflow policies, `max_html_bytes`, or extraction behavior requires rebuilding
+that ZIM with `build --force`.
 
 ### 2. Starting the server (`serve`, once)
 
@@ -277,6 +277,7 @@ python -m zimantic build zims/a.zim zims/b.zim  # several files
 python -m zimantic build /media/usb             # every .zim in a folder
 python -m zimantic build zims/a.zim /media/usb  # mix files and folders
 python -m zimantic build --fast                 # quick title + full-text index (no vectors)
+python -m zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
 python -m zimantic serve                        # web page on http://<host>:8090 after a build
 python -m zimantic serve --fast                 # start now: no model, no vectors
 python -m zimantic reload                       # ask a running server to rescan index_dir
@@ -284,11 +285,17 @@ python -m zimantic reload                       # ask a running server to rescan
 
 `build` takes zero or more files or folders. A folder means its `*.zim`; with no arguments it uses `zim_dir`
 from `config.toml`. Already-built ZIMs are skipped, so rerunning it is cheap.
+Pass `--force` to rebuild the selected ZIMs even when their indexes are complete. A forced rebuild replaces
+both the SQLite and FAISS files.
 
 **Fast indexes.** `build --fast` stores titles and paths but never reads article bodies or runs the model, so it
 finishes much sooner and needs no vectors. The result is still searched by **title words (SQLite FTS) and the
 ZIM's own full-text index** — both of which live in the ZIM/SQLite, not FAISS — so only *meaning* search is
 missing. Run a normal `build` later and it re-reads the entries and adds vectors in place.
+
+Normal builds embed eight articles at a time by default. This is intentionally a small CPU batch: the model
+pads each batch to its longest passage, so larger batches can use more memory and take longer. Tune
+`batch_size` in `config.toml` on faster hardware, and benchmark it against your ZIM.
 
 **Automatic pickup with systemd.** Instead of the server polling directories, let systemd watch `zims/` and
 build + reload when a ZIM is added. Example units (adjust paths, user and port):
@@ -335,7 +342,6 @@ kiwix-serve --port 8085 zims/*.zim       # matches the default kiwix_url in conf
 
 If a build stops, run it again and it will automatically pick up where it left off.
 
-To rebuild a ZIM, delete its `.sqlite` and `.faiss` from `index_dir` first.
 A running `serve` picks up new indexes when you run `python -m zimantic reload` (no restart needed);
 a fast-only index remains searchable while the normal build creates and publishes its replacement.
 
