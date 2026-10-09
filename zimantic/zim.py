@@ -32,12 +32,9 @@ SPA_CONTENT_PATH = "content/page_content_{id}.json"
 JS_SHELL_MARKERS = (b"<noscript", b'id="app"', b"id='app'")
 JS_NOTICE_MAX_CHARS = 300
 
-# Disambiguation pages are stored with kind=DISAMBIGUATION plus the entries they
-# link to, so search can cluster the hub with its members without re-reading the
-# ZIM. Detection is MediaWiki-flavoured and precise: a "(disambiguation)" title
-# suffix, the "This disambiguation page" template footer, or a disambiguation
-# category (the rendered Category: link or the wgCategories JSON in the head).
-DISAMBIGUATION = "disambiguation"
+# Disambiguation pages are persisted with a title suffix, so search can apply
+# the same ranking policy without a separate metadata table.
+DISAMBIGUATION_SUFFIX = " (disambiguation)"
 DISAMBIG_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
 DISAMBIG_BOILERPLATE = re.compile(r"this disambiguation page", re.I)
 DISAMBIG_HTML_MARKERS = re.compile(
@@ -46,13 +43,6 @@ DISAMBIG_HTML_MARKERS = re.compile(
     re.I,
 )
 WGCATEGORIES = re.compile(rb'"wgCategories"\s*:\s*(\[[^\]]*\])')
-MAX_DISAMBIG_MEMBERS = 50
-# Namespaces whose links are not article targets (casefolded, no trailing "_").
-_NON_ARTICLE_PREFIXES = {
-    "category", "file", "image", "help", "mediawiki", "portal", "special",
-    "talk", "template", "user", "wikipedia", "wiktionary", "wikiquote",
-    "wikisource", "module", "draft", "book", "timedtext",
-}
 
 class _MetaRefresh(HTMLParser):
     def __init__(self):
@@ -170,46 +160,6 @@ class _TextExtractor(HTMLParser):
     ]
 
 
-class _LinkExtractor(HTMLParser):
-    """Collect (href, visible text) for every <a> in a page."""
-
-    SKIP_TAGS = _TextExtractor.SKIP_TAGS
-
-    def __init__(self):
-        super().__init__()
-        self.skipping = []
-        self.links = []
-        self._href = None
-        self._text = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP_TAGS:
-            self.skipping.append(tag)
-            return
-        if self.skipping:
-            return
-        if tag == "a":
-            self._href = dict(attrs).get("href")
-            self._text = []
-
-    def handle_endtag(self, tag):
-        if self.skipping and self.skipping[-1] == tag:
-            self.skipping.pop()
-            return
-        if self.skipping:
-            return
-        if tag == "a" and self._href is not None:
-            self.links.append((self._href, " ".join("".join(self._text).split())))
-            self._href = None
-            self._text = []
-
-    def handle_data(self, data):
-        if self.skipping:
-            return
-        if self._href is not None:
-            self._text.append(data)
-
-
 def is_disambiguation(title: str, text: str, html: bytes = b"") -> bool:
     """True for a MediaWiki disambiguation page.
 
@@ -230,35 +180,9 @@ def is_disambiguation(title: str, text: str, html: bytes = b"") -> bool:
     return bool(categories and re.search(rb"disambig", categories.group(1), re.I))
 
 
-def disambiguation_members(html: bytes, path: str, limit: int = MAX_DISAMBIG_MEMBERS) -> list[dict]:
-    """Article links on a disambiguation page, resolved against its own path."""
-    parser = _LinkExtractor()
-    parser.feed(html.decode("utf-8", "ignore"))
-
-    directory = posixpath.dirname(path)
-    seen: set[str] = set()
-    members: list[dict] = []
-    for href, text in parser.links:
-        href = (href or "").strip()
-        if not href or href.startswith(("#", "//", "http:", "https:", "mailto:")):
-            continue
-        target = posixpath.normpath(posixpath.join(directory, unquote(href.split("#", 1)[0])))
-        if target == path or target.startswith("../") or target in seen:
-            continue
-        if any(
-            part.split(":", 1)[0].replace("_", " ").casefold() in _NON_ARTICLE_PREFIXES
-            for part in target.split("/")
-            if ":" in part
-        ):
-            continue
-        seen.add(target)
-        members.append({
-            "title": text or target.rsplit("/", 1)[-1].replace("_", " "),
-            "path": target,
-        })
-        if len(members) >= limit:
-            break
-    return members
+def disambiguation_title(title: str) -> str:
+    """Return the stored title for a disambiguation page."""
+    return title if DISAMBIG_TITLE.search(title) else title + DISAMBIGUATION_SUFFIX
 
 
 CHUNK = 65536  # bytes of HTML per feed() call (64 KB)
@@ -427,7 +351,7 @@ def read_entry(
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     embedder=None,
 ):
-    """Return (id, title, excerpt, path, target_id, members), or None.
+    """Return (id, title, excerpt, path, target_id), or None.
 
     Redirects (real ones, and small meta refresh pages) get empty excerpts and the
     path and id of the page they point to, so they are searchable by title only.
@@ -435,20 +359,18 @@ def read_entry(
     fast=True stores the title and path without reading the article body, so no
     text (and therefore no vector) is produced.
 
-    members is a JSON array of {title, path} for a disambiguation page (so
-    search can cluster the hub with its entries), or None for ordinary pages.
     """
     entry = zim._get_entry_by_id(i)
     if entry.is_redirect:
         target = entry.get_redirect_entry()
-        return i, entry.title, "", target.path, target._index, None
+        return i, entry.title, "", target.path, target._index
     
     item = entry.get_item()
     if not item.mimetype.startswith("text/html"): 
         return None
 
     if fast:
-        return i, entry.title, "", entry.path, None, None
+        return i, entry.title, "", entry.path, None
 
     content = item.content
     try:
@@ -481,9 +403,12 @@ def read_entry(
                 embedding_truncate=getattr(embedder, "truncate", None),
             )
             if excerpt and not is_javascript_shell(body, excerpt):
-                return i, entry.title, excerpt, entry.path, None, None
+                title = disambiguation_title(entry.title) if is_disambiguation(
+                    entry.title, excerpt, body
+                ) else entry.title
+                return i, title, excerpt, entry.path, None
         target = zim.get_entry_by_path(path)
-        return i, entry.title, "", target.path, target._index, None
+        return i, entry.title, "", target.path, target._index
     excerpt = extract_excerpt(
         html,
         title=entry.title,
@@ -497,7 +422,5 @@ def read_entry(
     if is_javascript_shell(html, excerpt):
         # An app shell with no article text: nothing useful to index.
         return None
-    members = None
-    if is_disambiguation(entry.title, excerpt, html):
-        members = json.dumps(disambiguation_members(html, entry.path))
-    return i, entry.title, excerpt, entry.path, None, members
+    title = disambiguation_title(entry.title) if is_disambiguation(entry.title, excerpt, html) else entry.title
+    return i, title, excerpt, entry.path, None

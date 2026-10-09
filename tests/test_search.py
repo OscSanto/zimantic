@@ -402,8 +402,6 @@ class DisambiguationRankingTests(unittest.TestCase):
             "lead": "Air may refer to:",
             "path": "Air_(disambiguation)",
             "source_rank": 1,
-            "kind": "disambiguation",
-            "members": [{"title": "Air", "path": "Air"}],
         }
         article = {
             "id": "manual:air",
@@ -421,33 +419,18 @@ class DisambiguationRankingTests(unittest.TestCase):
             fulltext=[(0, article)],
         )
 
-    def test_exact_hub_title_query_promotes_hub_and_keeps_members(self):
+    def test_exact_disambiguation_title_query_promotes_page(self):
         ranked = self._search()._rank_results([self._result()], "air (disambiguation)", 10)
 
         self.assertEqual(ranked[0]["id"], "manual:hub")
-        self.assertEqual(ranked[0]["kind"], "disambiguation")
-        self.assertEqual(ranked[0]["members"][0]["title"], "Air")
+        self.assertNotIn("kind", ranked[0])
+        self.assertNotIn("members", ranked[0])
 
     def test_base_title_and_partial_queries_demote_hub(self):
         for query in ("air", "air quality"):
             with self.subTest(query=query):
                 ranked = self._search()._rank_results([self._result()], query, 10)
                 self.assertEqual(ranked[0]["id"], "manual:air")
-
-    def test_member_links_add_urls_and_survive_bad_json(self):
-        search = self._search()
-        search.cfg["kiwix_url"] = "http://example/content"
-        source = SourceInfo("manual", "Manual", "book", "local")
-
-        links = search._member_links(source, '[{"title": "Air", "path": "Air"}]')
-
-        self.assertEqual(links, [{
-            "title": "Air",
-            "path": "Air",
-            "url": "http://example/content/book/Air",
-        }])
-        self.assertEqual(search._member_links(source, "not json"), [])
-
 
 def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
     db = sqlite3.connect(index_dir / f"{name}.sqlite")
