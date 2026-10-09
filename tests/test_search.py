@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 import tempfile
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -48,10 +49,14 @@ def _bare_search(cfg):
     search._reload_lock = threading.Lock()
     search.source_timeout = 12
     search.candidate_count = cfg.get("candidate_count", 16)
+    search.page_size = cfg.get("page_size", 10)
+    search.max_results = cfg.get("max_results", 100)
     search.source_workers = 2
     search.max_concurrent_searches = 2
     search._search_slots = threading.BoundedSemaphore(2)
     search._executor = ThreadPoolExecutor(max_workers=2)
+    search._inflight = {}
+    search._inflight_lock = threading.Lock()
     search.cache = QueryCache(16)
     return search
 
@@ -115,6 +120,15 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(_title_prefix_query("how to change tires"), "change* AND tires*")
         self.assertEqual(_title_prefix_query("praise of fol"), "praise* AND fol*")
         self.assertEqual(_title_prefix_query("c"), '"c"')
+
+    def test_cache_key_ignores_page_size_and_display_filter(self):
+        # The ranked pool is shared by every page/filter, so none of those may
+        # appear in the cache key.
+        self.assertEqual(
+            Search._cache_key("How  TO change", None),
+            Search._cache_key("how to change", None),
+        )
+        self.assertEqual(Search._cache_key("q", None), Search._cache_key("q", None))
 
     def test_hybrid_ranking_is_deterministic(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
@@ -235,6 +249,8 @@ class SearchContractTests(unittest.TestCase):
         search._reload_lock = threading.Lock()
         search._search_slots = threading.BoundedSemaphore(1)
         search._executor = ThreadPoolExecutor(max_workers=2)
+        search._inflight = {}
+        search._inflight_lock = threading.Lock()
         search.cache = QueryCache(16)
         search.embedder = types.SimpleNamespace(embed=lambda _: [[1.0]])
 
@@ -289,6 +305,8 @@ class SearchContractTests(unittest.TestCase):
         search._reload_lock = threading.Lock()
         search._search_slots = threading.BoundedSemaphore(1)
         search._executor = ThreadPoolExecutor(max_workers=1)
+        search._inflight = {}
+        search._inflight_lock = threading.Lock()
         search.cache = QueryCache(16)
         search.embedder = types.SimpleNamespace(embed=lambda _: np.array([[1.0]]))
 
@@ -486,7 +504,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
             events = list(search.stream_search("tire change", limit=1))
             self.assertEqual(events[-1]["type"], "done")
-            self.assertIsNotNone(search.cache.get(search._cache_key("tire change", None, 1)))
+            self.assertIsNotNone(search.cache.get(search._cache_key("tire change", None)))
 
             cached = search.search("tire change", limit=1)
             self.assertEqual(cached[0]["title"], "Tire Change")
@@ -512,7 +530,7 @@ class GracefulDegradationTests(unittest.TestCase):
                 "started", "source", "snapshot", "done",
             ])
             self.assertEqual(cached_events[1]["source"]["key"], "manual")
-            self.assertEqual(len(cached_events[1]["items"]), 1)
+            self.assertEqual(cached_events[1]["count"], 1)
             self.assertEqual(cached_events[-1]["results"], first_events[-1]["results"])
 
     def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
@@ -525,7 +543,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
             events = list(search.stream_search("tire change", limit=1))
             self.assertEqual(events[-1]["type"], "done")
-            key = search._cache_key("tire change", None, 1)
+            key = search._cache_key("tire change", None)
             self.assertIsNotNone(search.cache.get(key))
 
             # A plain source refresh with no changes must keep the cached answer
@@ -547,7 +565,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search._load_indexes()
             search.refresh_sources()
             list(search.stream_search("tire change", limit=1))
-            key = search._cache_key("tire change", None, 1)
+            key = search._cache_key("tire change", None)
             self.assertIsNotNone(search.cache.get(key))
 
             search.reload()
@@ -601,6 +619,129 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
 
+class PaginationTests(unittest.TestCase):
+    def _cfg(self, tmp):
+        return {
+            "index_dir": str(tmp),
+            "zim_dir": str(tmp),
+            "kiwix_url": "http://example/content",
+            "long_query": 10,
+            "candidate_count": 16,
+            "page_size": 2,
+            "max_results": 5,
+        }
+
+    def test_pages_are_prefixes_of_one_ranked_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [(i, f"Tire Change {i}", "", f"tire-{i}", None) for i in range(1, 6)]
+            _write_index(tmp, "manual", rows=rows)
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            page1 = search.search("tire change", limit=2, offset=0)
+            page2 = search.search("tire change", limit=2, offset=2)
+            page3 = search.search("tire change", limit=2, offset=4)
+            whole = search.search("tire change", limit=5, offset=0)
+
+            paged = [doc["id"] for doc in page1 + page2 + page3]
+            self.assertEqual(paged, [doc["id"] for doc in whole])
+            search._executor.shutdown(wait=True)
+
+    def test_second_page_reuses_the_cached_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [(i, f"Tire Change {i}", "", f"tire-{i}", None) for i in range(1, 6)]
+            _write_index(tmp, "manual", rows=rows)
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            first = search.search("tire change", limit=2, offset=0)
+            pooled = search.cache.get(search._cache_key("tire change", None))
+            self.assertEqual(len(pooled["pool"]), 5)
+            # A different page must be answered from the same cached entry.
+            second = search.search("tire change", limit=2, offset=2)
+            self.assertIs(search.cache.get(search._cache_key("tire change", None)), pooled)
+            self.assertNotEqual(first[0]["id"], second[0]["id"])
+            search._executor.shutdown(wait=True)
+
+    def test_display_source_filter_keeps_counts_for_all_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "alpha", rows=[(1, "Tire Change Alpha", "", "a", None)])
+            _write_index(tmp, "beta", rows=[(1, "Tire Change Beta", "", "b", None)])
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            page = search.search_page("tire change", limit=10, source="beta")
+
+            self.assertEqual([doc["source_key"] for doc in page["results"]], ["beta"])
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(page["counts"], {"alpha": 1, "beta": 1})
+            search._executor.shutdown(wait=True)
+
+    def test_concurrent_identical_searches_share_one_computation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "", "tire", None)])
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            original = search._search_source
+            release = threading.Event()
+            calls = 0
+
+            def slow(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                release.wait(timeout=5)
+                return original(*args, **kwargs)
+
+            search._search_source = slow
+            first: list = []
+            second: list = []
+
+            def run(target):
+                target.extend(search.stream_search("tire change", limit=1))
+
+            owner = threading.Thread(target=run, args=(first,))
+            owner.start()
+            # Wait until the owner has claimed the key, then start a waiter.
+            deadline = time.monotonic() + 5
+            while not search._inflight and time.monotonic() < deadline:
+                time.sleep(0.005)
+            waiter = threading.Thread(target=run, args=(second,))
+            waiter.start()
+            time.sleep(0.05)
+            release.set()
+            owner.join(timeout=5)
+            waiter.join(timeout=5)
+
+            self.assertEqual(calls, 1)
+            self.assertEqual(first[-1]["results"], second[-1]["results"])
+            search._executor.shutdown(wait=True)
+
+    def test_debug_flag_gates_ranking_explanation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "", "tire", None)])
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            plain = search.search_page("tire change", limit=10, debug=False)["results"][0]
+            detailed = search.search_page("tire change", limit=10, debug=True)["results"][0]
+
+            self.assertNotIn("explain", plain)
+            self.assertNotIn("score", plain)
+            self.assertIn("explain", detailed)
+            search._executor.shutdown(wait=True)
+
+
 class QueryCacheTests(unittest.TestCase):
     def test_lru_evicts_least_recently_used(self):
         cache = QueryCache(2)
@@ -615,6 +756,20 @@ class QueryCacheTests(unittest.TestCase):
         cache = QueryCache(0)
         cache.put("a", [1])
         self.assertIsNone(cache.get("a"))
+
+    def test_byte_budget_evicts_large_entries(self):
+        cache = QueryCache(100, max_bytes=2000)
+        cache.put("a", "x" * 1000)
+        cache.put("b", "y" * 1000)
+
+        self.assertLessEqual(cache.stats()["bytes"], 2000)
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual(cache.get("b"), "y" * 1000)
+
+    def test_byte_budget_can_be_disabled(self):
+        cache = QueryCache(100, max_bytes=0)
+        cache.put("a", "x" * 10_000)
+        self.assertEqual(cache.get("a"), "x" * 10_000)
 
 
 if __name__ == "__main__":

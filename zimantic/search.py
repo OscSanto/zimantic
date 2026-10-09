@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 from libzim.reader import Archive
 from libzim.search import Query, Searcher
 
-from .cache import DEFAULT_CACHE_SIZE, QueryCache
+from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .contracts import SourceInfo, SourceResult
 from .zim import DEFAULT_PREVIEW_CHARS, truncate_at_word_boundary
 
@@ -29,6 +29,8 @@ DEFAULT_SOURCE_TIMEOUT = 12
 DEFAULT_MAX_CONCURRENT_SEARCHES = 4
 DEFAULT_NPROBE_FRACTION = 0.06
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
+DEFAULT_PAGE_SIZE = 10
+DEFAULT_MAX_RESULTS = 100
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "how", "what", "where", "when", "why", "who", "which", "can", "could",
@@ -251,12 +253,25 @@ class Search:
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
         self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
+        # `results` is the legacy name for the page size; keep reading it so an
+        # old config.toml keeps working.
+        self.page_size = _int_config(
+            cfg, "page_size", _int_config(cfg, "results", DEFAULT_PAGE_SIZE)
+        )
+        self.max_results = _int_config(cfg, "max_results", DEFAULT_MAX_RESULTS)
         self.max_concurrent_searches = _int_config(
             cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
         self._executor = ThreadPoolExecutor(max_workers=self.source_workers, thread_name_prefix="zimantic-search")
-        self.cache = QueryCache(_int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0))
+        # In-flight search per cache key: concurrent identical queries share one
+        # computation instead of racing to compute the same pool.
+        self._inflight: dict[Any, Future] = {}
+        self._inflight_lock = threading.Lock()
+        self.cache = QueryCache(
+            _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
+            _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
+        )
         self._load_indexes()
         self.refresh_sources()
 
@@ -618,10 +633,78 @@ class Search:
         return query
 
     @staticmethod
-    def _cache_key(query: str, zim: list[str] | None, limit: int) -> tuple:
+    def _cache_key(query: str, zim: list[str] | None) -> tuple:
+        """Key by query and source selection only.
+
+        The ranked pool is independent of page size, offset, display filter and
+        debug flag, so none of those belong in the key: every page of a query
+        reuses one cached pool instead of fragmenting the cache per `limit`.
+        """
         selection = tuple(sorted(zim)) if zim else None
         normalized = re.sub(r"\s+", " ", query).strip().casefold()
-        return (normalized, selection, int(limit))
+        return (normalized, selection)
+
+    def _page_size(self, limit: int | None) -> int:
+        default = getattr(self, "page_size", DEFAULT_PAGE_SIZE)
+        ceiling = getattr(self, "max_results", DEFAULT_MAX_RESULTS)
+        if limit is None:
+            return default
+        try:
+            return max(1, min(int(limit), ceiling))
+        except (TypeError, ValueError):
+            return default
+
+    def _pool_target(self) -> int:
+        """How many ranked candidates to retain and serve across all pages."""
+        return max(
+            self.candidate_count,
+            getattr(self, "max_results", DEFAULT_MAX_RESULTS),
+        )
+
+    @staticmethod
+    def _source_counts(pool: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for doc in pool:
+            key = doc.get("source_key", "")
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    @staticmethod
+    def _public(doc: dict[str, Any], debug: bool) -> dict[str, Any]:
+        """A response copy. Ranking metadata is only shipped in debug mode."""
+        if debug:
+            return dict(doc)
+        return {key: value for key, value in doc.items() if key not in ("explain", "score")}
+
+    def _page_state(
+        self,
+        pool: list[dict[str, Any]],
+        source: str | None,
+        offset: int,
+        page_size: int,
+        debug: bool,
+    ) -> dict[str, Any]:
+        """Slice one display page out of the ranked pool.
+
+        `source` is a display-only filter: the pool was ranked over every
+        selected source, so narrowing here never changes what was searched.
+        """
+        scoped = pool if not source else [doc for doc in pool if doc.get("source_key") == source]
+        total = len(scoped)
+        page = scoped[offset:offset + page_size]
+        return {
+            "results": [self._public(doc, debug) for doc in page],
+            "total": total,
+            "has_more": offset + page_size < total,
+            "counts": self._source_counts(pool),
+        }
+
+    @staticmethod
+    def _unpack_cache(cached: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if isinstance(cached, dict):
+            return list(cached.get("pool", [])), list(cached.get("sources", []))
+        # Legacy entries stored a bare list of final results.
+        return list(cached), []
 
     def _query_vector(self, sources: list[SourceInfo], query: str):
         """Embed the query only when a selected local index actually has vectors.
@@ -646,150 +729,254 @@ class Search:
             print(f"zimantic: query embedding failed ({error}); using title and full-text search")
             return None
 
-    def search(self, query: str, zim: list[str] | None = None, limit: int = 20) -> list[dict]:
-        """Return the final result set using the same coordinator as streaming."""
-        query = self._validate_query(query)
-        limit = max(1, min(int(limit), 100))
-        cached = self.cache.get(self._cache_key(query, zim, limit))
-        if cached is not None:
-            return list(cached["results"] if isinstance(cached, dict) else cached)
-        events = self.stream_search(query, zim, limit)
-        final: list[dict] = []
-        for event in events:
+    def search_page(
+        self,
+        query: str,
+        zim: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        source: str | None = None,
+        debug: bool = False,
+    ) -> dict[str, Any]:
+        """Return one page plus totals, using the streaming coordinator."""
+        final: dict[str, Any] = {}
+        for event in self.stream_search(query, zim, limit, offset, source, debug):
             if event["type"] == "error":
                 raise SearchQueryError(event["error"])
             if event["type"] == "done":
-                final = event["results"]
-        return final
+                final = event
+        return {
+            "results": final.get("results", []),
+            "total": final.get("total", 0),
+            "has_more": final.get("has_more", False),
+            "offset": final.get("offset", max(0, int(offset))),
+            "counts": final.get("counts", {}),
+        }
+
+    def search(
+        self,
+        query: str,
+        zim: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        source: str | None = None,
+        debug: bool = False,
+    ) -> list[dict]:
+        """Return one page of the final result set."""
+        page = self.search_page(query, zim, limit, offset, source, debug)
+        return list(page["results"])
+
+    def _cached_events(
+        self,
+        cached: Any,
+        query: str,
+        sources: list[SourceInfo],
+        source: str | None,
+        offset: int,
+        page_size: int,
+        debug: bool,
+    ) -> Iterator[dict[str, Any]]:
+        """Replay a cached pool as a finished stream (progress + one page)."""
+        pool, cached_sources = self._unpack_cache(cached)
+        state = self._page_state(pool, source, offset, page_size, debug)
+        total_sources = len(sources)
+        yield {
+            "type": "started",
+            "query": query,
+            "sources": [src.to_dict() for src in sources],
+            "total_sources": total_sources,
+            "offset": offset,
+            "limit": page_size,
+        }
+        for completed, source_event in enumerate(cached_sources, 1):
+            yield {
+                "type": "source",
+                **source_event,
+                "completed": completed,
+                "total_sources": total_sources,
+            }
+        snapshot = {
+            "results": state["results"],
+            "completed": total_sources,
+            "total_sources": total_sources,
+            "total": state["total"],
+            "has_more": state["has_more"],
+            "offset": offset,
+            "limit": page_size,
+            "counts": state["counts"],
+        }
+        yield {"type": "snapshot", **snapshot}
+        yield {"type": "done", **snapshot}
+
+    def _finish_inflight(self, key: Any, pending: Future, value: Any) -> None:
+        with self._inflight_lock:
+            if self._inflight.get(key) is pending:
+                del self._inflight[key]
+        if not pending.done():
+            pending.set_result(value)
 
     def stream_search(
         self,
         query: str,
         zim: list[str] | None = None,
-        limit: int = 20,
+        limit: int | None = None,
+        offset: int = 0,
+        source: str | None = None,
+        debug: bool = False,
     ) -> Iterator[dict[str, Any]]:
-        """Yield source progress and provisional ranked snapshots."""
-        query = self._validate_query(query)
-        limit = max(1, min(int(limit), 100))
-        key = self._cache_key(query, zim, limit)
-        sources = self._selected_sources(zim)
+        """Yield source progress and one page of the ranked pool.
 
-        cached = self.cache.get(key)
-        if cached is not None:
-            if isinstance(cached, dict):
-                cached_results = list(cached["results"])
-                cached_sources = cached.get("sources", [])
-            else:
-                # Accept entries written by older in-memory cache users.
-                cached_results = list(cached)
-                cached_sources = []
-            total = len(sources)
-            yield {
-                "type": "started",
-                "query": query,
-                "sources": [source.to_dict() for source in sources],
-                "total": total,
-            }
-            for completed, source_event in enumerate(cached_sources, 1):
-                yield {
-                    "type": "source",
-                    **source_event,
-                    "completed": completed,
-                    "total": total,
-                }
-            yield {
-                "type": "snapshot",
-                "results": cached_results,
-                "completed": total,
-                "total": total,
-            }
-            yield {
-                "type": "done",
-                "results": cached_results,
-                "completed": total,
-                "total": total,
-            }
-            return
+        Ranking runs once to a fixed pool (`max_results`, at least
+        `candidate_count`); `limit`/`offset`/`source` only slice that pool for
+        the response. The pool is cached by `(query, sources)`, so every page
+        and display filter reuses one computation. Concurrent identical queries
+        share a single computation.
+        """
+        query = self._validate_query(query)
+        page_size = self._page_size(limit)
+        offset = max(0, int(offset))
+        key = self._cache_key(query, zim)
+        sources = self._selected_sources(zim)
+        total_sources = len(sources)
+
+        # Coalesce identical in-flight searches: wait for the owner, or become
+        # the owner and compute once.
+        pending: Future | None = None
+        while True:
+            cached = self.cache.get(key)
+            if cached is not None:
+                yield from self._cached_events(
+                    cached, query, sources, source, offset, page_size, debug
+                )
+                return
+            with self._inflight_lock:
+                existing = self._inflight.get(key)
+                if existing is None:
+                    pending = Future()
+                    self._inflight[key] = pending
+                    break
+            # Someone else is computing this query: wait, then reuse their pool.
+            try:
+                cached = existing.result(timeout=self.source_timeout * 4)
+            except Exception:
+                cached = None
+            if cached is not None:
+                yield from self._cached_events(
+                    cached, query, sources, source, offset, page_size, debug
+                )
+                return
+            # Owner failed or was cancelled; loop to claim or read a newer result.
 
         acquired = self._search_slots.acquire()
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
+        cache_value: Any = None
         try:
             yield {
                 "type": "started",
                 "query": query,
-                "sources": [source.to_dict() for source in sources],
-                "total": len(sources),
+                "sources": [src.to_dict() for src in sources],
+                "total_sources": total_sources,
+                "offset": offset,
+                "limit": page_size,
             }
             if not sources:
-                self.cache.put(key, [])
-                yield {"type": "done", "results": [], "completed": 0, "total": 0}
+                cache_value = {"pool": [], "sources": []}
+                self.cache.put(key, cache_value)
+                yield {
+                    "type": "done",
+                    "results": [],
+                    "completed": 0,
+                    "total_sources": 0,
+                    "total": 0,
+                    "has_more": False,
+                    "offset": offset,
+                    "limit": page_size,
+                    "counts": {},
+                }
                 return
 
             query_vector = self._query_vector(sources, query)
 
             title_query = _title_query(query)
             fulltext_query = _fulltext_query(query)
-            for source in sources:
+            pool_target = self._pool_target()
+            for src in sources:
                 futures.append(
                     self._executor.submit(
                         self._search_source,
-                        source,
+                        src,
                         query,
                         title_query,
                         fulltext_query,
                         query_vector,
-                        limit,
+                        pool_target,
                     )
                 )
 
             future_sources = dict(zip(futures, sources))
             for future in as_completed(futures):
-                source = future_sources[future]
+                src = future_sources[future]
                 try:
                     result = future.result()
                 except Exception as error:
                     result = SourceResult(
-                        source=source,
+                        source=src,
                         error=f"search failed: {error}",
                         status="error",
                     )
                 completed.append(result)
-                ranked = self._rank_results(completed, query, limit)
+                pool = self._rank_results(completed, query, pool_target)
+                counts = self._source_counts(pool)
                 yield {
                     "type": "source",
-                    **result.to_event(),
+                    **result.to_event(counts.get(src.key, 0)),
                     "completed": len(completed),
-                    "total": len(sources),
+                    "total_sources": total_sources,
                 }
+                state = self._page_state(pool, source, offset, page_size, debug)
                 yield {
                     "type": "snapshot",
-                    "results": ranked,
+                    "results": state["results"],
                     "completed": len(completed),
-                    "total": len(sources),
+                    "total_sources": total_sources,
+                    "total": state["total"],
+                    "has_more": state["has_more"],
+                    "offset": offset,
+                    "limit": page_size,
+                    "counts": state["counts"],
                 }
 
-            final = self._rank_results(completed, query, limit)
-            # Keep source outcomes so cached streams preserve the per-source
-            # progress and filtering UI on page reloads.
-            self.cache.put(
-                key,
-                {
-                    "results": final,
-                    "sources": [result.to_event() for result in completed],
-                },
-            )
+            pool = self._rank_results(completed, query, pool_target)
+            counts = self._source_counts(pool)
+            # The cache holds only the deduplicated ranked pool plus compact
+            # source outcomes, never a copy of every source's item list.
+            cache_value = {
+                "pool": pool,
+                "sources": [
+                    result.to_event(counts.get(result.source.key, 0))
+                    for result in completed
+                ],
+            }
+            self.cache.put(key, cache_value)
+            state = self._page_state(pool, source, offset, page_size, debug)
             yield {
                 "type": "done",
-                "results": final,
+                "results": state["results"],
                 "completed": len(completed),
-                "total": len(sources),
+                "total_sources": total_sources,
+                "total": state["total"],
+                "has_more": state["has_more"],
+                "offset": offset,
+                "limit": page_size,
+                "counts": state["counts"],
             }
         finally:
             for future in futures:
                 future.cancel()
             if acquired:
                 self._search_slots.release()
+            self._finish_inflight(key, pending, cache_value)
 
     def _search_source(
         self,
@@ -847,7 +1034,7 @@ class Search:
         limit: int,
         index: _LocalIndex,
     ) -> SourceResult:
-        count = max(self.candidate_count, limit * 2)
+        count = max(self.candidate_count, limit)
         db = self._db_for(index)
         semantic: list[tuple[float, dict[str, Any]]] = []
         keyword: list[tuple[float, dict[str, Any]]] = []
@@ -1030,7 +1217,7 @@ class Search:
         params = urlencode({
             "pattern": query,
             "books.name": source.book,
-            "pageLength": max(self.candidate_count, limit * 2),
+            "pageLength": max(self.candidate_count, limit),
             "format": "xml",
         })
         try:
@@ -1118,7 +1305,7 @@ class Search:
             (keyword, 1.0),
             (fulltext, 2.0 if len(re.findall(r"\w+", query, re.UNICODE)) >= _int_config(self.cfg, "long_query", 10) else 1.0),
         ):
-            for rank, (_, _, doc) in enumerate(ranked[: max(self.candidate_count, limit * 2)]):
+            for rank, (_, _, doc) in enumerate(ranked[: max(self.candidate_count, limit)]):
                 scores[doc["id"]] = scores.get(doc["id"], 0.0) + weight / (60 + rank)
 
         disambig_boost = float(self.cfg.get("disambiguation_boost", DEFAULT_DISAMBIGUATION_BOOST))

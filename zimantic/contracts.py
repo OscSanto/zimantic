@@ -41,10 +41,19 @@ class SourceResult:
     error: str | None = None
     status: str = "ok"
 
-    def to_event(self) -> dict[str, Any]:
-        return {
+    def to_event(self, count: int | None = None) -> dict[str, Any]:
+        """Compact progress event for one source.
+
+        Full per-source items are intentionally omitted: the client renders the
+        ranked pool page-by-page and filters on the server, so shipping every
+        source's candidate list would only duplicate the ranked payload and
+        bloat the cache.
+        """
+        event: dict[str, Any] = {
             "source": self.source.to_dict(),
-            "items": self.items,
             "error": self.error,
             "status": self.status,
         }
+        if count is not None:
+            event["count"] = count
+        return event
