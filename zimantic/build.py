@@ -7,8 +7,8 @@ the fast index and publishing it atomically.
 Use force=True to rebuild from scratch.
 """
 import os
+import secrets
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import faiss
@@ -147,6 +147,53 @@ def build(
             db.close()
 
 
+def _create_temp_path(path: Path) -> Path:
+    """Reserve a unique sibling temp file with normal (umask-respecting) mode.
+
+    ``tempfile.NamedTemporaryFile``/``mkstemp`` force 0600, which would publish
+    a FAISS file the server cannot read when it runs as another user. ``os.open``
+    with 0o644 matches how the SQLite file is created.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for _ in range(100):
+        candidate = path.with_name(
+            f".{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+        )
+        try:
+            fd = os.open(candidate, flags, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    raise RuntimeError(f"could not create a temporary file beside {path}")
+
+
+def _fsync_file(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(directory: Path) -> None:
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _upgrade_paths(db_path: Path, faiss_path: Path) -> tuple[Path, Path]:
     """Return staging paths used while replacing a valid fast index."""
     return (
@@ -175,11 +222,13 @@ def _publish_upgrade(
         # the new one.
         os.replace(staging_faiss_path, faiss_path)
         os.replace(staging_db_path, db_path)
+        _fsync_dir(db_path.parent)
         return
     if staging_db_path.exists() and faiss_path.exists():
         # Recover if the process stopped after publishing FAISS but before
         # publishing SQLite.
         os.replace(staging_db_path, db_path)
+        _fsync_dir(db_path.parent)
         return
     if db_path.exists() and faiss_path.exists() and not staging_db_path.exists():
         return
@@ -246,13 +295,14 @@ def _write_faiss(db, path: Path) -> None:
         ids, vectors = _load(rows)
         index.add_with_ids(vectors, ids)
         last = int(ids[-1])
-    with tempfile.NamedTemporaryFile(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-    ) as temp:
-        temp_path = Path(temp.name)
+    temp_path = _create_temp_path(path)
     try:
         faiss.write_index(index, str(temp_path))
+        # Flush the vectors before the rename so a power loss cannot publish a
+        # truncated index file; the directory fsync makes the rename durable.
+        _fsync_file(temp_path)
         os.replace(temp_path, path)
+        _fsync_dir(path.parent)
     finally:
         temp_path.unlink(missing_ok=True)
 

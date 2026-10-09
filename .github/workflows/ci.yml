@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (x86_64, py3.14)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      # `dev` is a PEP 735 dependency group; `uv sync` installs it by default.
+      # `--locked` fails if uv.lock is out of date.
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
+  arm:
+    name: test (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Fully supported: libzim/onnxruntime/faiss publish aarch64 wheels.
+          - arch: arm64
+            platform: linux/arm64
+            best_effort: false
+          # Best effort: libzim currently ships no armv7 (armhf) wheel, so this
+          # documents whether a 32-bit install is possible yet.
+          - arch: armhf
+            platform: linux/arm/v7
+            best_effort: true
+    # A 32-bit install may be impossible today; report it without failing the build.
+    continue-on-error: ${{ matrix.best_effort }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Run tests under emulation
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$PWD:/app" -w /app \
+            python:3.14-slim \
+            sh -c "pip install uv \
+                   && uv sync --locked --no-build \
+                   && uv run pytest -q"

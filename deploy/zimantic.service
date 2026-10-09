@@ -1,0 +1,43 @@
+# Zimantic search server (user unit).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/zimantic.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zimantic.service
+#
+# Adjust WorkingDirectory/ExecStart if the project is not at ~/zimantic.
+
+[Unit]
+Description=Zimantic search server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/zimantic
+ExecStart=%h/zimantic/.venv/bin/python -m zimantic serve
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening: the server only needs to read zims/model and write indexes/ plus
+# its PID file, all under the project directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/zimantic
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# Tune to the device, leaving headroom for the OS. See configs/ for profiles.
+#MemoryMax=450M
+#CPUQuota=90%
+
+[Install]
+WantedBy=default.target

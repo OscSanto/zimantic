@@ -34,7 +34,7 @@ _install_optional_dependency_stubs()
 
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult
-from zimantic.search import Search, _LocalIndex, _fulltext_query, _nprobe, _query_terms, _title_prefix_query, _title_query
+from zimantic.search import Search, SearchBusyError, _LocalIndex, _fulltext_query, _nprobe, _query_terms, _title_prefix_query, _title_query
 
 
 def _bare_search(cfg):
@@ -740,6 +740,69 @@ class PaginationTests(unittest.TestCase):
             self.assertNotIn("score", plain)
             self.assertIn("explain", detailed)
             search._executor.shutdown(wait=True)
+
+
+class ProductionHardeningTests(unittest.TestCase):
+    def _db(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        )
+        db.execute(
+            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            (1, "Tire Change", "A useful tire change guide.", "tire-change", None),
+        )
+        return db
+
+    def test_missing_kiwix_url_leaves_results_unlinked(self):
+        # kiwix_url is documented as optional; a result without it must not crash.
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        search = object.__new__(Search)
+        search.cfg = {}  # no kiwix_url
+        search.preview_chars = 100
+        db = self._db()
+        try:
+            doc = search._fetch_docs(source, db, {1})[1]
+        finally:
+            db.close()
+        self.assertIsNone(doc["url"])
+        self.assertEqual(doc["path"], "tire-change")
+
+    def test_malformed_disambiguation_tuning_falls_back_to_defaults(self):
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        search = object.__new__(Search)
+        search.cfg = {"disambiguation_boost": "high", "disambiguation_penalty": "nope"}
+        search.candidate_count = 16
+        search.max_results = 100
+        result = SourceResult(
+            source=source,
+            items=[{
+                "id": "manual:air",
+                "source_key": "manual",
+                "source": "Manual",
+                "title": "Air",
+                "lead": "Air is a mixture of gases.",
+                "path": "Air",
+                "source_rank": 1,
+            }],
+        )
+        ranked = search._rank_results([result], "air", 10)
+        self.assertEqual(ranked[0]["title"], "Air")
+
+    def test_exhausted_search_slots_report_busy_without_blocking(self):
+        search = _bare_search({"kiwix_url": "http://example/content"})
+        search._search_slots = threading.BoundedSemaphore(1)
+        self.assertTrue(search._search_slots.acquire(blocking=False))
+        try:
+            events = list(search.stream_search("anything", limit=1))
+            with self.assertRaises(SearchBusyError):
+                search.search_page("anything", limit=1)
+        finally:
+            search._search_slots.release()
+            search._executor.shutdown(wait=True)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertTrue(events[-1]["busy"])
 
 
 class QueryCacheTests(unittest.TestCase):

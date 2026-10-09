@@ -1,0 +1,31 @@
+# One-shot: index any new ZIMs (fast) and ask the server to rescan.
+#
+# Install alongside deploy/zimantic-zims.path. See that file for instructions.
+# The nightly full build lives in deploy/zimantic-index-full.service/.timer.
+#
+# This unit only actually builds between 01:00 and 06:00 in the machine's own
+# local time. The path watch fires when a ZIM is added at any hour, but the
+# ExecCondition below skips the work outside those hours, so daytime additions
+# are covered by the next nightly run of deploy/zimantic-index-full.timer.
+# Change the two numbers (1 and 6) for a different window; the timer's
+# OnCalendar start time must stay inside it.
+# Replace `build --fast` with `build` to add meaning vectors too (much slower on
+# low-power hardware; building on a faster machine and copying indexes/ is
+# usually better).
+
+[Unit]
+Description=Index new ZIMs (fast) and tell Zimantic to rescan
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/zimantic
+# Only start between 01:00 and 06:00 local time. Both build units share this
+# window, so manual, path-triggered and timer runs all respect it.
+ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
+# Serialize against the nightly full build: if it already holds the lock, skip
+# instead of touching the same index files concurrently. flock ships in
+# util-linux; the `|| echo` writes the skip reason into the journal.
+ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/zimantic/.venv/bin/python -m zimantic build --fast || echo "zimantic: another build is running, fast build skipped" >&2'
+ExecStart=%h/zimantic/.venv/bin/python -m zimantic reload
+NoNewPrivileges=yes
+PrivateTmp=yes

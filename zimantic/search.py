@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
-import json
 import math
 from pathlib import Path
 import re
@@ -84,6 +83,10 @@ class _LocalIndex:
 
 class SearchQueryError(ValueError):
     """The requested query cannot be processed."""
+
+
+class SearchBusyError(Exception):
+    """Too many searches are already running; the client should retry."""
 
 
 def _int_config(cfg: dict, key: str, default: int, minimum: int = 1) -> int:
@@ -273,7 +276,10 @@ class Search:
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
         )
         self._load_indexes()
-        self.refresh_sources()
+        # Local indexes are ready immediately; the optional Kiwix catalog is
+        # refreshed in the background so an unreachable Kiwix server cannot
+        # delay startup (see start_catalog_refresh).
+        self.refresh_local_sources()
 
     @staticmethod
     def _index_uri(db_path: Path) -> str:
@@ -508,10 +514,43 @@ class Search:
                 index._conns.append(conn)
         return conn
 
+    def refresh_local_sources(self) -> list[dict[str, Any]]:
+        """Rebuild the source set from local indexes only (never touches the network)."""
+        return self._rebuild_sources([])
+
     def refresh_sources(self) -> list[dict[str, Any]]:
-        """Refresh source metadata without making local indexes unavailable."""
+        """Refresh source metadata without making local indexes unavailable.
+
+        This includes the optional Kiwix catalog, so it performs a blocking HTTP
+        request when ``kiwix_server`` is configured. Startup calls
+        ``refresh_local_sources`` instead and refreshes the catalog in the
+        background via ``start_catalog_refresh``.
+        """
         server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
         entries = self._catalog_entries(server) if server else []
+        return self._rebuild_sources(entries)
+
+    def start_catalog_refresh(self) -> None:
+        """Fetch the optional Kiwix catalog off the startup path.
+
+        Catalog sources are only needed for books without a local index, so the
+        server must not wait (up to ``source_timeout``) for Kiwix to answer.
+        """
+        server = str(self.cfg.get("kiwix_server") or "").strip()
+        if not server:
+            return
+
+        def _refresh() -> None:
+            try:
+                sources = self.refresh_sources()
+            except Exception as error:  # a catalog failure must not affect serving
+                print(f"zimantic: catalog refresh failed ({error})", flush=True)
+                return
+            print(f"zimantic: Kiwix catalog ready ({len(sources)} source(s))", flush=True)
+
+        threading.Thread(target=_refresh, name="zimantic-catalog", daemon=True).start()
+
+    def _rebuild_sources(self, entries: list[dict[str, str]]) -> list[dict[str, Any]]:
         with self._state_lock:
             local: dict[str, SourceInfo] = {}
             for local_name in self.indexes:
@@ -742,6 +781,8 @@ class Search:
         final: dict[str, Any] = {}
         for event in self.stream_search(query, zim, limit, offset, source, debug):
             if event["type"] == "error":
+                if event.get("busy"):
+                    raise SearchBusyError(event["error"])
                 raise SearchQueryError(event["error"])
             if event["type"] == "done":
                 final = event
@@ -867,11 +908,20 @@ class Search:
                 return
             # Owner failed or was cancelled; loop to claim or read a newer result.
 
-        acquired = self._search_slots.acquire()
+        # Fail fast rather than blocking an ASGI request thread. Clients can
+        # retry the explicit busy response without holding a server thread.
+        acquired = self._search_slots.acquire(blocking=False)
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
         cache_value: Any = None
         try:
+            if not acquired:
+                yield {
+                    "type": "error",
+                    "error": "server is busy; try again shortly",
+                    "busy": True,
+                }
+                return
             yield {
                 "type": "started",
                 "query": query,
@@ -1154,6 +1204,9 @@ class Search:
             )
             rows.update({int(row[0]): row for row in db.execute(query, batch)})
 
+        # kiwix_url is optional: without it results have no article link, so the
+        # UI renders the title as plain text instead of building a broken URL.
+        kiwix_url = str(self.cfg.get("kiwix_url") or "").strip().rstrip("/")
         docs: dict[int, dict[str, Any]] = {}
         for rowid in values:
             original = rows.get(rowid)
@@ -1172,8 +1225,9 @@ class Search:
                 "lead": self._preview(excerpt or ""),
                 "path": path,
                 "url": (
-                    f"{self.cfg['kiwix_url'].rstrip('/')}/"
-                    f"{quote(source.book)}/{quote(path)}"
+                    f"{kiwix_url}/{quote(source.book)}/{quote(path)}"
+                    if kiwix_url
+                    else None
                 ),
             }
             docs[rowid] = doc
@@ -1308,8 +1362,12 @@ class Search:
             for rank, (_, _, doc) in enumerate(ranked[: max(self.candidate_count, limit)]):
                 scores[doc["id"]] = scores.get(doc["id"], 0.0) + weight / (60 + rank)
 
-        disambig_boost = float(self.cfg.get("disambiguation_boost", DEFAULT_DISAMBIGUATION_BOOST))
-        disambig_penalty = float(self.cfg.get("disambiguation_penalty", DEFAULT_DISAMBIGUATION_PENALTY))
+        disambig_boost = _float_config(
+            self.cfg, "disambiguation_boost", DEFAULT_DISAMBIGUATION_BOOST, -1.0, 1.0
+        )
+        disambig_penalty = _float_config(
+            self.cfg, "disambiguation_penalty", DEFAULT_DISAMBIGUATION_PENALTY, 0.0, 1.0
+        )
         scored: list[tuple[float, float, float, int, str, str, dict[str, Any]]] = []
         for identity, doc in docs.items():
             title_tokens = _content_terms(doc["title"])
