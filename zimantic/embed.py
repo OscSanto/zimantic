@@ -1,4 +1,7 @@
 """Turn text into vectors with multilingual-e5-small (ONNX, int8). This is the one model zimantic ships with."""
+import hashlib
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -8,19 +11,70 @@ import sentencepiece
 from .settings import DEFAULT_MAX_EMBEDDING_TOKENS
 SPECIAL_TOKEN_COUNT = 2
 
+# sha256 of the exact files the README tells users to download. A mismatch only
+# warns: a different but valid conversion still works, it just may rank
+# differently from the documented model.
+EXPECTED_CHECKSUMS = {
+    "model.onnx": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
+    "sentencepiece.bpe.model": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
+}
+
+# Leave a core for the search workers and web server: embedding gets a modest
+# fixed budget rather than every CPU, and spinning is disabled below so idle
+# model threads do not busy-wait on small hardware.
+DEFAULT_EMBED_THREADS = max(1, min(os.cpu_count() or 1, 4) - 1)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_model_files(model_dir, warn=None) -> None:
+    """Warn (never fail) when a model file differs from the documented checksum."""
+    if warn is None:
+        warn = lambda message: print(message, file=sys.stderr)  # noqa: E731
+    for name, expected in EXPECTED_CHECKSUMS.items():
+        path = Path(model_dir) / name
+        try:
+            actual = _sha256(path)
+        except OSError:
+            continue  # a missing file fails later, with a clearer error
+        if actual != expected:
+            warn(
+                f"zimantic: warning: {name} does not match the expected checksum "
+                f"(got {actual}, expected {expected}); search results may differ "
+                "from the documented model"
+            )
+
+
 # Turns text into vectors with multilingual-e5-small (ONNX, int8) currently.
 class Embedder:
     def __init__(
         self,
         model_dir,
         max_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+        threads: int | None = None,
     ):
         """model_dir holds model.onnx and sentencepiece.bpe.model."""
         self.max_tokens = int(max_tokens)
         if self.max_tokens < SPECIAL_TOKEN_COUNT:
             raise ValueError(f"max_tokens must be at least {SPECIAL_TOKEN_COUNT}")
+        verify_model_files(model_dir)
+        self.threads = int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
         opts = ort.SessionOptions()
         opts.enable_cpu_mem_arena = False  # the arena kept ~600 MB after indexing; without it memory is freed
+        opts.intra_op_num_threads = self.threads
+        opts.inter_op_num_threads = 1
+        # Without this, idle ORT threads busy-wait between batches and steal CPU
+        # from concurrent searches on constrained hardware.
+        try:
+            opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        except Exception:
+            pass
         self.session = ort.InferenceSession(str(Path(model_dir) / "model.onnx"), opts, providers=["CPUExecutionProvider"])
         # sentencepiece loads this vocabulary in ~45 MB; Hugging Face `tokenizers` needed ~250 MB.
         self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(Path(model_dir) / "sentencepiece.bpe.model"))

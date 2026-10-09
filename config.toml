@@ -1,5 +1,11 @@
 # zimantic settings.
 
+# This file is optional. When it is missing or empty, zimantic warns and uses
+# defaults auto-detected from the machine (mobile / desktop / supercomputer).
+# You only need to set the keys you want to override; anything you omit falls
+# back to those defaults. See config.pi-zero-2w.toml and config.pi-5.toml for
+# other tuned starting points.
+
 # Relative paths (like ./zims) are relative to the folder you run `python -m zimantic` from (this project folder)
 #  Absolute paths also work, e.g. /mnt/usb/zims or C:/zims.
 
@@ -31,7 +37,8 @@ port = 8090
 
 # Where result links open the article, served by kiwix-serve (optional; search works without it).
 # Links become <kiwix_url>/<zim name>/<article path>. Use this machine's address instead of
-# localhost if people open the search page from other devices.
+# localhost if people open the search page from other devices. Leave blank to show result
+# titles without links.
 kiwix_url = "http://localhost:8085/content"
 
 # Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
@@ -58,6 +65,11 @@ max_results = 100
 # Increase this on hardware where benchmarks show a gain; 32 is a good default.
 # Use ~8 on a Raspberry Pi Zero 2 W.
 batch_size = 32
+
+# ONNX Runtime threads used for embedding. Left unset, Zimantic uses one fewer
+# than the CPU count (up to three), leaving a core for the search workers and
+# the web server. Set an explicit number to override.
+# embed_threads = 3
 
 # Maximum HTML read from each article while extracting text.
 max_html_bytes = 4_194_304

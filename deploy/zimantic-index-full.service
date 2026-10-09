@@ -1,0 +1,29 @@
+# One-shot: nightly full build (with meaning vectors) of every ZIM, then rescan.
+#
+# Triggered by deploy/zimantic-index-full.timer. Install both:
+#   cp deploy/zimantic-index-full.service deploy/zimantic-index-full.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zimantic-index-full.timer
+#
+# Runs only between 01:00 and 06:00 in the machine's own local time. The timer
+# starts it at 01:00; the ExecCondition below also rejects manual or retried
+# starts outside the window. ZIMs that are already indexed are skipped (build is
+# idempotent), so the nightly run is near-instant once the library is complete
+# and does real work only for new or interrupted indexes.
+
+[Unit]
+Description=Build full Zimantic indexes at night and rescan
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/zimantic
+# Only start between 01:00 and 06:00 local time. Both build units share this
+# window, so manual, path-triggered and timer runs all respect it.
+ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
+# Serialize against the path-triggered fast build: if it already holds the
+# lock, skip instead of touching the same index files concurrently. flock ships
+# in util-linux; the `|| echo` writes the skip reason into the journal.
+ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/zimantic/.venv/bin/python -m zimantic build || echo "zimantic: another build is running, nightly full build skipped" >&2'
+ExecStart=%h/zimantic/.venv/bin/python -m zimantic reload
+NoNewPrivileges=yes
+PrivateTmp=yes

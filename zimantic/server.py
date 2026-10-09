@@ -8,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from .search import SearchQueryError
+from .search import SearchBusyError, SearchQueryError
 
 PAGE = Path(__file__).parent / "index.html"
 PID_FILE = Path("zimantic.pid")
@@ -73,6 +73,10 @@ def create_app(searchClass) -> FastAPI:
     ):
         try:
             page = searchClass.search_page(q, zim, limit, offset, source, debug)
+        except SearchBusyError as error:
+            raise HTTPException(
+                status_code=503, detail=str(error), headers={"Retry-After": "1"}
+            ) from error
         except SearchQueryError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         # Body stays the plain result list for compatibility; totals travel as
@@ -143,6 +147,12 @@ def serve(searchClass, port: int) -> None:
         PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as error:
         print(f"zimantic: could not write PID file {PID_FILE}: {error}", flush=True)
+
+    # Optional Kiwix catalog discovery runs in the background so an unreachable
+    # Kiwix server cannot delay binding the port.
+    start_catalog = getattr(searchClass, "start_catalog_refresh", None)
+    if callable(start_catalog):
+        start_catalog()
 
     sighup = getattr(signal, "SIGHUP", None)
     if sighup is not None:

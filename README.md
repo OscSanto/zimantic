@@ -96,10 +96,12 @@ The `.faiss` file is memory-mapped: the operating system reads only the **cluste
 instead of loading the whole index into RAM. Clusters are found relative to the distance of
 query-to-cluster centres in vector space.
 
-If a build stops, running it again resumes from the last saved batch. The FAISS file is written
-atomically and the SQLite `done` marker is written only after it is complete, so an interrupted
-finalization can be resumed safely. When a normal build upgrades a fast index, the existing
-title-word/full-text index remains available until the replacement is complete. Extracted excerpts
+If a build stops, running it again resumes from the last saved batch. Stopping one is safe at any
+point: Ctrl-C and a systemd `stop` (SIGTERM is handled like Ctrl-C) land between batches, and an
+interrupted run resumes where it left off. The FAISS file is written atomically and the SQLite `done`
+marker is written only after it is complete, so an interrupted finalization can be resumed safely.
+When a normal build upgrades a fast index, the existing title-word/full-text index remains available
+until the replacement is complete. Extracted excerpts
 are stored in the SQLite index, so changing `max_preview_chars`, `max_embedding_tokens`, overflow
 policies, `max_html_bytes`, or extraction behavior requires rebuilding that ZIM with `build --force`.
 
@@ -219,7 +221,7 @@ so less common languages may contain mistakes.
 
 ## Requirements
 
-- Python 3.12, 3.13 or 3.14 (the pinned numpy needs 3.12+; libzim doesn't support 3.15 yet)
+- Python 3.14 (libzim ships per-version wheels and the pinned release currently provides 3.14 only)
 - About 120 MB for the embedding model, plus your ZIM files
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
 - *Searching does not require Kiwix.* To open the articles from the result links, run
@@ -244,21 +246,27 @@ never get committed.
 
 ## Install
 
-1. **Get the code and enter the folder.** Run the next commands from here, and note that `config.toml`
-   is read from this folder, so configure appropriately.
+1. **Get the code and enter the folder.** Run the next commands from here. `config.toml` is optional —
+   when it is missing, zimantic warns and uses defaults auto-detected from the machine
+   (mobile / desktop / supercomputer), with the project folders as paths.
 
    ```bash
    git clone https://github.com/OscSanto/zimantic.git
    cd zimantic
    ```
 
-2. **Create a virtual environment and install the dependencies:**
+2. **Create the environment and install the dependencies.** With
+   [uv](https://docs.astral.sh/uv/) this is a single step — it creates `.venv` and installs
+   Zimantic plus, by default, the dev-only tools (`pytest` and `httpx2`, which back the test
+   suite; the program itself does not need them):
 
    ```bash
-   python3 -m venv .venv
+   uv sync
    . .venv/bin/activate              # Windows: .venv\Scripts\activate
-   pip install .
    ```
+
+   Add `--no-dev` to `uv sync` to skip the test tools. (`pip` works too: create a venv, then
+   `pip install .` for Zimantic and `pip install pytest httpx2` to run the tests.)
 
 3. **Download the model into `model/`** (keep these exact file names):
 
@@ -269,19 +277,28 @@ never get committed.
    ```
 
    (`curl` is built into Linux, macOS and Windows 10+. On Windows PowerShell, use `curl.exe` and `mkdir model`.)
+   Zimantic prints a warning at startup if either file does not match the documented checksum, but still
+   runs: a different conversion works, it may just rank differently.
 
 4. **Put your ZIM files in `zims/`.** Download them from
    [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. **Check `config.toml`.** If you used the folders above, nothing needs changing. Otherwise point
-   `zim_dir` / `model_dir` / `index_dir` at your folders. To open articles from the results, set
-   `kiwix_url` to where kiwix-serve runs.
+5. **Check `config.toml`.** If you used the folders above, nothing needs changing (you can even delete
+   the file — auto-detected defaults take over, with a warning). Otherwise point `zim_dir` /
+   `model_dir` / `index_dir` at your folders. To open articles from the results, set `kiwix_url` to
+   where kiwix-serve runs. Keys you omit fall back to the auto-detected defaults.
 
-6. **Check that it runs:**
+6. **Check that it runs, and that the installed dependencies expose the APIs Zimantic uses:**
 
    ```bash
    python -m zimantic --help
+   python -m pytest tests/test_runtime_api.py   # builds a tiny ZIM and reads it back
    ```
+
+   The runtime check exercises the private libzim calls the indexer and searcher depend on
+   (`_get_entry_by_id`, `_index`, the full-text `Searcher`), so a dependency upgrade that breaks them
+   fails loudly here instead of at first search. Running the whole suite (`python -m pytest`) covers
+   the rest.
 
 ## Use
 
@@ -313,37 +330,47 @@ vectors in place.
 
 Normal builds embed 32 articles at a time by default. This is intentionally a moderate CPU batch: the
 model pads each batch to its longest passage, so larger batches can use more memory and take longer.
-Tune `batch_size` in `config.toml` on faster hardware, and benchmark it against your ZIM.
+Tune `batch_size` in `config.toml` on faster hardware, and benchmark it against your ZIM. `embed_threads`
+bounds the ONNX Runtime threads (it defaults to leaving a core free). When all search slots are occupied,
+new searches fail fast as busy so they do not tie up web-server request threads; the web UI retries those
+responses with exponential backoff.
+
+**Hardware profiles.** When `config.toml` is missing, zimantic picks one of three default profiles
+(mobile, desktop, supercomputer) from a simple heuristic: roughly 1 GB of RAM or less is mobile;
+many cores (32+) or lots of RAM (128 GB+) is supercomputer; anything else is desktop. To pin explicit
+settings instead, copy the ready-made templates at the repo root over `config.toml`:
+`config.pi-zero-2w.toml` and `config.pi-5.toml`. Keys you omit from your `config.toml` still fall back
+to the auto-detected profile.
+
+Keep free disk space roughly equal to **another copy of the index** while `build` runs: a normal build
+renames the replacement into place beside the old index (for a fast→full upgrade) and writes the FAISS
+file through a same-directory temporary file before publishing it atomically.
 
 **Automatic pickup with systemd.** Instead of the server polling directories, let systemd watch
-`zims/` and build + reload when a ZIM is added. Example units (adjust paths, user and port):
+`zims/` and build + reload when a ZIM is added. Ready-to-copy user units live in `deploy/`:
 
-```ini
-# ~/.config/systemd/user/zimantic.service
-[Unit]
-Description=Zimantic search server
-[Service]
-WorkingDirectory=%h/zimantic
-ExecStart=%h/zimantic/.venv/bin/python -m zimantic serve
-Restart=on-failure
+- `deploy/zimantic.service` — the server, with `Restart=always` and sandboxing. Copy it to
+  `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
+- `deploy/zimantic-zims.path` + `deploy/zimantic-index.service` — watch `zims/` and run a fast build
+  plus `reload` when a ZIM appears.
+- `deploy/zimantic-index-full.service` + `deploy/zimantic-index-full.timer` — run the full build
+  (with meaning vectors) once a night.
 
-# ~/.config/systemd/user/zimantic-zims.path
-[Unit]
-Description=Index new ZIMs and rescan Zimantic
-[Path]
-PathChanged=%h/zimantic/zims
-[Install]
-WantedBy=default.target
+**Indexing only runs during a nightly window**, 01:00–06:00 in the machine's own local time by
+default. Both build services enforce the window with an `ExecCondition` clock check that runs before
+every start, and the timer triggers the full build at 01:00 (`OnCalendar=*-*-* 01:00:00`). Because
+the window follows local time, the same units work unchanged in any timezone — move the device or
+change its timezone and the hours still mean 01:00–06:00 where the machine is. To use different
+hours, change the two numbers in each `ExecCondition` and keep the timer's `OnCalendar` start inside
+the window. ZIMs added during the day are not ignored: the nightly full build indexes them, and
+`build` skips anything already indexed, so the nightly run is near-instant once the library is
+complete. A shared `flock` (in util-linux) in both units guarantees the path-triggered fast build and
+the nightly full build never write the same index at the same time; a build that arrives while the
+lock is held is skipped and picked up on the next run.
 
-# ~/.config/systemd/user/zimantic-index.service
-[Unit]
-Description=Index new ZIMs (fast) and tell Zimantic to rescan
-[Service]
-Type=oneshot
-WorkingDirectory=%h/zimantic
-ExecStart=%h/zimantic/.venv/bin/python -m zimantic build --fast
-ExecStart=%h/zimantic/.venv/bin/python -m zimantic reload
-```
+Each file has install instructions in its header. Adjust `WorkingDirectory`/`ExecStart` if the project
+is not at `~/zimantic`, and uncomment the `MemoryMax`/`CPUQuota` lines to cap resource use on a small
+device.
 
 `reload` does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by
 default, or from the file passed with `--pid`. A stale PID file (left over after a crash or a signal
@@ -372,8 +399,8 @@ JSON API examples:
   `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers, so the body stays a plain list.
   `source` is a display-only filter over the ranked pool: it never changes what is searched.
 - `GET /api/search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited JSON events:
-  `started`, `source`, `snapshot`, and `done`. Each event carries `total_sources`, and snapshots/done
-  carry the page, `total`, `has_more` and per-source `counts`.
+  `started`, `source`, `snapshot`, `done`, or a `busy` `error`. Each event carries `total_sources`,
+  and snapshots/done carry the page, `total`, `has_more` and per-source `counts`.
 - `GET /api/sources` returns source metadata and readiness; `GET /api/config` returns `page_size` and
   `max_results`; `GET /api/zims` remains as the local-index compatibility endpoint.
 - `GET /api/health` reports served indexes, source count, and cache statistics.

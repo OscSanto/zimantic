@@ -17,6 +17,13 @@ dependencies = [
     "libzim",
     "fastapi",
     "uvicorn",
+]
+
+[dependency-groups]
+# Development and test-only tools. httpx2 backs FastAPI's TestClient; the
+# application itself uses urllib, so it is not a runtime dependency.
+dev = [
+    "pytest",
     "httpx2",
 ]
 

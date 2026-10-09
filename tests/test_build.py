@@ -153,6 +153,18 @@ class BuildUpgradeTests(unittest.TestCase):
             self.assertEqual(faiss_path.read_bytes(), b"new vectors")
 
 
+class TempIndexFileTests(unittest.TestCase):
+    def test_temp_index_file_uses_readable_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "manual.faiss"
+            temp = build_module._create_temp_path(target)
+            try:
+                self.assertEqual(temp.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(temp.parent, target.parent)
+            finally:
+                temp.unlink(missing_ok=True)
+
+
 class FaissTrainingTests(unittest.TestCase):
     def test_training_stride_meets_faiss_minimum(self):
         vector_count = 700_000
@@ -272,6 +284,66 @@ class FaissTrainingSamplingTests(unittest.TestCase):
             db.close()
 
         self.assertEqual(index.training_vectors.shape, (5_000, 2))
+
+
+class BuildInterruptTests(unittest.TestCase):
+    def test_stopped_build_resumes_from_the_last_committed_batch(self):
+        class _Archive8(_FakeArchive):
+            entry_count = 8
+
+        rows = [
+            (i, f"Title {i}", f"Excerpt {i}", f"path-{i}", None)
+            for i in range(1, 9)
+        ]
+
+        def read_entry(_zim, index, **_kwargs):
+            if index == 4:
+                raise KeyboardInterrupt  # Ctrl-C or systemd SIGTERM, mid-scan
+            return rows[index]
+
+        def write_fake_faiss(_db, path):
+            path.write_bytes(b"vectors")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            db_path = directory / "manual.sqlite"
+            faiss_path = directory / "manual.faiss"
+
+            with (
+                patch.object(build_module, "Archive", _Archive8),
+                patch.object(build_module, "read_entry", side_effect=read_entry),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    build_module.build(directory / "manual.zim", directory, None, 2)
+
+            # The interrupted run committed batches up to entry 4 (next=4) and
+            # never marked the index done, so a rerun resumes exactly there.
+            self.assertEqual(_meta(db_path), {"next": 4})
+
+            with (
+                patch.object(build_module, "Archive", _Archive8),
+                patch.object(
+                    build_module,
+                    "read_entry",
+                    side_effect=lambda _zim, index, **_kwargs: rows[index],
+                ),
+                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
+            ):
+                build_module.build(directory / "manual.zim", directory, None, 2)
+
+            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1"})
+            db = sqlite3.connect(db_path)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 8)
+            db.close()
+            self.assertEqual(faiss_path.read_bytes(), b"vectors")
+
+
+class SigtermHandlerTests(unittest.TestCase):
+    def test_sigterm_handler_raises_keyboard_interrupt(self):
+        import zimantic.__main__ as main_module
+
+        with self.assertRaises(KeyboardInterrupt):
+            main_module._graceful_interrupt(None, None)
 
 
 if __name__ == "__main__":

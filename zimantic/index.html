@@ -185,6 +185,9 @@
   let PAGE_SIZE = 10;  // replaced with the server's page_size at startup
   const AUTO_SUBMIT_DELAY = 400;
   const STREAM_RENDER_DELAY = 150;
+  const BUSY_RETRY_BASE_DELAY = 1000;
+  const BUSY_RETRY_MAX_DELAY = 8000;
+  const BUSY_RETRY_LIMIT = 5;
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -619,11 +622,30 @@
     });
   }
 
+  function waitForRetry(delay, signal) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      }, delay);
+      const abort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    });
+  }
+
   async function consumeStream(response, sequence) {
     if (!response.body) throw new Error("streaming response has no body");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let busy = false;
     const applyPage = event => {
       current.completed = event.completed;
       current.pageItems = event.results || [];
@@ -657,6 +679,7 @@
           : "No searchable sources.";
         renderView();
       } else if (event.type === "error") {
+        busy = Boolean(event.busy);
         $("status").textContent = event.error || "Search failed";
       }
     };
@@ -669,11 +692,13 @@
       lines.forEach(consumeLine);
     }
     if (buffer) consumeLine(buffer);
+    if (busy) return true;
     if (sequence === searchSequence && current && current.streaming) {
       current.streaming = false;
       cancelStreamRender();
       renderView();
     }
+    return false;
   }
 
   async function runSearch(question, source = null, page = 0) {
@@ -725,9 +750,20 @@
       // Always query every source: no zim params means the server searches all
       // currently available sources. The server ranks one pool and sends only
       // this page; page size, offset and the display filter are not cached keys.
-      const response = await fetch("/api/search/stream?" + params, { signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      await consumeStream(response, sequence);
+      let busyRetries = 0;
+      while (true) {
+        const response = await fetch("/api/search/stream?" + params, { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const busy = await consumeStream(response, sequence);
+        if (!busy || busyRetries >= BUSY_RETRY_LIMIT || sequence !== searchSequence) break;
+        busyRetries++;
+        const delay = Math.min(
+          BUSY_RETRY_BASE_DELAY * 2 ** (busyRetries - 1),
+          BUSY_RETRY_MAX_DELAY
+        );
+        $("status").textContent = `Server is busy; retrying in ${delay / 1000}s…`;
+        await waitForRetry(delay, controller.signal);
+      }
     } catch (error) {
       if (error.name !== "AbortError" && sequence === searchSequence) {
         $("status").textContent = `Search failed: ${error.message}`;

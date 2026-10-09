@@ -2,8 +2,18 @@ import argparse
 import os
 import signal
 import sys
-import tomllib
 from pathlib import Path
+
+def _graceful_interrupt(_signum: int, _frame) -> None:
+    """Turn SIGTERM (a systemd stop) into KeyboardInterrupt.
+
+    Ctrl-C already interrupts the build; systemd stops a unit with SIGTERM, which
+    would otherwise kill the process without running its ``finally`` blocks. With
+    this handler, a stopped build closes its database and removes temp files
+    exactly like an interrupted batch, and stays resumable from the last
+    committed batch.
+    """
+    raise KeyboardInterrupt
 
 def main() -> None:
 
@@ -51,14 +61,16 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    config = Path("config.toml")
-    cfg = {}
-    if config.exists():
-        cfg = tomllib.loads(config.read_text(encoding="utf-8"))
-    if args.command in {"build", "serve"} and not cfg:
-        sys.exit("config.toml not found or empty")
+    # config.toml is optional: a missing or empty file only warns and falls back
+    # to defaults tuned for the hardware it is running on (settings.load_config).
+    # `reload` only needs the PID file, so it avoids loading config entirely.
+    if args.command in {"build", "serve"}:
+        from .settings import load_config
 
-   
+        cfg = load_config()
+    else:
+        cfg = {}
+
     if args.command == "build":
         from .build import build as build_zim
         from .embed import DEFAULT_MAX_EMBEDDING_TOKENS, Embedder
@@ -70,8 +82,14 @@ def main() -> None:
         )
         from tqdm import tqdm
 
+        # systemd stops units with SIGTERM; treat it like Ctrl-C so a stopped
+        # build unwinds cleanly and can be resumed by the next run.
+        sigterm = getattr(signal, "SIGTERM", None)
+        if sigterm is not None:
+            signal.signal(sigterm, _graceful_interrupt)
+
         # Expand the positional paths: files are used directly, folders mean
-        # their *.zim, and no argument at all means zim_dir from config.toml.
+        # their *.zim, and no argument at all means the configured zim_dir.
         zims: list[Path] = []
         seen: set[Path] = set()
         for source in (args.paths or [Path(cfg["zim_dir"])]):
@@ -111,6 +129,7 @@ def main() -> None:
             embedder = Embedder(
                 cfg["model_dir"],
                 max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                threads=cfg.get("embed_threads"),
             )
         global_progress = None
         if len(zims) > 1 and sys.stdout.isatty():
@@ -162,6 +181,7 @@ def main() -> None:
                 return Embedder(
                     cfg["model_dir"],
                     max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                    threads=cfg.get("embed_threads"),
                 )
 
             search.start_embedder(_make_embedder)
