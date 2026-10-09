@@ -19,6 +19,10 @@ DEFAULT_EMBEDDING_OVERFLOW = "truncate"
 OVERFLOW_POLICIES = {"skip", "truncate"}
 REFRESH_SCAN_BYTES = 64 << 10
 REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
+STUB_BOILERPLATE = re.compile(
+    r"This article or its section is a stub\.|You can help by expanding the article\.",
+    re.I,
+)
 
 # Some ZIMs render every article through a JavaScript app (an "SPA shell"): the
 # HTML entry is a tiny stub that meta-refreshes into an app route such as
@@ -133,11 +137,13 @@ class _TextExtractor(HTMLParser):
             for index in range(len(self.active) - 1, -1, -1):
                 if self.active[index]["tag"] == tag:
                     block = self.active.pop(index)
-                    text = " ".join("".join(block["parts"]).split())
+                    text = self._text(block["parts"])
                     block["text"] = text
                     if len(text) >= MIN_BLOCK_CHARS:
                         for parent in self.active[:index]:
                             parent["nested"] = True
+                    for parent in self.active[:index]:
+                        parent["parts"].append(" ")
                     break
 
     def handle_data(self, data):
@@ -146,12 +152,17 @@ class _TextExtractor(HTMLParser):
         for block in self.active:
             block["parts"].append(data)
 
+    @staticmethod
+    def _text(parts):
+        text = STUB_BOILERPLATE.sub(" ", "".join(parts))
+        return " ".join(text.split())
+
     def candidates(self) -> list[str]:
         candidates = []
         for block in self.blocks:
             if block["nested"]:
                 continue
-            text = block.get("text", " ".join("".join(block["parts"]).split()))
+            text = block.get("text", self._text(block["parts"]))
             if len(text) >= MIN_BLOCK_CHARS:
                 candidates.append((block["priority"], block["order"], text))
         return [
