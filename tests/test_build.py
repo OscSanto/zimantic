@@ -57,8 +57,8 @@ class BuildUpgradeTests(unittest.TestCase):
             faiss_path = directory / "manual.faiss"
             _create_fast_index(db_path)
             rows = [
-                (1, "New title", "A stored excerpt.", "new", None, None),
-                (2, "Another title", "Another stored excerpt.", "another", None, None),
+                (1, "New title", "A stored excerpt.", "new", None),
+                (2, "Another title", "Another stored excerpt.", "another", None),
             ]
 
             with (
@@ -109,8 +109,8 @@ class BuildUpgradeTests(unittest.TestCase):
             _create_done_index(db_path)
             faiss_path.write_bytes(b"existing vectors")
             rows = [
-                (1, "New title", "", "new", None, None),
-                (2, "Another title", "", "another", None, None),
+                (1, "New title", "", "new", None),
+                (2, "Another title", "", "another", None),
             ]
 
             with (
@@ -135,8 +135,8 @@ class BuildUpgradeTests(unittest.TestCase):
             _create_done_index(db_path)
             faiss_path.write_bytes(b"old vectors")
             rows = [
-                (1, "New title", "New excerpt", "new", None, None),
-                (2, "Another title", "Another excerpt", "another", None, None),
+                (1, "New title", "New excerpt", "new", None),
+                (2, "Another title", "Another excerpt", "another", None),
             ]
 
             def write_fake_faiss(_db, path):
@@ -187,7 +187,7 @@ class BuildBatchTests(unittest.TestCase):
             entry_count = 5
 
         rows = [
-            (index, f"Title {index}", "", f"path-{index}", None, None)
+            (index, f"Title {index}", "", f"path-{index}", None)
             for index in range(5)
         ]
         saved = []
@@ -227,7 +227,7 @@ class BuildBatchTests(unittest.TestCase):
         build_module._save(
             db,
             embedder,
-            [(1, "A title", "a stored excerpt", "article", None, None)],
+            [(1, "A title", "a stored excerpt", "article", None)],
             1,
         )
 

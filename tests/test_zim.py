@@ -13,7 +13,7 @@ reader.set_cluster_cache_max_size = lambda size: None
 from zimantic.zim import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
-    disambiguation_members,
+    disambiguation_title,
     extract_excerpt,
     is_javascript_shell,
     iter_text_blocks,
@@ -174,23 +174,28 @@ class TextExtractionTests(unittest.TestCase):
         self.assertEqual(excerpt, "y" * 55)
 
 
-DISAMBIG_HTML = b"""
-<html><body>
-  <p>Advocacy may refer to:</p>
-  <ul>
-    <li><a href="Advocacy">Advocacy</a></li>
-    <li><a href="Lawyer" class="mw-redirect">Lawyer</a></li>
-    <li><a href="../wiki/Category:Law">Category:Law</a></li>
-    <li><a href="https://example.org/external">External</a></li>
-    <li><a href="#top">Top</a></li>
-  </ul>
-</body></html>
-"""
-
-
 BOILERPLATE_HTML = b"<html><body><p>Lead.</p><p><i>This disambiguation page lists articles.</i></p></body></html>"
 WGCATEGORY_HTML = b'<html><head><script>RLCONF={"wgCategories":["Mainspace disambiguation pages"]}</script></head><body></body></html>'
 CATEGORY_LINK_HTML = b'<html><body><a href="../wiki/Category:Disambiguation_pages">cat</a></body></html>'
+
+
+class _DisambiguationItem:
+    mimetype = "text/html"
+    content = CATEGORY_LINK_HTML
+
+
+class _DisambiguationEntry:
+    is_redirect = False
+    title = "Air"
+    path = "Air"
+
+    def get_item(self):
+        return _DisambiguationItem()
+
+
+class _DisambiguationArchive:
+    def _get_entry_by_id(self, _index):
+        return _DisambiguationEntry()
 
 
 class DisambiguationTests(unittest.TestCase):
@@ -210,10 +215,14 @@ class DisambiguationTests(unittest.TestCase):
         self.assertFalse(is_disambiguation("Air", "Air is a mixture of gases."))
         self.assertFalse(is_disambiguation("Absolutism", "The term may refer to stances.", b"<html></html>"))
 
-    def test_members_resolve_relative_links_and_drop_namespaces(self):
-        members = disambiguation_members(DISAMBIG_HTML, "Advocacy_(disambiguation)")
-        self.assertEqual([member["path"] for member in members], ["Advocacy", "Lawyer"])
-        self.assertEqual(members[0]["title"], "Advocacy")
+    def test_disambiguation_title_gets_required_suffix_without_duplicates(self):
+        self.assertEqual(disambiguation_title("Air"), "Air (disambiguation)")
+        self.assertEqual(disambiguation_title("Air (disambiguation)"), "Air (disambiguation)")
+
+    def test_read_entry_persists_disambiguation_suffix(self):
+        row = read_entry(_DisambiguationArchive(), 0)
+        self.assertEqual(row[1], "Air (disambiguation)")
+        self.assertEqual(len(row), 5)
 
 
 SPA_STUB = (

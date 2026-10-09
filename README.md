@@ -144,16 +144,17 @@ from the web page or the HTTP API; source discovery is read-only.
    can contribute at most once per search list. A bounded lexical bonus favors titles containing more query
    words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured
    source intent provide additional deterministic signals.
-6. **Treat disambiguation pages as hubs.** At build time a page is flagged when its title ends in
+6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in
    "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category
-   (the rendered `Category:` link or `wgCategories`). Its article links are stored as members. A query that names
-   the hub's full title is navigation: the hub is promoted above the normal score range and its members are
-   clustered in the result card. Any other query that merely matches a hub is demoted so the real article wins.
+   (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate
+   disambiguation metadata is needed. A query that names the full title is navigation: the page is promoted above
+   the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
 The streaming endpoint sends a source completion and a provisional ranked snapshot as each source finishes.
 The browser preserves result identities while reranking, so moved results animate into their new positions and
 new results enter without rebuilding the whole list. Users who prefer no animation are covered by
-`prefers-reduced-motion`.
+`prefers-reduced-motion`. Previous/Next pagination uses regular links with the query, source, and page in the
+URL, so navigating between pages follows normal browser history and scroll behavior.
 
 *Timings measured on WikiMed; a whole search took 26 ms (median over 785 benchmark queries).
 A Raspberry Pi Zero 2 W is much slower (around 150 ms).*

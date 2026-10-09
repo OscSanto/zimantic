@@ -84,12 +84,11 @@ min_cosine_similarity = 0.85
 # Set very high (e.g. 1000) to turn the doubling off.
 long_query = 10
 
-# Disambiguation hubs (pages whose title ends in "(disambiguation)", renders the
-# "This disambiguation page" footer, or carries a disambiguation category).
-# A query that names the hub's full title exactly is
-# navigation, so the hub is promoted above the normal score range and its member
-# links are clustered in the result card. Any other query that merely matches a
-# hub is demoted behind real articles. Set disambiguation_penalty = 1 to disable.
+# Disambiguation pages (titles detected from the "(disambiguation)" suffix,
+# rendered footer, or category). A query that names the full title exactly is
+# navigation, so the page is promoted above the normal score range. Any other
+# query that merely matches it is demoted behind real articles. Set
+# disambiguation_penalty = 1 to disable.
 disambiguation_boost = 0.08
 disambiguation_penalty = 0.5
 

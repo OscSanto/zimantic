@@ -84,6 +84,9 @@
     .filter-line { min-height: 1.2em; font-size: .85rem; margin-bottom: 14px; }
     .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 18px 0 8px; font-size: .85rem; }
     .pager:empty { display: none; }
+    .pager a, .pager span { padding: 6px 12px; }
+    .pager a { color: var(--accent); }
+    .pager .disabled { color: var(--muted); }
     .linklike { background: none; border: 0; color: var(--accent); padding: 0; text-decoration: underline; }
     .notice {
       background: var(--panel);
@@ -116,11 +119,6 @@
     .result-snippet { font-size: .92rem; margin-top: 6px; overflow-wrap: anywhere; }
     .result-snippet mark { background: var(--mark-bg); border-radius: 2px; font-weight: 600; }
     .result-snippet.none { color: var(--muted); font-style: italic; }
-    .result-members { border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; margin: 8px 0 0; padding: 8px 0 0; }
-    .result-members:empty { display: none; }
-    .result-members li { font-size: .88rem; }
-    .result-members a { color: var(--accent); text-decoration: none; }
-    .result-members a:hover { text-decoration: underline; }
     .result-thumb {
       background: var(--mark-bg);
       border-radius: 6px;
@@ -179,6 +177,7 @@
   const $ = id => document.getElementById(id);
   const PAGE_SIZE = 10;
   const REQUESTED_RESULTS = 100;
+  const AUTO_SUBMIT_DELAY = 400;
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -188,6 +187,7 @@
   let activeSource = null;
   let requestController = null;
   let searchSequence = 0;
+  let autoSubmitTimer = null;
   let resultList = null;
   let thumbnailGeneration = 0;
   const thumbnailCache = new Map();
@@ -265,9 +265,6 @@
     const title = node.querySelector(".result-title");
     title.replaceChildren();
     let displayTitle = item.title || "(untitled)";
-    if (item.kind === "disambiguation" && !/\(disambiguation\)\s*$/i.test(displayTitle)) {
-      displayTitle += " (disambiguation)";
-    }
     if (item.url) {
       const link = document.createElement("a");
       link.href = item.url;
@@ -277,24 +274,6 @@
       title.appendChild(link);
     } else {
       title.textContent = displayTitle;
-    }
-    const members = node.querySelector(".result-members");
-    members.replaceChildren();
-    if (item.kind === "disambiguation" && Array.isArray(item.members)) {
-      for (const member of item.members) {
-        const li = document.createElement("li");
-        if (member.url) {
-          const link = document.createElement("a");
-          link.href = member.url;
-          link.target = "_blank";
-          link.rel = "noopener";
-          link.textContent = member.title || member.path;
-          li.appendChild(link);
-        } else {
-          li.textContent = member.title || member.path;
-        }
-        members.appendChild(li);
-      }
     }
     setText(node, ".result-meta", `${item.source || ""} · source rank ${item.rank || item.source_rank || "—"}`);
     setText(node, ".result-match", item.explain || "Source result");
@@ -328,7 +307,6 @@
       <div class="result-meta"></div>
       <div class="result-match"></div>
       <div class="result-snippet"></div>
-      <ul class="result-members"></ul>
     </div>`;
     setResultNode(node, item);
     return node;
@@ -414,22 +392,19 @@
     const pager = $("pager");
     pager.innerHTML = "";
     if (total <= PAGE_SIZE && pageCount <= 1) return;
-    const prev = document.createElement("button");
-    prev.type = "button";
-    prev.textContent = "← Previous";
-    prev.disabled = current.page === 0;
-    prev.addEventListener("click", () => {
-      current.page--;
-      renderView();
-    });
-    const next = document.createElement("button");
-    next.type = "button";
-    next.textContent = "Next →";
-    next.disabled = current.page >= pageCount - 1;
-    next.addEventListener("click", () => {
-      current.page++;
-      renderView();
-    });
+    const pageLink = (text, page, disabled) => {
+      const link = document.createElement(disabled ? "span" : "a");
+      link.textContent = text;
+      if (disabled) {
+        link.className = "disabled";
+        link.setAttribute("aria-disabled", "true");
+      } else {
+        link.href = makePageUrl(page);
+      }
+      return link;
+    };
+    const prev = pageLink("← Previous", current.page - 1, current.page === 0);
+    const next = pageLink("Next →", current.page + 1, current.page >= pageCount - 1);
     const label = document.createElement("span");
     const from = total ? current.page * PAGE_SIZE + 1 : 0;
     const to = Math.min((current.page + 1) * PAGE_SIZE, total);
@@ -447,8 +422,10 @@
       all = current.ranked;
     }
     const pageCount = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
-    if (current.page >= pageCount) current.page = pageCount - 1;
-    if (current.page < 0) current.page = 0;
+    if (current.completed === current.total) {
+      if (current.page >= pageCount) current.page = pageCount - 1;
+      if (current.page < 0) current.page = 0;
+    }
     const list = all.slice(current.page * PAGE_SIZE, (current.page + 1) * PAGE_SIZE);
     renderBadges();
     renderFilterLine(all.length);
@@ -607,7 +584,7 @@
     if (buffer) consumeLine(buffer);
   }
 
-  async function runSearch(question, source = null) {
+  async function runSearch(question, source = null, page = 0) {
     question = question.trim();
     if (!question) return;
     if (requestController) requestController.abort();
@@ -625,7 +602,7 @@
       sourceItems: new Map(),
       completed: 0,
       total: 0,
-      page: 0
+      page: Number.isInteger(page) && page >= 0 ? page : 0
     };
     $("searchButton").disabled = true;
     $("status").innerHTML = `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
@@ -661,16 +638,34 @@
     const params = new URLSearchParams({ q: question });
     if (source) params.set("src", source);
     if (debugMode) params.set("debug", "true");
-    return "#" + params;
+    const url = new URL(location.href);
+    url.search = "";
+    url.hash = "#" + params;
+    return url.pathname + url.hash;
   }
 
-  function readHash() {
-    const params = new URLSearchParams(location.hash.slice(1));
+  function makePageUrl(page) {
+    const url = new URL(location.href);
+    url.hash = "";
+    url.search = "";
+    url.searchParams.set("q", current.question);
+    if (activeSource) url.searchParams.set("src", activeSource);
+    if (debugMode) url.searchParams.set("debug", "true");
+    url.searchParams.set("page", String(page + 1));
+    return url.pathname + url.search;
+  }
+
+  function readLocationState() {
+    const queryParams = new URLSearchParams(location.search);
+    const hashParams = new URLSearchParams(location.hash.slice(1));
+    const params = queryParams.has("q") ? queryParams : hashParams;
     const debug = params.get("debug");
+    const pageNumber = Number.parseInt(params.get("page") || "1", 10);
     return {
       question: (params.get("q") || "").trim(),
       source: params.get("src") || null,
-      debug: debug !== null && debug.toLowerCase() !== "false"
+      debug: debug !== null && debug.toLowerCase() !== "false",
+      page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0
     };
   }
 
@@ -700,20 +695,31 @@
     }
   });
 
-  $("searchForm").addEventListener("submit", event => {
-    event.preventDefault();
+  function submitSearch(pushHistory) {
     const question = $("question").value.trim();
     if (!question) return;
-    history.pushState(null, "", makeHash(question, null));
+    history[pushHistory ? "pushState" : "replaceState"](null, "", makeHash(question, null));
     runSearch(question);
+  }
+
+  $("question").addEventListener("input", () => {
+    clearTimeout(autoSubmitTimer);
+    if (!$("question").value.trim()) return;
+    autoSubmitTimer = setTimeout(() => submitSearch(false), AUTO_SUBMIT_DELAY);
+  });
+
+  $("searchForm").addEventListener("submit", event => {
+    event.preventDefault();
+    clearTimeout(autoSubmitTimer);
+    submitSearch(true);
   });
 
   window.addEventListener("popstate", () => {
-    const state = readHash();
+    const state = readLocationState();
     applyHashState(state);
     if (state.question) {
       $("question").value = state.question;
-      runSearch(state.question, state.source);
+      runSearch(state.question, state.source, state.page);
     }
   });
 
@@ -727,11 +733,11 @@
     } catch (error) {
       $("status").textContent = `Could not load sources: ${error.message}`;
     }
-    const state = readHash();
+    const state = readLocationState();
     applyHashState(state);
     if (state.question) {
       $("question").value = state.question;
-      runSearch(state.question, state.source);
+      runSearch(state.question, state.source, state.page);
     } else {
       $("question").focus();
     }
