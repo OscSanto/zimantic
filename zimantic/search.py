@@ -15,7 +15,6 @@ from urllib.parse import quote, urlencode, unquote, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
-import faiss
 from libzim.reader import Archive
 from libzim.search import Query, Searcher
 
@@ -285,6 +284,10 @@ class Search:
             faiss_path = db_path.with_suffix(".faiss")
             if self.semantic and done_value == "1" and faiss_path.exists():
                 try:
+                    # Imported lazily: title + full-text-only servers (and
+                    # `serve --fast`) never need FAISS, so they skip its ~0.2s import.
+                    import faiss
+
                     faiss_index = faiss.read_index(
                         str(faiss_path),
                         faiss.IO_FLAG_MMAP_IFC | faiss.IO_FLAG_READ_ONLY,
@@ -325,6 +328,31 @@ class Search:
             index = self._open_index(db_path)
             if index:
                 self.indexes[db_path.stem] = index
+
+    def start_embedder(self, factory) -> None:
+        """Build the embedding model on a background thread.
+
+        Loading the ONNX model and sentencepiece vocabulary costs most of
+        `serve` startup, so it happens off the critical path: the server starts
+        serving title and full-text results immediately and gains meaning search
+        as soon as `factory()` returns. Searches issued meanwhile degrade
+        gracefully; `_query_vector` treats a missing embedder as no vectors.
+        """
+        def _load() -> None:
+            try:
+                embedder = factory()
+            except Exception as error:  # missing/corrupt model must not kill serve
+                print(
+                    f"zimantic: embedding model unavailable ({error}); "
+                    "using title and full-text search",
+                    flush=True,
+                )
+                return
+            with self._state_lock:
+                self.embedder = embedder
+            print("zimantic: embedding model ready; meaning search enabled", flush=True)
+
+        threading.Thread(target=_load, name="zimantic-embedder", daemon=True).start()
 
     def reload(self) -> dict[str, Any]:
         """Rescan index_dir without restarting. Picks up new finished indexes,
@@ -598,7 +626,9 @@ class Search:
     def _query_vector(self, sources: list[SourceInfo], query: str):
         """Embed the query only when a selected local index actually has vectors.
         A failed embedding degrades to title + full-text rather than failing."""
-        if self.embedder is None or not self.semantic:
+        # Read once: start_embedder may swap this in from a worker thread.
+        embedder = self.embedder
+        if embedder is None or not self.semantic:
             return None
         with self._state_lock:
             indexes = dict(self.indexes)
@@ -611,7 +641,7 @@ class Search:
         if not wants_semantic:
             return None
         try:
-            return self.embedder.embed([f"query: {query}"])
+            return embedder.embed([f"query: {query}"])
         except Exception as error:
             print(f"zimantic: query embedding failed ({error}); using title and full-text search")
             return None

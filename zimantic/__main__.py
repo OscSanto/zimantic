@@ -144,7 +144,6 @@ def main() -> None:
 
     elif args.command == "serve":
         from .search import Search
-        from .server import serve
 
         search = Search(cfg, semantic=not args.fast)
         if not search.local_names():
@@ -154,11 +153,23 @@ def main() -> None:
                 file=sys.stderr,
             )
         if not args.fast:
-            from .embed import DEFAULT_MAX_EMBEDDING_TOKENS, Embedder
-            search.embedder = Embedder(
-                cfg["model_dir"],
-                max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
-            )
+            # Load the model off the critical path: the server answers title and
+            # full-text searches immediately and gains meaning search once the
+            # ONNX model and vocabulary finish loading in the background.
+            def _make_embedder():
+                from .embed import DEFAULT_MAX_EMBEDDING_TOKENS, Embedder
+
+                return Embedder(
+                    cfg["model_dir"],
+                    max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                )
+
+            search.start_embedder(_make_embedder)
+
+        # Import the web layer after the model load has started so FastAPI's
+        # import cost overlaps it instead of adding to startup.
+        from .server import serve
+
         if args.fast:
             print("zimantic: fast mode: title and ZIM full-text search only")
         serve(search, cfg["port"])
