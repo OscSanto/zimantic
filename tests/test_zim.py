@@ -59,6 +59,18 @@ LIST_BEFORE_BLOCK_HTML = b"""
 </body></html>
 """
 
+LIST_WITHOUT_WHITESPACE_HTML = b"""
+<html><body>
+  <p><div><ul>
+    <li><a>TitlePage</a></li>
+    <li><a>InfoPage</a></li>
+    <li><a>Table of Contents</a></li>
+    <li><a>Licensing</a></li>
+    <li><a>About this Book</a></li>
+  </ul></div></p>
+</body></html>
+"""
+
 
 class _Item:
     mimetype = "text/html"
@@ -108,6 +120,23 @@ class TextExtractionTests(unittest.TestCase):
                 "The preferred block summary is used when no paragraph is available.",
                 "A fallback definition that should lose to a later block with the article summary.",
             ],
+        )
+
+    def test_generator_separates_adjacent_block_elements(self):
+        self.assertEqual(
+            list(iter_text_blocks(LIST_WITHOUT_WHITESPACE_HTML)),
+            ["TitlePage InfoPage Table of Contents Licensing About this Book"],
+        )
+
+    def test_generator_ignores_stub_boilerplate(self):
+        html = (
+            b"<p>A useful article paragraph with enough text to be indexed.</p>"
+            b"<p>This article or its section is a stub.</p>"
+            b"<p>You can help by expanding the article.</p>"
+        )
+        self.assertEqual(
+            list(iter_text_blocks(html)),
+            ["A useful article paragraph with enough text to be indexed."],
         )
 
     def test_html_limit_is_configurable(self):
