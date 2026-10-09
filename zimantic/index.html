@@ -162,10 +162,10 @@
 <body>
 <div class="wrap">
   <h1>Zimantic</h1>
-  <div class="subtitle">Meaning, title, and full-text search over your offline library. Results arrive as sources finish.</div>
+  <div class="subtitle">Search your offline library by meaning, title, or full text. Results arrive as each source finishes.</div>
 
   <form id="searchForm" autocomplete="off">
-    <input id="question" type="search" placeholder="how to change a tire" aria-label="Question">
+    <input id="question" type="search" placeholder="how to change a lightbulb" aria-label="Search query">
     <button id="searchButton" type="submit">Search</button>
   </form>
 
@@ -363,7 +363,7 @@
         .join("");
     } else {
       snippet.className = "result-snippet none";
-      snippet.textContent = "No text preview for this result.";
+      snippet.textContent = "No preview available for this result.";
     }
     let thumb = node.querySelector(".result-thumb");
     if (item.url) {
@@ -418,7 +418,7 @@
       const empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = current && current.completed === current.total
-        ? "No results from the selected sources. Try different words."
+        ? "No results from the available sources. Try different words."
         : "Waiting for source results…";
       $("results").appendChild(empty);
       return;
@@ -524,7 +524,7 @@
     const errors = outcomes.filter(outcome => outcome.error);
     $("notice").innerHTML = current.completed === current.total && outcomes.length > 0 &&
       errors.length === outcomes.length
-      ? "<div class='notice'><strong>Every source failed.</strong> Check your sources or the Kiwix service, then restart or reload the server.</div>"
+      ? "<div class='notice'><strong>All sources failed.</strong> Check your sources and the Kiwix service, then reload or restart the server.</div>"
       : "";
   }
 
@@ -705,7 +705,7 @@
     try {
       const selected = activeSources();
       if (!selected.length) {
-        $("status").textContent = "No sources selected.";
+        $("status").textContent = "No sources are available to search.";
         return;
       }
       const params = new URLSearchParams({ q: question, limit: String(REQUESTED_RESULTS) });
