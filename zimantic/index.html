@@ -39,13 +39,14 @@
       background: var(--bg);
       color: var(--text);
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       font: 16px/1.5 system-ui, sans-serif;
       margin: 0;
       min-height: 100vh;
       min-height: 100dvh;
       padding: 24px 16px 60px;
     }
+    body:not(.search-active) { align-items: center; }
     .wrap { width: 100%; max-width: 870px; margin: 0 auto; }
     h1 { font-size: 1.4rem; margin: 0 0 4px; }
     .subtitle, .help, .status, .filter-line, .result-meta { color: var(--muted); }
@@ -184,6 +185,7 @@
   const PAGE_SIZE = 10;
   const REQUESTED_RESULTS = 100;
   const AUTO_SUBMIT_DELAY = 400;
+  const STREAM_RENDER_DELAY = 150;
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -200,6 +202,22 @@
   const thumbnailQueue = [];
   const thumbnailControllers = new Set();
   let activeThumbnails = 0;
+  let streamRenderTimer = null;
+
+  function cancelStreamRender() {
+    if (streamRenderTimer !== null) {
+      clearTimeout(streamRenderTimer);
+      streamRenderTimer = null;
+    }
+  }
+
+  function scheduleStreamRender(sequence) {
+    if (streamRenderTimer !== null) return;
+    streamRenderTimer = setTimeout(() => {
+      streamRenderTimer = null;
+      if (sequence === searchSequence && current) renderView();
+    }, STREAM_RENDER_DELAY);
+  }
 
   function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, c => ({
@@ -373,8 +391,8 @@
     return node;
   }
 
-  function animateRemoval(node) {
-    if (reducedMotion() || !node.animate) {
+  function animateRemoval(node, animate = true) {
+    if (!animate || reducedMotion() || !node.animate) {
       node.remove();
       return;
     }
@@ -390,7 +408,7 @@
     if (!items.length) {
       const oldList = resultList;
       if (oldList) {
-        [...oldList.children].forEach(animateRemoval);
+        [...oldList.children].forEach(node => animateRemoval(node, !current?.streaming));
         resultList = null;
         setTimeout(() => {
           if (!oldList.children.length) oldList.remove();
@@ -414,8 +432,9 @@
     const existing = new Map([...resultList.children].map(node => [node.dataset.key, node]));
     const before = new Map([...resultList.children].map(node => [node.dataset.key, node.getBoundingClientRect()]));
     const wanted = new Set(items.map(resultKey));
+    const animateChanges = !current?.streaming;
     existing.forEach((node, key) => {
-      if (!wanted.has(key)) animateRemoval(node);
+      if (!wanted.has(key)) animateRemoval(node, animateChanges);
     });
     const added = [];
     items.forEach(item => {
@@ -427,17 +446,19 @@
     });
     const after = new Map([...resultList.children].map(node => [node.dataset.key, node.getBoundingClientRect()]));
     if (!reducedMotion()) {
-      for (const [key, node] of [...resultList.children].map(node => [node.dataset.key, node])) {
-        const oldBox = before.get(key);
-        const newBox = after.get(key);
-        if (oldBox && newBox && node.animate) {
-          const dx = oldBox.left - newBox.left;
-          const dy = oldBox.top - newBox.top;
-          if (dx || dy) {
-            node.animate(
-              [{ transform: `translate(${dx}px,${dy}px)` }, { transform: "translate(0,0)" }],
-              { duration: 220, easing: "ease-out" }
-            );
+      if (animateChanges) {
+        for (const [key, node] of [...resultList.children].map(node => [node.dataset.key, node])) {
+          const oldBox = before.get(key);
+          const newBox = after.get(key);
+          if (oldBox && newBox && node.animate) {
+            const dx = oldBox.left - newBox.left;
+            const dy = oldBox.top - newBox.top;
+            if (dx || dy) {
+              node.animate(
+                [{ transform: `translate(${dx}px,${dy}px)` }, { transform: "translate(0,0)" }],
+                { duration: 220, easing: "ease-out" }
+              );
+            }
           }
         }
       }
@@ -622,10 +643,12 @@
       } else if (event.type === "snapshot") {
         current.completed = event.completed;
         current.ranked = event.results || [];
-        renderView();
+        scheduleStreamRender(sequence);
       } else if (event.type === "done") {
         current.completed = event.completed;
         current.ranked = event.results || [];
+        current.streaming = false;
+        cancelStreamRender();
         $("status").textContent = current.total
           ? `${current.completed}/${current.total} sources complete · ${current.ranked.length} results`
           : "No searchable sources.";
@@ -643,12 +666,18 @@
       lines.forEach(consumeLine);
     }
     if (buffer) consumeLine(buffer);
+    if (sequence === searchSequence && current && current.streaming) {
+      current.streaming = false;
+      cancelStreamRender();
+      renderView();
+    }
   }
 
   async function runSearch(question, source = null, page = 0) {
     question = question.trim();
     if (!question) return;
     if (requestController) requestController.abort();
+    cancelStreamRender();
     cancelThumbnails();
     thumbnailCache.clear();
     const controller = new AbortController();
@@ -663,8 +692,11 @@
       sourceItems: new Map(),
       completed: 0,
       total: 0,
+      streaming: true,
       page: Number.isInteger(page) && page >= 0 ? page : 0
     };
+    document.body.classList.add("search-active");
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     $("searchButton").disabled = true;
     $("status").innerHTML = `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
     $("notice").textContent = "";
@@ -689,6 +721,8 @@
       }
     } finally {
       if (sequence === searchSequence) {
+        current.streaming = false;
+        cancelStreamRender();
         $("searchButton").disabled = false;
         requestController = null;
       }
