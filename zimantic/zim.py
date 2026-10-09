@@ -19,8 +19,11 @@ DEFAULT_EMBEDDING_OVERFLOW = "truncate"
 OVERFLOW_POLICIES = {"skip", "truncate"}
 REFRESH_SCAN_BYTES = 64 << 10
 REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
-STUB_BOILERPLATE = re.compile(
-    r"This article or its section is a stub\.|You can help by expanding the article\.",
+BOILERPLATE = re.compile(
+    r"This article or its section is a stub\."
+    r"|You can help by expanding the article\."
+    r"|Our robots\.txt blocks googlebot\."
+    r"|You're wasting your own time by spamming here\.",
     re.I,
 )
 
@@ -154,7 +157,7 @@ class _TextExtractor(HTMLParser):
 
     @staticmethod
     def _text(parts):
-        text = STUB_BOILERPLATE.sub(" ", "".join(parts))
+        text = BOILERPLATE.sub(" ", "".join(parts))
         return " ".join(text.split())
 
     def candidates(self) -> list[str]:

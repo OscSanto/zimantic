@@ -55,7 +55,8 @@ app shell itself, are skipped so that one boilerplate vector cannot surface as a
 **Text extraction.** Zimantic skips stylesheets, scripts and footnote markers like `[1]`, then
 collects substantial visible blocks. Paragraphs are preferred; when a page has no suitable paragraph,
 `blockquote`, `pre`, `div`, `section`, `article` and `main` are considered before ordered-list blocks
-used by dictionary-style pages. Page chrome such as navigation, headers, footers and asides is ignored.
+used by dictionary-style pages. Page chrome such as navigation, headers, footers and asides is ignored,
+as are common boilerplate notices such as stub prompts and anti-bot warnings.
 
 The same prioritized block stream produces a single stored `excerpt`. Extraction computes the
 preview- and embedding-sized candidates and stores the longer one, so the SQLite index does not
