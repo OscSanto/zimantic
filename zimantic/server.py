@@ -1,19 +1,35 @@
+import hashlib
 import json
 from pathlib import Path
 import os
 import signal
 import threading
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from .search import SearchQueryError
 
 PAGE = Path(__file__).parent / "index.html"
 PID_FILE = Path("zimantic.pid")
+# Result payloads are text-heavy; gzip cuts them several-fold over the network.
+GZIP_MIN_SIZE = 512
+
+
+def _json_with_etag(request: Request, payload) -> Response:
+    """JSON response with a content ETag, so a warm browser can revalidate
+    source discovery cheaply with If-None-Match instead of re-downloading."""
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
+    etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 def create_app(searchClass) -> FastAPI:
     app = FastAPI(title="zimantic")
+    app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
 
     @app.get("/", include_in_schema=False)
     def page():
@@ -23,11 +39,19 @@ def create_app(searchClass) -> FastAPI:
     def zims():
         return searchClass.local_names()
 
+    @app.get("/api/config")
+    def config(request: Request):
+        # Page defaults so the UI does not hard-code them.
+        return _json_with_etag(request, {
+            "page_size": getattr(searchClass, "page_size", 10),
+            "max_results": getattr(searchClass, "max_results", 100),
+        })
+
     @app.get("/api/sources")
-    def sources():
+    def sources(request: Request):
         # Source discovery only: clients can never force a refresh. Rebuilding the
         # source set is an admin action carried out by `zimantic reload` or SIGHUP.
-        return searchClass.source_dicts()
+        return _json_with_etag(request, searchClass.source_dicts())
 
     @app.get("/api/health")
     def health():
@@ -42,18 +66,35 @@ def create_app(searchClass) -> FastAPI:
     def api_search(
         q: str = Query(..., min_length=1, max_length=4096),
         zim: list[str] | None = Query(None),
-        limit: int = Query(searchClass.cfg["results"], ge=1, le=100),
+        source: str | None = Query(None),
+        limit: int | None = Query(None, ge=1),
+        offset: int = Query(0, ge=0),
+        debug: bool = Query(False),
     ):
         try:
-            return searchClass.search(q, zim, limit)
+            page = searchClass.search_page(q, zim, limit, offset, source, debug)
         except SearchQueryError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        # Body stays the plain result list for compatibility; totals travel as
+        # headers so clients can page without an envelope.
+        return JSONResponse(
+            content=page["results"],
+            headers={
+                "X-Total-Count": str(page["total"]),
+                "X-Has-More": "true" if page["has_more"] else "false",
+                "X-Offset": str(page["offset"]),
+                "X-Page-Size": str(len(page["results"])),
+            },
+        )
 
     @app.get("/api/search/stream")
     def api_search_stream(
         q: str = Query(..., min_length=1, max_length=4096),
         zim: list[str] | None = Query(None),
-        limit: int = Query(searchClass.cfg["results"], ge=1, le=100),
+        source: str | None = Query(None),
+        limit: int | None = Query(None, ge=1),
+        offset: int = Query(0, ge=0),
+        debug: bool = Query(False),
     ):
         try:
             searchClass._validate_query(q)
@@ -61,7 +102,7 @@ def create_app(searchClass) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
         def events():
-            for event in searchClass.stream_search(q, zim, limit):
+            for event in searchClass.stream_search(q, zim, limit, offset, source, debug):
                 yield json.dumps(event, separators=(",", ":")) + "\n"
 
         return StreamingResponse(events(), media_type="application/x-ndjson")

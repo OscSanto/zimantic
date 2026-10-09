@@ -45,8 +45,13 @@ kiwix_search_path = "/kiwix/search"
 # TUNING (the defaults are fine to start with)
 # ---------------------------------------------------------------------------------------------
 
-# Results shown per search.
-results = 30
+# Results shown per page in the web UI and the default API page size.
+page_size = 10
+
+# Largest ranked result pool kept and served. Pages are drawn from this pool,
+# so 100 means pagination reaches the top 100 matches. Searching still ranks
+# the whole pool once; larger values cost a little more per search and cache.
+max_results = 100
 
 # Articles embedded at once while indexing. The CPU model pads each batch to its
 # longest passage, so larger batches can be slower despite doing fewer calls.
@@ -102,7 +107,10 @@ max_concurrent_searches = 4
 candidate_count = 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
 source_timeout = 12
-# Small LRU cache of exact queries (query + selected sources + limit). A finished
-# streamed search is cached too, so the JSON endpoint gets it for free.
-# Set to 0 to disable.
+# Small LRU cache of exact queries (query + selected sources). A finished
+# streamed search is cached too, so the JSON endpoint gets it for free, and
+# every page of a query reuses the same ranked pool. Bounded by both entry
+# count and total bytes (the byte budget is what keeps a Pi's memory in check).
+# Set cache_size to 0 to disable.
 cache_size = 256
+cache_bytes = 33_554_432  # 32 MiB

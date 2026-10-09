@@ -182,8 +182,7 @@
   "use strict";
 
   const $ = id => document.getElementById(id);
-  const PAGE_SIZE = 10;
-  const REQUESTED_RESULTS = 100;
+  let PAGE_SIZE = 10;  // replaced with the server's page_size at startup
   const AUTO_SUBMIT_DELAY = 400;
   const STREAM_RENDER_DELAY = 150;
   const THUMB_LIMIT = 128 * 1024;
@@ -194,6 +193,7 @@
   let current = null;
   let activeSource = null;
   let requestController = null;
+  let pageController = null;
   let searchSequence = 0;
   let autoSubmitTimer = null;
   let resultList = null;
@@ -309,9 +309,10 @@
     }
     const all = `<button class="badge" type="button" data-source="" aria-pressed="${activeSource ? "false" : "true"}">All sources</button>`;
     const entries = [...current.outcomes.values()].map(outcome => {
-      const usable = outcome.items && outcome.items.length > 0;
-      const cls = outcome.error ? "badge err" : usable ? "badge ok" : "badge";
-      const count = outcome.items ? outcome.items.length : 0;
+      // Counts come from the ranked pool (server-reported), not per-source
+      // candidate lists, so they match what the filtered view actually shows.
+      const count = current.counts[outcome.source.key] || 0;
+      const cls = outcome.error ? "badge err" : count > 0 ? "badge ok" : "badge";
       const label = outcome.error ? `${outcome.source.name}: ${outcome.error}` : `${outcome.source.name}: ${count}`;
       const disabled = outcome.error ? "disabled" : "";
       const pressed = activeSource === outcome.source.key ? "true" : "false";
@@ -481,7 +482,10 @@
         link.className = "disabled";
         link.setAttribute("aria-disabled", "true");
       } else {
+        // A real href keeps middle-click/open-in-new-tab working; the click
+        // handler below intercepts it to avoid a full document reload.
         link.href = makePageUrl(page);
+        link.dataset.page = String(page);
       }
       return link;
     };
@@ -496,23 +500,17 @@
 
   function renderView() {
     if (!current) return;
-    let all;
-    if (activeSource) {
-      all = current.sourceItems.get(activeSource) || [];
-    } else {
-      // Every source is searched; narrowing to one source happens via the badges.
-      all = current.ranked;
-    }
-    const pageCount = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
-    if (current.completed === current.total) {
+    // The server already sliced this page and applied any display filter, so
+    // there is nothing to slice here.
+    const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
+    if (current.completed === current.sourcesTotal) {
       if (current.page >= pageCount) current.page = pageCount - 1;
       if (current.page < 0) current.page = 0;
     }
-    const list = all.slice(current.page * PAGE_SIZE, (current.page + 1) * PAGE_SIZE);
     renderBadges();
-    renderFilterLine(all.length);
-    renderPager(all.length, pageCount);
-    renderResults(list);
+    renderFilterLine(current.total);
+    renderPager(current.total, pageCount);
+    renderResults(current.pageItems);
   }
 
   function renderNotice() {
@@ -522,7 +520,7 @@
     }
     const outcomes = [...current.outcomes.values()];
     const errors = outcomes.filter(outcome => outcome.error);
-    $("notice").innerHTML = current.completed === current.total && outcomes.length > 0 &&
+    $("notice").innerHTML = current.completed === current.sourcesTotal && outcomes.length > 0 &&
       errors.length === outcomes.length
       ? "<div class='notice'><strong>All sources failed.</strong> Check your sources and the Kiwix service, then reload or restart the server.</div>"
       : "";
@@ -626,31 +624,36 @@
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    const applyPage = event => {
+      current.completed = event.completed;
+      current.pageItems = event.results || [];
+      current.total = event.total || 0;
+      current.hasMore = Boolean(event.has_more);
+      if (event.counts) current.counts = event.counts;
+    };
     const consumeLine = line => {
       if (!line.trim() || sequence !== searchSequence) return;
       const event = JSON.parse(line);
       if (event.type === "started") {
-        current.total = event.total;
+        current.sourcesTotal = event.total_sources || 0;
         current.completed = 0;
-        $("status").textContent = `Searching ${event.total} source${event.total === 1 ? "" : "s"}…`;
+        $("status").textContent = `Searching ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
       } else if (event.type === "source") {
         current.completed = event.completed;
         current.outcomes.set(event.source.key, event);
-        current.sourceItems.set(event.source.key, event.items || []);
-        $("status").textContent = `${event.completed}/${event.total} sources complete`;
+        if (typeof event.count === "number") current.counts[event.source.key] = event.count;
+        $("status").textContent = `${event.completed}/${event.total_sources} sources complete`;
         renderBadges();
         renderNotice();
       } else if (event.type === "snapshot") {
-        current.completed = event.completed;
-        current.ranked = event.results || [];
+        applyPage(event);
         scheduleStreamRender(sequence);
       } else if (event.type === "done") {
-        current.completed = event.completed;
-        current.ranked = event.results || [];
+        applyPage(event);
         current.streaming = false;
         cancelStreamRender();
-        $("status").textContent = current.total
-          ? `${current.completed}/${current.total} sources complete · ${current.ranked.length} results`
+        $("status").textContent = current.sourcesTotal
+          ? `${current.completed}/${current.sourcesTotal} sources complete · ${current.total} result${current.total === 1 ? "" : "s"}`
           : "No searchable sources.";
         renderView();
       } else if (event.type === "error") {
@@ -677,23 +680,27 @@
     question = question.trim();
     if (!question) return;
     if (requestController) requestController.abort();
+    if (pageController) pageController.abort();
     cancelStreamRender();
     cancelThumbnails();
     thumbnailCache.clear();
     const controller = new AbortController();
     requestController = controller;
     const sequence = ++searchSequence;
+    const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
     activeSource = source;
     current = {
       question,
       terms: queryTerms(question),
-      ranked: [],
       outcomes: new Map(),
-      sourceItems: new Map(),
-      completed: 0,
+      counts: {},
+      pageItems: [],
       total: 0,
+      hasMore: false,
+      completed: 0,
+      sourcesTotal: 0,
       streaming: true,
-      page: Number.isInteger(page) && page >= 0 ? page : 0
+      page: pageIndex
     };
     document.body.classList.add("search-active");
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -708,10 +715,16 @@
         $("status").textContent = "No sources are available to search.";
         return;
       }
-      const params = new URLSearchParams({ q: question, limit: String(REQUESTED_RESULTS) });
+      const params = new URLSearchParams({
+        q: question,
+        limit: String(PAGE_SIZE),
+        offset: String(pageIndex * PAGE_SIZE)
+      });
+      if (source) params.set("source", source);
+      if (debugMode) params.set("debug", "true");
       // Always query every source: no zim params means the server searches all
-      // currently available sources. The same limit is used for every search so
-      // repeated queries hit the server cache; the page just slices the results.
+      // currently available sources. The server ranks one pool and sends only
+      // this page; page size, offset and the display filter are not cached keys.
       const response = await fetch("/api/search/stream?" + params, { signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await consumeStream(response, sequence);
@@ -729,25 +742,60 @@
     }
   }
 
-  function makeHash(question, source) {
-    const params = new URLSearchParams({ q: question });
-    if (source) params.set("src", source);
+  async function loadPage(page) {
+    // Paging and source filtering reuse the server's cached ranked pool and
+    // return a single page. No full document reload, no re-stream.
+    if (!current) return;
+    const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
+    if (pageController) pageController.abort();
+    const controller = new AbortController();
+    pageController = controller;
+    const params = new URLSearchParams({
+      q: current.question,
+      limit: String(PAGE_SIZE),
+      offset: String(pageIndex * PAGE_SIZE)
+    });
+    if (activeSource) params.set("source", activeSource);
     if (debugMode) params.set("debug", "true");
-    const url = new URL(location.href);
-    url.search = "";
-    url.hash = "#" + params;
-    return url.pathname + url.hash;
+    $("status").textContent = "Loading page…";
+    try {
+      const response = await fetch("/api/search?" + params, { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const items = await response.json();
+      current.page = pageIndex;
+      current.pageItems = items;
+      current.total = Number(response.headers.get("X-Total-Count") || items.length);
+      current.hasMore = response.headers.get("X-Has-More") === "true";
+      if (controller !== pageController) return;
+      const from = current.total ? pageIndex * PAGE_SIZE + 1 : 0;
+      const to = Math.min((pageIndex + 1) * PAGE_SIZE, current.total);
+      $("status").textContent = current.total
+        ? `${from}–${to} of ${current.total} result${current.total === 1 ? "" : "s"}`
+        : "No results.";
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      renderView();
+    } catch (error) {
+      if (error.name !== "AbortError") $("status").textContent = `Search failed: ${error.message}`;
+    } finally {
+      if (controller === pageController) pageController = null;
+    }
   }
 
-  function makePageUrl(page) {
+  function makeStateUrl(question, source, page) {
+    // Keep q/src/page in the query string so links are shareable and Back/
+    // Forward just work; readLocationState still accepts legacy #hash links.
     const url = new URL(location.href);
     url.hash = "";
     url.search = "";
-    url.searchParams.set("q", current.question);
-    if (activeSource) url.searchParams.set("src", activeSource);
+    url.searchParams.set("q", question);
+    if (source) url.searchParams.set("src", source);
     if (debugMode) url.searchParams.set("debug", "true");
-    url.searchParams.set("page", String(page + 1));
+    if (page > 0) url.searchParams.set("page", String(page + 1));
     return url.pathname + url.search;
+  }
+
+  function makePageUrl(page) {
+    return makeStateUrl(current.question, activeSource, page);
   }
 
   function readLocationState() {
@@ -775,19 +823,28 @@
     const key = button.dataset.source || null;
     // Clicking the active source badge again returns to "All sources".
     activeSource = (activeSource && activeSource === key) ? null : key;
-    current.page = 0;
-    history.replaceState(null, "", makeHash(current.question, activeSource));
-    renderView();
+    history.pushState(null, "", makeStateUrl(current.question, activeSource, 0));
+    renderBadges();
+    loadPage(0);
   });
 
   $("filterLine").addEventListener("click", event => {
     const button = event.target.closest("button[data-source]");
     if (button) {
       activeSource = null;
-      current.page = 0;
-      history.replaceState(null, "", makeHash(current.question, null));
-      renderView();
+      history.pushState(null, "", makeStateUrl(current.question, null, 0));
+      renderBadges();
+      loadPage(0);
     }
+  });
+
+  $("pager").addEventListener("click", event => {
+    const link = event.target.closest("a[data-page]");
+    if (!link || !current) return;
+    event.preventDefault();
+    const page = Number(link.dataset.page);
+    history.pushState(null, "", makeStateUrl(current.question, activeSource, page));
+    loadPage(page);
   });
 
   function resetResults() {
@@ -797,6 +854,8 @@
     autoSubmitTimer = null;
     if (requestController) requestController.abort();
     requestController = null;
+    if (pageController) pageController.abort();
+    pageController = null;
     searchSequence++;  // invalidate any in-flight stream callbacks
     cancelStreamRender();
     cancelThumbnails();
@@ -820,7 +879,7 @@
     // Explicitly submitted with an empty field: drop the prior search and
     // re-center. A cleared-but-not-submitted field keeps its results, so an
     // empty debounce never wipes the page on its own.
-    const hadSearch = current !== null || Boolean(location.hash);
+    const hadSearch = current !== null || Boolean(location.hash) || Boolean(location.search);
     resetResults();
     $("question").value = "";
     if (hadSearch) {
@@ -836,7 +895,7 @@
       clearSearch(pushHistory);
       return;
     }
-    history[pushHistory ? "pushState" : "replaceState"](null, "", makeHash(question, null));
+    history[pushHistory ? "pushState" : "replaceState"](null, "", makeStateUrl(question, null, 0));
     runSearch(question);
   }
 
@@ -855,13 +914,20 @@
   window.addEventListener("popstate", () => {
     const state = readLocationState();
     applyHashState(state);
-    if (state.question) {
-      $("question").value = state.question;
-      runSearch(state.question, state.source, state.page);
-    } else {
+    if (!state.question) {
       // Navigated back/forward to the no-search entry: match it.
       resetResults();
       $("question").value = "";
+      return;
+    }
+    $("question").value = state.question;
+    if (current && current.question === state.question) {
+      // Same query: just move the page or display filter, no re-search.
+      activeSource = state.source;
+      loadPage(state.page);
+    } else {
+      activeSource = state.source;
+      runSearch(state.question, state.source, state.page);
     }
   });
 
@@ -869,9 +935,18 @@
     try {
       // Source discovery is read-only; refreshing the index/catalog set is an
       // admin action done only via `zimantic reload` or SIGHUP.
-      const response = await fetch("/api/sources");
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      sources = await response.json();
+      const [configResponse, sourcesResponse] = await Promise.all([
+        fetch("/api/config"),
+        fetch("/api/sources"),
+      ]);
+      if (configResponse.ok) {
+        const config = await configResponse.json();
+        if (Number.isInteger(config.page_size) && config.page_size > 0) {
+          PAGE_SIZE = config.page_size;
+        }
+      }
+      if (!sourcesResponse.ok) throw new Error(`HTTP ${sourcesResponse.status}`);
+      sources = await sourcesResponse.json();
     } catch (error) {
       $("status").textContent = `Could not load sources: ${error.message}`;
     }

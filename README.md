@@ -28,7 +28,7 @@ Zero 2 W.
 - **Source-aware UI**: discover sources, filter results without re-searching, tolerate individual source failures, and optionally load thumbnails after text results appear. Every search always covers **all** available sources; source filters change what is displayed, never what is searched.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
-- **Multi-user**: several searches run at once (`max_concurrent_searches`), and repeated exact queries are answered from a small in-memory cache.
+- **Multi-user**: several searches run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
 - **Web page and JSON API**: search from any browser on the network, or from your own programs.
 
 Zimantic finds articles; [kiwix-serve](https://kiwix.org/en/applications/) displays them. Searching
@@ -144,12 +144,18 @@ API; source discovery is read-only.
 5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared (a cosine similarity, a BM25 score, a position in Kiwix's list), so RRF ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured source intent provide additional deterministic signals.
 6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is navigation: the page is promoted above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
-The streaming endpoint sends a source completion and a provisional ranked snapshot as each source
-finishes. The browser preserves result identities while reranking, so moved results animate into their
-new positions and new results enter without rebuilding the whole list. Users who prefer no animation
-are covered by `prefers-reduced-motion`. Previous/Next pagination uses regular links with the query,
-source, and page in the URL, so navigating between pages follows normal browser history and scroll
-behavior.
+Search ranks **one pool** of results (up to `max_results`, at least `candidate_count`) and caches it
+by query and source set, independent of page size, offset and display filter. The response carries a
+single page (`page_size`, 10 by default); paging and source filtering reuse the same cached pool, so
+the ranking work happens once no matter how far the user browses.
+
+The streaming endpoint sends a source completion and a provisional snapshot of the current page as
+each source finishes. The browser preserves result identities while reranking, so moved results
+animate into their new positions and new results enter without rebuilding the whole list. Users who
+prefer no animation are covered by `prefers-reduced-motion`. Previous/Next pagination uses regular
+links carrying the query, source and page, so pages remain shareable and open-in-new-tab works, but a
+click is intercepted: the page is fetched from the JSON endpoint and rendered in place instead of
+reloading the document, and Back/Forward move through normal browser history.
 
 *Timings measured on WikiMed; a whole search took 26 ms (median over 785 benchmark queries).
 A Raspberry Pi Zero 2 W is much slower (around 150 ms).*
@@ -361,16 +367,24 @@ a fast index remains searchable while the normal build creates and publishes its
 
 JSON API examples:
 
-- `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=20` returns the final JSON result list (`zim` may be omitted).
-- `GET /api/search/stream?q=...&limit=20` returns newline-delimited JSON events: `started`, `source`, `snapshot`, and `done`.
-- `GET /api/sources` returns source metadata and readiness; `GET /api/zims` remains as the local-index compatibility endpoint.
+- `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=10&offset=0&source=<key>&debug=1` returns one
+  page of the JSON result list (`zim`, `source`, and `debug` may be omitted). Totals travel as
+  `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers, so the body stays a plain list.
+  `source` is a display-only filter over the ranked pool: it never changes what is searched.
+- `GET /api/search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited JSON events:
+  `started`, `source`, `snapshot`, and `done`. Each event carries `total_sources`, and snapshots/done
+  carry the page, `total`, `has_more` and per-source `counts`.
+- `GET /api/sources` returns source metadata and readiness; `GET /api/config` returns `page_size` and
+  `max_results`; `GET /api/zims` remains as the local-index compatibility endpoint.
 - `GET /api/health` reports served indexes, source count, and cache statistics.
 
 Reloading indexes is **not** an HTTP API: running servers rescan via `python -m zimantic reload` or
 `kill -HUP <pid>`.
 
-Exact queries (same text, same selected sources, same limit) are answered from a small LRU cache
-controlled by `cache_size`. A streamed search caches its finished results too, so the regular JSON
-endpoint gets them for free. The cache is only invalidated when the set of searchable sources actually
+Exact queries (same text, same selected sources) are answered from a small LRU cache controlled by
+`cache_size` and bounded by `cache_bytes` (32 MiB by default). A streamed search caches its ranked pool
+too, so the regular JSON endpoint gets it for free and every page of a query reuses the same
+computation. Because the pool is cached independently of page size, offset and display filter, moving
+between pages never re-ranks. The cache is only invalidated when the set of searchable sources actually
 changes (an index is added, removed, or rebuilt), so repeated queries — including full page reloads —
 are served from the cache as long as nothing changed.
