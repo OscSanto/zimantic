@@ -133,6 +133,8 @@ class TextExtractionTests(unittest.TestCase):
             b"<p>A useful article paragraph with enough text to be indexed.</p>"
             b"<p>This article or its section is a stub.</p>"
             b"<p>You can help by expanding the article.</p>"
+            b"<p>Our robots.txt blocks googlebot.</p>"
+            b"<p>You're wasting your own time by spamming here.</p>"
         )
         self.assertEqual(
             list(iter_text_blocks(html)),
