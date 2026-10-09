@@ -790,9 +790,52 @@
     }
   });
 
+  function resetResults() {
+    // Clear everything a search painted, without touching history. Removes
+    // search-active so the empty page re-centers like a fresh load.
+    clearTimeout(autoSubmitTimer);
+    autoSubmitTimer = null;
+    if (requestController) requestController.abort();
+    requestController = null;
+    searchSequence++;  // invalidate any in-flight stream callbacks
+    cancelStreamRender();
+    cancelThumbnails();
+    thumbnailCache.clear();
+    current = null;
+    activeSource = null;
+    resultList = null;
+    document.body.classList.remove("search-active");
+    $("status").textContent = "";
+    $("badges").innerHTML = "";
+    $("filterLine").innerHTML = "";
+    $("notice").textContent = "";
+    $("pager").innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    $("results").replaceChildren(empty);
+    $("searchButton").disabled = false;
+  }
+
+  function clearSearch(pushHistory) {
+    // Explicitly submitted with an empty field: drop the prior search and
+    // re-center. A cleared-but-not-submitted field keeps its results, so an
+    // empty debounce never wipes the page on its own.
+    const hadSearch = current !== null || Boolean(location.hash);
+    resetResults();
+    $("question").value = "";
+    if (hadSearch) {
+      history[pushHistory ? "pushState" : "replaceState"](null, "", location.pathname);
+    }
+    $("question").focus();
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }
+
   function submitSearch(pushHistory) {
     const question = $("question").value.trim();
-    if (!question) return;
+    if (!question) {
+      clearSearch(pushHistory);
+      return;
+    }
     history[pushHistory ? "pushState" : "replaceState"](null, "", makeHash(question, null));
     runSearch(question);
   }
@@ -815,6 +858,10 @@
     if (state.question) {
       $("question").value = state.question;
       runSearch(state.question, state.source, state.page);
+    } else {
+      // Navigated back/forward to the no-search entry: match it.
+      resetResults();
+      $("question").value = "";
     }
   });
 
