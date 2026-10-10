@@ -29,14 +29,6 @@ jobs:
           # Fully supported: libzim/onnxruntime/faiss publish aarch64 wheels.
           - arch: arm64
             platform: linux/arm64
-            best_effort: false
-          # Best effort: libzim currently ships no armv7 (armhf) wheel, so this
-          # documents whether a 32-bit install is possible yet.
-          - arch: armhf
-            platform: linux/arm/v7
-            best_effort: true
-    # A 32-bit install may be impossible today; report it without failing the build.
-    continue-on-error: ${{ matrix.best_effort }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

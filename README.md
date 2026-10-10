@@ -182,6 +182,7 @@ so less common languages may contain mistakes.
 ## Requirements
 
 - Python 3.14 (libzim ships per-version wheels and the pinned release currently provides 3.14 only)
+- 32-bit Linux platforms (such as armhf/armv7) are not supported because required native dependencies do not publish compatible wheels
 - About 120 MB for the embedding model, plus your ZIM files
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
 - *Searching does not require Kiwix.* To open the articles from the result links, run
