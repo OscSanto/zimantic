@@ -296,9 +296,9 @@ reload when a ZIM is added:
 
 - `deploy/zimantic.service` — the server, with `Restart=always` and sandboxing. Copy it to
   `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
-- `deploy/zimantic-zims.path` + `deploy/zimantic-index.service` — watch `zims/` and run a fast build
+- `deploy/zimantic-indexing-fast.path` + `deploy/zimantic-indexing-fast.service` — watch `zims/` and run a fast build
   followed by `reload` when a ZIM appears.
-- `deploy/zimantic-index-full.service` + `deploy/zimantic-index-full.timer` — run the full build
+- `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run the full build
   (with meaning vectors) once a night.
 
 The path-triggered fast build runs whenever a ZIM is added. The full build runs from 01:00–06:00

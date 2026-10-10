@@ -1,9 +1,9 @@
 # One-shot: nightly full build (with meaning vectors) of every ZIM, then rescan.
 #
-# Triggered by deploy/zimantic-index-full.timer. Install both:
-#   cp deploy/zimantic-index-full.service deploy/zimantic-index-full.timer ~/.config/systemd/user/
+# Triggered by deploy/zimantic-indexing.timer. Install both:
+#   cp deploy/zimantic-indexing.service deploy/zimantic-indexing.timer ~/.config/systemd/user/
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now zimantic-index-full.timer
+#   systemctl --user enable --now zimantic-indexing.timer
 #
 # Runs only between 01:00 and 06:00 in the machine's own local time. The timer
 # starts it at 01:00; the ExecCondition below also rejects manual or retried
@@ -19,10 +19,10 @@ Type=oneshot
 WorkingDirectory=%h/.local/share/zimantic
 # Only the full build is allowed between 01:00 and 06:00 local time.
 ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
-# Serialize against the path-triggered fast build: if it already holds the
-# lock, skip instead of touching the same index files concurrently. flock ships
-# in util-linux; the `|| echo` writes the skip reason into the journal.
-ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/.local/bin/zimantic build || echo "zimantic: another build is running, nightly full build skipped" >&2'
+# Serialize against the path-triggered fast build: if it already holds the lock,
+# skip instead of touching the same index files concurrently. Keep the build's
+# exit status visible to systemd; a failed build must not look like a lock skip.
+ExecStart=/bin/sh -c 'if ! exec 9>"%t/zimantic-build.lock"; then echo "zimantic: unable to open build lock" >&2; exit 1; fi; if ! /usr/bin/flock -n 9; then echo "zimantic: another build is running, nightly full build skipped" >&2; exit 0; fi; exec "%h/.local/bin/zimantic" build'
 ExecStart=%h/.local/bin/zimantic reload
 NoNewPrivileges=yes
 PrivateTmp=yes
