@@ -216,14 +216,15 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    cd ~/.local/share/zimantic
    ```
 
-2. **Install the CLI with uv.** This installs the package and runtime dependencies in an isolated
-   tool environment, with the `zimantic` executable at `~/.local/bin/zimantic`:
+2. **Install the CLI with uv.** This installs the locked runtime dependencies without the
+   development tools, then exposes the executable at `~/.local/bin/zimantic`:
 
    ```bash
-   uv tool install .
+   uv sync --locked --no-dev --no-editable
+   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
    ```
 
-   For development, use `uv sync` and `. .venv/bin/activate`.
+   For development, use `uv sync` and `. .venv/bin/activate` instead.
 
 3. **Download the model into `model/`** using these file names:
 
