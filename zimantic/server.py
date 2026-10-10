@@ -156,8 +156,8 @@ def serve(searchClass, port: int) -> None:
         signal.signal(sighup, lambda _signum, _frame: _handle_reload_request(searchClass, guard))
 
     print(
-        f"zimantic: server loaded on port {port} "
-        f"(PID {os.getpid()}; reload with `zimantic reload` or `kill -HUP <pid>`)",
+        f"zimantic: server loaded at http://localhost:{port}\n"
+        f"zimantic: PID {os.getpid()}; reload with `zimantic reload` ",
         flush=True,
     )
     try:
