@@ -50,6 +50,17 @@ The server benchmark loaded the embedding model, opened the single ZIM index, an
 source-discovery and search requests. `serve --fast` omits the model and FAISS, so it uses much less
 memory but does not provide meaning-based search.
 
+**Where the memory goes.** The ~118 MB int8 model and the SentencePiece vocabulary (~50 MB of
+native memory) make up most of the footprint; they are loaded once and are not duplicated, and
+`gc.collect()` cannot release them because they are C++ allocations, not Python objects. ONNX
+Runtime also reads the file into a temporary buffer while loading (so there is a short-lived ~2×
+peak at startup) and its **CPU memory arena** keeps the working set of the largest embedding batch
+for the lifetime of the session. At `batch_size = 32` that arena alone can add ~400 MB and never
+let it go. On hosts with **2 GB RAM or less**, Zimantic therefore disables the arena and returns
+freed heap memory to the OS between batches (`malloc_trim` on glibc), capping build memory near the
+model size at a modest throughput cost. Machines with more RAM keep the arena for faster builds.
+`serve` embeds one query at a time, so the arena costs little there either way.
+
 ## How it works
 
 ### 1. Indexing a ZIM (`build`, once per ZIM)
