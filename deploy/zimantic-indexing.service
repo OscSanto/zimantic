@@ -1,0 +1,27 @@
+# One-shot: nightly full build (with meaning vectors) of every ZIM, then rescan.
+#
+# Triggered by deploy/zimantic-indexing.timer. Install both:
+#   cp deploy/zimantic-indexing.service deploy/zimantic-indexing.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zimantic-indexing.timer
+#
+# Runs only between 01:00 and 06:00 in the machine's own local time. The timer
+# starts it at 01:00; the ExecCondition below also rejects manual or retried
+# starts outside the window. ZIMs that are already indexed are skipped (build is
+# idempotent), so the nightly run is near-instant once the library is complete
+# and does real work only for new or interrupted indexes.
+
+[Unit]
+Description=Build full Zimantic indexes at night and rescan
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.local/share/zimantic
+# Only the full build is allowed between 01:00 and 06:00 local time.
+ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
+# Serialize against the path-triggered fast build: if it already holds the lock,
+# skip instead of touching the same index files concurrently. Always reload
+# after a build attempt, while preserving the build failure for systemd.
+ExecStart=/bin/sh -c 'if ! exec 9>"%t/zimantic-build.lock"; then echo "zimantic: unable to open build lock" >&2; exit 1; fi; if ! /usr/bin/flock -n 9; then echo "zimantic: another build is running, nightly full build skipped" >&2; exit 0; fi; build_status=0; "%h/.local/bin/zimantic" build || build_status=$?; reload_status=0; "%h/.local/bin/zimantic" reload || reload_status=$?; if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi; exit "$reload_status"'
+NoNewPrivileges=yes
+PrivateTmp=yes

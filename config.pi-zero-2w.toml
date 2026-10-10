@@ -1,0 +1,42 @@
+# Settings tuned for a Raspberry Pi Zero 2 W (4 cores, 512 MB RAM).
+# Copy this file to config.toml to use them. Build indexes elsewhere or use `build --fast`.
+
+zim_dir = "./zims"
+model_dir = "./model"
+index_dir = "./indexes"
+
+port = 8090
+kiwix_url = "http://localhost:8085/content"
+kiwix_server = ""
+kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
+kiwix_search_path = "/kiwix/search"
+
+page_size = 10
+# Smaller pool to reduce cache and ranking work.
+max_results = 50
+
+# Small batches save RAM.
+batch_size = 8
+
+max_html_bytes = 4_194_304
+max_preview_chars = 1_000
+max_embedding_tokens = 256
+preview_overflow = "skip"
+embedding_overflow = "truncate"
+
+# Leave CPU for search workers.
+embed_threads = 2
+
+# nprobe = 64
+min_cosine_similarity = 0.85
+long_query = 10
+disambiguation_boost = 0.08
+disambiguation_penalty = 0.5
+
+search_workers = 2
+max_concurrent_searches = 2
+candidate_count = 16
+source_timeout = 12
+
+cache_size = 64
+cache_bytes = 8_388_608  # 8 MiB

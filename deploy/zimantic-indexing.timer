@@ -1,0 +1,26 @@
+# Nightly trigger for deploy/zimantic-indexing.service.
+#
+# Install:
+#   cp deploy/zimantic-indexing.service deploy/zimantic-indexing.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zimantic-indexing.timer
+#
+# Times are local to the machine, so the window follows its timezone with no
+# editing when a device moves or its timezone changes. The service re-checks
+# the clock before building (ExecCondition), so no start can land outside the
+# 01:00-06:00 window.
+
+[Unit]
+Description=Run the Zimantic nightly full index build
+
+[Timer]
+# Start the nightly full build at 01:00 local time (inside the 01:00-06:00 window).
+OnCalendar=*-*-* 01:00:00
+# Spread the start a little instead of always landing on the hour.
+RandomizedDelaySec=30m
+# If the machine was off at 01:00, retry when it is next on; the service's
+# ExecCondition still refuses a retry outside the nightly window.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

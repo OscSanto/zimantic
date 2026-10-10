@@ -1,73 +1,1001 @@
 <!doctype html>
 <html lang="en">
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Zimantic</title>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Zimantic</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a2f3a;
+      --text: #e6e8eb;
+      --muted: #9aa3af;
+      --accent: #4f9cf9;
+      --mark-bg: rgba(79, 156, 249, .18);
+      --ok: #7fd99a;
+      --ok-border: #2e5c3f;
+      --err: #e06a6a;
+      --err-border: #5c2e2e;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f7f9;
+        --panel: #fff;
+        --border: #dde1e7;
+        --text: #1b1f24;
+        --muted: #5d6673;
+        --accent: #1f6fd6;
+        --mark-bg: rgba(31, 111, 214, .12);
+        --ok: #1f7a3d;
+        --ok-border: #a8d8b8;
+        --err: #b42318;
+        --err-border: #f0b4ae;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: flex-start;
+      font: 16px/1.5 system-ui, sans-serif;
+      margin: 0;
+      min-height: 100vh;
+      min-height: 100dvh;
+      padding: 24px 16px 60px;
+    }
+    body:not(.search-active) { align-items: center; }
+    .wrap { width: 100%; max-width: 870px; margin: 0 auto; }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    .subtitle, .help, .status, .filter-line, .result-meta { color: var(--muted); }
+    .subtitle { font-size: .9rem; margin-bottom: 20px; }
+    form { display: flex; gap: 8px; }
+    input[type="search"] {
+      flex: 1;
+      min-width: 0;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 12px 14px;
+      border-radius: 8px;
+      font-size: 1rem;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      padding: 12px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { cursor: default; opacity: .6; }
+    button.secondary, button.badge {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-weight: 400;
+    }
+    button.secondary { padding: 6px 12px; font-size: .85rem; }
+    .status { min-height: 1.4em; margin: 12px 0 6px; font-size: .85rem; }
+    .query-used { color: var(--accent); font-family: var(--mono); }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+    button.badge { border-radius: 100px; font-size: .75rem; padding: 3px 10px; }
+    button.badge.ok { border-color: var(--ok-border); color: var(--ok); cursor: pointer; }
+    button.badge.err { border-color: var(--err-border); color: var(--err); }
+    button.badge[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .filter-line { min-height: 1.2em; font-size: .85rem; margin-bottom: 14px; }
+    .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 18px 0 8px; font-size: .85rem; }
+    .pager:empty { display: none; }
+    .pager a, .pager span { padding: 6px 12px; }
+    .pager a { color: var(--accent); }
+    .pager .disabled { color: var(--muted); }
+    .linklike { background: none; border: 0; color: var(--accent); padding: 0; text-decoration: underline; }
+    .notice {
+      background: var(--panel);
+      border: 1px solid var(--err-border);
+      border-radius: 8px;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      font-size: .9rem;
+    }
+    ol.results { list-style: none; margin: 0; padding: 0; }
+    .result {
+      align-items: flex-start;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      display: flex;
+      gap: 14px;
+      margin-bottom: 10px;
+      padding: 14px 16px;
+      transition: opacity .18s ease, transform .18s ease;
+      will-change: transform;
+    }
+    .result-body { flex: 1; min-width: 0; }
+    .result-title { font-size: 1.02rem; font-weight: 600; }
+    .result-title a { color: var(--text); text-decoration: none; }
+    .result-title a:hover { color: var(--accent); text-decoration: underline; }
+    .result-meta { font-size: .8rem; margin: 2px 0 6px; }
+    .result-match { color: var(--muted); display: none; font: .72rem var(--mono); }
+    .debug-mode .result-match { display: block; }
+    .result-snippet { font-size: .92rem; margin-top: 6px; overflow-wrap: anywhere; }
+    .result-snippet p { margin: 0 0 8px; }
+    .result-snippet p:last-child { margin-bottom: 0; }
+    .result-snippet mark { background: var(--mark-bg); border-radius: 2px; font-weight: 600; }
+    .result-snippet.none { color: var(--muted); font-style: italic; }
+    .result-thumb {
+      background: var(--mark-bg);
+      border-radius: 6px;
+      flex: 0 0 197px;
+      height: 144px;
+      overflow: hidden;
+    }
+    .result-thumb img { display: block; height: 100%; object-fit: cover; width: 100%; }
+    .empty { color: var(--muted); padding: 16px 0; }
+    .source-list { display: grid; gap: 4px; }
+    .source-list label { align-items: flex-start; display: flex; gap: 8px; padding: 4px; }
+    .source-list label.unavailable { opacity: .55; }
+    .source-list code { color: var(--muted); font: .75rem var(--mono); }
+    details { border-top: 1px solid var(--border); margin-top: 28px; padding-top: 14px; }
+    summary { color: var(--muted); cursor: pointer; font-size: .88rem; }
+    .help { font-size: .85rem; margin: 10px 0; }
+    .settings-actions { align-items: center; display: flex; gap: 8px; margin-top: 8px; }
+    .settings-status { color: var(--muted); font-size: .82rem; }
+    .result-enter { opacity: 0; transform: translateY(8px); }
+    .result-exit { pointer-events: none; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+      }
+    }
+    @media (max-width: 480px) {
+      .result-thumb { flex-basis: 128px; height: 96px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Zimantic</h1>
+  <div class="subtitle">Search your offline library by meaning, title, or full text. Results arrive as each source finishes.</div>
 
-<style>
-body{font:16px system-ui,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#222}
-form{display:flex;flex-wrap:wrap;gap:.5rem}#q{flex:1;min-width:12rem;padding:.6rem;font-size:1rem}button{padding:.6rem}
-#picker{flex-basis:100%;color:#444}#picker summary{cursor:pointer;padding:.3rem 0}
-#zims{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))}
-#zims label{display:flex;gap:.5rem;align-items:flex-start;padding:.35rem .4rem;border-radius:4px;cursor:pointer}
-#zims label:hover{background:#f2f2f2}#zims input{margin-top:.2rem}
-.r{border-top:1px solid #ddd;padding:.8rem 0}.r a{font-size:1.1rem}.r small{color:#666}.r p{margin:.3rem 0}
-</style>
+  <form id="searchForm" autocomplete="off">
+    <input id="question" type="search" placeholder="how to change a lightbulb" aria-label="Search query">
+    <button id="searchButton" type="submit">Search</button>
+  </form>
 
-<h1>Zimantic</h1>
-<form id="f">
-  <input id="q" type="search" placeholder="Search…" autofocus>
-  <button>Search</button>
-  <details id="picker" hidden>
-    <summary id="summary">Collections</summary>
-    <div id="zims"></div>
-  </details>
-</form>
-<p id="status"></p>
-<main id="results"></main>
+  <div class="status" id="status"></div>
+  <div class="badges" id="badges" role="group" aria-label="Filter by source"></div>
+  <div class="filter-line" id="filterLine"></div>
+  <div id="notice"></div>
+  <div id="results"><div class="empty"></div></div>
+  <nav class="pager" id="pager" aria-label="Results pagination"></nav>
+</div>
+
 <script>
+(function () {
+  "use strict";
 
-const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/[&<>"']/g, c => "&#" + c.charCodeAt(0) + ";");
-const boxes = () => [...$("zims").querySelectorAll("input")];
+  const $ = id => document.getElementById(id);
+  let PAGE_SIZE = 10;  // replaced with the server's page_size at startup
+  const AUTO_SUBMIT_DELAY = 400;
+  const STREAM_RENDER_DELAY = 150;
+  const BUSY_RETRY_BASE_DELAY = 1000;
+  const BUSY_RETRY_MAX_DELAY = 8000;
+  const BUSY_RETRY_LIMIT = 5;
+  const THUMB_LIMIT = 128 * 1024;
+  const THUMB_CONCURRENCY = 4;
+  const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let debugMode = false;
+  let sources = [];
+  let current = null;
+  let activeSource = null;
+  let requestController = null;
+  let pageController = null;
+  let searchSequence = 0;
+  let autoSubmitTimer = null;
+  let resultList = null;
+  let thumbnailGeneration = 0;
+  const thumbnailCache = new Map();
+  const thumbnailQueue = [];
+  const thumbnailControllers = new Set();
+  let activeThumbnails = 0;
+  let streamRenderTimer = null;
 
-// Summary line of the collapsed picker. None ticked searches everything, like all ticked.
-function updateSummary() {
-  const all = boxes().length, on = boxes().filter(b => b.checked).length;
-  $("summary").textContent = on === all || on === 0 ? `Collections: All (${all})` : `Collections: ${on} of ${all}`;
-}
+  function cancelStreamRender() {
+    if (streamRenderTimer !== null) {
+      clearTimeout(streamRenderTimer);
+      streamRenderTimer = null;
+    }
+  }
 
-// Collection picker: one checkbox per ZIM, all ticked.
-fetch("/api/zims").then(r => r.json()).then(zims => {
-  if (zims.length < 2) return;  // one collection: nothing to choose
-  $("zims").innerHTML = zims.map(z =>
-    `<label><input type="checkbox" value="${esc(z)}" checked> ${esc(z)}</label>`).join("");
-  $("picker").hidden = false;
-  updateSummary();
-});
+  function scheduleStreamRender(sequence) {
+    if (streamRenderTimer !== null) return;
+    streamRenderTimer = setTimeout(() => {
+      streamRenderTimer = null;
+      if (sequence === searchSequence && current) renderView();
+    }, STREAM_RENDER_DELAY);
+  }
 
-$("zims").onchange = updateSummary;
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
 
-$("f").onsubmit = async e => {
-  e.preventDefault();
+  function resultKey(item) {
+    return item.id || `${item.source_key}:${item.path || item.url || item.title}`;
+  }
 
-  const q = $("q").value.trim();
-  if (!q) return;
+  function queryTerms(text) {
+    return (text.toLowerCase().match(/[a-z0-9]+/g) || [])
+      .filter(word => !new Set([
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "how", "what", "where", "when", "why", "who", "which", "can", "could",
+        "do", "does", "did", "i", "you", "my", "me", "to", "of", "in", "on",
+        "at", "for", "with", "about", "find", "some", "any", "there", "it",
+        "that", "this", "and", "or", "if", "so", "will", "would", "should"
+      ]).has(word));
+  }
 
-  $("status").textContent = "Searching…";
+  function highlight(text, terms) {
+    const wanted = new Set(terms);
+    return String(text).split(/([A-Za-z0-9]+)/).map((part, index) => {
+      if (index % 2 && wanted.has(part.toLowerCase())) return `<mark>${escapeHtml(part)}</mark>`;
+      return escapeHtml(part);
+    }).join("");
+  }
 
-  const params = new URLSearchParams({q});
-  const ticked = boxes().filter(b => b.checked);
-  if (ticked.length < boxes().length)  // all ticked (or none): send no zim, which searches everything
-    for (const box of ticked) params.append("zim", box.value);  // ?zim=a&zim=b
-  const r = await fetch("/api/search?" + params);
+  function previewBlocks(text) {
+    const value = String(text).replace(/\s+/g, " ").trim();
+    if (!value) return [];
 
-  if (!r.ok) { $("status").textContent = "Search failed"; return; }
-  const results = await r.json();
+    const blockCount = value.length >= 760 ? 3 : value.length >= 360 ? 2 : 1;
+    if (blockCount === 1) return [value];
 
-  $("status").textContent = results.length ? "" : "No results.";
-  $("results").innerHTML = results.map(x =>
-    `<div class="r"><a href="${esc(x.url)}">${esc(x.title)}</a> <small>${esc(x.zim)}</small><p>${esc(x.lead)}</p></div>`).join("");
-};
+    const sentences = [];
+    let start = 0;
+    for (let index = 0; index < value.length; index++) {
+      if (!/[.!?。！？]/u.test(value[index])) continue;
+      if (index + 1 < value.length && !/\s/u.test(value[index + 1])) continue;
+      sentences.push(value.slice(start, index + 1).trim());
+      start = index + 1;
+    }
+    if (start < value.length) sentences.push(value.slice(start).trim());
+
+    if (sentences.length >= 2) {
+      const count = Math.min(blockCount, sentences.length);
+      const blocks = [];
+      let cursor = 0;
+      for (let index = 0; index < count; index++) {
+        const remainingSentences = sentences.length - cursor;
+        const remainingBlocks = count - index;
+        const take = Math.ceil(remainingSentences / remainingBlocks);
+        blocks.push(sentences.slice(cursor, cursor + take).join(" "));
+        cursor += take;
+      }
+      return blocks;
+    }
+
+    const words = value.split(" ");
+    const blocks = [];
+    let cursor = 0;
+    for (let index = 0; index < blockCount; index++) {
+      const remainingWords = words.length - cursor;
+      const remainingBlocks = blockCount - index;
+      const take = Math.ceil(remainingWords / remainingBlocks);
+      blocks.push(words.slice(cursor, cursor + take).join(" "));
+      cursor += take;
+    }
+    return blocks;
+  }
+
+  function previewEndsWithPunctuation(text) {
+    return /[.!?,;:…。！？；，]["')\]]*$/u.test(text);
+  }
+
+  function activeSources() {
+    // Every available source is always searched; the Filter by source badges
+    // only narrow what is displayed (see renderView).
+    return sources.filter(source => source.available);
+  }
+
+  function renderBadges() {
+    if (!current) {
+      $("badges").innerHTML = "";
+      return;
+    }
+    const all = `<button class="badge" type="button" data-source="" aria-pressed="${activeSource ? "false" : "true"}">All sources</button>`;
+    const entries = [...current.outcomes.values()].map(outcome => {
+      // Counts come from the ranked pool (server-reported), not per-source
+      // candidate lists, so they match what the filtered view actually shows.
+      const count = current.counts[outcome.source.key] || 0;
+      const cls = outcome.error ? "badge err" : count > 0 ? "badge ok" : "badge";
+      const label = outcome.error ? `${outcome.source.name}: ${outcome.error}` : `${outcome.source.name}: ${count}`;
+      const disabled = outcome.error ? "disabled" : "";
+      const pressed = activeSource === outcome.source.key ? "true" : "false";
+      return `<button class="${cls}" type="button" data-source="${escapeHtml(outcome.source.key)}"
+        ${disabled} aria-pressed="${pressed}">${escapeHtml(label)}</button>`;
+    }).join("");
+    $("badges").innerHTML = all + entries;
+  }
+
+  function renderFilterLine(count) {
+    $("filterLine").innerHTML = activeSource
+      ? `Showing only <strong>${escapeHtml(current.outcomes.get(activeSource)?.source.name || activeSource)}</strong>: ${count} result${count === 1 ? "" : "s"}.
+         <button class="linklike" type="button" data-source="">Show all sources</button>`
+      : "";
+  }
+
+  function setText(node, selector, text) {
+    node.querySelector(selector).textContent = text;
+  }
+
+  function setResultNode(node, item) {
+    node.dataset.key = resultKey(item);
+    const title = node.querySelector(".result-title");
+    title.replaceChildren();
+    let displayTitle = item.title || "(untitled)";
+    if (item.url) {
+      const link = document.createElement("a");
+      link.href = item.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = displayTitle;
+      title.appendChild(link);
+    } else {
+      title.textContent = displayTitle;
+    }
+    const sourceRank = item.rank || item.source_rank || "—";
+    setText(node, ".result-meta", item.source || "");
+    setText(node, ".result-match", `${item.explain || "Source result"} · source rank ${sourceRank}`);
+    const snippet = node.querySelector(".result-snippet");
+    const lead = item.lead || "";
+    if (lead) {
+      snippet.className = "result-snippet";
+      const blocks = previewBlocks(lead);
+      if (!previewEndsWithPunctuation(lead) && blocks.length) {
+        blocks[blocks.length - 1] += "…";
+      }
+      snippet.innerHTML = blocks
+        .map(block => `<p>${highlight(block, current ? current.terms : [])}</p>`)
+        .join("");
+    } else {
+      snippet.className = "result-snippet none";
+      snippet.textContent = "No preview available for this result.";
+    }
+    let thumb = node.querySelector(".result-thumb");
+    if (item.url) {
+      if (!thumb) {
+        thumb = document.createElement("div");
+        thumb.className = "result-thumb";
+        node.appendChild(thumb);
+      }
+      thumb.dataset.url = item.url;
+    } else if (thumb) {
+      thumb.remove();
+    }
+  }
+
+  function newResultNode(item) {
+    const node = document.createElement("li");
+    node.className = "result";
+    node.innerHTML = `<div class="result-body">
+      <div class="result-title"></div>
+      <div class="result-meta"></div>
+      <div class="result-match"></div>
+      <div class="result-snippet"></div>
+    </div>`;
+    setResultNode(node, item);
+    return node;
+  }
+
+  function animateRemoval(node, animate = true) {
+    if (!animate || reducedMotion() || !node.animate) {
+      node.remove();
+      return;
+    }
+    node.classList.add("result-exit");
+    const animation = node.animate(
+      [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(-6px)" }],
+      { duration: 180, easing: "ease-in", fill: "forwards" }
+    );
+    animation.finished.then(() => node.remove(), () => node.remove());
+  }
+
+  function renderResults(items) {
+    if (!items.length) {
+      const oldList = resultList;
+      if (oldList) {
+        [...oldList.children].forEach(node => animateRemoval(node, !current?.streaming));
+        resultList = null;
+        setTimeout(() => {
+          if (!oldList.children.length) oldList.remove();
+        }, reducedMotion() ? 0 : 200);
+      }
+      $("results").querySelectorAll(".empty").forEach(node => node.remove());
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = current?.streaming
+        ? "" // waiting for search results... but they often appear too fast to read this text so better to print nothing...
+        : "No results found in the available sources. Try using different words.";
+      $("results").appendChild(empty);
+      return;
+    }
+    $("results").querySelectorAll(".empty").forEach(node => node.remove());
+    if (!resultList) {
+      resultList = document.createElement("ol");
+      resultList.className = "results";
+      $("results").appendChild(resultList);
+    }
+    const existing = new Map([...resultList.children].map(node => [node.dataset.key, node]));
+    const before = new Map([...resultList.children].map(node => [node.dataset.key, node.getBoundingClientRect()]));
+    const wanted = new Set(items.map(resultKey));
+    const animateChanges = !current?.streaming;
+    existing.forEach((node, key) => {
+      if (!wanted.has(key)) animateRemoval(node, animateChanges);
+    });
+    const added = [];
+    items.forEach(item => {
+      const key = resultKey(item);
+      const node = existing.get(key) || newResultNode(item);
+      setResultNode(node, item);
+      if (!existing.has(key)) added.push(node);
+      resultList.appendChild(node);
+    });
+    const after = new Map([...resultList.children].map(node => [node.dataset.key, node.getBoundingClientRect()]));
+    if (!reducedMotion()) {
+      if (animateChanges) {
+        for (const [key, node] of [...resultList.children].map(node => [node.dataset.key, node])) {
+          const oldBox = before.get(key);
+          const newBox = after.get(key);
+          if (oldBox && newBox && node.animate) {
+            const dx = oldBox.left - newBox.left;
+            const dy = oldBox.top - newBox.top;
+            if (dx || dy) {
+              node.animate(
+                [{ transform: `translate(${dx}px,${dy}px)` }, { transform: "translate(0,0)" }],
+                { duration: 220, easing: "ease-out" }
+              );
+            }
+          }
+        }
+      }
+      added.forEach(node => {
+        node.classList.add("result-enter");
+        requestAnimationFrame(() => node.classList.remove("result-enter"));
+      });
+    }
+    loadThumbnails(items);
+  }
+
+  function renderPager(total, pageCount) {
+    const pager = $("pager");
+    pager.innerHTML = "";
+    if (total <= PAGE_SIZE && pageCount <= 1) return;
+    const pageLink = (text, page, disabled) => {
+      const link = document.createElement(disabled ? "span" : "a");
+      link.textContent = text;
+      if (disabled) {
+        link.className = "disabled";
+        link.setAttribute("aria-disabled", "true");
+      } else {
+        // A real href keeps middle-click/open-in-new-tab working; the click
+        // handler below intercepts it to avoid a full document reload.
+        link.href = makePageUrl(page);
+        link.dataset.page = String(page);
+      }
+      return link;
+    };
+    const prev = pageLink("← Previous", current.page - 1, current.page === 0);
+    const next = pageLink("Next →", current.page + 1, current.page >= pageCount - 1);
+    const label = document.createElement("span");
+    const from = total ? current.page * PAGE_SIZE + 1 : 0;
+    const to = Math.min((current.page + 1) * PAGE_SIZE, total);
+    label.textContent = `${from}–${to} of ${total}`;
+    pager.append(prev, label, next);
+  }
+
+  function renderView() {
+    if (!current) return;
+    // The server already sliced this page and applied any display filter, so
+    // there is nothing to slice here.
+    const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
+    if (current.completed === current.sourcesTotal) {
+      if (current.page >= pageCount) current.page = pageCount - 1;
+      if (current.page < 0) current.page = 0;
+    }
+    renderBadges();
+    renderFilterLine(current.total);
+    renderPager(current.total, pageCount);
+    renderResults(current.pageItems);
+  }
+
+  function renderNotice() {
+    if (!current) {
+      $("notice").textContent = "";
+      return;
+    }
+    const outcomes = [...current.outcomes.values()];
+    const errors = outcomes.filter(outcome => outcome.error);
+    $("notice").innerHTML = current.completed === current.sourcesTotal && outcomes.length > 0 &&
+      errors.length === outcomes.length
+      ? "<div class='notice'><strong>All sources failed.</strong> Check your sources and the Kiwix service, then reload or restart the server.</div>"
+      : "";
+  }
+
+  function cancelThumbnails() {
+    thumbnailGeneration++;
+    thumbnailQueue.length = 0;
+    thumbnailControllers.forEach(controller => controller.abort());
+    thumbnailControllers.clear();
+  }
+
+  function pumpThumbnails() {
+    while (activeThumbnails < THUMB_CONCURRENCY && thumbnailQueue.length) {
+      const task = thumbnailQueue.shift();
+      activeThumbnails++;
+      fetchThumbnail(task.url).then(task.resolve, () => task.resolve(null)).finally(() => {
+        activeThumbnails--;
+        pumpThumbnails();
+      });
+    }
+  }
+
+  async function readStart(response, maxBytes) {
+    if (!response.body || !response.body.getReader) return (await response.text()).slice(0, maxBytes);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let bytes = 0;
+    try {
+      while (bytes < maxBytes) {
+        const part = await reader.read();
+        if (part.done) break;
+        bytes += part.value.byteLength;
+        text += decoder.decode(part.value, { stream: true });
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    return text;
+  }
+
+  function pickThumbnail(html, articleUrl) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    for (const image of doc.querySelectorAll("img")) {
+      const src = (image.getAttribute("src") || "").trim();
+      if (!src || src.startsWith("data:") || /\.svg(?:[?#]|$)/i.test(src)) continue;
+      if (/(^|[\W_])(icon|logo|avatar|symbol|sprite|spacer|blank)/i.test(src)) continue;
+      try { return new URL(src, articleUrl).href; } catch (_) {}
+    }
+    return null;
+  }
+
+  async function fetchThumbnail(url) {
+    const controller = new AbortController();
+    thumbnailControllers.add(controller);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) return null;
+      return pickThumbnail(await readStart(response, THUMB_LIMIT), url);
+    } catch (_) {
+      return null;
+    } finally {
+      thumbnailControllers.delete(controller);
+    }
+  }
+
+  function thumbnailFor(url) {
+    if (!thumbnailCache.has(url)) {
+      thumbnailCache.set(url, new Promise(resolve => {
+        thumbnailQueue.push({ url, resolve });
+        pumpThumbnails();
+      }));
+    }
+    return thumbnailCache.get(url);
+  }
+
+  function loadThumbnails(items) {
+    const generation = thumbnailGeneration;
+    items.forEach(item => {
+      if (!item.url) return;
+      thumbnailFor(item.url).then(src => {
+        if (generation !== thumbnailGeneration) return;
+        const node = resultList && [...resultList.children].find(child => child.dataset.key === resultKey(item));
+        const slot = node && node.querySelector(".result-thumb");
+        if (!slot || slot.firstChild) return;
+        if (!src) { slot.remove(); return; }
+        const image = document.createElement("img");
+        image.alt = "";
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.src = src;
+        image.addEventListener("error", () => slot.remove());
+        slot.appendChild(image);
+      });
+    });
+  }
+
+  function waitForRetry(delay, signal) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      }, delay);
+      const abort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    });
+  }
+
+  async function consumeStream(response, sequence) {
+    if (!response.body) throw new Error("streaming response has no body");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let busy = false;
+    const applyPage = event => {
+      current.completed = event.completed;
+      current.pageItems = event.results || [];
+      current.total = event.total || 0;
+      current.hasMore = Boolean(event.has_more);
+      if (event.counts) current.counts = event.counts;
+    };
+    const consumeLine = line => {
+      if (!line.trim() || sequence !== searchSequence) return;
+      const event = JSON.parse(line);
+      if (event.type === "started") {
+        current.sourcesTotal = event.total_sources || 0;
+        current.completed = 0;
+        $("status").textContent = `Searching ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
+      } else if (event.type === "source") {
+        current.completed = event.completed;
+        current.outcomes.set(event.source.key, event);
+        if (typeof event.count === "number") current.counts[event.source.key] = event.count;
+        $("status").textContent = `${event.completed}/${event.total_sources} sources complete`;
+        renderBadges();
+        renderNotice();
+      } else if (event.type === "snapshot") {
+        applyPage(event);
+        scheduleStreamRender(sequence);
+      } else if (event.type === "done") {
+        applyPage(event);
+        current.streaming = false;
+        cancelStreamRender();
+        $("status").textContent = current.sourcesTotal
+          ? `${current.completed}/${current.sourcesTotal} sources complete · ${current.total} result${current.total === 1 ? "" : "s"}`
+          : "No searchable sources.";
+        renderView();
+      } else if (event.type === "error") {
+        busy = Boolean(event.busy);
+        $("status").textContent = event.error || "Search failed";
+      }
+    };
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      buffer += decoder.decode(part.value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+    }
+    if (buffer) consumeLine(buffer);
+    if (busy) return true;
+    if (sequence === searchSequence && current && current.streaming) {
+      current.streaming = false;
+      cancelStreamRender();
+      renderView();
+    }
+    return false;
+  }
+
+  async function runSearch(question, source = null, page = 0) {
+    question = question.trim();
+    if (!question) return;
+    if (requestController) requestController.abort();
+    if (pageController) pageController.abort();
+    cancelStreamRender();
+    cancelThumbnails();
+    thumbnailCache.clear();
+    const controller = new AbortController();
+    requestController = controller;
+    const sequence = ++searchSequence;
+    const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
+    activeSource = source;
+    current = {
+      question,
+      terms: queryTerms(question),
+      outcomes: new Map(),
+      counts: {},
+      pageItems: [],
+      total: 0,
+      hasMore: false,
+      completed: 0,
+      sourcesTotal: 0,
+      streaming: true,
+      page: pageIndex
+    };
+    document.body.classList.add("search-active");
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    $("searchButton").disabled = true;
+    $("status").innerHTML = `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
+    $("notice").textContent = "";
+    $("pager").innerHTML = "";
+    renderResults([]);
+    try {
+      const selected = activeSources();
+      if (!selected.length) {
+        $("status").textContent = "No sources are available to search.";
+        return;
+      }
+      const params = new URLSearchParams({
+        q: question,
+        limit: String(PAGE_SIZE),
+        offset: String(pageIndex * PAGE_SIZE)
+      });
+      if (source) params.set("source", source);
+      if (debugMode) params.set("debug", "true");
+      // Always query every source: no zim params means the server searches all
+      // currently available sources. The server ranks one pool and sends only
+      // this page; page size, offset and the display filter are not cached keys.
+      let busyRetries = 0;
+      while (true) {
+        const response = await fetch("/api/search/stream?" + params, { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const busy = await consumeStream(response, sequence);
+        if (!busy || busyRetries >= BUSY_RETRY_LIMIT || sequence !== searchSequence) break;
+        busyRetries++;
+        const delay = Math.min(
+          BUSY_RETRY_BASE_DELAY * 2 ** (busyRetries - 1),
+          BUSY_RETRY_MAX_DELAY
+        );
+        $("status").textContent = `Server is busy; retrying in ${delay / 1000}s…`;
+        await waitForRetry(delay, controller.signal);
+      }
+    } catch (error) {
+      if (error.name !== "AbortError" && sequence === searchSequence) {
+        $("status").textContent = `Search failed: ${error.message}`;
+      }
+    } finally {
+      if (sequence === searchSequence) {
+        current.streaming = false;
+        cancelStreamRender();
+        $("searchButton").disabled = false;
+        requestController = null;
+      }
+    }
+  }
+
+  async function loadPage(page) {
+    // Paging and source filtering reuse the server's cached ranked pool and
+    // return a single page. No full document reload, no re-stream.
+    if (!current) return;
+    const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
+    if (pageController) pageController.abort();
+    const controller = new AbortController();
+    pageController = controller;
+    const params = new URLSearchParams({
+      q: current.question,
+      limit: String(PAGE_SIZE),
+      offset: String(pageIndex * PAGE_SIZE)
+    });
+    if (activeSource) params.set("source", activeSource);
+    if (debugMode) params.set("debug", "true");
+    $("status").textContent = "Loading page…";
+    try {
+      const response = await fetch("/api/search?" + params, { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const items = await response.json();
+      current.page = pageIndex;
+      current.pageItems = items;
+      current.total = Number(response.headers.get("X-Total-Count") || items.length);
+      current.hasMore = response.headers.get("X-Has-More") === "true";
+      if (controller !== pageController) return;
+      const from = current.total ? pageIndex * PAGE_SIZE + 1 : 0;
+      const to = Math.min((pageIndex + 1) * PAGE_SIZE, current.total);
+      $("status").textContent = current.total
+        ? `${from}–${to} of ${current.total} result${current.total === 1 ? "" : "s"}`
+        : "No results.";
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      renderView();
+    } catch (error) {
+      if (error.name !== "AbortError") $("status").textContent = `Search failed: ${error.message}`;
+    } finally {
+      if (controller === pageController) pageController = null;
+    }
+  }
+
+  function makeStateUrl(question, source, page) {
+    // Keep q/src/page in the query string so links are shareable and Back/
+    // Forward just work.
+    const url = new URL(location.href);
+    url.hash = "";
+    url.search = "";
+    url.searchParams.set("q", question);
+    if (source) url.searchParams.set("src", source);
+    if (debugMode) url.searchParams.set("debug", "true");
+    if (page > 0) url.searchParams.set("page", String(page + 1));
+    return url.pathname + url.search;
+  }
+
+  function makePageUrl(page) {
+    return makeStateUrl(current.question, activeSource, page);
+  }
+
+  function readLocationState() {
+    const params = new URLSearchParams(location.search);
+    const debug = params.get("debug");
+    const pageNumber = Number.parseInt(params.get("page") || "1", 10);
+    return {
+      question: (params.get("q") || "").trim(),
+      source: params.get("src") || null,
+      debug: debug !== null && debug.toLowerCase() !== "false",
+      page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0
+    };
+  }
+
+  function applyLocationState(state) {
+    debugMode = state.debug;
+    document.body.classList.toggle("debug-mode", debugMode);
+  }
+
+  $("badges").addEventListener("click", event => {
+    const button = event.target.closest("button[data-source]");
+    if (!button || button.disabled || !current) return;
+    const key = button.dataset.source || null;
+    // Clicking the active source badge again returns to "All sources".
+    activeSource = (activeSource && activeSource === key) ? null : key;
+    history.pushState(null, "", makeStateUrl(current.question, activeSource, 0));
+    renderBadges();
+    loadPage(0);
+  });
+
+  $("filterLine").addEventListener("click", event => {
+    const button = event.target.closest("button[data-source]");
+    if (button) {
+      activeSource = null;
+      history.pushState(null, "", makeStateUrl(current.question, null, 0));
+      renderBadges();
+      loadPage(0);
+    }
+  });
+
+  $("pager").addEventListener("click", event => {
+    const link = event.target.closest("a[data-page]");
+    if (!link || !current) return;
+    event.preventDefault();
+    const page = Number(link.dataset.page);
+    history.pushState(null, "", makeStateUrl(current.question, activeSource, page));
+    loadPage(page);
+  });
+
+  function resetResults() {
+    // Clear everything a search painted, without touching history. Removes
+    // search-active so the empty page re-centers like a fresh load.
+    clearTimeout(autoSubmitTimer);
+    autoSubmitTimer = null;
+    if (requestController) requestController.abort();
+    requestController = null;
+    if (pageController) pageController.abort();
+    pageController = null;
+    searchSequence++;  // invalidate any in-flight stream callbacks
+    cancelStreamRender();
+    cancelThumbnails();
+    thumbnailCache.clear();
+    current = null;
+    activeSource = null;
+    resultList = null;
+    document.body.classList.remove("search-active");
+    $("status").textContent = "";
+    $("badges").innerHTML = "";
+    $("filterLine").innerHTML = "";
+    $("notice").textContent = "";
+    $("pager").innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    $("results").replaceChildren(empty);
+    $("searchButton").disabled = false;
+  }
+
+  function clearSearch(pushHistory) {
+    // Explicitly submitted with an empty field: drop the prior search and
+    // re-center. A cleared-but-not-submitted field keeps its results, so an
+    // empty debounce never wipes the page on its own.
+    const hadSearch = current !== null || Boolean(location.search);
+    resetResults();
+    $("question").value = "";
+    if (hadSearch) {
+      history[pushHistory ? "pushState" : "replaceState"](null, "", location.pathname);
+    }
+    $("question").focus();
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }
+
+  function submitSearch(pushHistory) {
+    const question = $("question").value.trim();
+    if (!question) {
+      clearSearch(pushHistory);
+      return;
+    }
+    history[pushHistory ? "pushState" : "replaceState"](null, "", makeStateUrl(question, null, 0));
+    runSearch(question);
+  }
+
+  $("question").addEventListener("input", () => {
+    clearTimeout(autoSubmitTimer);
+    if (!$("question").value.trim()) return;
+    autoSubmitTimer = setTimeout(() => submitSearch(false), AUTO_SUBMIT_DELAY);
+  });
+
+  $("searchForm").addEventListener("submit", event => {
+    event.preventDefault();
+    clearTimeout(autoSubmitTimer);
+    submitSearch(true);
+  });
+
+  window.addEventListener("popstate", () => {
+    const state = readLocationState();
+    applyLocationState(state);
+    if (!state.question) {
+      // Navigated back/forward to the no-search entry: match it.
+      resetResults();
+      $("question").value = "";
+      return;
+    }
+    $("question").value = state.question;
+    if (current && current.question === state.question) {
+      // Same query: just move the page or display filter, no re-search.
+      activeSource = state.source;
+      loadPage(state.page);
+    } else {
+      activeSource = state.source;
+      runSearch(state.question, state.source, state.page);
+    }
+  });
+
+  async function initialize() {
+    try {
+      // Source discovery is read-only; refreshing the index/catalog set is an
+      // admin action done only via `zimantic reload` or SIGHUP.
+      const [configResponse, sourcesResponse] = await Promise.all([
+        fetch("/api/config"),
+        fetch("/api/sources"),
+      ]);
+      if (configResponse.ok) {
+        const config = await configResponse.json();
+        if (Number.isInteger(config.page_size) && config.page_size > 0) {
+          PAGE_SIZE = config.page_size;
+        }
+      }
+      if (!sourcesResponse.ok) throw new Error(`HTTP ${sourcesResponse.status}`);
+      sources = await sourcesResponse.json();
+    } catch (error) {
+      $("status").textContent = `Could not load sources: ${error.message}`;
+    }
+    const state = readLocationState();
+    applyLocationState(state);
+    if (state.question) {
+      $("question").value = state.question;
+      runSearch(state.question, state.source, state.page);
+    } else {
+      $("question").focus();
+    }
+  }
+
+  initialize();
+})();
 </script>
-
+</body>
 </html>

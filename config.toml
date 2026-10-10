@@ -1,0 +1,100 @@
+# Zimantic settings. This file is optional; omitted keys use hardware-based defaults.
+# See config.pi-zero-2w.toml and config.pi-5.toml for tuned starting points.
+
+# Relative paths use the directory where `zimantic` runs.
+# Absolute paths also work.
+
+# ZIM files, downloaded from https://library.kiwix.org.
+zim_dir = "./zims"
+
+# Must contain model.onnx and sentencepiece.bpe.model (see the README).
+model_dir = "./model"
+
+# Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.
+# Created automatically. 
+# (Recomended; for large ZIMs, build the index on a faster machine and copy both files here)
+index_dir = "./indexes"
+
+# SERVER
+
+# Search page port; reachable from other devices on the network.
+port = 8090
+
+# Where result links open the article, served by kiwix-serve (optional; search works without it).
+# Links become <kiwix_url>/<zim name>/<article path>. Use this machine's address instead of
+# localhost if people open the search page from other devices. Leave blank to show result
+# titles without links.
+kiwix_url = "http://localhost:8085/content"
+
+# Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
+# sources that do not have a local Zimantic index. Leave blank to use local
+# indexes only. With the standard Kiwix proxy setup this is often http://localhost:8085.
+kiwix_server = ""
+kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
+kiwix_search_path = "/kiwix/search"
+
+# TUNING
+
+# Results per page in the UI and API.
+page_size = 10
+
+# Largest ranked result pool kept and served. Pages are drawn from this pool,
+# so 100 means pagination reaches the top 100 matches. Searching still ranks
+# the whole pool once; larger values cost a little more per search and cache.
+max_results = 100
+
+# Articles embedded per batch. Larger batches use more memory; use about 8 on a Pi Zero 2 W.
+batch_size = 32
+
+# ONNX Runtime threads for embedding. Unset leaves a core for search and the web server.
+# embed_threads = 3
+
+# Maximum HTML read per article.
+max_html_bytes = 4_194_304
+
+# Maximum preview characters stored and returned.
+max_preview_chars = 1_000
+
+# Maximum embedding sequence length, including two special tokens.
+max_embedding_tokens = 256
+
+# What to do when adding a block would exceed each independent budget.
+# "skip" keeps looking for another suitable block; "truncate" fills the remaining budget.
+preview_overflow = "skip"
+embedding_overflow = "truncate"
+
+# Large ZIMs only (10,000+ articles): how many groups of vectors each search scans.
+# By default, searches scan about 6% of the groups, scaling automatically with ZIM size.
+# Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
+# nprobe = 64
+
+# Meaning matches below this cosine similarity are discarded.
+min_cosine_similarity = 0.85
+
+# A naive approach to determining if query requires a deeper search (e.g. pasted sentences from article)
+# Searches with 'long_query' words or more will double kiwix's full-text result weights.
+# Rule of thumb: long searchs are usually pasted sentence or remembered text.  
+# Set very high (e.g. 1000) to turn the doubling off.
+long_query = 10
+
+# Disambiguation pages (titles detected from the "(disambiguation)" suffix,
+# rendered footer, or category). A query that names the full title exactly,
+# including "air disambiguation" without parentheses, is navigation. A question
+# that names the base title and ends in "?" is also treated as navigation. Such
+# pages are promoted above the normal score range; other matches are demoted.
+# Set disambiguation_penalty = 1 to disable.
+disambiguation_boost = 0.08
+disambiguation_penalty = 0.5
+
+# Search workers.
+search_workers = 4
+# Maximum simultaneous user searches. Several people can search at once up to
+# this many; each search may still use all source workers. Lower it on a Pi.
+max_concurrent_searches = 4
+# Number of candidates requested from each retrieval backend before fusion.
+candidate_count = 16
+# Timeout for catalog and Kiwix fallback requests, in seconds.
+source_timeout = 12
+# Exact-query LRU cache. Set cache_size to 0 to disable.
+cache_size = 256
+cache_bytes = 33_554_432  # 32 MiB

@@ -1,0 +1,41 @@
+# Settings tuned for a Raspberry Pi 5 (4 cores, 4-8 GB RAM).
+# Copy this file to config.toml to use them.
+
+zim_dir = "./zims"
+model_dir = "./model"
+index_dir = "./indexes"
+
+port = 8090
+kiwix_url = "http://localhost:8085/content"
+kiwix_server = ""
+kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
+kiwix_search_path = "/kiwix/search"
+
+page_size = 10
+max_results = 100
+
+# Moderate batch size for a Pi 5.
+batch_size = 16
+
+max_html_bytes = 4_194_304
+max_preview_chars = 1_000
+max_embedding_tokens = 256
+preview_overflow = "skip"
+embedding_overflow = "truncate"
+
+# Leave one core for search and the web server.
+embed_threads = 3
+
+# nprobe = 64
+min_cosine_similarity = 0.85
+long_query = 10
+disambiguation_boost = 0.08
+disambiguation_penalty = 0.5
+
+search_workers = 4
+max_concurrent_searches = 4
+candidate_count = 16
+source_timeout = 12
+
+cache_size = 256
+cache_bytes = 33_554_432  # 32 MiB
