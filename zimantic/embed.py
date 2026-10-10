@@ -2,6 +2,7 @@
 import hashlib
 import os
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -71,10 +72,16 @@ class Embedder:
         self.session = ort.InferenceSession(str(Path(model_dir) / "model.onnx"), opts, providers=["CPUExecutionProvider"])
         # sentencepiece loads this vocabulary in ~45 MB; Hugging Face `tokenizers` needed ~250 MB.
         self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(Path(model_dir) / "sentencepiece.bpe.model"))
+        # The SentencePiece processor is not safe for concurrent encode calls from
+        # several search threads; serialize access to it. ONNX inference itself is
+        # thread-safe and needs no lock.
+        self._tokenizer_lock = threading.Lock()
 
     def token_count(self, text: str, prefix: str = "") -> int:
         """Count special tokens and SentencePiece pieces for the full input."""
-        return SPECIAL_TOKEN_COUNT + len(self.tokenizer.encode(prefix + text))
+        with self._tokenizer_lock:
+            pieces = self.tokenizer.encode(prefix + text)
+        return SPECIAL_TOKEN_COUNT + len(pieces)
 
     def truncate(self, text: str, prefix: str = "") -> str:
         """Keep text within the model budget without cutting through a word."""
@@ -93,7 +100,8 @@ class Embedder:
 
     def _ids(self, text: str) -> list[int]:
         # XLM-RoBERTa numbering: <s>=0 <pad>=1 </s>=2 <unk>=3, other pieces are sentencepiece id + 1.
-        pieces = self.tokenizer.encode(text)[:self.max_tokens - SPECIAL_TOKEN_COUNT]
+        with self._tokenizer_lock:
+            pieces = self.tokenizer.encode(text)[:self.max_tokens - SPECIAL_TOKEN_COUNT]
         return [0] + [p + 1 if p else 3 for p in pieces] + [2]
 
     def embed(self, texts: list[str]) -> np.ndarray:

@@ -102,6 +102,9 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
 
 PROFILES = {"mobile": MOBILE, "desktop": DESKTOP, "supercomputer": SUPERCOMPUTER}
 
+# Every key zimantic reads, including optional ones not present in the profiles
+KNOWN_KEYS = frozenset(key for profile in PROFILES.values() for key in profile) | {"nprobe"}
+
 
 def _system_memory_gb() -> float:
     """Total physical memory in GiB, 0.0 when unknown."""
@@ -145,5 +148,7 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
         warn(f"zimantic: warning: could not read {path} ({error}); using {profile} defaults")
     if config_path.exists() and not user:
         warn(f"zimantic: warning: {path} is empty; using {profile} defaults")
+    for key in sorted(set(user) - KNOWN_KEYS):
+        warn(f"zimantic: warning: unknown config key {key!r} in {path} (ignored)")
     cfg.update(user)
     return cfg

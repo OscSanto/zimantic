@@ -54,10 +54,37 @@ def build(
     try:
         if force:
             _reset_index(db_path, faiss_path)
+        try:
+            filesize = zim_path.stat().st_size
+        except OSError:
+            filesize = 0
         db = sqlite3.connect(build_db_path)
         db.executescript(SCHEMA)
         meta = dict(db.execute("SELECT key, value FROM meta"))
         done = str(meta.get("done", ""))
+        # A ZIM replaced under the same name must not keep its old index: rebuild
+        # when the source file's size no longer matches the size recorded when the
+        # index was finished. Both fast and full indexes record it.
+        recorded_size = meta.get("filesize")
+        if (
+            done in {"1", "fast"}
+            and recorded_size is not None
+            and str(filesize) != recorded_size
+        ):
+            print(
+                f"{zim_path.stem}: source ZIM changed size "
+                f"({recorded_size} -> {filesize} bytes); rebuilding"
+            )
+            db.close()
+            db = None
+            _reset_index(db_path, faiss_path)
+            build_db_path = db_path
+            build_faiss_path = faiss_path
+            publish_upgrade = False
+            db = sqlite3.connect(build_db_path)
+            db.executescript(SCHEMA)
+            meta = {}
+            done = ""
         if done == "1":
             if faiss_path.exists():
                 print(f"{zim_path.stem}: already built (use --force to rebuild)")
@@ -116,6 +143,7 @@ def build(
             with db:
                 db.execute("DROP TABLE IF EXISTS vecs")
                 db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
+                db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(filesize),))
             print(f"{zim_path.stem}: title + full-text index ready")
             return
 
@@ -124,6 +152,7 @@ def build(
             db.execute("DROP TABLE vecs")
             db.execute("DELETE FROM meta WHERE key = 'next'")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(filesize),))
         if publish_upgrade:
             db.close()
             db = None
