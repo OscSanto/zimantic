@@ -1,8 +1,8 @@
 # Zimantic
 
-**Offline search that understands what you mean, for Kiwix ZIM files.**
+**Offline search that understands what you mean for Kiwix ZIM files.**
 
-Zimantic adds meaning-based search to ZIM files: the compressed offline copies of Wikipedia and
+Zimantic adds meaning-based search to ZIM files, the compressed offline copies of Wikipedia and
 other sites published by Kiwix. Ask a question, describe something without knowing its name, misspell
 it, or search in one of 100+ languages, and Zimantic finds the article closest to what you mean. It
 works best in widely spoken languages. Everything runs offline, on hardware as small as a Raspberry Pi
@@ -21,19 +21,19 @@ Zero 2 W.
 - **Search by meaning**: questions and descriptions find articles even when they share no words with the title.
 - **Alternate names and misspellings**: "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another. Strongest in widely used languages (see the results below).
-- **Several sources at once**: search any combination of your ZIMs, ranked together in one list.
+- **Several sources at once**: search any combination of your ZIMs and rank the results together in one list.
 - **Best of three searches**: meaning, title-word and full-text retrieval are fused into a single ranking.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Source-aware UI**: discover sources, filter results without re-searching, tolerate individual source failures, and optionally load thumbnails after text results appear. Every search always covers **all** available sources; source filters change what is displayed, never what is searched.
+- **Source-aware UI**: discover sources, filter results without re-searching, tolerate individual source failures, and optionally load thumbnails after text results appear. Every search covers **all** available sources; source filters change what is displayed, never what is searched.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
-- **Multi-user**: several searches run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
-- **Web page and JSON API**: search from any browser on the network, or from your own programs.
+- **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
+- **Web page and JSON API**: search from any browser on the network or use your own programs.
 
-Zimantic finds articles; [kiwix-serve](https://kiwix.org/en/applications/) displays them. Searching
-itself does not require Kiwix, but serving the article pages does, so Zimantic works alongside Kiwix
-rather than replacing it.
+Zimantic finds articles, while [kiwix-serve](https://kiwix.org/en/applications/) displays them.
+Searching does not require Kiwix, but displaying the article pages does. Zimantic works alongside
+Kiwix rather than replacing it.
 
 ## How it works
 
@@ -81,16 +81,16 @@ Builds resume from the last saved batch. FAISS files are published atomically, a
 remains available while a full replacement is built. Rebuild with `build --force` after changing
 extraction or excerpt settings.
 
-### 2. Starting the server (`serve`, once)
+### 2. Starting the server
 
 At startup Zimantic opens every **finished** index and keeps it open; nothing is reloaded per search.
-The page lists local indexes automatically. With `kiwix_server`, it also discovers catalog sources and
+The page automatically lists local indexes. With `kiwix_server`, it also discovers catalog sources and
 can search them with Kiwix full-text search.
 
 An index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
 search**. `serve --fast` also skips the model and all vectors.
 
-A lightweight HTML page is served through FastAPI and is accessible from any browser at
+FastAPI serves a lightweight HTML page that is accessible from any browser at
 `http://<host>:8090` (the `port` in `config.toml`).
 
 **Picking up indexes without a restart.** `zimantic reload` sends `SIGHUP` to the server,
@@ -110,8 +110,8 @@ which rescans `index_dir` for added, removed or upgraded indexes. `kill -HUP <pi
 
 3. **Collapse redirects**: every hit on a redirect is replaced by the article it points to, and duplicates are merged, so each article appears only once.
 4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall.
-5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared (a cosine similarity, a BM25 score, a position in Kiwix's list), so RRF ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured source intent provide additional deterministic signals.
-6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is navigation, whether it writes `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
+5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured source intent provide additional deterministic signals.
+6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is treated as navigation, whether it writes `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
 Search ranks one pool of results (up to `max_results`, at least `candidate_count`) and caches it by
 query and source set. Paging and display filters reuse that pool.
@@ -119,7 +119,7 @@ query and source set. Paging and display filters reuse that pool.
 The streaming endpoint sends a provisional page as each source finishes. Pagination uses regular links
 and updates the page through the JSON endpoint without a full document reload.
 
-*Timings measured on WikiMed; a whole search took 26 ms (median over 785 benchmark queries).
+*Timings measured on WikiMed; a complete search took 26 ms (median over 785 benchmark queries).
 A Raspberry Pi Zero 2 W is much slower (around 150 ms).*
 
 ## Compared with Kiwix search
@@ -129,7 +129,7 @@ A Raspberry Pi Zero 2 W is much slower (around 150 ms).*
 ![How often the right article comes first: Zimantic vs Kiwix](docs/images/0-scorecard.png)
 
 *Measured on WikiMed, the Wikipedia medical encyclopedia ZIM (`wikipedia_en_medicine_maxi_2026-04`,
-70,523 articles), against kiwix-serve's full-text search.*
+70,523 articles), compared with kiwix-serve's full-text search.*
 
 ### Results by type of search
 
@@ -154,7 +154,7 @@ hand; with 25–60 queries each, treat their numbers as accurate to roughly ±12
 
 ### Single words in other languages
 
-The English articles searched with one word in another language, 15 common medical words per language
+These tests search the English articles with one word in another language, using 15 common medical words per language
 (malaria, diabetes, fever, cough, pregnancy, heart, blood, …). Translations were written for this test,
 so less common languages may contain mistakes.
 
@@ -172,7 +172,7 @@ so less common languages may contain mistakes.
 | Swahili, Igbo, Zulu, Kinyarwanda | e.g. "ikholera" (Zulu) → *Cholera* | not in top 20 | **#1** | 0% → **7%** | 0–7% → 7% |
 | Hausa, Yoruba | | | | 0% → 0% | 0% → 0% |
 
-**Where Kiwix is still better, or cheaper:**
+**Where Kiwix is still better or cheaper:**
 - **Words buried deep inside an article.** Kiwix indexes every word, so it performs better on deeper
   searches (68% first vs 28%; in the top 5 they're nearly tied, 78% vs 76%). Zimantic only indexes
   each article's title and bounded content excerpt.
@@ -202,8 +202,8 @@ The installed CLI is separate from runtime data. By default the data directory i
 └── zimantic.pid         ← server PID (created while serving)
 ```
 
-Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `model_dir` or `index_dir`
-in `config.toml` at them instead.
+If your files are somewhere else (on a USB drive or another disk), point `zim_dir`, `model_dir` or
+`index_dir` in `config.toml` at them instead.
 
 ## Install
 
@@ -247,12 +247,12 @@ in `config.toml` at them instead.
    zimantic --help
    ```
 
-   To run the development runtime check, activate the `uv` environment and run
-   `python -m pytest tests/test_runtime_api.py`; run `python -m pytest` for the full suite.
+   For a development runtime check, activate the `uv` environment and run
+   `python -m pytest tests/test_runtime_api.py`; use `python -m pytest` for the full suite.
 
 ## Development install
 
-For a checkout-only development environment:
+For a development environment based on the checkout:
 
 ```bash
 uv sync
@@ -276,7 +276,7 @@ zimantic serve --fast                 # start now: no model, no vectors
 zimantic reload                       # ask a running server to rescan index_dir
 ```
 
-`build` accepts files or folders; a folder means its `*.zim`, and no arguments uses `zim_dir`.
+`build` accepts files or folders; a folder means all its `*.zim` files, and no arguments uses `zim_dir`.
 Already-built ZIMs are skipped. Pass `--force` to rebuild selected indexes.
 
 **Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
@@ -297,7 +297,7 @@ reload when a ZIM is added:
 - `deploy/zimantic.service` — the server, with `Restart=always` and sandboxing. Copy it to
   `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
 - `deploy/zimantic-zims.path` + `deploy/zimantic-index.service` — watch `zims/` and run a fast build
-  plus `reload` when a ZIM appears.
+  followed by `reload` when a ZIM appears.
 - `deploy/zimantic-index-full.service` + `deploy/zimantic-index-full.timer` — run the full build
   (with meaning vectors) once a night.
 
@@ -313,8 +313,8 @@ elsewhere.
 The units call the installed `~/.local/bin/zimantic` executable, while `WorkingDirectory` keeps
 configuration, model files, ZIMs, indexes and `zimantic.pid` under the data directory. `reload`
 does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by default, or
-from the file passed with `--pid`. A stale PID file (left over after a crash or a signal shutdown)
-is reported and ignored.
+from the file passed with `--pid`. A stale PID file (left over after a crash or a
+signal-triggered shutdown) is reported and ignored.
 
 Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you copy finished indexes from
 another machine, watch `indexes/` and run only `reload`.
