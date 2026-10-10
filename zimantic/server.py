@@ -27,7 +27,7 @@ def _json_with_etag(request: Request, payload) -> Response:
     return Response(content=body, media_type="application/json", headers=headers)
 
 
-def create_app(searchClass) -> FastAPI:
+def create_app(searchClass, debug: bool = False) -> FastAPI:
     app = FastAPI(title="zimantic")
     app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
 
@@ -44,6 +44,7 @@ def create_app(searchClass) -> FastAPI:
         return _json_with_etag(request, {
             "page_size": getattr(searchClass, "page_size", 10),
             "max_results": getattr(searchClass, "max_results", 100),
+            "debug": debug,
         })
 
     @app.get("/api/sources")
@@ -66,7 +67,6 @@ def create_app(searchClass) -> FastAPI:
         source: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
-        debug: bool = Query(False),
     ):
         try:
             page = searchClass.search_page(q, zim, limit, offset, source, debug)
@@ -95,7 +95,6 @@ def create_app(searchClass) -> FastAPI:
         source: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
-        debug: bool = Query(False),
     ):
         try:
             searchClass._validate_query(q)
@@ -137,8 +136,8 @@ def _handle_reload_request(searchClass, guard: threading.Lock) -> None:
     threading.Thread(target=_reload, name="zimantic-reload", daemon=True).start()
 
 
-def serve(searchClass, port: int) -> None:
-    app = create_app(searchClass)
+def serve(searchClass, port: int, debug: bool = False) -> None:
+    app = create_app(searchClass, debug=debug)
     try:
         PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as error:

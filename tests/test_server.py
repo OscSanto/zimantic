@@ -24,8 +24,11 @@ class FakeSearch:
         return query
 
     def search_page(self, query, zim, limit, offset, source, debug):
+        result = {"id": "manual:page", "title": "Page"}
+        if debug:
+            result.update({"score": 1.0, "explain": "debug"})
         return {
-            "results": [{"id": "manual:page", "title": "Page"}],
+            "results": [result],
             "total": 1,
             "has_more": False,
             "offset": offset,
@@ -36,10 +39,13 @@ class FakeSearch:
         return self.search_page(query, zim, limit, offset, source, debug)["results"]
 
     def stream_search(self, query, zim, limit=None, offset=0, source=None, debug=False):
+        result = {"id": "manual:page", "title": "Page"}
+        if debug:
+            result.update({"score": 1.0, "explain": "debug"})
         yield {"type": "started", "total_sources": 1, "offset": offset, "limit": limit or 10}
         yield {
             "type": "done",
-            "results": [{"id": "manual:page", "title": "Page"}],
+            "results": [result],
             "completed": 1,
             "total_sources": 1,
             "total": 1,
@@ -54,6 +60,7 @@ class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(create_app(FakeSearch()))
+        cls.debug_client = TestClient(create_app(FakeSearch(), debug=True))
 
     def test_sources_and_json_search(self):
         self.assertEqual(self.client.get("/api/sources").json()[0]["key"], "manual")
@@ -64,9 +71,23 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.headers["x-has-more"], "false")
 
     def test_search_accepts_page_and_filter_parameters(self):
-        response = self.client.get("/api/search?q=page&offset=10&source=manual&limit=5&debug=true")
+        response = self.client.get("/api/search?q=page&offset=10&source=manual&limit=5")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-offset"], "10")
+        self.assertNotIn("score", response.json()[0])
+
+    def test_debug_mode_is_server_wide(self):
+        response = self.debug_client.get("/api/search?q=page")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["explain"], "debug")
+
+        stream = self.debug_client.get("/api/search/stream?q=page")
+        events = [json.loads(line) for line in stream.text.splitlines()]
+        self.assertEqual(events[-1]["results"][0]["score"], 1.0)
+
+    def test_config_reports_debug_mode(self):
+        self.assertFalse(self.client.get("/api/config").json()["debug"])
+        self.assertTrue(self.debug_client.get("/api/config").json()["debug"])
 
     def test_sources_ignores_client_refresh_parameter(self):
         # Clients cannot force a source refresh: any refresh parameter is ignored.

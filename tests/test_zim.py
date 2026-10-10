@@ -19,6 +19,7 @@ from zimantic.zim import (
     iter_text_blocks,
     is_disambiguation,
     read_entry,
+    truncate_at_word_boundary,
 )
 
 
@@ -151,6 +152,23 @@ class TextExtractionTests(unittest.TestCase):
         self.assertLessEqual(len(excerpt), 20)
         self.assertEqual(excerpt, "A sufficiently long")
 
+    def test_empty_article_body_has_no_excerpt(self):
+        self.assertEqual(extract_excerpt(b"<html><body></body></html>"), "")
+
+    def test_preview_fills_a_realistic_article_paragraph(self):
+        words = " ".join(f"article{i}" for i in range(400))
+        excerpt = extract_excerpt(
+            f"<p>{words}</p>".encode(),
+            max_preview_chars=750,
+        )
+        self.assertLessEqual(len(excerpt), 750)
+        self.assertGreater(len(excerpt), 700)
+        self.assertGreaterEqual(len(excerpt.split()), 70)
+
+    def test_unbroken_text_keeps_a_bounded_excerpt(self):
+        excerpt = truncate_at_word_boundary("x" * 1000, 750)
+        self.assertEqual(len(excerpt), 750)
+
     def test_preview_skips_oversized_blocks_and_keeps_searching(self):
         html = (
             b"<p>" + b"x" * 100 + b"</p>"
@@ -185,6 +203,26 @@ class TextExtractionTests(unittest.TestCase):
         )
         self.assertLessEqual(token_count(excerpt, "passage: Example\n"), 8)
         self.assertEqual(excerpt, "one two three four")
+
+    def test_embedding_budget_can_preserve_more_than_preview_limit(self):
+        def token_count(text, prefix):
+            return 2 + len((prefix + text).split())
+
+        def truncate(text, prefix):
+            available = 256 - token_count("", prefix)
+            return " ".join(text.split()[:available])
+
+        words = " ".join(f"article{i}" for i in range(400))
+        excerpt = extract_excerpt(
+            f"<p>{words}</p>".encode(),
+            title="Example",
+            max_preview_chars=750,
+            max_embedding_tokens=256,
+            embedding_token_count=token_count,
+            embedding_truncate=truncate,
+        )
+        self.assertGreater(len(excerpt), 750)
+        self.assertLessEqual(token_count(excerpt, "passage: Example\n"), 256)
 
     def test_embedding_skip_policy_keeps_looking_for_a_fitting_block(self):
         def token_count(text, prefix):
