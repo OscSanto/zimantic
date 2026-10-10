@@ -228,7 +228,7 @@ def truncate_at_word_boundary(text: str, max_chars: int) -> str:
         return text
     cut = text[:limit]
     boundary = max(cut.rfind(" "), cut.rfind("\n"), cut.rfind("\t"))
-    return cut[:boundary].rstrip() if boundary > 0 else ""
+    return cut[:boundary].rstrip() if boundary > 0 else cut
 
 
 def _preview_excerpt(

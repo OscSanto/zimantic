@@ -191,7 +191,7 @@
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let debugMode = false;
+  let debugMode = false;  // configured by the server, not the URL
   let sources = [];
   let current = null;
   let activeSource = null;
@@ -746,7 +746,6 @@
         offset: String(pageIndex * PAGE_SIZE)
       });
       if (source) params.set("source", source);
-      if (debugMode) params.set("debug", "true");
       // Always query every source: no zim params means the server searches all
       // currently available sources. The server ranks one pool and sends only
       // this page; page size, offset and the display filter are not cached keys.
@@ -792,7 +791,6 @@
       offset: String(pageIndex * PAGE_SIZE)
     });
     if (activeSource) params.set("source", activeSource);
-    if (debugMode) params.set("debug", "true");
     $("status").textContent = "Loading page…";
     try {
       const response = await fetch("/api/search?" + params, { signal: controller.signal });
@@ -825,7 +823,6 @@
     url.search = "";
     url.searchParams.set("q", question);
     if (source) url.searchParams.set("src", source);
-    if (debugMode) url.searchParams.set("debug", "true");
     if (page > 0) url.searchParams.set("page", String(page + 1));
     return url.pathname + url.search;
   }
@@ -836,18 +833,16 @@
 
   function readLocationState() {
     const params = new URLSearchParams(location.search);
-    const debug = params.get("debug");
     const pageNumber = Number.parseInt(params.get("page") || "1", 10);
     return {
       question: (params.get("q") || "").trim(),
       source: params.get("src") || null,
-      debug: debug !== null && debug.toLowerCase() !== "false",
       page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0
     };
   }
 
-  function applyLocationState(state) {
-    debugMode = state.debug;
+  function applyDebugMode(enabled) {
+    debugMode = enabled;
     document.body.classList.toggle("debug-mode", debugMode);
   }
 
@@ -947,7 +942,6 @@
 
   window.addEventListener("popstate", () => {
     const state = readLocationState();
-    applyLocationState(state);
     if (!state.question) {
       // Navigated back/forward to the no-search entry: match it.
       resetResults();
@@ -978,6 +972,7 @@
         if (Number.isInteger(config.page_size) && config.page_size > 0) {
           PAGE_SIZE = config.page_size;
         }
+        applyDebugMode(config.debug === true);
       }
       if (!sourcesResponse.ok) throw new Error(`HTTP ${sourcesResponse.status}`);
       sources = await sourcesResponse.json();
@@ -985,7 +980,6 @@
       $("status").textContent = `Could not load sources: ${error.message}`;
     }
     const state = readLocationState();
-    applyLocationState(state);
     if (state.question) {
       $("question").value = state.question;
       runSearch(state.question, state.source, state.page);

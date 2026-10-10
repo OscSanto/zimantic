@@ -304,6 +304,7 @@ zimantic build --fast                 # quick title-word + full-text index (no v
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
 zimantic serve                        # web page on http://<host>:8090 after a build
 zimantic serve --fast                 # start now: no model, no vectors
+zimantic serve --debug                # include ranking scores and explanations in results
 zimantic reload                       # ask a running server to rescan index_dir
 ```
 
@@ -366,6 +367,8 @@ JSON API examples:
   Totals are in `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers.
 - `GET /api/search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
   events and result snapshots.
+- Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
+  search endpoints. Debug output is configured for the whole server; it is not a URL parameter.
 - `GET /api/sources`, `/api/config`, `/api/zims` and `/api/health` return source, configuration,
   local-index and health information.
 

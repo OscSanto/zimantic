@@ -61,6 +61,11 @@ def main() -> None:
         action="store_true",
         help="start immediately without the model or FAISS vectors (title and ZIM full-text results only)",
     )
+    serve_cmd.add_argument(
+        "--debug",
+        action="store_true",
+        help="include ranking scores and explanations in search results",
+    )
 
     build = commands.add_parser("build", help="index ZIM files")
     build.add_argument(
@@ -229,7 +234,9 @@ def main() -> None:
 
         if args.fast:
             print("zimantic: fast mode: title and ZIM full-text search only")
-        serve(search, cfg["port"])
+        if args.debug:
+            print("zimantic: debug mode: ranking scores and explanations enabled")
+        serve(search, cfg["port"], debug=args.debug)
 
     elif args.command == "reload":
         pid_file = args.pid
