@@ -73,17 +73,18 @@ finds the United States page.
 that JSON and keeps each article's own path as a deep link, so results point to the real article
 instead of the shared shell. Shell stubs and "enable JavaScript" notices are skipped.
 
-**Text extraction.** Stylesheets, scripts, footnotes, page chrome and common boilerplate are
-ignored. Visible blocks are collected in priority order, with paragraphs preferred.
+**Text extraction.** Stylesheets, scripts, footnotes, page chrome (category footers, navboxes,
+tables of contents, maintenance tags) and common boilerplate are ignored. Visible blocks are
+collected in priority order, with paragraphs preferred, and block boundaries keep neighboring
+text runs from running together.
 
-Each article stores one **excerpt** for both previews and embeddings. It keeps at least
-`max_preview_chars` (1,000 by default) and `embedding_tokens` (256) when the article has enough
-text. `embedding_overflow` controls how the excerpt is cut to the token budget at build time;
-the browser trims the stored excerpt to `max_preview_chars` at a word boundary. Extraction reads
-up to 4 MiB per page by default.
+Each article stores one **excerpt** for both previews and embeddings, bounded to
+`max_preview_chars` (1,000 by default) at a word boundary. The embedder trims that same text to
+`embedding_tokens` (256) when it builds the vector, so the model never sees more than its budget.
+Extraction reads up to 4 MiB per page by default.
 
-**Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable HTML.
-PDFs inside a ZIM are skipped.
+**Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable text:
+HTML, XHTML, and plain text. PDFs inside a ZIM are skipped.
 
 **Embedding.** Titles and excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).

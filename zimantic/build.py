@@ -8,9 +8,7 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 from libzim.reader import Archive
-from .settings import DEFAULT_EMBEDDING_TOKENS
 from .zim import (
-    DEFAULT_EMBEDDING_OVERFLOW,
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     read_entry,
@@ -22,7 +20,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
     tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dropped once .faiss is written
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry to resume from; done: 'fast' | 1
-DROP TABLE IF EXISTS disamb;
 """
 
 _FAISS_MIN_POINTS_PER_CENTROID = 39
@@ -37,8 +34,6 @@ def build(
     fast: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
-    embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
-    embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     force: bool = False,
 ) -> None:
     """Index a ZIM, optionally without article bodies or vectors."""
@@ -123,9 +118,6 @@ def build(
                 fast=fast,
                 max_html_bytes=max_html_bytes,
                 max_preview_chars=max_preview_chars,
-                embedding_tokens=embedding_tokens,
-                embedding_overflow=embedding_overflow,
-                embedder=embedder,
             )
             if row:
                 batch.append(row)

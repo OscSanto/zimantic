@@ -111,7 +111,6 @@ def main() -> None:
         from .build import build as build_zim
         from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
         from .zim import (
-            DEFAULT_EMBEDDING_OVERFLOW,
             DEFAULT_MAX_HTML_BYTES,
             DEFAULT_PREVIEW_CHARS,
         )
@@ -188,8 +187,6 @@ def main() -> None:
                         fast=args.fast,
                         max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
                         max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
-                        embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
-                        embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
                         force=args.force,
                     )
                 except Exception as error:

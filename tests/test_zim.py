@@ -186,62 +186,228 @@ class TextExtractionTests(unittest.TestCase):
         )
         self.assertEqual(excerpt, "one two three four")
 
-    def test_embedding_excerpt_stays_within_token_budget(self):
-        def token_count(text, prefix):
-            return 2 + len((prefix + text).split())
-
-        def truncate(text, prefix):
-            available = 8 - token_count("", prefix)
-            return " ".join(text.split()[:max(0, available)])
-
-        excerpt = extract_excerpt(
-            b"<p>" + b"one two three four five six seven eight nine ten " * 5 + b"</p>",
-            title="Example",
-            max_preview_chars=10,
-            embedding_tokens=8,
-            embedding_token_count=token_count,
-            embedding_truncate=truncate,
+    def test_page_chrome_is_skipped(self):
+        html = (
+            b"<p>An article paragraph long enough to be indexed as the lead text.</p>"
+            b'<div id="catlinks" class="catlinks catlinks-allhidden">'
+            b"<p>Hidden categories: Articles with short description.</p></div>"
+            b'<div class="navbox"><p>Navigation box linking to related topics everywhere.</p></div>'
+            b'<div aria-hidden="true"><p>Hidden accessibility text that should not be indexed.</p></div>'
+            b'<div role="navigation"><p>Menu links that are chrome and should be skipped.</p></div>'
         )
-        self.assertEqual(token_count(excerpt, "passage: Example\n"), 8)
-        self.assertEqual(excerpt, "one two three four")
+        excerpt = extract_excerpt(html, max_preview_chars=1000)
+        self.assertTrue(excerpt.startswith("An article paragraph"))
+        for gone in ("Hidden categories", "Navigation box", "accessibility text", "Menu links"):
+            self.assertNotIn(gone, excerpt)
 
-    def test_embedding_budget_can_preserve_more_than_preview_limit(self):
-        def token_count(text, prefix):
-            return 2 + len((prefix + text).split())
-
-        def truncate(text, prefix):
-            available = 256 - token_count("", prefix)
-            return " ".join(text.split()[:available])
-
-        words = " ".join(f"article{i}" for i in range(400))
-        excerpt = extract_excerpt(
-            f"<p>{words}</p>".encode(),
-            title="Example",
-            max_preview_chars=750,
-            embedding_tokens=256,
-            embedding_token_count=token_count,
-            embedding_truncate=truncate,
+    def test_block_boundaries_separate_text_runs(self):
+        html = (
+            b"<div><dt>A heading</dt>"
+            b"<dd>The definition is long enough to be captured as a block here.</dd></div>"
         )
-        self.assertGreater(len(excerpt), 750)
-        self.assertEqual(token_count(excerpt, "passage: Example\n"), 256)
+        block = list(iter_text_blocks(html))[0]
+        self.assertIn("A heading The definition", block)
+        self.assertNotIn("A headingThe", block)
 
-    def test_embedding_skip_policy_keeps_looking_for_a_fitting_block(self):
-        def token_count(text, prefix):
-            return 2 + len((prefix + text).split())
+    def test_plain_text_entries_are_indexed(self):
+        class _PlainItem:
+            mimetype = "text/plain"
+            content = b"Plain text article.\n\nSecond paragraph with more useful detail."
 
-        excerpt = extract_excerpt(
-            (
-                b"<p>" + b"x " * 100 + b"</p>"
-                b"<p>" + b"y" * 55 + b"</p>"
-            ),
-            title="Example",
-            max_preview_chars=20,
-            embedding_tokens=20,
-            embedding_overflow="skip",
-            embedding_token_count=token_count,
-            embedding_truncate=lambda *_args, **_kwargs: self.fail("unexpected truncation"),
+        class _PlainEntry:
+            is_redirect = False
+            title = "Plain"
+            path = "plain"
+
+            def get_item(self):
+                return _PlainItem()
+
+        class _PlainArchive:
+            def _get_entry_by_id(self, _index):
+                return _PlainEntry()
+
+        row = read_entry(_PlainArchive(), 0)
+        self.assertEqual(
+            row[2], "Plain text article. Second paragraph with more useful detail."
         )
-        self.assertEqual(excerpt, "y" * 55)
+
+    def test_tiny_plain_text_assets_are_not_indexed(self):
+        class _TinyItem:
+            mimetype = "text/plain"
+            content = b"*"
+
+        class _TinyEntry:
+            is_redirect = False
+            title = ".gitignore"
+            path = ".gitignore"
+
+            def get_item(self):
+                return _TinyItem()
+
+        class _TinyArchive:
+            def _get_entry_by_id(self, _index):
+                return _TinyEntry()
+
+        self.assertIsNone(read_entry(_TinyArchive(), 0))
+
+    def test_bundled_plain_text_licenses_are_not_indexed(self):
+        class _LicenseItem:
+            mimetype = "text/plain"
+            # Long enough to clear MIN_BLOCK_CHARS; must still be rejected by path.
+            content = (
+                b"Redistribution and use in source and binary forms, with or "
+                b"without modification, are permitted provided that the "
+                b"conditions of this license are met."
+            )
+
+        class _LicenseEntry:
+            is_redirect = False
+            title = "COPYING"
+            path = "assets/ogvjs/COPYING"
+
+            def get_item(self):
+                return _LicenseItem()
+
+        class _LicenseArchive:
+            def _get_entry_by_id(self, _index):
+                return _LicenseEntry()
+
+        self.assertIsNone(read_entry(_LicenseArchive(), 0))
+
+    def test_plain_text_article_named_like_a_license_is_indexed(self):
+        class _ArticleItem:
+            mimetype = "text/plain"
+            content = (
+                b"License to Wed is a 2007 comedy film starring Robin Williams "
+                b"and directed by Ken Kwapis, released in theaters that summer."
+            )
+
+        class _ArticleEntry:
+            is_redirect = False
+            title = "License to Wed"
+            path = "License_to_Wed"
+
+            def get_item(self):
+                return _ArticleItem()
+
+        class _ArticleArchive:
+            def _get_entry_by_id(self, _index):
+                return _ArticleEntry()
+
+        row = read_entry(_ArticleArchive(), 0)
+        self.assertIsNotNone(row)
+        self.assertIn("comedy film", row[2])
+
+    def test_lowercase_plain_text_dictionary_entry_is_indexed(self):
+        class _WordItem:
+            mimetype = "text/plain"
+            content = (
+                b"license: permission, especially official permission to do "
+                b"something or to use something owned by another party."
+            )
+
+        class _WordEntry:
+            is_redirect = False
+            title = "license"
+            path = "license"
+
+            def get_item(self):
+                return _WordItem()
+
+        class _WordArchive:
+            def _get_entry_by_id(self, _index):
+                return _WordEntry()
+
+        row = read_entry(_WordArchive(), 0)
+        self.assertIsNotNone(row)
+        self.assertIn("permission", row[2])
+
+    def test_plain_text_asset_with_query_string_is_not_indexed(self):
+        class _LogoItem:
+            mimetype = "text/plain"
+            content = (
+                b"Copyright (C) 2015-2016 The R Foundation. You can distribute "
+                b"this logo under the Creative Commons Attribution-ShareAlike "
+                b"4.0 International license."
+            )
+
+        class _LogoEntry:
+            is_redirect = False
+            title = "Rlogo.svg"
+            path = "content/stats.example.org/@api/deki/files/1/Rlogo.svg?revision=1"
+
+            def get_item(self):
+                return _LogoItem()
+
+        class _LogoArchive:
+            def _get_entry_by_id(self, _index):
+                return _LogoEntry()
+
+        self.assertIsNone(read_entry(_LogoArchive(), 0))
+
+    def test_app_shell_with_description_is_not_indexed(self):
+        html = (
+            b'<html><head><meta name="description" content="My App">'
+            b'</head><body><div id="app"></div></body></html>'
+        )
+
+        class _ShellItem:
+            mimetype = "text/html"
+            content = html
+
+        class _ShellEntry:
+            is_redirect = False
+            title = "index.html"
+            path = "index.html"
+
+            def get_item(self):
+                return _ShellItem()
+
+        class _ShellArchive:
+            def _get_entry_by_id(self, _index):
+                return _ShellEntry()
+
+        self.assertIsNone(read_entry(_ShellArchive(), 0))
+
+    def test_meta_description_is_a_fallback_excerpt(self):
+        html = (
+            b'<html><head><meta name="description" '
+            b'content="A short summary of the topic for search.">'
+            b"</head><body></body></html>"
+        )
+
+        class _MetaItem:
+            mimetype = "text/html"
+            content = html
+
+        class _MetaEntry:
+            is_redirect = False
+            title = "Meta"
+            path = "meta"
+
+            def get_item(self):
+                return _MetaItem()
+
+        class _MetaArchive:
+            def _get_entry_by_id(self, _index):
+                return _MetaEntry()
+
+        self.assertEqual(read_entry(_MetaArchive(), 0)[2], "A short summary of the topic for search.")
+
+    def test_spa_body_accepts_alternate_json_keys(self):
+        alt_body = json.dumps({
+            "body": "<p>" + ("Alternate key article text about the topic. " * 6) + "</p>",
+        }).encode("utf-8")
+
+        class _AltSpaArchive(_SpaArchive):
+            def get_entry_by_path(self, path):
+                if path == "content/page_content_42.json":
+                    return _JsonEntry(path, alt_body)
+                return super().get_entry_by_path(path)
+
+        row = read_entry(_AltSpaArchive(), 0)
+        self.assertIn("Alternate key article text", row[2])
+        self.assertEqual(row[3], "index/page_42")
 
 
 BOILERPLATE_HTML = b"<html><body><p>Lead.</p><p><i>This disambiguation page lists articles.</i></p></body></html>"
@@ -355,6 +521,34 @@ class _SpaArchive:
         return _HtmlEntry("index.html", "index.html", SHELL_HTML)
 
 
+def _media_archive(stub, title, stub_path, companion_path, companion_body):
+    """Archive whose shell stub resolves a ``<slug>.json`` companion (youtube2zim)."""
+
+    class _StubEntry:
+        is_redirect = False
+        path = stub_path
+
+        def __init__(self):
+            self.title = title
+
+        def get_item(self):
+            return _SpaItem(stub)
+
+    class _MediaArchive:
+        def _get_entry_by_id(self, _index):
+            return _StubEntry()
+
+        def has_entry_by_path(self, path):
+            return path in ("index.html", companion_path)
+
+        def get_entry_by_path(self, path):
+            if path == companion_path:
+                return _JsonEntry(path, companion_body)
+            return _HtmlEntry("index.html", "index.html", SHELL_HTML)
+
+    return _MediaArchive()
+
+
 class _ShellArchive:
     def _get_entry_by_id(self, _index):
         return _HtmlEntry("index.html", "index.html", SHELL_HTML)
@@ -368,6 +562,70 @@ class JavaScriptShellTests(unittest.TestCase):
         self.assertIn("real article about collected poems", row[2])
         self.assertEqual(row[3], "index/page_42")  # deep link, not the shell
         self.assertIsNone(row[4])                  # not a redirect onto index.html
+
+    def test_media_bundle_video_description_is_indexed(self):
+        stub = (
+            b"<html><head><title>Getting Started</title>"
+            b"<meta http-equiv=\"refresh\" content=\"0;URL='../index.html"
+            b"#/watch/getting-started-abc?list=sql-basics'\" /></head><body></body></html>"
+        )
+        body = json.dumps({
+            "id": "abc123",
+            "title": "Getting Started",
+            "description": "In this video we begin learning the basics. " * 5,
+        }).encode("utf-8")
+
+        row = read_entry(
+            _media_archive(
+                stub, "Getting Started", "index/getting-started-abc",
+                "videos/getting-started-abc.json", body,
+            ),
+            0,
+        )
+
+        self.assertEqual(row[1], "Getting Started")
+        self.assertIn("begin learning the basics", row[2])
+        self.assertEqual(row[3], "index/getting-started-abc")
+        self.assertIsNone(row[4])
+
+    def test_media_bundle_playlist_description_is_indexed(self):
+        stub = (
+            b"<html><head><title>SQL Tutorials</title>"
+            b"<meta http-equiv=\"refresh\" content=\"0;URL='../index.html"
+            b"#/playlist/sql-basics'\" /></head><body></body></html>"
+        )
+        body = json.dumps({
+            "title": "SQL Tutorials",
+            "description": "An in-depth look at SQL and relational databases. " * 5,
+        }).encode("utf-8")
+
+        row = read_entry(
+            _media_archive(
+                stub, "SQL Tutorials", "index/sql-basics",
+                "playlists/sql-basics.json", body,
+            ),
+            0,
+        )
+
+        self.assertEqual(row[1], "SQL Tutorials")
+        self.assertIn("in-depth look at SQL", row[2])
+        self.assertEqual(row[3], "index/sql-basics")
+
+    def test_html_companion_without_visible_text_does_not_leak_markup(self):
+        empty = json.dumps({
+            "htmlBody": '<p id="indexLetterList"> </p> <div id="indexTable"> </div>',
+        }).encode("utf-8")
+
+        class _EmptyArchive(_SpaArchive):
+            def get_entry_by_path(self, path):
+                if path == "content/page_content_42.json":
+                    return _JsonEntry(path, empty)
+                return super().get_entry_by_path(path)
+
+        row = read_entry(_EmptyArchive(), 0)
+
+        self.assertEqual(row[2], "")            # no markup leaked as text
+        self.assertEqual(row[3], "index.html")  # falls back to the shell target
 
     def test_javascript_shell_pages_are_not_indexed(self):
         self.assertIsNone(read_entry(_ShellArchive(), 0))

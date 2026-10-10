@@ -4,9 +4,8 @@ import posixpath
 import re
 from html.parser import HTMLParser
 from urllib.parse import unquote
-from typing import Callable, Iterator
+from typing import Iterator
 from libzim.reader import Archive, set_cluster_cache_max_size
-from .settings import DEFAULT_EMBEDDING_TOKENS
 
 # libzim undercounts this cache: its 16 MB default really used ~170 MB. 1 MB used ~4 MB and wasn't slower.
 set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
@@ -14,8 +13,27 @@ set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
 DEFAULT_PREVIEW_CHARS = 1000
 DEFAULT_MAX_HTML_BYTES = 4 << 20
-DEFAULT_EMBEDDING_OVERFLOW = "truncate"
-OVERFLOW_POLICIES = {"skip", "truncate"}
+# text/html is the common case; XHTML parses the same way, and plain text is
+# split into an excerpt with a simple normalization.
+_READABLE_MIMETYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain"})
+# Plain-text entries are usually article text (a text-based ZIM), but asset
+# bundles also ship licenses, dotfiles and config as text/plain. Skip those so
+# they never become search results. License/readme names are matched only in
+# their conventional ALL CAPS form so a plain-text article such as
+# "License_to_Wed" or a dictionary entry named "license" is still indexed.
+_PLAIN_TEXT_ASSET = re.compile(
+    r"(^|/)\.[^/]*$"  # dotfiles such as .gitignore
+    # Non-prose, machine-readable or media files (with an optional ?query/#frag).
+    r"|(?i:\.(?:md|markdown|rst|json|jsonl|ya?ml|toml|ini|cfg|conf|js|mjs|cjs"
+    r"|css|scss|less|xml|svg|png|jpe?g|gif|webp|ico|csv|tsv|log|lock))"
+    r"(?:[?#][^/]*)?$"
+    # License/notice files, which are conventionally ALL CAPS.
+    r"|(^|/)(?:COPYING|LICEN[CS]E|PATENTS?|NOTICE|README|CHANGELOG|AUTHORS"
+    r"|CONTRIBUTORS|MAKEFILE|DOCKERFILE)(?:[._-]|$)"
+    # Anything inside a bundle's asset directory.
+    r"|(?i:(^|/)(?:assets?|static|_static|_assets|media|vendor|node_modules"
+    r"|mathjax|fonts?|images?|img|css|js|scripts?|downloads?)/)"
+)
 REFRESH_SCAN_BYTES = 64 << 10
 REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
 BOILERPLATE = re.compile(
@@ -35,8 +53,41 @@ BOILERPLATE = re.compile(
 # deep-links into the app route.
 SPA_PAGE_ID = re.compile(r"_(\d+)$")
 SPA_CONTENT_PATH = "content/page_content_{id}.json"
+# The companion body is normally under "htmlBody"; accept the other keys some
+# shells use so more app-shell ZIMs become searchable. "description" is plain
+# text (video/playlist/channel metadata) rather than HTML.
+SPA_BODY_KEYS = ("htmlBody", "body", "html", "content", "text", "description")
+# Not every app bundle uses Kiwix's content JSON. Media bundles (for example
+# youtube2zim) keep a "<slug>.json" beside the route, commonly under these
+# directories; <slug> is the deep link's last path segment.
+SPA_COMPANION_DIRS = ("", "videos", "playlists", "channels", "content", "pages", "posts", "items")
+# A tag-like "<p ...>", "<br/>" or "<!doctype" (but not prose such as "a < b").
+_HTML_TAG = re.compile(rb"<[a-zA-Z!/][^>]*>")
 JS_SHELL_MARKERS = (b"<noscript", b'id="app"', b"id='app'")
 JS_NOTICE_MAX_CHARS = 300
+
+# Page chrome that is navigation, maintenance or boilerplate rather than article
+# text. Matching these by id, class token or ARIA role keeps category footers,
+# navboxes and tables of contents out of excerpts (and therefore out of the
+# embedding), which is a large share of the text on MediaWiki stubs.
+SKIP_IDS = frozenset({
+    "catlinks", "mw-hidden-catlinks", "printfooter", "footer",
+    "toc", "mw-navigation", "sitefooter",
+})
+SKIP_CLASSES = frozenset({
+    "catlinks", "mw-hidden-catlinks", "mw-hidden-cats-hidden",
+    "navbox", "vertical-navbox", "navbox-inner", "navbox-styles", "navbar",
+    "metadata", "ambox", "mbox", "ombox", "messagebox",
+    "toc", "toccolours",
+    "mw-editsection", "hatnote", "reflist", "references",
+    "mw-references-wrap", "noprint", "mw-jump-link",
+    "portal", "sistersitebox", "sidebar",
+    "shortdescription", "noindex", "printfooter", "stub", "boilerplate",
+    "assistive", "visuallyhidden", "screen-reader-text", "sr-only",
+    # LibreTexts/MindTouch app-shell topic listings.
+    "mt-topic-hierarchy-listings", "mt-guide-listings", "mt-listing-detailed",
+})
+SKIP_ROLES = frozenset({"navigation", "banner", "contentinfo"})
 
 # Persist disambiguation pages with a title suffix instead of a metadata table.
 DISAMBIGUATION_SUFFIX = " (disambiguation)"
@@ -97,6 +148,17 @@ class _TextExtractor(HTMLParser):
     }
     SKIP_TAGS = {"head", "script", "style", "template"}
     CHROME_TAGS = {"aside", "footer", "header", "nav"}
+    # Block-level tags end one text run and begin another. Inserting a space at
+    # each boundary stops runs of text from concatenating when the source has no
+    # whitespace between elements (headings, <dt>/<dd>, list links, and so on).
+    SEPARATOR_TAGS = {
+        "p", "blockquote", "pre", "div", "section", "article", "main",
+        "ol", "ul", "li", "dl", "dt", "dd",
+        "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption",
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "figure", "figcaption", "address", "hr", "br",
+        "details", "summary", "form", "fieldset", "legend",
+    }
 
     def __init__(self):
         super().__init__()
@@ -105,20 +167,39 @@ class _TextExtractor(HTMLParser):
         self.active = []
         self.block_order = 0
 
+    @staticmethod
+    def _is_chrome(tag, attributes) -> bool:
+        """True for navigation, maintenance or boilerplate containers."""
+        if tag in _TextExtractor.SKIP_TAGS or tag in _TextExtractor.CHROME_TAGS:
+            return True
+        if tag == "sup" and "reference" in (attributes.get("class") or ""):
+            return True
+        if (attributes.get("aria-hidden") or "").casefold() == "true":
+            return True
+        if (attributes.get("role") or "").casefold() in SKIP_ROLES:
+            return True
+        identifier = (attributes.get("id") or "").casefold()
+        if identifier in SKIP_IDS or identifier.endswith("footer"):
+            return True
+        classes = (attributes.get("class") or "").casefold().split()
+        return any(
+            name in SKIP_CLASSES or name.endswith("footer") for name in classes
+        )
+
+    def _separate(self) -> None:
+        for block in self.active:
+            block["parts"].append(" ")
+
     def handle_starttag(self, tag, attrs):
         if self.skipping:
             return
         attributes = dict(attrs)
-        classes = (attributes.get("class") or "").casefold().split()
-        is_footer = tag == "div" and any(
-            class_name.endswith("footer") for class_name in classes
-        )
-        if tag in self.SKIP_TAGS or is_footer or tag in self.CHROME_TAGS or (
-            tag == "sup" and "reference" in (attributes.get("class") or "")
-        ):
+        if self._is_chrome(tag, attributes):
             self.skipping.append(tag)
             return
 
+        if tag in self.SEPARATOR_TAGS and self.active:
+            self._separate()
         if tag in self.CANDIDATE_PRIORITIES:
             block = {
                 "tag": tag,
@@ -143,9 +224,9 @@ class _TextExtractor(HTMLParser):
                     if len(text) >= MIN_BLOCK_CHARS:
                         for parent in self.active[:index]:
                             parent["nested"] = True
-                    for parent in self.active[:index]:
-                        parent["parts"].append(" ")
                     break
+        if not self.skipping and tag in self.SEPARATOR_TAGS and self.active:
+            self._separate()
 
     def handle_data(self, data):
         if self.skipping:
@@ -212,14 +293,6 @@ def iter_text_blocks(html: bytes) -> Iterator[str]:
     yield from parser.candidates()
 
 
-def _policy(value: str) -> str:
-    policy = str(value).casefold()
-    if policy not in OVERFLOW_POLICIES:
-        choices = ", ".join(sorted(OVERFLOW_POLICIES))
-        raise ValueError(f"overflow policy must be one of {choices}, got {value!r}")
-    return policy
-
-
 def truncate_at_word_boundary(text: str, max_chars: int) -> str:
     """Limit text without cutting through a word when a boundary is available."""
     limit = max(1, int(max_chars))
@@ -230,140 +303,120 @@ def truncate_at_word_boundary(text: str, max_chars: int) -> str:
     return cut[:boundary].rstrip() if boundary > 0 else cut
 
 
-def _fit_chars(candidate: str, available: int) -> str:
-    return truncate_at_word_boundary(candidate, available) if available > 0 else ""
+def _join_blocks(candidates: list[str], max_chars: int) -> str:
+    """Join the opening blocks up to ``max_chars``, truncating the last one.
 
-
-def _excerpt(
-    candidates: list[str],
-    overflow: str,
-    limit: int,
-    initial: int,
-    measure: Callable[[str], int],
-    remainder: Callable[[str, str, str], str],
-) -> str:
-    """Join blocks while ``measure`` keeps the running total within ``limit``.
-
-    ``measure`` prices a block as it is appended, so callers can count characters
-    or tokens incrementally instead of re-measuring the whole excerpt. On
-    overflow the offending block is truncated or dropped per ``overflow``.
+    One excerpt serves both the preview and the embedding. The model truncates
+    it to ``embedding_tokens`` when it builds the vector, so there is no need to
+    compute a separate token-budgeted text here; measured on real indexes this
+    loses only a few characters of model input per article.
     """
     current = ""
-    used = initial
     for candidate in candidates:
         separator = "\n\n" if current else ""
-        cost = measure(separator + candidate)
-        if used + cost <= limit:
-            current += separator + candidate
-            used += cost
-            continue
-        if overflow == "truncate":
-            fitted = remainder(current, separator, candidate)
-            if fitted:
-                current += separator + fitted
+        available = max_chars - len(current) - len(separator)
+        if available <= 0:
             break
+        if len(candidate) <= available:
+            current += separator + candidate
+            continue
+        fitted = truncate_at_word_boundary(candidate, available)
+        if fitted:
+            current += separator + fitted
+        break
     # Nothing fit: keep a truncated opening block so the page still has a preview.
-    return current or remainder("", "", candidates[0])
-
-
-def _preview_excerpt(
-    candidates: list[str],
-    max_chars: int,
-) -> str:
-    # The preview is the article's opening blocks, cut off at a word boundary.
-    return _excerpt(
-        candidates,
-        "truncate",
-        max_chars,
-        0,
-        len,
-        lambda current, separator, candidate: _fit_chars(
-            candidate, max_chars - len(current) - len(separator)
-        ),
-    )
-
-
-def _embedding_excerpt(
-    candidates: list[str],
-    title: str,
-    embedding_tokens: int,
-    overflow: str,
-    token_count: Callable[[str, str], int] | None,
-    truncate: Callable[[str, str], str] | None,
-) -> str:
-    if token_count is None or truncate is None:
-        return ""
-    prefix = f"passage: {title}\n"
-    # The separator is a hard token boundary, so pieces add up across blocks and
-    # only the newly appended block needs measuring.
-    empty = token_count("", "")
-    return _excerpt(
-        candidates,
-        overflow,
-        embedding_tokens,
-        token_count("", prefix),
-        lambda text: token_count(text, "") - empty,
-        lambda current, separator, candidate: truncate(
-            candidate, prefix=prefix + current + separator
-        ),
-    )
+    return current or truncate_at_word_boundary(candidates[0], max_chars)
 
 
 def extract_excerpt(
     html: bytes,
-    title: str = "",
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
-    embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
-    embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
-    embedding_token_count: Callable[[str, str], int] | None = None,
-    embedding_truncate: Callable[[str, str], str] | None = None,
 ) -> str:
-    """Return text meeting the preview and embedding floors when available.
+    """Return the article's opening text, bounded to ``max_preview_chars``.
 
-    The stored excerpt may exceed either individual budget: ``max_preview_chars``
-    keeps enough text for the UI, while ``embedding_tokens`` gives the model
-    enough input. The embedder enforces ``embedding_tokens`` when it creates the
-    vector.
+    The same stored excerpt is the UI preview and the embedding input; the
+    embedder truncates it to ``embedding_tokens`` when it creates the vector.
     """
     max_chars = max(1, int(max_preview_chars))
-    token_budget = max(1, int(embedding_tokens))
     candidates = list(iter_text_blocks(html))
     if not candidates:
         return ""
-    preview = _preview_excerpt(candidates, max_chars)
-    embedding_policy = _policy(embedding_overflow)
-    embedding = _embedding_excerpt(
-        candidates,
-        title,
-        token_budget,
-        embedding_policy,
-        embedding_token_count,
-        embedding_truncate,
-    )
-    # Both excerpts come from the same ordered blocks, so the longer one also
-    # covers the other's floor; the embedder truncates tokens to its budget.
-    return max(preview, embedding, key=len)
+    return _join_blocks(candidates, max_chars)
 
 
-def _spa_page_body(zim: Archive, entry) -> bytes | None:
-    """Article HTML for a page rendered by a JavaScript app shell, if any.
-
-    Returns the ``htmlBody`` from the companion content JSON
-    (``content/page_content_<id>.json``) when the entry follows that convention,
-    or None for ordinary ZIMs.
-    """
-    match = SPA_PAGE_ID.search(entry.path)
-    if not match:
-        return None
-    content_path = SPA_CONTENT_PATH.format(id=match.group(1))
-    if not zim.has_entry_by_path(content_path):
+def _json_body(zim: Archive, path: str) -> bytes | None:
+    """Return a text body from the JSON entry at ``path``, or None."""
+    if not path or not zim.has_entry_by_path(path):
         return None
     try:
-        payload = json.loads(bytes(zim.get_entry_by_path(content_path).get_item().content))
+        payload = json.loads(bytes(zim.get_entry_by_path(path).get_item().content))
     except (LookupError, RuntimeError, TypeError, ValueError):
         return None
-    body = payload.get("htmlBody") if isinstance(payload, dict) else None
-    return body.encode("utf-8") if isinstance(body, str) else None
+    if not isinstance(payload, dict):
+        return None
+    for key in SPA_BODY_KEYS:
+        body = payload.get(key)
+        if isinstance(body, str) and body.strip():
+            return body.encode("utf-8")
+    return None
+
+
+def _fragment_slug(fragment: str) -> str:
+    """Last path segment of an app deep link, query/hash stripped.
+
+    ``/watch/getting-started-abc`` and ``/playlist/sql-basics`` yield
+    ``getting-started-abc`` and ``sql-basics``.
+    """
+    path = fragment.split("?", 1)[0].split("#", 1)[0]
+    parts = [part for part in path.split("/") if part]
+    return parts[-1] if parts else ""
+
+
+def _spa_body(zim: Archive, entry, fragment: str) -> bytes | None:
+    """Companion text for an app-shell stub, or None.
+
+    Two conventions are supported: Kiwix's ``content/page_content_<id>.json``
+    keyed by the numeric page id, and app bundles that keep a ``<slug>.json``
+    companion for the deep link, commonly under ``videos/`` or ``playlists/``.
+    The result may be HTML or plain text; the caller decides how to read it.
+    """
+    match = SPA_PAGE_ID.search(entry.path)
+    if match:
+        body = _json_body(zim, SPA_CONTENT_PATH.format(id=match.group(1)))
+        if body is not None:
+            return body
+    slug = _fragment_slug(fragment)
+    if not slug:
+        return None
+    for directory in SPA_COMPANION_DIRS:
+        candidate = posixpath.join(directory, slug + ".json") if directory else slug + ".json"
+        body = _json_body(zim, candidate)
+        if body is not None:
+            return body
+    # Some bundles keep the JSON beside the stub entry.
+    return _json_body(zim, posixpath.join(posixpath.dirname(entry.path), slug + ".json"))
+
+
+def _meta_description(html: bytes) -> str:
+    """Return a meta/Open Graph description from the page head, if any.
+
+    Used only as a fallback when no visible text blocks were found, so thin
+    pages still get a preview and an embedding instead of being title-only.
+    """
+    best = ""
+    for match in re.finditer(rb"<meta\b[^>]*>", html, re.I):
+        tag = match.group(0)
+        if not re.search(rb"(?:name|property)\s*=\s*[\"']?\s*(?:og:)?description\b", tag, re.I):
+            continue
+        content = re.search(rb"content\s*=\s*\"([^\"]*)\"", tag, re.I) or re.search(
+            rb"content\s*=\s*'([^']*)'", tag, re.I
+        )
+        if content is None:
+            continue
+        text = content.group(1).decode("utf-8", "ignore")
+        if len(text) > len(best):
+            best = text
+    return " ".join(best.split())
 
 
 def is_javascript_shell(html: bytes, text: str) -> bool:
@@ -383,15 +436,18 @@ def is_javascript_shell(html: bytes, text: str) -> bool:
     return any(marker in html for marker in JS_SHELL_MARKERS)
 
 
+def _plain_text_excerpt(raw: bytes, max_chars: int) -> str:
+    """Turn a non-HTML text entry into a single normalized excerpt."""
+    text = raw.decode("utf-8", "ignore")
+    return truncate_at_word_boundary(" ".join(text.split()), max_chars)
+
+
 def read_entry(
     zim: Archive,
     i: int,
     fast: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
-    embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
-    embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
-    embedder=None,
 ):
     """Return (id, title, excerpt, path, target_id), or None.
 
@@ -406,9 +462,10 @@ def read_entry(
     if entry.is_redirect:
         target = entry.get_redirect_entry()
         return i, entry.title, "", target.path, target._index
-    
+
     item = entry.get_item()
-    if not item.mimetype.startswith("text/html"): 
+    mimetype = item.mimetype.split(";", 1)[0].strip().lower()
+    if mimetype not in _READABLE_MIMETYPES:
         return None
 
     if fast:
@@ -419,30 +476,42 @@ def read_entry(
         html_limit = max(1, int(max_html_bytes))
     except (TypeError, ValueError):
         html_limit = DEFAULT_MAX_HTML_BYTES
-    html = bytes(content[:html_limit])
+    raw = bytes(content[:html_limit])
     del content, item
+
+    if mimetype == "text/plain":
+        # Bundled licenses, dotfiles and configs are text/plain too; only real
+        # article text should become a search result.
+        if _PLAIN_TEXT_ASSET.search(entry.path) or _PLAIN_TEXT_ASSET.search(entry.title):
+            return None
+        excerpt = _plain_text_excerpt(raw, max_preview_chars)
+        # Require real prose: a two-byte .gitignore or a stray asset is not an
+        # article, but a text ZIM entry is.
+        if len(excerpt) < MIN_BLOCK_CHARS or is_javascript_shell(raw, excerpt):
+            return None
+        title = disambiguation_title(entry.title) if is_disambiguation(entry.title, excerpt, raw) else entry.title
+        return i, title, excerpt, entry.path, None
+
+    html = raw
     refresh_url = _refresh_url(html)
-    
+
     if refresh_url:
         url = unquote(refresh_url)
         base, _, fragment = url.partition("#")
         path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), base))
         if not zim.has_entry_by_path(path):
             return None
-        body = _spa_page_body(zim, entry) if fragment else None
+        body = _spa_body(zim, entry, fragment) if fragment else None
         if body is not None:
             # Keep this page's own title and path: it is a deep link into the
             # app route, and its body is real text. Storing the shell target
             # instead would collapse every article onto "index.html".
-            excerpt = extract_excerpt(
-                body,
-                title=entry.title,
-                max_preview_chars=max_preview_chars,
-                embedding_tokens=embedding_tokens,
-                embedding_overflow=embedding_overflow,
-                embedding_token_count=getattr(embedder, "token_count", None),
-                embedding_truncate=getattr(embedder, "truncate", None),
-            )
+            excerpt = extract_excerpt(body, max_preview_chars=max_preview_chars)
+            if not excerpt and not _HTML_TAG.search(body):
+                # Plain-text companions (video/playlist descriptions) have no
+                # HTML blocks, so normalize them directly. An HTML body with no
+                # visible text stays empty instead of leaking its markup.
+                excerpt = _plain_text_excerpt(body, max_preview_chars)
             if excerpt and not is_javascript_shell(body, excerpt):
                 title = disambiguation_title(entry.title) if is_disambiguation(
                     entry.title, excerpt, body
@@ -450,17 +519,17 @@ def read_entry(
                 return i, title, excerpt, entry.path, None
         target = zim.get_entry_by_path(path)
         return i, entry.title, "", target.path, target._index
-    excerpt = extract_excerpt(
-        html,
-        title=entry.title,
-        max_preview_chars=max_preview_chars,
-        embedding_tokens=embedding_tokens,
-        embedding_overflow=embedding_overflow,
-        embedding_token_count=getattr(embedder, "token_count", None),
-        embedding_truncate=getattr(embedder, "truncate", None),
-    )
+
+    excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars)
     if is_javascript_shell(html, excerpt):
         # An app shell with no article text: nothing useful to index.
         return None
+    if not excerpt:
+        # No visible blocks. An app shell has nothing to index even if its head
+        # carries a title/description; otherwise a meta description is better
+        # than a title-only entry.
+        if any(marker in html for marker in JS_SHELL_MARKERS):
+            return None
+        excerpt = truncate_at_word_boundary(_meta_description(html), max_preview_chars)
     title = disambiguation_title(entry.title) if is_disambiguation(entry.title, excerpt, html) else entry.title
     return i, title, excerpt, entry.path, None

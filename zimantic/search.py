@@ -1371,8 +1371,9 @@ class Search:
         scored: list[tuple[float, float, float, int, str, str, dict[str, Any]]] = []
         for identity, doc in docs.items():
             title_tokens = _content_terms(doc["title"])
+            title_token_set = set(title_tokens)
             preview_tokens = _content_terms(doc.get("lead", ""))
-            title_matches = sum(term in set(title_tokens) for term in query_words)
+            title_matches = sum(term in title_token_set for term in query_words)
             title_coverage = title_matches / len(query_words) if query_words else 0.0
             title_density = _density(query_words, title_tokens)
             # Coverage is primary; density rewards concise titles among equally
@@ -1380,10 +1381,8 @@ class Search:
             title_quality = title_coverage * (1.0 + title_density) / 2.0
             phrase_hit = _phrase(query_words, title_tokens)
             snippet_coverage = _coverage(query_words, preview_tokens)
-            intent = max(
-                (_intent_match(source_by_key[key], query) for key in {doc["source_key"]} if key in source_by_key),
-                default=0.0,
-            )
+            source = source_by_key.get(doc["source_key"])
+            intent = _intent_match(source, query) if source is not None else 0.0
             lexical = (
                 5.0 * title_quality
                 + 2.0 * phrase_hit
