@@ -17,20 +17,16 @@ def _graceful_interrupt(_signum: int, _frame) -> None:
     raise KeyboardInterrupt
 
 
-# A ZIM smaller than this may still be downloading when a build starts (the
-# systemd.path unit can fire the moment the file is created). Poll until its size
-# stops changing so a truncated download is not indexed.
-MIN_STABLE_ZIM_BYTES = 5 * 1024 * 1024
+# The systemd.path unit can fire the moment a file is created. Poll until its
+# size stops changing so a truncated download is not indexed.
 STABLE_POLL_SECONDS = 10
 
 
 def _wait_for_stable_size(path: Path) -> None:
-    """Wait for a small ZIM to finish being written before indexing it."""
+    """Wait for a ZIM to finish being written before indexing it."""
     try:
         size = path.stat().st_size
     except OSError:
-        return
-    if size >= MIN_STABLE_ZIM_BYTES:
         return
     print(
         f"zimantic: {path.name} is {size} bytes; waiting for it to finish downloading",
