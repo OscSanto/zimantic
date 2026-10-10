@@ -6,8 +6,10 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now zimantic.service
 #
-# The default self-contained checkout is ~/.local/share/zimantic.
-# Adjust WorkingDirectory/ExecStart if the project is elsewhere.
+# Install the CLI from the checkout first:
+#   cd ~/.local/share/zimantic && uv tool install .
+# The default data directory is ~/.local/share/zimantic.
+# Use `uv tool install zimantic` after a PyPI release.
 
 [Unit]
 Description=Zimantic search server
@@ -17,7 +19,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/zimantic
-ExecStart=%h/.local/share/zimantic/.venv/bin/python -m zimantic serve
+ExecStart=%h/.local/bin/zimantic serve
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1

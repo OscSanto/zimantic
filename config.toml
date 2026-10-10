@@ -1,7 +1,7 @@
 # Zimantic settings. This file is optional; omitted keys use hardware-based defaults.
 # See config.pi-zero-2w.toml and config.pi-5.toml for tuned starting points.
 
-# Relative paths use the directory where `python -m zimantic` runs.
+# Relative paths use the directory where `zimantic` runs.
 # Absolute paths also work.
 
 # ZIM files, downloaded from https://library.kiwix.org.
