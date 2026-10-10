@@ -26,7 +26,7 @@ Zero 2 W.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover sources, filter results without re-searching, tolerate individual source failures, and optionally load thumbnails after text results appear. Every search covers **all** available sources; source filters change what is displayed, never what is searched.
-- **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
+- **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
 - **Web page and JSON API**: search from any browser on the network or use your own programs.
@@ -34,6 +34,21 @@ Zero 2 W.
 Zimantic finds articles, while [kiwix-serve](https://kiwix.org/en/applications/) displays them.
 Searching does not require Kiwix, but displaying the article pages does. Zimantic works alongside
 Kiwix rather than replacing it.
+
+### Measured memory use
+
+As a reference point, a clean benchmark using the `wikipedia_en_100_2026-08.zim` ZIM (5,056
+articles) and one local index measured these peak resident set sizes:
+
+| Operation | Peak RSS |
+|---|---:|
+| Full index rebuild | 301.7 MiB |
+| Semantic server (`serve`) | 323.5 MiB |
+| Title and full-text server (`serve --fast`) | 65.6 MiB |
+
+The server benchmark loaded the embedding model, opened the single ZIM index, and handled health,
+source-discovery and search requests. `serve --fast` omits the model and FAISS, so it uses much less
+memory but does not provide meaning-based search.
 
 ## How it works
 

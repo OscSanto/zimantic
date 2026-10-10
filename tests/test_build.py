@@ -184,13 +184,14 @@ class FaissTrainingTests(unittest.TestCase):
 
     def test_cluster_count_never_exceeds_trainable_centroids(self):
         for vector_count in (10_000, 10_728, 24_000, 24_335, 250_000, 700_000):
-            cluster_count = build_module._faiss_cluster_count(vector_count)
+            with self.subTest(vector_count=vector_count):
+                cluster_count = build_module._faiss_cluster_count(vector_count)
 
-            self.assertGreaterEqual(cluster_count, 1)
-            self.assertLessEqual(
-                build_module._FAISS_MIN_POINTS_PER_CENTROID * cluster_count,
-                vector_count,
-            )
+                self.assertGreaterEqual(cluster_count, 1)
+                self.assertLessEqual(
+                    build_module._FAISS_MIN_POINTS_PER_CENTROID * cluster_count,
+                    vector_count,
+                )
 
 
 class BuildBatchTests(unittest.TestCase):
