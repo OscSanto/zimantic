@@ -1,9 +1,9 @@
-# Nightly trigger for deploy/zimantic-index-full.service.
+# Nightly trigger for deploy/zimantic-indexing.service.
 #
 # Install:
-#   cp deploy/zimantic-index-full.service deploy/zimantic-index-full.timer ~/.config/systemd/user/
+#   cp deploy/zimantic-indexing.service deploy/zimantic-indexing.timer ~/.config/systemd/user/
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now zimantic-index-full.timer
+#   systemctl --user enable --now zimantic-indexing.timer
 #
 # Times are local to the machine, so the window follows its timezone with no
 # editing when a device moves or its timezone changes. The service re-checks
