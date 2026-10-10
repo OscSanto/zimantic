@@ -12,7 +12,6 @@
 #   install -d ~/.local/bin
 #   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
 # The default data directory is ~/.local/share/zimantic.
-# Use `uv tool install zimantic` after a PyPI release.
 
 [Unit]
 Description=Zimantic search server
@@ -41,9 +40,17 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 
-# Tune to the device, leaving headroom for the OS. See configs/ for profiles.
-#MemoryMax=450M
-#CPUQuota=90%
+# Tune to the device, leaving headroom for the OS (and kiwix-serve). MemoryMax
+# caps the service inside its own cgroup so a search spike OOMs Zimantic, not the
+# whole device; OOMScoreAdjust>0 makes Zimantic the preferred victim if the
+# device still runs out of RAM (protecting sshd/kiwix-serve).
+# Raspberry Pi Zero 2 W (512 MB):
+#   MemoryMax=450M
+#   OOMScoreAdjust=200
+#
+# Raspberry Pi 5 (4-8 GB):
+#   MemoryMax=1G
+#   OOMScoreAdjust=0
 
 [Install]
 WantedBy=default.target

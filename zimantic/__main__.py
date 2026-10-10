@@ -2,6 +2,7 @@ import argparse
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 def _graceful_interrupt(_signum: int, _frame) -> None:
@@ -14,6 +15,42 @@ def _graceful_interrupt(_signum: int, _frame) -> None:
     committed batch.
     """
     raise KeyboardInterrupt
+
+
+# A ZIM smaller than this may still be downloading when a build starts (the
+# systemd.path unit can fire the moment the file is created). Poll until its size
+# stops changing so a truncated download is not indexed.
+MIN_STABLE_ZIM_BYTES = 5 * 1024 * 1024
+STABLE_POLL_SECONDS = 10
+
+
+def _wait_for_stable_size(path: Path) -> None:
+    """Wait for a small ZIM to finish being written before indexing it."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size >= MIN_STABLE_ZIM_BYTES:
+        return
+    print(
+        f"zimantic: {path.name} is {size} bytes; waiting for it to finish downloading",
+        file=sys.stderr,
+        flush=True,
+    )
+    while True:
+        time.sleep(STABLE_POLL_SECONDS)
+        try:
+            current = path.stat().st_size
+        except OSError:
+            return
+        if current == size:
+            return
+        size = current
+        print(
+            f"zimantic: {path.name} is now {size} bytes; still downloading",
+            file=sys.stderr,
+            flush=True,
+        )
 
 def main() -> None:
 
@@ -138,26 +175,34 @@ def main() -> None:
                 unit_scale=True,
                 file=sys.stdout,
             )
+        failures: list[tuple[Path, BaseException]] = []
         try:
             for zim in zims:
-                build_zim(
-                    zim,
-                    cfg["index_dir"],
-                    embedder,
-                    cfg["batch_size"],
-                    fast=args.fast,
-                    max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
-                    max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
-                    max_embedding_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
-                    preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
-                    embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
-                    force=args.force,
-                )
+                _wait_for_stable_size(zim)
+                try:
+                    build_zim(
+                        zim,
+                        cfg["index_dir"],
+                        embedder,
+                        cfg["batch_size"],
+                        fast=args.fast,
+                        max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
+                        max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
+                        max_embedding_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                        preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
+                        embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
+                        force=args.force,
+                    )
+                except Exception as error:
+                    print(f"zimantic: failed to index {zim}: {error}", file=sys.stderr)
+                    failures.append((zim, error))
                 if global_progress is not None:
                     global_progress.update(zim_sizes[zim])
         finally:
             if global_progress is not None:
                 global_progress.close()
+        if failures:
+            sys.exit(1)
 
     elif args.command == "serve":
         from .search import Search

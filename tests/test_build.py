@@ -90,7 +90,7 @@ class BuildUpgradeTests(unittest.TestCase):
             ):
                 build_module.build(directory / "manual.zim", directory, None, 1)
 
-            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1"})
+            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1", "filesize": "0"})
             db = sqlite3.connect(db_path)
             self.assertEqual(
                 db.execute("SELECT title FROM docs ORDER BY rowid").fetchall(),
@@ -149,8 +149,41 @@ class BuildUpgradeTests(unittest.TestCase):
             ):
                 build_module.build(directory / "manual.zim", directory, None, 1, force=True)
 
-            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1"})
+            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1", "filesize": "0"})
             self.assertEqual(faiss_path.read_bytes(), b"new vectors")
+
+    def test_changed_filesize_triggers_rebuild(self):
+        class _OneEntryArchive(_FakeArchive):
+            entry_count = 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            db_path = directory / "manual.sqlite"
+            zim_path = directory / "manual.zim"
+            zim_path.write_bytes(b"x" * 200)
+            _create_done_index(db_path)
+            db = sqlite3.connect(db_path)
+            db.execute("INSERT INTO meta VALUES ('filesize', '100')")
+            db.commit()
+            db.close()
+
+            row = (1, "New title", "New excerpt", "new", None)
+
+            def write_fake_faiss(_db, path):
+                path.write_bytes(b"new vectors")
+
+            with (
+                patch.object(build_module, "Archive", _OneEntryArchive),
+                patch.object(build_module, "read_entry", return_value=row),
+                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
+            ):
+                build_module.build(zim_path, directory, None, 1)
+
+            self.assertEqual(str(_meta(db_path)["done"]), "1")
+            self.assertEqual(str(_meta(db_path)["filesize"]), "200")
+            db = sqlite3.connect(db_path)
+            self.assertEqual(db.execute("SELECT title FROM docs").fetchone(), ("New title",))
+            db.close()
 
 
 class TempIndexFileTests(unittest.TestCase):
@@ -332,7 +365,7 @@ class BuildInterruptTests(unittest.TestCase):
             ):
                 build_module.build(directory / "manual.zim", directory, None, 2)
 
-            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1"})
+            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1", "filesize": "0"})
             db = sqlite3.connect(db_path)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 8)
             db.close()

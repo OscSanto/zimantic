@@ -16,9 +16,10 @@ Description=Index new ZIMs (fast) and tell Zimantic to rescan
 Type=oneshot
 WorkingDirectory=%h/.local/share/zimantic
 # Serialize against the nightly full build: if it already holds the lock, skip
-# instead of touching the same index files concurrently. Keep the build's exit
-# status visible to systemd; a failed build must not look like a lock skip.
-ExecStart=/bin/sh -c 'if ! exec 9>"%t/zimantic-build.lock"; then echo "zimantic: unable to open build lock" >&2; exit 1; fi; if ! /usr/bin/flock -n 9; then echo "zimantic: another build is running, fast build skipped" >&2; exit 0; fi; exec "%h/.local/bin/zimantic" build --fast'
+# instead of touching the same index files concurrently. A lock skip exits 0
+# (not a failure). The leading '-' ignores the build's exit status so the reload
+# below still runs when a ZIM fails to index.
+ExecStart=-/bin/sh -c 'if ! exec 9>"%t/zimantic-build.lock"; then echo "zimantic: unable to open build lock" >&2; exit 1; fi; if ! /usr/bin/flock -n 9; then echo "zimantic: another build is running, fast build skipped" >&2; exit 0; fi; exec "%h/.local/bin/zimantic" build --fast'
 ExecStart=%h/.local/bin/zimantic reload
 NoNewPrivileges=yes
 PrivateTmp=yes

@@ -69,6 +69,15 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(cfg["index_dir"], "./indexes")  # filled from the profile
             self.assertEqual(warnings, [])
 
+    def test_unknown_keys_warn_but_known_keys_still_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('port = 9999\nbath_size = 8\n', encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+            self.assertEqual(cfg["port"], 9999)
+            self.assertTrue(any("bath_size" in message for message in warnings))
+
 
 if __name__ == "__main__":
     unittest.main()

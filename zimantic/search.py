@@ -65,7 +65,7 @@ def _disambiguation_intent(query: str, query_words: list[str], title: str) -> bo
 
 @dataclass
 class _LocalIndex:
-    db: sqlite3.Connection
+    db: sqlite3.Connection | None
     faiss_index: Any | None
     archive: Archive | None
     searcher: Searcher | None
@@ -328,8 +328,12 @@ class Search:
                     print(f"{db_path.stem}: ZIM unavailable ({error}); title search only")
                     archive = None
                     searcher = None
+            # The connection used for the one-off "done" check is not used for
+            # searches (those use per-thread read-only connections); close it
+            # rather than hold an idle descriptor open for the index lifetime.
+            db.close()
             return _LocalIndex(
-                db,
+                None,
                 faiss_index,
                 archive,
                 searcher,
@@ -468,8 +472,10 @@ class Search:
         Search._close_connections(connections)
 
     @staticmethod
-    def _close_connections(connections: list[sqlite3.Connection]) -> None:
+    def _close_connections(connections: list[sqlite3.Connection | None]) -> None:
         for conn in connections:
+            if conn is None:
+                continue
             try:
                 conn.close()
             except sqlite3.Error:

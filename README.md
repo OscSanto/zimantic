@@ -197,11 +197,15 @@ so less common languages may contain mistakes.
 ## Requirements
 
 - Python 3.14 (libzim ships per-version wheels and the pinned release currently provides 3.14 only)
-- 32-bit Linux platforms (such as armhf/armv7) are not supported because required native dependencies do not publish compatible wheels
+- 32-bit Linux platforms (such as armhf/armv7) are not supported because required native
+  dependencies do not publish compatible wheels. On a Raspberry Pi Zero 2 W this means running 64-bit
+  Raspberry Pi OS (aarch64) is required.
 - About 120 MB for the embedding model, plus your ZIM files
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
 - *Searching does not require Kiwix.* To open the articles from the result links, run
   [kiwix-serve](https://kiwix.org/en/applications/) with the same ZIMs (set its address as `kiwix_url` in `config.toml`).
+  kiwix-serve needs its own memory (roughly 100–300 MB depending on the ZIM); on a 512 MB Pi Zero 2 W
+  which leaves little headroom for Zimantic.
 
 ## Where your files go
 
