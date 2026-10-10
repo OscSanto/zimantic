@@ -22,7 +22,7 @@ ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
 # Serialize against the path-triggered fast build: if it already holds the
 # lock, skip instead of touching the same index files concurrently. flock ships
 # in util-linux; the `|| echo` writes the skip reason into the journal.
-ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/.local/share/zimantic/.venv/bin/python -m zimantic build || echo "zimantic: another build is running, nightly full build skipped" >&2'
-ExecStart=%h/.local/share/zimantic/.venv/bin/python -m zimantic reload
+ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/.local/bin/zimantic build || echo "zimantic: another build is running, nightly full build skipped" >&2'
+ExecStart=%h/.local/bin/zimantic reload
 NoNewPrivileges=yes
 PrivateTmp=yes

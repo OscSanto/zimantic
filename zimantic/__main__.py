@@ -17,7 +17,7 @@ def _graceful_interrupt(_signum: int, _frame) -> None:
 
 def main() -> None:
 
-    parser = argparse.ArgumentParser(prog="python -m zimantic")
+    parser = argparse.ArgumentParser(prog="zimantic")
     
     # subcommands: build (files/folders, default zim_dir), serve, reload
     commands = parser.add_subparsers(dest="command", required=True)

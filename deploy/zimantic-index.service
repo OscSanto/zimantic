@@ -18,7 +18,7 @@ WorkingDirectory=%h/.local/share/zimantic
 # Serialize against the nightly full build: if it already holds the lock, skip
 # instead of touching the same index files concurrently. flock ships in
 # util-linux; the `|| echo` writes the skip reason into the journal.
-ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/.local/share/zimantic/.venv/bin/python -m zimantic build --fast || echo "zimantic: another build is running, fast build skipped" >&2'
-ExecStart=%h/.local/share/zimantic/.venv/bin/python -m zimantic reload
+ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/.local/bin/zimantic build --fast || echo "zimantic: another build is running, fast build skipped" >&2'
+ExecStart=%h/.local/bin/zimantic reload
 NoNewPrivileges=yes
 PrivateTmp=yes

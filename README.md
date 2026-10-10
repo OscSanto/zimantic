@@ -93,7 +93,7 @@ search**. `serve --fast` also skips the model and all vectors.
 A lightweight HTML page is served through FastAPI and is accessible from any browser at
 `http://<host>:8090` (the `port` in `config.toml`).
 
-**Picking up indexes without a restart.** `python -m zimantic reload` sends `SIGHUP` to the server,
+**Picking up indexes without a restart.** `zimantic reload` sends `SIGHUP` to the server,
 which rescans `index_dir` for added, removed or upgraded indexes. `kill -HUP <pid>` also works.
 
 ### 3. Each search
@@ -189,40 +189,40 @@ so less common languages may contain mistakes.
 
 ## Where your files go
 
-By default everything lives inside the project folder, so `config.toml` works without changes:
+The installed CLI is separate from runtime data. By default the data directory is
+`~/.local/share/zimantic`, so `config.toml` and its relative paths work without changes:
 
 ```
-zimantic/
+~/.local/share/zimantic/
 ├── config.toml          ← settings (paths below are its defaults)
 ├── model/               ← model_dir: model.onnx + sentencepiece.bpe.model   (you download)
 ├── zims/                ← zim_dir:   your .zim files                          (you download)
 ├── indexes/             ← index_dir: <name>.sqlite + <name>.faiss            (created by build)
-└── zimantic/           ← the program
+└── zimantic.pid         ← server PID (created while serving)
 ```
 
 Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `model_dir` or `index_dir`
-in `config.toml` at them instead. These three folders are git-ignored, so ZIMs, models and indexes
-never get committed.
+in `config.toml` at them instead.
 
 ## Install
 
-1. **Get the code and enter the folder.** `config.toml` is optional; missing values use
+1. **Get the code and enter the data directory.** `config.toml` is optional; missing values use
    hardware-based defaults.
 
    ```bash
-   git clone https://github.com/OscSanto/zimantic.git
-   cd zimantic
+   mkdir -p ~/.local/share
+   git clone https://github.com/OscSanto/zimantic.git ~/.local/share/zimantic
+   cd ~/.local/share/zimantic
    ```
 
-2. **Create the environment and install the dependencies.** With
-   [uv](https://docs.astral.sh/uv/):
+2. **Install the CLI with uv.** This installs the package and runtime dependencies in an isolated
+   tool environment, with the `zimantic` executable at `~/.local/bin/zimantic`:
 
    ```bash
-   uv sync
-   . .venv/bin/activate              # Windows: .venv\Scripts\activate
+   uv tool install .
    ```
 
-   Add `--no-dev` to skip test tools. `pip install .` also works in a virtual environment.
+   For development, use `uv sync` and `. .venv/bin/activate`.
 
 3. **Download the model into `model/`** using these file names:
 
@@ -243,26 +243,36 @@ never get committed.
 6. **Check the installation:**
 
    ```bash
-   python -m zimantic --help
-   python -m pytest tests/test_runtime_api.py   # builds a tiny ZIM and reads it back
+   zimantic --help
    ```
 
-   The runtime check verifies the libzim APIs used by indexing and search. Run `python -m pytest` for
-   the full suite.
+   To run the development runtime check, activate the `uv` environment and run
+   `python -m pytest tests/test_runtime_api.py`; run `python -m pytest` for the full suite.
+
+## Development install
+
+For a checkout-only development environment:
+
+```bash
+uv sync
+. .venv/bin/activate              # Windows: .venv\Scripts\activate
+```
+
+`uv sync --no-dev` omits test tools. `pip install .` also works in a virtual environment.
 
 ## Use
 
 ```bash
-python -m zimantic build                        # index every .zim in zim_dir (the default)
-python -m zimantic build zims/x.zim             # index one file
-python -m zimantic build zims/a.zim zims/b.zim  # several files
-python -m zimantic build /media/usb             # every .zim in a folder
-python -m zimantic build zims/a.zim /media/usb  # mix files and folders
-python -m zimantic build --fast                 # quick title-word + full-text index (no vectors)
-python -m zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
-python -m zimantic serve                        # web page on http://<host>:8090 after a build
-python -m zimantic serve --fast                 # start now: no model, no vectors
-python -m zimantic reload                       # ask a running server to rescan index_dir
+zimantic build                        # index every .zim in zim_dir (the default)
+zimantic build zims/x.zim             # index one file
+zimantic build zims/a.zim zims/b.zim  # several files
+zimantic build /media/usb             # every .zim in a folder
+zimantic build zims/a.zim /media/usb  # mix files and folders
+zimantic build --fast                 # quick title-word + full-text index (no vectors)
+zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
+zimantic serve                        # web page on http://<host>:8090 after a build
+zimantic serve --fast                 # start now: no model, no vectors
+zimantic reload                       # ask a running server to rescan index_dir
 ```
 
 `build` accepts files or folders; a folder means its `*.zim`, and no arguments uses `zim_dir`.
@@ -294,14 +304,16 @@ The path-triggered fast build runs whenever a ZIM is added. The full build runs 
 local time by default; adjust its `ExecCondition` and timer to change the window. A shared `flock`
 prevents overlapping builds.
 
-Each unit has install instructions in its header. The units assume a self-contained checkout at
-the default XDG data directory, `~/.local/share/zimantic`, so the repository, virtual environment,
-configuration, ZIMs and indexes stay together there. Adjust `WorkingDirectory` and `ExecStart` if
-you use a custom `XDG_DATA_HOME` or keep the checkout elsewhere.
+Each unit has install instructions in its header. The units assume runtime data at the default XDG
+data directory, `~/.local/share/zimantic`, and the CLI installed at `~/.local/bin/zimantic`.
+Adjust `WorkingDirectory` and `ExecStart` if you use a custom `XDG_DATA_HOME` or install the CLI
+elsewhere.
 
-`reload` does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by
-default, or from the file passed with `--pid`. A stale PID file (left over after a crash or a signal
-shutdown) is reported and ignored.
+The units call the installed `~/.local/bin/zimantic` executable, while `WorkingDirectory` keeps
+configuration, model files, ZIMs, indexes and `zimantic.pid` under the data directory. `reload`
+does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by default, or
+from the file passed with `--pid`. A stale PID file (left over after a crash or a signal shutdown)
+is reported and ignored.
 
 Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you copy finished indexes from
 another machine, watch `indexes/` and run only `reload`.
@@ -313,7 +325,7 @@ sudo apt install kiwix-tools             # Debian/Ubuntu/Raspberry Pi OS; other 
 kiwix-serve --port 8085 zims/*.zim       # matches the default kiwix_url in config.toml
 ```
 
-A running `serve` picks up new indexes with `python -m zimantic reload`; a fast index remains
+A running `serve` picks up new indexes with `zimantic reload`; a fast index remains
 searchable while a full replacement is built.
 
 JSON API examples:
@@ -325,7 +337,7 @@ JSON API examples:
 - `GET /api/sources`, `/api/config`, `/api/zims` and `/api/health` return source, configuration,
   local-index and health information.
 
-Reloading indexes is **not** an HTTP API: running servers rescan via `python -m zimantic reload` or
+Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
 `kill -HUP <pid>`.
 
 Exact queries use a small LRU cache controlled by `cache_size` and `cache_bytes` (32 MiB by default).
