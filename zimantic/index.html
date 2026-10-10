@@ -421,9 +421,9 @@
       $("results").querySelectorAll(".empty").forEach(node => node.remove());
       const empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = current && current.completed === current.total
-        ? "No results from the available sources. Try different words."
-        : "Waiting for source results…";
+      empty.textContent = current?.streaming
+        ? "" // waiting for search results... but they often appear too fast to read this text so better to print nothing...
+        : "No results found in the available sources. Try using different words.";
       $("results").appendChild(empty);
       return;
     }
