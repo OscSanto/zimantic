@@ -28,7 +28,8 @@ _PLAIN_TEXT_ASSET = re.compile(
     r"(^|/)\.[^/]*$"  # dotfiles such as .gitignore
     # Non-prose, machine-readable or media files (with an optional ?query/#frag).
     r"|(?i:\.(?:md|markdown|rst|json|jsonl|ya?ml|toml|ini|cfg|conf|js|mjs|cjs"
-    r"|css|scss|less|xml|svg|png|jpe?g|gif|webp|ico|csv|tsv|log|lock))"
+    r"|css|scss|less|xml|svg|png|jpe?g|gif|webp|ico|csv|tsv|log|lock|map"
+    r"|handlebars|hbs|mustache|twig|liquid|jade|pug|ejs|tmpl|tpl))"
     r"(?:[?#][^/]*)?$"
     # License/notice files, which are conventionally ALL CAPS.
     r"|(^|/)(?:COPYING|LICEN[CS]E|PATENTS?|NOTICE|README|CHANGELOG|AUTHORS"
@@ -66,6 +67,21 @@ SPA_BODY_KEYS = ("htmlBody", "body", "html", "content", "text", "description")
 SPA_COMPANION_DIRS = ("", "videos", "playlists", "channels", "content", "pages", "posts", "items")
 # A tag-like "<p ...>", "<br/>" or "<!doctype" (but not prose such as "a < b").
 _HTML_TAG = re.compile(rb"<[a-zA-Z!/][^>]*>")
+# A "lang-xx" class token. Pages that ship the same text in many languages
+# (TED talks, and other parallel-translation scrapes) mark each copy this way;
+# the "lang-default" copy is the document's primary language.
+_ELEMENT_LANG = re.compile(r"(?:^|\s)lang-([a-z0-9-]+)")
+# Markdown front-matter ("---\n...title: ...\n---") and syntax. ZIMs built from
+# a docs/curriculum source (freeCodeCamp and friends) ship the article body as
+# text/markdown; the HTML route is only a meta-refresh stub, so the markdown is
+# read as the stub's companion.
+_YAML_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n", re.S)
+_MARKDOWN_FENCE = re.compile(r"```.*?```", re.S)
+_MARKDOWN_SECTION = re.compile(r"(?m)^#{1,6}[ \t]*--[a-z0-9-]+--[ \t]*$")
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_HTML = re.compile(r"<[^>]+>")
+_MARKDOWN_HEADING = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]*")
+_MARKDOWN_MARKER = re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|\d+[.)])[ \t]+")
 JS_SHELL_MARKERS = (b"<noscript", b'id="app"', b"id='app'")
 JS_NOTICE_MAX_CHARS = 300
 
@@ -75,7 +91,7 @@ JS_NOTICE_MAX_CHARS = 300
 # embedding), which is a large share of the text on MediaWiki stubs.
 SKIP_IDS = frozenset({
     "catlinks", "mw-hidden-catlinks", "printfooter", "footer",
-    "toc", "mw-navigation", "sitefooter",
+    "toc", "mw-navigation", "sitefooter", "breadcrumbs",
 })
 SKIP_CLASSES = frozenset({
     "catlinks", "mw-hidden-catlinks", "mw-hidden-cats-hidden",
@@ -87,8 +103,12 @@ SKIP_CLASSES = frozenset({
     "portal", "sistersitebox", "sidebar",
     "shortdescription", "noindex", "printfooter", "stub", "boilerplate",
     "assistive", "visuallyhidden", "screen-reader-text", "sr-only",
+    # Breadcrumbs and language pickers (PHP manual and similar).
+    "breadcrumb", "breadcrumbs", "change-language",
     # LibreTexts/MindTouch app-shell topic listings.
     "mt-topic-hierarchy-listings", "mt-guide-listings", "mt-listing-detailed",
+    # DevDocs/Sphinx attribution footer ("© … Licensed under …").
+    "_attribution",
 })
 SKIP_ROLES = frozenset({"navigation", "banner", "contentinfo"})
 
@@ -151,6 +171,12 @@ class _TextExtractor(HTMLParser):
     }
     SKIP_TAGS = {"head", "script", "style", "template"}
     CHROME_TAGS = {"aside", "footer", "header", "nav"}
+    # Tags that never have a closing tag; while skipping a container we must not
+    # push them or the open/close bookkeeping would drift.
+    VOID_TAGS = frozenset({
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    })
     # Block-level tags end one text run and begin another. Inserting a space at
     # each boundary stops runs of text from concatenating when the source has no
     # whitespace between elements (headings, <dt>/<dd>, list links, and so on).
@@ -179,6 +205,11 @@ class _TextExtractor(HTMLParser):
             return True
         if (attributes.get("aria-hidden") or "").casefold() == "true":
             return True
+        if "hidden" in attributes:
+            return True
+        style = (attributes.get("style") or "").replace(" ", "").casefold()
+        if "display:none" in style or "visibility:hidden" in style:
+            return True
         if (attributes.get("role") or "").casefold() in SKIP_ROLES:
             return True
         identifier = (attributes.get("id") or "").casefold()
@@ -195,10 +226,15 @@ class _TextExtractor(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         if self.skipping:
+            # Track nested tags so the matching close ends the skip, not the
+            # first nested close of the same name (a footer full of <div>s).
+            if tag not in self.VOID_TAGS:
+                self.skipping.append(tag)
             return
         attributes = dict(attrs)
         if self._is_chrome(tag, attributes):
-            self.skipping.append(tag)
+            if tag not in self.VOID_TAGS:
+                self.skipping.append(tag)
             return
 
         if tag in self.SEPARATOR_TAGS and self.active:
@@ -211,14 +247,26 @@ class _TextExtractor(HTMLParser):
                 "nested": False,
                 "parts": [],
             }
+            match = _ELEMENT_LANG.search(attributes.get("class") or "")
+            if match:
+                block["lang"] = match.group(1)
             self.blocks.append(block)
             self.active.append(block)
             self.block_order += 1
 
     def handle_endtag(self, tag):
-        if self.skipping and self.skipping[-1] == tag:  # the <style>/<script>/<sup> we were skipping ended
-            self.skipping.pop()
-        elif tag in self.CANDIDATE_PRIORITIES:
+        if self.skipping:
+            if tag in self.VOID_TAGS:
+                return
+            if tag == self.skipping[-1]:
+                self.skipping.pop()
+            elif tag in self.skipping:  # mismatched nesting: unwind to the match
+                while self.skipping and self.skipping[-1] != tag:
+                    self.skipping.pop()
+                if self.skipping:
+                    self.skipping.pop()
+            return
+        if tag in self.CANDIDATE_PRIORITIES:
             for index in range(len(self.active) - 1, -1, -1):
                 if self.active[index]["tag"] == tag:
                     block = self.active.pop(index)
@@ -228,7 +276,7 @@ class _TextExtractor(HTMLParser):
                         for parent in self.active[:index]:
                             parent["nested"] = True
                     break
-        if not self.skipping and tag in self.SEPARATOR_TAGS and self.active:
+        if tag in self.SEPARATOR_TAGS and self.active:
             self._separate()
 
     def handle_data(self, data):
@@ -243,9 +291,16 @@ class _TextExtractor(HTMLParser):
         return " ".join(text.split())
 
     def candidates(self) -> list[str]:
+        # When the page repeats its text under lang-* classes, keep only the
+        # lang-default copy (the document's primary language) so parallel
+        # translations don't crowd the excerpt.
+        langs = {block["lang"] for block in self.blocks if block.get("lang")}
+        default_lang = "default" if "default" in langs else None
         candidates = []
         for block in self.blocks:
             if block["nested"]:
+                continue
+            if default_lang is not None and block.get("lang") not in (None, default_lang):
                 continue
             text = block.get("text", self._text(block["parts"]))
             if len(text) >= MIN_BLOCK_CHARS:
@@ -400,6 +455,60 @@ def _spa_body(zim: Archive, entry, fragment: str) -> bytes | None:
     return _json_body(zim, posixpath.join(posixpath.dirname(entry.path), slug + ".json"))
 
 
+# Directories where a markdown companion for an app-shell route may live.
+MARKDOWN_COMPANION_DIRS = ("", "content/curriculum", "curriculum", "content", "pages", "docs")
+MARKDOWN_EXTENSIONS = (".md", ".markdown")
+MARKDOWN_MIME_TYPES = frozenset({
+    "text/markdown",
+    "text/x-markdown",
+    "text/plain",
+    # Some freeCodeCamp ZIMs label Markdown companions as JavaScript.
+    "application/javascript",
+})
+
+
+def _markdown_body(zim: Archive, entry, fragment: str) -> bytes | None:
+    """Markdown companion for an app-shell stub, or None.
+
+    A docs/curriculum ZIM often serves each route through a meta-refresh stub
+    while the article body lives in a ``content/.../<route>.md`` entry. The route
+    usually keeps its full path (``a/b/c``) in the fragment, so both the whole
+    route and its last segment are tried under the usual content directories.
+    Companions are recognized by their common Markdown extension or MIME type;
+    ZIM packaging does not always keep those signals consistent.
+    """
+    route = fragment.split("?", 1)[0].split("#", 1)[0].strip("/")
+    if not route:
+        return None
+    names = (route, posixpath.basename(route))
+    base = posixpath.dirname(entry.path)
+    candidates = []
+    for directory in MARKDOWN_COMPANION_DIRS:
+        for name in names:
+            for extension in MARKDOWN_EXTENSIONS:
+                candidates.append(
+                    posixpath.join(directory, name + extension)
+                    if directory
+                    else name + extension
+                )
+            candidates.append(
+                posixpath.join(directory, name) if directory else name
+            )
+    candidates.extend(
+        posixpath.join(base, names[1] + extension)
+        for extension in MARKDOWN_EXTENSIONS
+    )
+    candidates.append(posixpath.join(base, names[1]))
+    for candidate in candidates:
+        if candidate and zim.has_entry_by_path(candidate):
+            item = zim.get_entry_by_path(candidate).get_item()
+            mimetype = item.mimetype.split(";", 1)[0].strip().lower()
+            extension = posixpath.splitext(candidate)[1].lower()
+            if extension in MARKDOWN_EXTENSIONS or mimetype in MARKDOWN_MIME_TYPES:
+                return bytes(item.content)
+    return None
+
+
 def _meta_description(html: bytes) -> str:
     """Return a meta/Open Graph description from the page head, if any.
 
@@ -443,6 +552,31 @@ def _plain_text_excerpt(raw: bytes, max_chars: int) -> str:
     """Turn a non-HTML text entry into a single normalized excerpt."""
     text = raw.decode("utf-8", "ignore")
     return truncate_at_word_boundary(" ".join(text.split()), max_chars)
+
+
+def _markdown_excerpt(raw: bytes, max_chars: int) -> tuple[str, str]:
+    """Return ``(excerpt, front_matter_title)`` for a markdown document.
+
+    Front matter and fenced code are dropped, section headings such as
+    ``# --instructions--`` and list markers are removed, and link/image syntax
+    is reduced to its label, so the excerpt is the prose a reader sees.
+    """
+    text = raw.decode("utf-8", "ignore")
+    title = ""
+    front = _YAML_FRONTMATTER.match(text)
+    if front:
+        title_match = re.search(r"(?m)^title[ \t]*:[ \t]*(.+?)[ \t]*$", front.group(1))
+        if title_match:
+            title = title_match.group(1).strip().strip("'\"")
+        text = text[front.end():]
+    text = _MARKDOWN_FENCE.sub(" ", text)
+    text = _MARKDOWN_SECTION.sub(" ", text)
+    text = _MARKDOWN_LINK.sub(r"\1", text)
+    text = _MARKDOWN_HTML.sub(" ", text)
+    text = _MARKDOWN_HEADING.sub("", text)
+    text = _MARKDOWN_MARKER.sub("", text)
+    text = text.replace("`", "").replace("*", "").replace("~~", "")
+    return truncate_at_word_boundary(" ".join(text.split()), max_chars), title
 
 
 def _pdf_module():
@@ -573,6 +707,12 @@ def read_entry(
         if not zim.has_entry_by_path(path):
             return None
         body = _spa_body(zim, entry, fragment) if fragment else None
+        if body is None and fragment:
+            markdown = _markdown_body(zim, entry, fragment)
+            if markdown is not None:
+                excerpt, md_title = _markdown_excerpt(markdown, max_preview_chars)
+                if excerpt and not is_javascript_shell(markdown, excerpt):
+                    return i, entry.title or md_title, excerpt, entry.path, None
         if body is not None:
             # Keep this page's own title and path: it is a deep link into the
             # app route, and its body is real text. Storing the shell target

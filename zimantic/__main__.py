@@ -73,7 +73,7 @@ def main() -> None:
         nargs="*",
         type=Path,
         metavar="PATH",
-        help="ZIM files or folders containing *.zim; a folder means every .zim in it. Default: zim_dir",
+        help="ZIM files or folders containing *.zim; a folder means every .zim under it (recursively). Default: zim_dir",
     )
     build.add_argument(
         "--fast",
@@ -128,7 +128,8 @@ def main() -> None:
         seen: set[Path] = set()
         for source in (args.paths or [Path(cfg["zim_dir"])]):
             if source.is_dir():
-                matches = sorted(source.glob("*.zim"))
+                # Recurse: a corpus is often laid out as <collection>/<file>.zim.
+                matches = sorted(source.rglob("*.zim"))
             elif source.is_file():
                 matches = [source]
             else:

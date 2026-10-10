@@ -240,6 +240,63 @@ class TextExtractionTests(unittest.TestCase):
         for gone in ("Hidden categories", "Navigation box", "accessibility text", "Menu links"):
             self.assertNotIn(gone, excerpt)
 
+    def test_nested_elements_inside_chrome_are_skipped(self):
+        html = (
+            b'<div id="footer"><div class="row"><p>Footer affiliate text that must never '
+            b"appear in the excerpt at all.</p></div>"
+            b"<p>More footer text that must also stay out of the excerpt.</p></div>"
+            b"<p>An article paragraph long enough to be indexed as the lead text.</p>"
+        )
+        excerpt = extract_excerpt(html, max_preview_chars=1000)
+        self.assertTrue(excerpt.startswith("An article paragraph"))
+        self.assertNotIn("Footer affiliate", excerpt)
+        self.assertNotIn("More footer", excerpt)
+
+    def test_hidden_elements_are_skipped(self):
+        html = (
+            b"<p>An article paragraph long enough to be indexed as the lead text.</p>"
+            b'<span style="display: none;">data-sort-value="furniture" hidden junk here</span>'
+            b"<div hidden><p>Hidden attribute text that should never be indexed.</p></div>"
+            b'<span style="visibility:hidden">Invisible text that should never be indexed.</span>'
+        )
+        excerpt = extract_excerpt(html, max_preview_chars=1000)
+        self.assertNotIn("data-sort-value", excerpt)
+        self.assertNotIn("Hidden attribute", excerpt)
+        self.assertNotIn("Invisible text", excerpt)
+
+    def test_hidden_void_elements_do_not_skip_following_content(self):
+        html = (
+            b"<meta hidden>"
+            b'<img style="display: none;">'
+            b"<p>An article paragraph after hidden void elements remains visible.</p>"
+        )
+        self.assertEqual(
+            extract_excerpt(html),
+            "An article paragraph after hidden void elements remains visible.",
+        )
+
+    def test_hidden_non_void_elements_still_skip_content(self):
+        html = (
+            b"<div hidden><p>Hidden content must remain excluded from the excerpt.</p></div>"
+            b"<p>Visible article content follows the hidden container.</p>"
+        )
+        excerpt = extract_excerpt(html)
+        self.assertEqual(excerpt, "Visible article content follows the hidden container.")
+        self.assertNotIn("Hidden content", excerpt)
+
+    def test_parallel_language_blocks_keep_only_the_default(self):
+        html = (
+            b'<p class="title lang-default">The primary language title of the talk is shown here.</p>'
+            b'<p class="title lang-fr">Le titre principal de la conference est affiche ici.</p>'
+            b'<p class="description lang-default">The primary language description of this talk appears here.</p>'
+            b'<p class="description lang-fr">La description principale de cette conference est ici.</p>'
+        )
+        joined = " ".join(iter_text_blocks(html))
+        self.assertIn("primary language title", joined)
+        self.assertIn("primary language description", joined)
+        self.assertNotIn("Le titre", joined)
+        self.assertNotIn("La description", joined)
+
     def test_block_boundaries_separate_text_runs(self):
         html = (
             b"<div><dt>A heading</dt>"
@@ -384,6 +441,28 @@ class TextExtractionTests(unittest.TestCase):
                 return _LogoEntry()
 
         self.assertIsNone(read_entry(_LogoArchive(), 0))
+
+    def test_plain_text_template_and_sourcemap_assets_are_not_indexed(self):
+        class _TemplateItem:
+            mimetype = "text/plain"
+            content = (
+                b"{{#each doc.items}} <p><a href=\"{{this.fpath}}\">{{this.fname}}</a>"
+                b"{{/each}}</p>"
+            )
+
+        class _TemplateEntry:
+            is_redirect = False
+            title = "media_player.handlebars"
+            path = "media_player.handlebars"
+
+            def get_item(self):
+                return _TemplateItem()
+
+        class _TemplateArchive:
+            def _get_entry_by_id(self, _index):
+                return _TemplateEntry()
+
+        self.assertIsNone(read_entry(_TemplateArchive(), 0))
 
     def test_pdf_text_layer_is_indexed(self):
         content = _pdf_bytes(
@@ -704,6 +783,117 @@ class JavaScriptShellTests(unittest.TestCase):
 
         self.assertEqual(row[2], "")            # no markup leaked as text
         self.assertEqual(row[3], "index.html")  # falls back to the shell target
+
+    def test_markdown_companion_body_is_indexed(self):
+        stub = (
+            b"<html><head><title>Find the Symmetric Difference</title>"
+            b"<meta http-equiv=\"refresh\" content=\"0;URL='../../../index.html"
+            b"#coding-interview-prep/algorithms/find-the-symmetric-difference'\" />"
+            b"</head><body></body></html>"
+        )
+        markdown = (
+            b"---\nid: a3f503de\n"
+            b"title: Find the Symmetric Difference\n"
+            b"challengeType: 1\n---\n\n"
+            b"# --description--\n\n"
+            b"The symmetric difference of two sets is the set of elements which are in "
+            b"either of the two sets but not in both.\n\n"
+            b"# --instructions--\n\n"
+            b"Create a function that takes two or more arrays and returns their "
+            b"symmetric difference.\n\n"
+            b"```js\nassert.sameMembers(sym([1, 2, 3], [5, 2, 1, 4]), [3, 4, 5]);\n```\n"
+        )
+        md_path = "content/curriculum/coding-interview-prep/algorithms/find-the-symmetric-difference.md"
+
+        class _MarkdownItem:
+            mimetype = "text/markdown"
+
+            def __init__(self, content):
+                self.content = content
+
+        class _MarkdownEntry(_HtmlEntry):
+            def get_item(self):
+                return _MarkdownItem(self._content)
+
+        class _StubEntry:
+            is_redirect = False
+            path = "index/coding-interview-prep/algorithms/find-the-symmetric-difference.html"
+            title = "Find the Symmetric Difference"
+
+            def get_item(self):
+                return _SpaItem(stub)
+
+        class _MarkdownArchive:
+            def _get_entry_by_id(self, _index):
+                return _StubEntry()
+
+            def has_entry_by_path(self, path):
+                return path in ("index.html", md_path)
+
+            def get_entry_by_path(self, path):
+                if path == md_path:
+                    return _MarkdownEntry("Find the Symmetric Difference", path, markdown)
+                return _HtmlEntry("index.html", "index.html", SHELL_HTML)
+
+        row = read_entry(_MarkdownArchive(), 0)
+
+        self.assertEqual(row[1], "Find the Symmetric Difference")
+        self.assertIn("symmetric difference of two sets", row[2])
+        self.assertNotIn("--description--", row[2])
+        self.assertNotIn("a3f503de", row[2])          # front matter dropped
+        self.assertNotIn("assert.sameMembers", row[2])  # fenced code dropped
+        self.assertEqual(row[3], _StubEntry.path)     # keeps the renderable route
+
+    def test_markdown_companion_accepts_extension_or_mime_type(self):
+        stub = (
+            b"<html><head><title>Markdown Article</title>"
+            b"<meta http-equiv=\"refresh\" content=\"0;URL='../index.html#article'\" />"
+            b"</head><body></body></html>"
+        )
+        markdown = (
+            b"# Article\n\n"
+            b"This is a sufficiently substantial Markdown companion body for indexing."
+        )
+        cases = (
+            ("article.md", "application/javascript"),
+            ("article.markdown", "application/octet-stream"),
+            ("article", "text/markdown"),
+        )
+
+        for companion_path, companion_mimetype in cases:
+            with self.subTest(companion_path=companion_path, mimetype=companion_mimetype):
+                class _MarkdownItem:
+                    def __init__(self):
+                        self.mimetype = companion_mimetype
+                        self.content = markdown
+
+                class _MarkdownEntry:
+                    def get_item(self):
+                        return _MarkdownItem()
+
+                class _StubEntry:
+                    is_redirect = False
+                    path = "index/article"
+                    title = "Markdown Article"
+
+                    def get_item(self):
+                        return _SpaItem(stub)
+
+                class _MarkdownArchive:
+                    def _get_entry_by_id(self, _index):
+                        return _StubEntry()
+
+                    def has_entry_by_path(self, path):
+                        return path in ("index.html", companion_path)
+
+                    def get_entry_by_path(self, path):
+                        if path == companion_path:
+                            return _MarkdownEntry()
+                        return _HtmlEntry("index.html", "index.html", SHELL_HTML)
+
+                row = read_entry(_MarkdownArchive(), 0)
+                self.assertIn("sufficiently substantial Markdown companion", row[2])
+                self.assertEqual(row[3], _StubEntry.path)
 
     def test_javascript_shell_pages_are_not_indexed(self):
         self.assertIsNone(read_entry(_ShellArchive(), 0))

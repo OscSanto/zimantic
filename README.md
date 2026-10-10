@@ -69,14 +69,21 @@ model size at a modest throughput cost. Machines with more RAM keep the arena fo
 Redirects are stored as **title-only** entries pointing to their article, so searching "USA" still
 finds the United States page.
 
-**App-shell ZIMs.** Some ZIMs store article bodies in JSON behind a JavaScript shell. Zimantic reads
-that JSON and keeps each article's own path as a deep link, so results point to the real article
-instead of the shared shell. Shell stubs and "enable JavaScript" notices are skipped.
+**App-shell ZIMs.** Some ZIMs store article bodies in JSON or Markdown behind a JavaScript shell.
+Zimantic reads that companion and keeps each article's own path as a deep link, so results point to
+the real article instead of the shared shell. This covers Kiwix's `content/page_content_<id>.json`,
+media/app bundles that keep a `<slug>.json` companion (for example `videos/<slug>.json` or
+`playlists/<slug>.json`) keyed by the deep link, and docs/curriculum bundles (freeCodeCamp and
+similar) whose `<route>.md` holds the body under `content/`. Plain-text fields such as video
+descriptions and Markdown prose are indexed too (front matter and fenced code are dropped). Shell
+stubs and "enable JavaScript" notices are skipped.
 
 **Text extraction.** Stylesheets, scripts, footnotes, page chrome (category footers, navboxes,
-tables of contents, maintenance tags) and common boilerplate are ignored. Visible blocks are
-collected in priority order, with paragraphs preferred, and block boundaries keep neighboring
-text runs from running together.
+tables of contents, maintenance tags) and common boilerplate are ignored, including page chrome that
+is nested or hidden (`display:none`, `visibility:hidden`, the `hidden` attribute). When a page
+repeats the same text under `lang-*` classes (parallel translations, as in TED talks), only the
+`lang-default` copy is kept. Visible blocks are collected in priority order, with paragraphs
+preferred, and block boundaries keep neighboring text runs from running together.
 
 Each article stores one **excerpt** for both previews and embeddings, bounded to
 `max_preview_chars` (1,000 by default) at a word boundary. The embedder trims that same text to
@@ -324,7 +331,7 @@ Normal builds embed 32 articles at a time by default. Tune `batch_size` and `emb
 defaults from the machine's resources. Copy `config.pi-zero-2w.toml` or `config.pi-5.toml` to pin
 settings.
 
-As a rule of thumb, keep enough free disk space when building indexes: at least **10% of each ZIM file's size**.
+As a rule of thumb, keep enough free disk space when building indexes: about **20% of total ZIM file size**.
 
 **Automatic pickup with systemd.** Ready-to-copy user units in `deploy/` can watch `zims/`, build and
 reload when a ZIM is added:
