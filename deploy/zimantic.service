@@ -6,7 +6,8 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now zimantic.service
 #
-# Adjust WorkingDirectory/ExecStart if the project is not at ~/zimantic.
+# The default self-contained checkout is ~/.local/share/zimantic.
+# Adjust WorkingDirectory/ExecStart if the project is elsewhere.
 
 [Unit]
 Description=Zimantic search server
@@ -15,19 +16,19 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/zimantic
-ExecStart=%h/zimantic/.venv/bin/python -m zimantic serve
+WorkingDirectory=%h/.local/share/zimantic
+ExecStart=%h/.local/share/zimantic/.venv/bin/python -m zimantic serve
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
 
 # Hardening: the server only needs to read zims/model and write indexes/ plus
-# its PID file, all under the project directory.
+# its PID file, all under the XDG data directory.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=%h/zimantic
+ReadWritePaths=%h/.local/share/zimantic
 ProtectControlGroups=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

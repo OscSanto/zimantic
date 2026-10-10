@@ -1,11 +1,4 @@
-"""Index one ZIM into <index_dir>/<name>.sqlite (titles, excerpts) and, unless
-fast, <name>.faiss (vectors).
-
-Rerunning an unfinished build resumes where it stopped. A fast build marks the
-index done='fast' and can later be upgraded by building a replacement beside
-the fast index and publishing it atomically.
-Use force=True to rebuild from scratch.
-"""
+"""Build a resumable SQLite and optional FAISS index for one ZIM."""
 import os
 import secrets
 import sqlite3
@@ -50,12 +43,7 @@ def build(
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     force: bool = False,
 ) -> None:
-    """Index a ZIM.
-
-    fast=True builds title + ZIM full-text search only: it never reads article
-    bodies or runs the embedding model, so it is much quicker. Otherwise,
-    A later full build upgrades the fast index through a staged replacement.
-    """
+    """Index a ZIM, optionally without article bodies or vectors."""
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,12 +136,7 @@ def build(
 
 
 def _create_temp_path(path: Path) -> Path:
-    """Reserve a unique sibling temp file with normal (umask-respecting) mode.
-
-    ``tempfile.NamedTemporaryFile``/``mkstemp`` force 0600, which would publish
-    a FAISS file the server cannot read when it runs as another user. ``os.open``
-    with 0o644 matches how the SQLite file is created.
-    """
+    """Reserve a readable sibling temp file."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     for _ in range(100):
         candidate = path.with_name(
@@ -298,8 +281,7 @@ def _write_faiss(db, path: Path) -> None:
     temp_path = _create_temp_path(path)
     try:
         faiss.write_index(index, str(temp_path))
-        # Flush the vectors before the rename so a power loss cannot publish a
-        # truncated index file; the directory fsync makes the rename durable.
+        # Flush before rename so a partial file is never published.
         _fsync_file(temp_path)
         os.replace(temp_path, path)
         _fsync_dir(path.parent)

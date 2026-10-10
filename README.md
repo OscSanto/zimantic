@@ -39,45 +39,29 @@ rather than replacing it.
 
 ### 1. Indexing a ZIM (`build`, once per ZIM)
 
-**What gets read.** Every entry in the ZIM is visited once. Images, stylesheets and scripts are
-skipped. Redirects, including the small "forwarding" pages some ZIMs use instead of real redirects,
-are stored as **title-only** entries that point to their article (app-shell stubs are the exception,
-below). Thus, searching "USA" still finds the United States page.
+**What gets read.** Every entry is visited once; images, stylesheets and scripts are skipped.
+Redirects are stored as **title-only** entries pointing to their article, so searching "USA" still
+finds the United States page.
 
-**App-shell ZIMs.** Some ZIMs render every article through a JavaScript app: the HTML entry is a tiny
-stub that forwards to a route such as `index.html#/Bookshelves/…`, and the real body is stored as JSON
-(`content/page_content_<id>.json`, key `htmlBody`). Zimantic reads that JSON, indexes its text, and
-keeps the article's own ZIM path (for example `index/page_3941`) as a deep link into the route, so
-title-word, full-text and meaning search all agree on the real article instead of collapsing every
-result onto the app shell. Stubs whose only visible text is an "enable JavaScript" notice, and the
-shared app shell itself, are skipped so that one boilerplate vector cannot surface as a result.
+**App-shell ZIMs.** Some ZIMs store article bodies in JSON behind a JavaScript shell. Zimantic reads
+that JSON and keeps each article's own path as a deep link, so results point to the real article
+instead of the shared shell. Shell stubs and "enable JavaScript" notices are skipped.
 
-**Text extraction.** Zimantic skips stylesheets, scripts and footnote markers like `[1]`, then
-collects substantial visible blocks. Paragraphs are preferred; when a page has no suitable paragraph,
-`blockquote`, `pre`, `div`, `section`, `article` and `main` are considered before ordered-list blocks
-used by dictionary-style pages. Page chrome such as navigation, headers, footers and asides is
-ignored, as are common boilerplate notices such as stub prompts and anti-bot warnings.
+**Text extraction.** Stylesheets, scripts, footnotes, page chrome and common boilerplate are
+ignored. Visible blocks are collected in priority order, with paragraphs preferred.
 
-Extraction produces a single stored **excerpt** per article that serves two budgets, so the SQLite
-index does not duplicate article text: it computes the preview- and embedding-sized candidates and
-stores the longer one. The preview is capped by `max_preview_chars` (1,000 by default); the embedding
-is capped by `max_embedding_tokens` (256 by default, including the model's two special tokens).
-`preview_overflow = "skip"` keeps looking for another block when one does not fit;
-`embedding_overflow = "truncate"` fills the remaining model budget. Truncation stops at word
-boundaries. If no block fits, the best available block is truncated as a last resort. Both modes
-inspect at most the first 4 MiB of each HTML page by default; change `max_html_bytes` to tune that
-limit.
+Each article stores one **excerpt** for both previews and embeddings. It is capped by
+`max_preview_chars` (1,000 by default) and `max_embedding_tokens` (256); overflow behavior is
+controlled by `preview_overflow` and `embedding_overflow`. Extraction reads up to 4 MiB per page by
+default.
 
-**Other ZIMs** (Stack Exchange, Gutenberg, TED, …) aren't refused: `build` runs on any ZIM and
-extracts their visible HTML text using the same block hierarchy. PDFs inside a ZIM are skipped.
+**Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable HTML.
+PDFs inside a ZIM are skipped.
 
-**Embedding.** The title and extracted text are turned into a vector — a list of numbers describing
-their meaning — currently by
+**Embedding.** Titles and excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-Input is capped at `max_embedding_tokens` (256 by default, including the two special tokens). This is
-an explicit application budget; the ONNX input shape is dynamic. The stored excerpt is truncated at
-word boundaries to the available token budget before embedding. Search results use the same stored
-excerpt and expose at most `max_preview_chars` characters.
+Input is capped by `max_embedding_tokens`; results use the same excerpt and expose at most
+`max_preview_chars` characters.
 
 **Storage.** Each ZIM gets two files in `index_dir`:
 - `<name>.sqlite`: titles, the shared excerpt, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
@@ -89,51 +73,34 @@ excerpt and expose at most `max_preview_chars` characters.
 | 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search scans about 6% of the closest clusters by default (64 of 1,062 on WikiMed's 70k articles) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters was within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). The probe count scales automatically for larger ZIMs; set `nprobe` in `config.toml` to use a fixed value instead. 8-bit numbers were nearly exact. **Heavier compression (e.g. PQ48) lost ~25% of the top hits in earlier testing.** |
 
 IVF training samples are selected across the ZIM and scale with the number of clusters, with at least
-39 samples per cluster as required by FAISS. This avoids under-training warnings on larger ZIMs
-without loading every vector into the training set.
+39 samples per cluster as required by FAISS.
 
-The `.faiss` file is memory-mapped: the operating system reads only the **clusters** a search touches
-instead of loading the whole index into RAM. Clusters are found relative to the distance of
-query-to-cluster centres in vector space.
+The `.faiss` file is memory-mapped, so searches read only the clusters they touch.
 
-If a build stops, running it again resumes from the last saved batch. Stopping one is safe at any
-point: Ctrl-C and a systemd `stop` (SIGTERM is handled like Ctrl-C) land between batches, and an
-interrupted run resumes where it left off. The FAISS file is written atomically and the SQLite `done`
-marker is written only after it is complete, so an interrupted finalization can be resumed safely.
-When a normal build upgrades a fast index, the existing title-word/full-text index remains available
-until the replacement is complete. Extracted excerpts
-are stored in the SQLite index, so changing `max_preview_chars`, `max_embedding_tokens`, overflow
-policies, `max_html_bytes`, or extraction behavior requires rebuilding that ZIM with `build --force`.
+Builds resume from the last saved batch. FAISS files are published atomically, and a fast index
+remains available while a full replacement is built. Rebuild with `build --force` after changing
+extraction or excerpt settings.
 
 ### 2. Starting the server (`serve`, once)
 
-At startup Zimantic loads the embedding model and opens every **finished** index; that is, the SQLite
-file, the FAISS file, and the ZIM. These stay open for as long as the server runs; **nothing is
-reloaded per search**. The page lists local indexes automatically. If `kiwix_server` is configured, it
-also refreshes the Kiwix catalog and can search catalog sources without a local semantic index using
-Kiwix full-text search.
+At startup Zimantic opens every **finished** index and keeps it open; nothing is reloaded per search.
+The page lists local indexes automatically. With `kiwix_server`, it also discovers catalog sources and
+can search them with Kiwix full-text search.
 
-An index does not need its FAISS file to be usable. If the vectors are missing or unreadable, the
-server keeps serving that index with **title-word and ZIM full-text search** instead of refusing to
-start. `serve --fast` takes this further and starts without the embedding model or any vectors at
-all, which is much quicker on a Pi.
+An index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
+search**. `serve --fast` also skips the model and all vectors.
 
 A lightweight HTML page is served through FastAPI and is accessible from any browser at
 `http://<host>:8090` (the `port` in `config.toml`).
 
-**Picking up indexes without a restart.** `python -m zimantic reload` sends `SIGHUP` to the running
-server (it records its PID in `zimantic.pid` next to `config.toml` at startup) and the server rescans
-`index_dir`: it opens new finished indexes, forgets deleted ones, and upgrades a fast index once its
-vectors appear. A plain `kill -HUP <pid>` works too; the server also tolerates a second signal during
-an in-flight reload. It is cheap enough to trigger from `systemd.path` or `cron`, so the server never
-has to poll the directory. Clients cannot trigger a refresh or reload from the web page or the HTTP
-API; source discovery is read-only.
+**Picking up indexes without a restart.** `python -m zimantic reload` sends `SIGHUP` to the server,
+which rescans `index_dir` for added, removed or upgraded indexes. `kill -HUP <pid>` also works.
 
 ### 3. Each search
 
-1. **Embed the query** with the same model used to index. This happens once per search, not once per source.
+1. **Embed the query** with the same model used to index.
 2. **Run three searches on each selected local source.** Sources run in parallel, up to
-   `search_workers` at a time; the three retrieval backends find the best matches in different ways:
+   `search_workers` at a time:
 
    | Search | Finds | Good at | Time |
    |---|---|---|---|
@@ -144,20 +111,13 @@ API; source discovery is read-only.
 3. **Collapse redirects**: every hit on a redirect is replaced by the article it points to, and duplicates are merged, so each article appears only once.
 4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall.
 5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared (a cosine similarity, a BM25 score, a position in Kiwix's list), so RRF ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured source intent provide additional deterministic signals.
-6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is navigation: the page is promoted above the normal score range. Any other query that merely matches it is demoted so the real article wins.
+6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is navigation, whether it writes `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
-Search ranks **one pool** of results (up to `max_results`, at least `candidate_count`) and caches it
-by query and source set, independent of page size, offset and display filter. The response carries a
-single page (`page_size`, 10 by default); paging and source filtering reuse the same cached pool, so
-the ranking work happens once no matter how far the user browses.
+Search ranks one pool of results (up to `max_results`, at least `candidate_count`) and caches it by
+query and source set. Paging and display filters reuse that pool.
 
-The streaming endpoint sends a source completion and a provisional snapshot of the current page as
-each source finishes. The browser preserves result identities while reranking, so moved results
-animate into their new positions and new results enter without rebuilding the whole list. Users who
-prefer no animation are covered by `prefers-reduced-motion`. Previous/Next pagination uses regular
-links carrying the query, source and page, so pages remain shareable and open-in-new-tab works, but a
-click is intercepted: the page is fetched from the JSON endpoint and rendered in place instead of
-reloading the document, and Back/Forward move through normal browser history.
+The streaming endpoint sends a provisional page as each source finishes. Pagination uses regular links
+and updates the page through the JSON endpoint without a full document reload.
 
 *Timings measured on WikiMed; a whole search took 26 ms (median over 785 benchmark queries).
 A Raspberry Pi Zero 2 W is much slower (around 150 ms).*
@@ -246,9 +206,8 @@ never get committed.
 
 ## Install
 
-1. **Get the code and enter the folder.** Run the next commands from here. `config.toml` is optional —
-   when it is missing, zimantic warns and uses defaults auto-detected from the machine
-   (mobile / desktop / supercomputer), with the project folders as paths.
+1. **Get the code and enter the folder.** `config.toml` is optional; missing values use
+   hardware-based defaults.
 
    ```bash
    git clone https://github.com/OscSanto/zimantic.git
@@ -256,19 +215,16 @@ never get committed.
    ```
 
 2. **Create the environment and install the dependencies.** With
-   [uv](https://docs.astral.sh/uv/) this is a single step — it creates `.venv` and installs
-   Zimantic plus, by default, the dev-only tools (`pytest` and `httpx2`, which back the test
-   suite; the program itself does not need them):
+   [uv](https://docs.astral.sh/uv/):
 
    ```bash
    uv sync
    . .venv/bin/activate              # Windows: .venv\Scripts\activate
    ```
 
-   Add `--no-dev` to `uv sync` to skip the test tools. (`pip` works too: create a venv, then
-   `pip install .` for Zimantic and `pip install pytest httpx2` to run the tests.)
+   Add `--no-dev` to skip test tools. `pip install .` also works in a virtual environment.
 
-3. **Download the model into `model/`** (keep these exact file names):
+3. **Download the model into `model/`** using these file names:
 
    ```bash
    mkdir -p model
@@ -276,29 +232,23 @@ never get committed.
    curl -L -o model/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
    ```
 
-   (`curl` is built into Linux, macOS and Windows 10+. On Windows PowerShell, use `curl.exe` and `mkdir model`.)
-   Zimantic prints a warning at startup if either file does not match the documented checksum, but still
-   runs: a different conversion works, it may just rank differently.
+   Zimantic warns if either file differs from the documented checksum, but still runs.
 
 4. **Put your ZIM files in `zims/`.** Download them from
    [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. **Check `config.toml`.** If you used the folders above, nothing needs changing (you can even delete
-   the file — auto-detected defaults take over, with a warning). Otherwise point `zim_dir` /
-   `model_dir` / `index_dir` at your folders. To open articles from the results, set `kiwix_url` to
-   where kiwix-serve runs. Keys you omit fall back to the auto-detected defaults.
+5. **Check `config.toml`.** Point `zim_dir`, `model_dir` and `index_dir` at your folders if needed.
+   Set `kiwix_url` to the address where kiwix-serve runs.
 
-6. **Check that it runs, and that the installed dependencies expose the APIs Zimantic uses:**
+6. **Check the installation:**
 
    ```bash
    python -m zimantic --help
    python -m pytest tests/test_runtime_api.py   # builds a tiny ZIM and reads it back
    ```
 
-   The runtime check exercises the private libzim calls the indexer and searcher depend on
-   (`_get_entry_by_id`, `_index`, the full-text `Searcher`), so a dependency upgrade that breaks them
-   fails loudly here instead of at first search. Running the whole suite (`python -m pytest`) covers
-   the rest.
+   The runtime check verifies the libzim APIs used by indexing and search. Run `python -m pytest` for
+   the full suite.
 
 ## Use
 
@@ -315,39 +265,23 @@ python -m zimantic serve --fast                 # start now: no model, no vector
 python -m zimantic reload                       # ask a running server to rescan index_dir
 ```
 
-`build` takes zero or more files or folders. A folder means its `*.zim`; with no arguments it uses
-`zim_dir` from `config.toml`. When multiple ZIMs are selected, they are processed from smallest to
-largest file size. In an interactive terminal, `build` also shows a size-weighted overall progress bar
-with a global ETA. Already-built ZIMs are skipped, so rerunning it is cheap. Pass `--force` to rebuild
-the selected ZIMs even when their indexes are complete; a forced rebuild replaces both the SQLite and
-FAISS files.
+`build` accepts files or folders; a folder means its `*.zim`, and no arguments uses `zim_dir`.
+Already-built ZIMs are skipped. Pass `--force` to rebuild selected indexes.
 
-**Fast indexes.** `build --fast` stores titles and paths but never reads article bodies or runs the
-model, so it finishes much sooner and needs no vectors. The result is still searched by
-title-word (SQLite FTS) and the ZIM's own full-text index — both live in the ZIM/SQLite, not FAISS —
-so only *meaning* search is missing. Run a normal `build` later and it re-reads the entries and adds
-vectors in place.
+**Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
+model. Title-word and ZIM full-text search still work; run a normal `build` later to add vectors.
 
-Normal builds embed 32 articles at a time by default. This is intentionally a moderate CPU batch: the
-model pads each batch to its longest passage, so larger batches can use more memory and take longer.
-Tune `batch_size` in `config.toml` on faster hardware, and benchmark it against your ZIM. `embed_threads`
-bounds the ONNX Runtime threads (it defaults to leaving a core free). When all search slots are occupied,
-new searches fail fast as busy so they do not tie up web-server request threads; the web UI retries those
-responses with exponential backoff.
+Normal builds embed 32 articles at a time by default. Tune `batch_size` and `embed_threads` in
+`config.toml` for different hardware.
 
-**Hardware profiles.** When `config.toml` is missing, zimantic picks one of three default profiles
-(mobile, desktop, supercomputer) from a simple heuristic: roughly 1 GB of RAM or less is mobile;
-many cores (32+) or lots of RAM (128 GB+) is supercomputer; anything else is desktop. To pin explicit
-settings instead, copy the ready-made templates at the repo root over `config.toml`:
-`config.pi-zero-2w.toml` and `config.pi-5.toml`. Keys you omit from your `config.toml` still fall back
-to the auto-detected profile.
+**Hardware profiles.** Without `config.toml`, Zimantic selects mobile, desktop or supercomputer
+defaults from the machine's resources. Copy `config.pi-zero-2w.toml` or `config.pi-5.toml` to pin
+settings.
 
-Keep free disk space roughly equal to **another copy of the index** while `build` runs: a normal build
-renames the replacement into place beside the old index (for a fast→full upgrade) and writes the FAISS
-file through a same-directory temporary file before publishing it atomically.
+As a rule of thumb, keep enough free disk space when building indexes: at least **10% of each ZIM file's size**.
 
-**Automatic pickup with systemd.** Instead of the server polling directories, let systemd watch
-`zims/` and build + reload when a ZIM is added. Ready-to-copy user units live in `deploy/`:
+**Automatic pickup with systemd.** Ready-to-copy user units in `deploy/` can watch `zims/`, build and
+reload when a ZIM is added:
 
 - `deploy/zimantic.service` — the server, with `Restart=always` and sandboxing. Copy it to
   `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
@@ -356,31 +290,21 @@ file through a same-directory temporary file before publishing it atomically.
 - `deploy/zimantic-index-full.service` + `deploy/zimantic-index-full.timer` — run the full build
   (with meaning vectors) once a night.
 
-**Indexing only runs during a nightly window**, 01:00–06:00 in the machine's own local time by
-default. Both build services enforce the window with an `ExecCondition` clock check that runs before
-every start, and the timer triggers the full build at 01:00 (`OnCalendar=*-*-* 01:00:00`). Because
-the window follows local time, the same units work unchanged in any timezone — move the device or
-change its timezone and the hours still mean 01:00–06:00 where the machine is. To use different
-hours, change the two numbers in each `ExecCondition` and keep the timer's `OnCalendar` start inside
-the window. ZIMs added during the day are not ignored: the nightly full build indexes them, and
-`build` skips anything already indexed, so the nightly run is near-instant once the library is
-complete. A shared `flock` (in util-linux) in both units guarantees the path-triggered fast build and
-the nightly full build never write the same index at the same time; a build that arrives while the
-lock is held is skipped and picked up on the next run.
+The path-triggered fast build runs whenever a ZIM is added. The full build runs from 01:00–06:00
+local time by default; adjust its `ExecCondition` and timer to change the window. A shared `flock`
+prevents overlapping builds.
 
-Each file has install instructions in its header. Adjust `WorkingDirectory`/`ExecStart` if the project
-is not at `~/zimantic`, and uncomment the `MemoryMax`/`CPUQuota` lines to cap resource use on a small
-device.
+Each unit has install instructions in its header. The units assume a self-contained checkout at
+the default XDG data directory, `~/.local/share/zimantic`, so the repository, virtual environment,
+configuration, ZIMs and indexes stay together there. Adjust `WorkingDirectory` and `ExecStart` if
+you use a custom `XDG_DATA_HOME` or keep the checkout elsewhere.
 
 `reload` does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by
 default, or from the file passed with `--pid`. A stale PID file (left over after a crash or a signal
 shutdown) is reported and ignored.
 
-Watch `zims/`, not `indexes/`: `build` writes into `indexes/`, so a path unit there would fire on its
-own output. `build` skips already-indexed ZIMs, so this is cheap once the library is indexed. If you
-instead copy finished indexes in from another machine, point `PathChanged` at `indexes/` and run only
-`reload`. Building on a more powerful PC and copying the files over is also a good plan when a ZIM is
-slow to index locally.
+Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you copy finished indexes from
+another machine, watch `indexes/` and run only `reload`.
 
 To open articles from the results, run kiwix-serve with the same ZIMs, in a second terminal:
 
@@ -389,29 +313,21 @@ sudo apt install kiwix-tools             # Debian/Ubuntu/Raspberry Pi OS; other 
 kiwix-serve --port 8085 zims/*.zim       # matches the default kiwix_url in config.toml
 ```
 
-A running `serve` picks up new indexes when you run `python -m zimantic reload` (no restart needed);
-a fast index remains searchable while the normal build creates and publishes its replacement.
+A running `serve` picks up new indexes with `python -m zimantic reload`; a fast index remains
+searchable while a full replacement is built.
 
 JSON API examples:
 
-- `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=10&offset=0&source=<key>&debug=1` returns one
-  page of the JSON result list (`zim`, `source`, and `debug` may be omitted). Totals travel as
-  `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers, so the body stays a plain list.
-  `source` is a display-only filter over the ranked pool: it never changes what is searched.
-- `GET /api/search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited JSON events:
-  `started`, `source`, `snapshot`, `done`, or a `busy` `error`. Each event carries `total_sources`,
-  and snapshots/done carry the page, `total`, `has_more` and per-source `counts`.
-- `GET /api/sources` returns source metadata and readiness; `GET /api/config` returns `page_size` and
-  `max_results`; `GET /api/zims` remains as the local-index compatibility endpoint.
-- `GET /api/health` reports served indexes, source count, and cache statistics.
+- `GET /api/search?q=...&zim=<name>&limit=10&offset=0&source=<key>` returns one page of results.
+  Totals are in `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers.
+- `GET /api/search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
+  events and result snapshots.
+- `GET /api/sources`, `/api/config`, `/api/zims` and `/api/health` return source, configuration,
+  local-index and health information.
 
 Reloading indexes is **not** an HTTP API: running servers rescan via `python -m zimantic reload` or
 `kill -HUP <pid>`.
 
-Exact queries (same text, same selected sources) are answered from a small LRU cache controlled by
-`cache_size` and bounded by `cache_bytes` (32 MiB by default). A streamed search caches its ranked pool
-too, so the regular JSON endpoint gets it for free and every page of a query reuses the same
-computation. Because the pool is cached independently of page size, offset and display filter, moving
-between pages never re-ranks. The cache is only invalidated when the set of searchable sources actually
-changes (an index is added, removed, or rebuilt), so repeated queries — including full page reloads —
-are served from the cache as long as nothing changed.
+Exact queries use a small LRU cache controlled by `cache_size` and `cache_bytes` (32 MiB by default).
+The ranked pool is shared across pages and display filters, and invalidated when searchable sources
+change.

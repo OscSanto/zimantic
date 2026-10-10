@@ -20,8 +20,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-# Development and test-only tools. httpx2 backs FastAPI's TestClient; the
-# application itself uses urllib, so it is not a runtime dependency.
+# Development and test-only tools; the application does not need them at runtime.
 dev = [
     "pytest",
     "httpx2",

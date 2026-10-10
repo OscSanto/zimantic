@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +25,7 @@ class ModelChecksumTests(unittest.TestCase):
 
 class ThreadConfigTests(unittest.TestCase):
     def test_default_thread_budget_leaves_at_least_one_thread(self):
-        self.assertGreaterEqual(embed.DEFAULT_EMBED_THREADS, 1)
+        self.assertEqual(embed.DEFAULT_EMBED_THREADS, max(1, (os.cpu_count() or 1) - 1))
 
 
 if __name__ == "__main__":

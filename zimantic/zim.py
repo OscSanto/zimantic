@@ -39,8 +39,7 @@ SPA_CONTENT_PATH = "content/page_content_{id}.json"
 JS_SHELL_MARKERS = (b"<noscript", b'id="app"', b"id='app'")
 JS_NOTICE_MAX_CHARS = 300
 
-# Disambiguation pages are persisted with a title suffix, so search can apply
-# the same ranking policy without a separate metadata table.
+# Persist disambiguation pages with a title suffix instead of a metadata table.
 DISAMBIGUATION_SUFFIX = " (disambiguation)"
 DISAMBIG_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
 DISAMBIG_BOILERPLATE = re.compile(r"this disambiguation page", re.I)

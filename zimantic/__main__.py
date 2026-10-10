@@ -61,9 +61,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # config.toml is optional: a missing or empty file only warns and falls back
-    # to defaults tuned for the hardware it is running on (settings.load_config).
-    # `reload` only needs the PID file, so it avoids loading config entirely.
+    # `reload` only needs the PID file.
     if args.command in {"build", "serve"}:
         from .settings import load_config
 
@@ -186,8 +184,6 @@ def main() -> None:
 
             search.start_embedder(_make_embedder)
 
-        # Import the web layer after the model load has started so FastAPI's
-        # import cost overlaps it instead of adding to startup.
         from .server import serve
 
         if args.fast:
