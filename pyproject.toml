@@ -17,6 +17,7 @@ dependencies = [
     "libzim",
     "fastapi",
     "uvicorn",
+    "pymupdf",
 ]
 
 [dependency-groups]

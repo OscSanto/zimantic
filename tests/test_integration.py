@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +52,29 @@ class _Page(Item):
 
     def get_contentprovider(self):
         return StringProvider(self._html)
+
+    def get_hints(self):
+        return {Hint.FRONT_ARTICLE: True}
+
+
+class _PdfPage(Item):
+    def __init__(self, path: str, title: str, pdf: bytes):
+        super().__init__()
+        self._path = path
+        self._title = title
+        self._pdf = pdf
+
+    def get_path(self):
+        return self._path
+
+    def get_title(self):
+        return self._title
+
+    def get_mimetype(self):
+        return "application/pdf"
+
+    def get_contentprovider(self):
+        return StringProvider(self._pdf)
 
     def get_hints(self):
         return {Hint.FRONT_ARTICLE: True}
@@ -148,6 +172,52 @@ class LocalIntegrationTests(unittest.TestCase):
                 ["started", "source", "snapshot", "done"],
             )
             self.assertEqual(json.loads(stream.text.splitlines()[-1])["results"][0]["title"], "Beta")
+
+    def test_pdf_entries_are_indexed_end_to_end(self):
+        import pymupdf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "library.zim"
+
+            document = pymupdf.open()
+            page = document.new_page()
+            page.insert_textbox(
+                pymupdf.Rect(72, 72, 520, 760),
+                "Photosynthesis converts light energy into chemical energy "
+                "stored in glucose.",
+                fontsize=11,
+            )
+            pdf = document.tobytes()
+            document.close()
+
+            creator = Creator(str(zim_path))
+            creator.config_indexing(True, "eng")
+            with creator:
+                creator.add_item(
+                    _PdfPage("media/photosynthesis.pdf", "Photosynthesis", pdf)
+                )
+
+            build_module.build(zim_path, indexes, embedder=None, batch_size=1)
+            search = self._open_search(root)
+
+            results = search.search("photosynthesis", limit=5)
+            self.assertTrue(
+                any(result["title"] == "Photosynthesis" for result in results)
+            )
+
+            db = sqlite3.connect(indexes / "library.sqlite")
+            try:
+                excerpt = db.execute(
+                    "SELECT excerpt FROM docs WHERE title = 'Photosynthesis'"
+                ).fetchone()[0]
+            finally:
+                db.close()
+            self.assertIn("light energy", excerpt)
 
     def test_interrupted_upgrade_keeps_published_index_until_reload(self):
         with tempfile.TemporaryDirectory() as tmp:

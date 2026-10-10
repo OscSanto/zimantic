@@ -15,6 +15,7 @@ from zimantic.zim import (
     DEFAULT_PREVIEW_CHARS,
     disambiguation_title,
     extract_excerpt,
+    extract_pdf_excerpt,
     is_javascript_shell,
     iter_text_blocks,
     is_disambiguation,
@@ -90,6 +91,45 @@ class _Entry:
 class _Archive:
     def _get_entry_by_id(self, index):
         return _Entry()
+
+
+def _pdf_bytes(text: str, *, pages: int = 1) -> bytes:
+    """Build a small in-memory PDF with a real text layer."""
+    import pymupdf
+
+    document = pymupdf.open()
+    for _ in range(pages):
+        page = document.new_page()
+        page.insert_textbox(pymupdf.Rect(72, 72, 520, 760), text, fontsize=11)
+    data = document.tobytes()
+    document.close()
+    return data
+
+
+def _pdf_archive(content: bytes, *, title: str = "Annual Report", path: str = "files/report.pdf"):
+    """Minimal Archive exposing one application/pdf entry."""
+
+    class _PdfItem:
+        mimetype = "application/pdf"
+
+        def __init__(self):
+            self.content = content
+
+    class _PdfEntry:
+        is_redirect = False
+
+        def __init__(self):
+            self.title = title
+            self.path = path
+
+        def get_item(self):
+            return _PdfItem()
+
+    class _PdfArchive:
+        def _get_entry_by_id(self, _index):
+            return _PdfEntry()
+
+    return _PdfArchive()
 
 
 class TextExtractionTests(unittest.TestCase):
@@ -344,6 +384,44 @@ class TextExtractionTests(unittest.TestCase):
                 return _LogoEntry()
 
         self.assertIsNone(read_entry(_LogoArchive(), 0))
+
+    def test_pdf_text_layer_is_indexed(self):
+        content = _pdf_bytes(
+            "Tetanus is a serious bacterial infection caused by Clostridium "
+            "tetani. It affects the nervous system and causes muscle spasms."
+        )
+        row = read_entry(_pdf_archive(content), 0)
+        self.assertEqual(row[1], "Annual Report")
+        self.assertIn("bacterial infection", row[2])
+        self.assertEqual(row[3], "files/report.pdf")
+        self.assertIsNone(row[4])
+
+    def test_pdf_excerpt_is_bounded_to_preview_chars(self):
+        content = _pdf_bytes(" ".join(f"word{i}" for i in range(400)))
+        excerpt = extract_pdf_excerpt(content, max_preview_chars=120)
+        self.assertLessEqual(len(excerpt), 120)
+        self.assertGreater(len(excerpt), 100)
+
+    def test_scanned_pdf_without_text_layer_is_skipped(self):
+        self.assertIsNone(read_entry(_pdf_archive(_pdf_bytes("")), 0))
+
+    def test_malformed_pdf_is_skipped(self):
+        self.assertIsNone(read_entry(_pdf_archive(b"%PDF-1.4 not really a pdf"), 0))
+        self.assertEqual(extract_pdf_excerpt(b"not a pdf at all"), "")
+
+    def test_fast_build_stores_pdf_title_without_body(self):
+        row = read_entry(_pdf_archive(b"unused"), 0, fast=True)
+        self.assertEqual(row[1], "Annual Report")
+        self.assertEqual(row[2], "")
+        self.assertEqual(row[3], "files/report.pdf")
+
+    def test_pdf_text_spans_multiple_pages(self):
+        content = _pdf_bytes(
+            "First page text about introductory material and background.",
+            pages=2,
+        )
+        excerpt = extract_pdf_excerpt(content, max_preview_chars=1000)
+        self.assertEqual(excerpt.count("introductory material"), 2)
 
     def test_app_shell_with_description_is_not_indexed(self):
         html = (

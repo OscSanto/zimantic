@@ -13,9 +13,12 @@ set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
 DEFAULT_PREVIEW_CHARS = 1000
 DEFAULT_MAX_HTML_BYTES = 4 << 20
-# text/html is the common case; XHTML parses the same way, and plain text is
-# split into an excerpt with a simple normalization.
-_READABLE_MIMETYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain"})
+# text/html is the common case; XHTML parses the same way, plain text is split
+# into an excerpt with a simple normalization, and PDFs are read through their
+# embedded text layer.
+_READABLE_MIMETYPES = frozenset({
+    "text/html", "application/xhtml+xml", "text/plain", "application/pdf",
+})
 # Plain-text entries are usually article text (a text-based ZIM), but asset
 # bundles also ship licenses, dotfiles and config as text/plain. Skip those so
 # they never become search results. License/readme names are matched only in
@@ -442,6 +445,64 @@ def _plain_text_excerpt(raw: bytes, max_chars: int) -> str:
     return truncate_at_word_boundary(" ".join(text.split()), max_chars)
 
 
+def _pdf_module():
+    """Return the PyMuPDF module, imported lazily, or None when unavailable.
+
+    PDFs are a small share of most ZIMs, so MuPDF's native library is loaded only
+    the first time one is actually read. A server that never touches a PDF (or a
+    build of a PDF-free ZIM) never pays for it.
+    """
+    try:
+        import pymupdf
+    except ImportError:  # pragma: no cover - pymupdf is a declared dependency
+        return None
+    return pymupdf
+
+
+def extract_pdf_excerpt(
+    raw: bytes,
+    max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+) -> str:
+    """Return a PDF's opening text, bounded to ``max_preview_chars``.
+
+    Only whole pages are read, and only until the character budget is filled, so
+    a long document costs little. A scanned PDF has no text layer and yields an
+    empty string, which the caller treats as "not indexable" rather than storing
+    a title-only or boilerplate entry. A password-protected or malformed PDF is
+    skipped the same way instead of failing the build.
+    """
+    if not raw:
+        return ""
+    pymupdf = _pdf_module()
+    if pymupdf is None:
+        return ""
+    max_chars = max(1, int(max_preview_chars))
+    try:
+        document = pymupdf.open(stream=raw, filetype="pdf")
+    except Exception:
+        return ""
+    try:
+        if document.needs_pass:
+            return ""
+        pieces: list[str] = []
+        total = 0
+        for page in document:
+            try:
+                text = page.get_text("text")
+            except Exception:
+                continue
+            normalized = " ".join(text.split())
+            if not normalized:
+                continue
+            pieces.append(normalized)
+            total += len(normalized) + 1
+            if total >= max_chars:
+                break
+    finally:
+        document.close()
+    return truncate_at_word_boundary(" ".join(pieces), max_chars)
+
+
 def read_entry(
     zim: Archive,
     i: int,
@@ -476,8 +537,18 @@ def read_entry(
         html_limit = max(1, int(max_html_bytes))
     except (TypeError, ValueError):
         html_limit = DEFAULT_MAX_HTML_BYTES
-    raw = bytes(content[:html_limit])
+    # A PDF cannot be parsed from a prefix (its cross-reference table sits at the
+    # end), and libzim has already decompressed the whole entry, so read it whole.
+    raw = bytes(content) if mimetype == "application/pdf" else bytes(content[:html_limit])
     del content, item
+
+    if mimetype == "application/pdf":
+        excerpt = extract_pdf_excerpt(raw, max_preview_chars)
+        if len(excerpt) < MIN_BLOCK_CHARS:
+            # No text layer (a scan), password-protected, or malformed: skip it
+            # rather than store a title-only entry with no searchable body.
+            return None
+        return i, entry.title, excerpt, entry.path, None
 
     if mimetype == "text/plain":
         # Bundled licenses, dotfiles and configs are text/plain too; only real

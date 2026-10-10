@@ -84,7 +84,8 @@ Each article stores one **excerpt** for both previews and embeddings, bounded to
 Extraction reads up to 4 MiB per page by default.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable text:
-HTML, XHTML, and plain text. PDFs inside a ZIM are skipped.
+HTML, XHTML, plain text and PDFs. PDF text is read from the file's embedded text layer, so scanned
+documents without one are skipped.
 
 **Embedding.** Titles and excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
