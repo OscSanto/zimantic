@@ -78,8 +78,9 @@ ignored. Visible blocks are collected in priority order, with paragraphs preferr
 
 Each article stores one **excerpt** for both previews and embeddings. It keeps at least
 `max_preview_chars` (1,000 by default) and `embedding_tokens` (256) when the article has enough
-text; overflow behavior is controlled by `preview_overflow` and `embedding_overflow`. Extraction
-reads up to 4 MiB per page by default.
+text. `embedding_overflow` controls how the excerpt is cut to the token budget at build time;
+the browser trims the stored excerpt to `max_preview_chars` at a word boundary. Extraction reads
+up to 4 MiB per page by default.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable HTML.
 PDFs inside a ZIM are skipped.

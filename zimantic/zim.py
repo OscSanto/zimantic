@@ -14,7 +14,6 @@ set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
 DEFAULT_PREVIEW_CHARS = 1000
 DEFAULT_MAX_HTML_BYTES = 4 << 20
-DEFAULT_PREVIEW_OVERFLOW = "skip"
 DEFAULT_EMBEDDING_OVERFLOW = "truncate"
 OVERFLOW_POLICIES = {"skip", "truncate"}
 REFRESH_SCAN_BYTES = 64 << 10
@@ -270,11 +269,11 @@ def _excerpt(
 def _preview_excerpt(
     candidates: list[str],
     max_chars: int,
-    overflow: str,
 ) -> str:
+    # The preview is the article's opening blocks, cut off at a word boundary.
     return _excerpt(
         candidates,
-        overflow,
+        "truncate",
         max_chars,
         0,
         len,
@@ -315,7 +314,6 @@ def extract_excerpt(
     title: str = "",
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
-    preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     embedding_token_count: Callable[[str, str], int] | None = None,
     embedding_truncate: Callable[[str, str], str] | None = None,
@@ -332,22 +330,7 @@ def extract_excerpt(
     candidates = list(iter_text_blocks(html))
     if not candidates:
         return ""
-    preview_policy = _policy(preview_overflow)
-    preview = _preview_excerpt(
-        candidates,
-        max_chars,
-        preview_policy,
-    )
-    # A skip policy can leave the preview below its requested size. When a
-    # tokenizer is available, fill that gap from the article text so the
-    # stored excerpt still provides a useful preview.
-    if (
-        len(preview) < max_chars
-        and embedding_token_count is not None
-        and embedding_truncate is not None
-    ):
-        preview = _preview_excerpt(candidates, max_chars, "truncate")
-
+    preview = _preview_excerpt(candidates, max_chars)
     embedding_policy = _policy(embedding_overflow)
     embedding = _embedding_excerpt(
         candidates,
@@ -407,7 +390,6 @@ def read_entry(
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
-    preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     embedder=None,
 ):
@@ -457,7 +439,6 @@ def read_entry(
                 title=entry.title,
                 max_preview_chars=max_preview_chars,
                 embedding_tokens=embedding_tokens,
-                preview_overflow=preview_overflow,
                 embedding_overflow=embedding_overflow,
                 embedding_token_count=getattr(embedder, "token_count", None),
                 embedding_truncate=getattr(embedder, "truncate", None),
@@ -474,7 +455,6 @@ def read_entry(
         title=entry.title,
         max_preview_chars=max_preview_chars,
         embedding_tokens=embedding_tokens,
-        preview_overflow=preview_overflow,
         embedding_overflow=embedding_overflow,
         embedding_token_count=getattr(embedder, "token_count", None),
         embedding_truncate=getattr(embedder, "truncate", None),

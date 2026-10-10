@@ -114,7 +114,6 @@ def main() -> None:
             DEFAULT_EMBEDDING_OVERFLOW,
             DEFAULT_MAX_HTML_BYTES,
             DEFAULT_PREVIEW_CHARS,
-            DEFAULT_PREVIEW_OVERFLOW,
         )
         from tqdm import tqdm
 
@@ -190,7 +189,6 @@ def main() -> None:
                         max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
                         max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
                         embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
-                        preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
                         embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
                         force=args.force,
                     )

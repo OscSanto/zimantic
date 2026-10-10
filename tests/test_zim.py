@@ -169,19 +169,20 @@ class TextExtractionTests(unittest.TestCase):
         excerpt = truncate_at_word_boundary("x" * 1000, 750)
         self.assertEqual(len(excerpt), 750)
 
-    def test_preview_skips_oversized_blocks_and_keeps_searching(self):
+    def test_preview_truncates_an_oversized_block_instead_of_skipping_it(self):
+        # The stored excerpt is the opening prefix: an oversized block is cut,
+        # not skipped in favor of a smaller later one.
         html = (
             b"<p>" + b"x" * 100 + b"</p>"
             b"<p>" + b"y" * 55 + b"</p>"
         )
         excerpt = extract_excerpt(html, max_preview_chars=60)
-        self.assertEqual(excerpt, "y" * 55)
+        self.assertEqual(excerpt, "x" * 60)
 
     def test_preview_truncates_best_block_when_none_fits(self):
         excerpt = extract_excerpt(
             b"<p>one two three four five six seven eight nine ten eleven twelve</p>",
             max_preview_chars=20,
-            preview_overflow="truncate",
         )
         self.assertEqual(excerpt, "one two three four")
 

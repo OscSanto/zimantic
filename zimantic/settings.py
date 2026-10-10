@@ -25,7 +25,6 @@ MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     "max_html_bytes": 4_194_304,
     "max_preview_chars": 1_000,
     "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
-    "preview_overflow": "skip",
     "embedding_overflow": "truncate",
     "embed_threads": 2,
     "min_cosine_similarity": 0.85,
@@ -55,7 +54,6 @@ DESKTOP = {  # the shipped config.toml values, for typical PCs
     "max_html_bytes": 4_194_304,
     "max_preview_chars": 1_000,
     "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
-    "preview_overflow": "skip",
     "embedding_overflow": "truncate",
     "embed_threads": None,  # let the Embedder pick a sensible budget
     "min_cosine_similarity": 0.85,
@@ -85,7 +83,6 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
     "max_html_bytes": 4_194_304,
     "max_preview_chars": 1_000,
     "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
-    "preview_overflow": "skip",
     "embedding_overflow": "truncate",
     "embed_threads": 8,
     "min_cosine_similarity": 0.85,

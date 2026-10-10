@@ -58,9 +58,8 @@ max_preview_chars = 1_000
 # Embedding sequence length and minimum excerpt token budget, including two special tokens.
 embedding_tokens = 256
 
-# What to do when adding a block would exceed each independent budget.
+# What to do when adding a block would exceed the embedding token budget.
 # "skip" keeps looking for another suitable block; "truncate" fills the remaining budget.
-preview_overflow = "skip"
 embedding_overflow = "truncate"
 
 # Large ZIMs only (10,000+ articles): how many groups of vectors each search scans.
