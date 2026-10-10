@@ -11,7 +11,7 @@ import numpy as np
 import onnxruntime as ort
 import sentencepiece
 
-from .settings import DEFAULT_MAX_EMBEDDING_TOKENS, _system_memory_gb
+from .settings import DEFAULT_EMBEDDING_TOKENS, _system_memory_gb
 
 SPECIAL_TOKEN_COUNT = 2
 
@@ -85,7 +85,7 @@ class Embedder:
     def __init__(
         self,
         model_dir,
-        max_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+        embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
         threads: int | None = None,
         low_memory: bool | None = None,
     ):
@@ -95,9 +95,9 @@ class Embedder:
         back to the OS after batched embeddings. By default (None) it is enabled
         automatically on hosts with LOW_MEMORY_GB or less of RAM.
         """
-        self.max_tokens = int(max_tokens)
-        if self.max_tokens < SPECIAL_TOKEN_COUNT:
-            raise ValueError(f"max_tokens must be at least {SPECIAL_TOKEN_COUNT}")
+        self.embedding_tokens = int(embedding_tokens)
+        if self.embedding_tokens < SPECIAL_TOKEN_COUNT:
+            raise ValueError(f"embedding_tokens must be at least {SPECIAL_TOKEN_COUNT}")
         verify_model_files(model_dir)
         self.threads = (
             int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
@@ -138,14 +138,14 @@ class Embedder:
 
     def truncate(self, text: str, prefix: str = "") -> str:
         """Keep text within the model budget without cutting through a word."""
-        if self.token_count(text, prefix) <= self.max_tokens:
+        if self.token_count(text, prefix) <= self.embedding_tokens:
             return text
         words = text.split()
         low, high = 0, len(words)
         while low < high:
             midpoint = (low + high + 1) // 2
             candidate = " ".join(words[:midpoint])
-            if self.token_count(candidate, prefix) <= self.max_tokens:
+            if self.token_count(candidate, prefix) <= self.embedding_tokens:
                 low = midpoint
             else:
                 high = midpoint - 1
@@ -155,7 +155,7 @@ class Embedder:
         # XLM-RoBERTa numbering: <s>=0 <pad>=1 </s>=2 <unk>=3, other pieces are sentencepiece id + 1.
         with self._tokenizer_lock:
             pieces = self.tokenizer.encode(text)[
-                : self.max_tokens - SPECIAL_TOKEN_COUNT
+                : self.embedding_tokens - SPECIAL_TOKEN_COUNT
             ]
         return [0] + [p + 1 if p else 3 for p in pieces] + [2]
 

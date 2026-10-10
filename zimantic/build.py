@@ -8,7 +8,7 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 from libzim.reader import Archive
-from .settings import DEFAULT_MAX_EMBEDDING_TOKENS
+from .settings import DEFAULT_EMBEDDING_TOKENS
 from .zim import (
     DEFAULT_EMBEDDING_OVERFLOW,
     DEFAULT_MAX_HTML_BYTES,
@@ -38,7 +38,7 @@ def build(
     fast: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
-    max_embedding_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+    embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
     preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     force: bool = False,
@@ -125,7 +125,7 @@ def build(
                 fast=fast,
                 max_html_bytes=max_html_bytes,
                 max_preview_chars=max_preview_chars,
-                max_embedding_tokens=max_embedding_tokens,
+                embedding_tokens=embedding_tokens,
                 preview_overflow=preview_overflow,
                 embedding_overflow=embedding_overflow,
                 embedder=embedder,

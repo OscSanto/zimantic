@@ -197,11 +197,11 @@ class TextExtractionTests(unittest.TestCase):
             b"<p>" + b"one two three four five six seven eight nine ten " * 5 + b"</p>",
             title="Example",
             max_preview_chars=10,
-            max_embedding_tokens=8,
+            embedding_tokens=8,
             embedding_token_count=token_count,
             embedding_truncate=truncate,
         )
-        self.assertLessEqual(token_count(excerpt, "passage: Example\n"), 8)
+        self.assertEqual(token_count(excerpt, "passage: Example\n"), 8)
         self.assertEqual(excerpt, "one two three four")
 
     def test_embedding_budget_can_preserve_more_than_preview_limit(self):
@@ -217,12 +217,12 @@ class TextExtractionTests(unittest.TestCase):
             f"<p>{words}</p>".encode(),
             title="Example",
             max_preview_chars=750,
-            max_embedding_tokens=256,
+            embedding_tokens=256,
             embedding_token_count=token_count,
             embedding_truncate=truncate,
         )
         self.assertGreater(len(excerpt), 750)
-        self.assertLessEqual(token_count(excerpt, "passage: Example\n"), 256)
+        self.assertEqual(token_count(excerpt, "passage: Example\n"), 256)
 
     def test_embedding_skip_policy_keeps_looking_for_a_fitting_block(self):
         def token_count(text, prefix):
@@ -235,7 +235,7 @@ class TextExtractionTests(unittest.TestCase):
             ),
             title="Example",
             max_preview_chars=20,
-            max_embedding_tokens=20,
+            embedding_tokens=20,
             embedding_overflow="skip",
             embedding_token_count=token_count,
             embedding_truncate=lambda *_args, **_kwargs: self.fail("unexpected truncation"),

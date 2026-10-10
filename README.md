@@ -76,18 +76,18 @@ instead of the shared shell. Shell stubs and "enable JavaScript" notices are ski
 **Text extraction.** Stylesheets, scripts, footnotes, page chrome and common boilerplate are
 ignored. Visible blocks are collected in priority order, with paragraphs preferred.
 
-Each article stores one **excerpt** for both previews and embeddings. It is capped by
-`max_preview_chars` (1,000 by default) and `max_embedding_tokens` (256); overflow behavior is
-controlled by `preview_overflow` and `embedding_overflow`. Extraction reads up to 4 MiB per page by
-default.
+Each article stores one **excerpt** for both previews and embeddings. It keeps at least
+`max_preview_chars` (1,000 by default) and `embedding_tokens` (256) when the article has enough
+text; overflow behavior is controlled by `preview_overflow` and `embedding_overflow`. Extraction
+reads up to 4 MiB per page by default.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable HTML.
 PDFs inside a ZIM are skipped.
 
 **Embedding.** Titles and excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-Input is capped by `max_embedding_tokens`; results use the same excerpt and expose at most
-`max_preview_chars` characters.
+The model receives at most `embedding_tokens`; the same excerpt is used for results, which expose
+at most `max_preview_chars` characters.
 
 **Storage.** Each ZIM gets two files in `index_dir`:
 - `<name>.sqlite`: titles, the shared excerpt, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).

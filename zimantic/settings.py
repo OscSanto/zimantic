@@ -5,7 +5,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-DEFAULT_MAX_EMBEDDING_TOKENS = 256
+DEFAULT_EMBEDDING_TOKENS = 256
 
 # Fallback settings selected automatically when config.toml is missing (or a key
 # is missing from it). Any value present in config.toml always wins; unset keys
@@ -24,7 +24,7 @@ MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     "batch_size": 8,
     "max_html_bytes": 4_194_304,
     "max_preview_chars": 1_000,
-    "max_embedding_tokens": DEFAULT_MAX_EMBEDDING_TOKENS,
+    "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
     "preview_overflow": "skip",
     "embedding_overflow": "truncate",
     "embed_threads": 2,
@@ -54,7 +54,7 @@ DESKTOP = {  # the shipped config.toml values, for typical PCs
     "batch_size": 32,
     "max_html_bytes": 4_194_304,
     "max_preview_chars": 1_000,
-    "max_embedding_tokens": DEFAULT_MAX_EMBEDDING_TOKENS,
+    "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
     "preview_overflow": "skip",
     "embedding_overflow": "truncate",
     "embed_threads": None,  # let the Embedder pick a sensible budget
@@ -84,7 +84,7 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
     "batch_size": 128,
     "max_html_bytes": 4_194_304,
     "max_preview_chars": 1_000,
-    "max_embedding_tokens": DEFAULT_MAX_EMBEDDING_TOKENS,
+    "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
     "preview_overflow": "skip",
     "embedding_overflow": "truncate",
     "embed_threads": 8,

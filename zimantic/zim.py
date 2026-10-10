@@ -6,7 +6,7 @@ from html.parser import HTMLParser
 from urllib.parse import unquote
 from typing import Callable, Iterator
 from libzim.reader import Archive, set_cluster_cache_max_size
-from .settings import DEFAULT_MAX_EMBEDDING_TOKENS
+from .settings import DEFAULT_EMBEDDING_TOKENS
 
 # libzim undercounts this cache: its 16 MB default really used ~170 MB. 1 MB used ~4 MB and wasn't slower.
 set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
@@ -213,8 +213,8 @@ def iter_text_blocks(html: bytes) -> Iterator[str]:
     yield from parser.candidates()
 
 
-def _policy(value: str, default: str) -> str:
-    policy = default if value is None else str(value).casefold()
+def _policy(value: str) -> str:
+    policy = str(value).casefold()
     if policy not in OVERFLOW_POLICIES:
         choices = ", ".join(sorted(OVERFLOW_POLICIES))
         raise ValueError(f"overflow policy must be one of {choices}, got {value!r}")
@@ -231,88 +231,135 @@ def truncate_at_word_boundary(text: str, max_chars: int) -> str:
     return cut[:boundary].rstrip() if boundary > 0 else cut
 
 
+def _fit_chars(candidate: str, available: int) -> str:
+    return truncate_at_word_boundary(candidate, available) if available > 0 else ""
+
+
+def _excerpt(
+    candidates: list[str],
+    overflow: str,
+    limit: int,
+    initial: int,
+    measure: Callable[[str], int],
+    remainder: Callable[[str, str, str], str],
+) -> str:
+    """Join blocks while ``measure`` keeps the running total within ``limit``.
+
+    ``measure`` prices a block as it is appended, so callers can count characters
+    or tokens incrementally instead of re-measuring the whole excerpt. On
+    overflow the offending block is truncated or dropped per ``overflow``.
+    """
+    current = ""
+    used = initial
+    for candidate in candidates:
+        separator = "\n\n" if current else ""
+        cost = measure(separator + candidate)
+        if used + cost <= limit:
+            current += separator + candidate
+            used += cost
+            continue
+        if overflow == "truncate":
+            fitted = remainder(current, separator, candidate)
+            if fitted:
+                current += separator + fitted
+            break
+    # Nothing fit: keep a truncated opening block so the page still has a preview.
+    return current or remainder("", "", candidates[0])
+
+
 def _preview_excerpt(
     candidates: list[str],
     max_chars: int,
     overflow: str,
 ) -> str:
-    accepted: list[str] = []
-    for candidate in candidates:
-        separator = "\n\n" if accepted else ""
-        available = max_chars - len(separator) - sum(map(len, accepted)) - max(0, len(accepted) - 1) * 2
-        if len(candidate) <= available:
-            accepted.append(candidate)
-        elif overflow == "truncate" and available > 0:
-            fitted = truncate_at_word_boundary(candidate, available)
-            if fitted:
-                accepted.append(fitted)
-            break
-    if accepted:
-        return "\n\n".join(accepted)
-    return truncate_at_word_boundary(candidates[0], max_chars) if candidates else ""
+    return _excerpt(
+        candidates,
+        overflow,
+        max_chars,
+        0,
+        len,
+        lambda current, separator, candidate: _fit_chars(
+            candidate, max_chars - len(current) - len(separator)
+        ),
+    )
 
 
 def _embedding_excerpt(
     candidates: list[str],
     title: str,
-    max_tokens: int,
+    embedding_tokens: int,
     overflow: str,
     token_count: Callable[[str, str], int] | None,
     truncate: Callable[[str, str], str] | None,
 ) -> str:
-    if not candidates or token_count is None or truncate is None:
+    if token_count is None or truncate is None:
         return ""
     prefix = f"passage: {title}\n"
-    accepted: list[str] = []
-    for candidate in candidates:
-        separator = "\n\n" if accepted else ""
-        current = "\n\n".join(accepted)
-        proposed = current + separator + candidate
-        if token_count(proposed, prefix) <= max_tokens:
-            accepted.append(candidate)
-            continue
-        if overflow == "truncate":
-            fitted = truncate(candidate, prefix=prefix + current + separator)
-            if fitted:
-                accepted.append(fitted)
-            break
-    if accepted:
-        return "\n\n".join(accepted)
-    return truncate(candidates[0], prefix=prefix)
+    # The separator is a hard token boundary, so pieces add up across blocks and
+    # only the newly appended block needs measuring.
+    empty = token_count("", "")
+    return _excerpt(
+        candidates,
+        overflow,
+        embedding_tokens,
+        token_count("", prefix),
+        lambda text: token_count(text, "") - empty,
+        lambda current, separator, candidate: truncate(
+            candidate, prefix=prefix + current + separator
+        ),
+    )
 
 
 def extract_excerpt(
     html: bytes,
     title: str = "",
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
-    max_embedding_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+    embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
     preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     embedding_token_count: Callable[[str, str], int] | None = None,
     embedding_truncate: Callable[[str, str], str] | None = None,
 ) -> str:
-    """Return one stored excerpt large enough for preview or embedding use."""
+    """Return text meeting the preview and embedding floors when available.
+
+    The stored excerpt may exceed either individual budget: ``max_preview_chars``
+    keeps enough text for the UI, while ``embedding_tokens`` gives the model
+    enough input. The embedder enforces ``embedding_tokens`` when it creates the
+    vector.
+    """
     max_chars = max(1, int(max_preview_chars))
-    max_tokens = max(1, int(max_embedding_tokens))
+    token_budget = max(1, int(embedding_tokens))
     candidates = list(iter_text_blocks(html))
+    if not candidates:
+        return ""
+    preview_policy = _policy(preview_overflow)
     preview = _preview_excerpt(
         candidates,
         max_chars,
-        _policy(preview_overflow, DEFAULT_PREVIEW_OVERFLOW),
+        preview_policy,
     )
+    # A skip policy can leave the preview below its requested size. When a
+    # tokenizer is available, fill that gap from the article text so the
+    # stored excerpt still provides a useful preview.
+    if (
+        len(preview) < max_chars
+        and embedding_token_count is not None
+        and embedding_truncate is not None
+    ):
+        preview = _preview_excerpt(candidates, max_chars, "truncate")
+
+    embedding_policy = _policy(embedding_overflow)
     embedding = _embedding_excerpt(
         candidates,
         title,
-        max_tokens,
-        _policy(embedding_overflow, DEFAULT_EMBEDDING_OVERFLOW),
+        token_budget,
+        embedding_policy,
         embedding_token_count,
         embedding_truncate,
     )
-    return max(
-        (preview, embedding),
-        key=len,
-        default="",
-    )
+    # Both excerpts come from the same ordered blocks, so the longer one also
+    # covers the other's floor; the embedder truncates tokens to its budget.
+    return max(preview, embedding, key=len)
 
 
 def _spa_page_body(zim: Archive, entry) -> bytes | None:
@@ -359,7 +406,7 @@ def read_entry(
     fast: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
-    max_embedding_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
+    embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
     preview_overflow: str = DEFAULT_PREVIEW_OVERFLOW,
     embedding_overflow: str = DEFAULT_EMBEDDING_OVERFLOW,
     embedder=None,
@@ -409,7 +456,7 @@ def read_entry(
                 body,
                 title=entry.title,
                 max_preview_chars=max_preview_chars,
-                max_embedding_tokens=max_embedding_tokens,
+                embedding_tokens=embedding_tokens,
                 preview_overflow=preview_overflow,
                 embedding_overflow=embedding_overflow,
                 embedding_token_count=getattr(embedder, "token_count", None),
@@ -426,7 +473,7 @@ def read_entry(
         html,
         title=entry.title,
         max_preview_chars=max_preview_chars,
-        max_embedding_tokens=max_embedding_tokens,
+        embedding_tokens=embedding_tokens,
         preview_overflow=preview_overflow,
         embedding_overflow=embedding_overflow,
         embedding_token_count=getattr(embedder, "token_count", None),

@@ -19,7 +19,7 @@ batch_size = 16
 
 max_html_bytes = 4_194_304
 max_preview_chars = 1_000
-max_embedding_tokens = 256
+embedding_tokens = 256
 preview_overflow = "skip"
 embedding_overflow = "truncate"
 

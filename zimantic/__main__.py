@@ -109,7 +109,7 @@ def main() -> None:
 
     if args.command == "build":
         from .build import build as build_zim
-        from .embed import DEFAULT_MAX_EMBEDDING_TOKENS, Embedder
+        from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
         from .zim import (
             DEFAULT_EMBEDDING_OVERFLOW,
             DEFAULT_MAX_HTML_BYTES,
@@ -164,7 +164,7 @@ def main() -> None:
         if not args.fast:
             embedder = Embedder(
                 cfg["model_dir"],
-                max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
                 threads=cfg.get("embed_threads"),
             )
         global_progress = None
@@ -189,7 +189,7 @@ def main() -> None:
                         fast=args.fast,
                         max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
                         max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
-                        max_embedding_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                        embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
                         preview_overflow=cfg.get("preview_overflow", DEFAULT_PREVIEW_OVERFLOW),
                         embedding_overflow=cfg.get("embedding_overflow", DEFAULT_EMBEDDING_OVERFLOW),
                         force=args.force,
@@ -220,11 +220,11 @@ def main() -> None:
             # full-text searches immediately and gains meaning search once the
             # ONNX model and vocabulary finish loading in the background.
             def _make_embedder():
-                from .embed import DEFAULT_MAX_EMBEDDING_TOKENS, Embedder
+                from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
 
                 return Embedder(
                     cfg["model_dir"],
-                    max_tokens=cfg.get("max_embedding_tokens", DEFAULT_MAX_EMBEDDING_TOKENS),
+                    embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
                     threads=cfg.get("embed_threads"),
                 )
 
