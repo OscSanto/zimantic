@@ -61,7 +61,6 @@ class Embedder:
         verify_model_files(model_dir)
         self.threads = int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
         opts = ort.SessionOptions()
-        opts.enable_cpu_mem_arena = False
         opts.intra_op_num_threads = self.threads
         opts.inter_op_num_threads = 1
         # Prevent idle ORT threads from busy-waiting between batches.
