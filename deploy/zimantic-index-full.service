@@ -16,14 +16,13 @@ Description=Build full Zimantic indexes at night and rescan
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/zimantic
-# Only start between 01:00 and 06:00 local time. Both build units share this
-# window, so manual, path-triggered and timer runs all respect it.
+WorkingDirectory=%h/.local/share/zimantic
+# Only the full build is allowed between 01:00 and 06:00 local time.
 ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
 # Serialize against the path-triggered fast build: if it already holds the
 # lock, skip instead of touching the same index files concurrently. flock ships
 # in util-linux; the `|| echo` writes the skip reason into the journal.
-ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/zimantic/.venv/bin/python -m zimantic build || echo "zimantic: another build is running, nightly full build skipped" >&2'
-ExecStart=%h/zimantic/.venv/bin/python -m zimantic reload
+ExecStart=/bin/sh -c '/usr/bin/flock -n %t/zimantic-build.lock %h/.local/share/zimantic/.venv/bin/python -m zimantic build || echo "zimantic: another build is running, nightly full build skipped" >&2'
+ExecStart=%h/.local/share/zimantic/.venv/bin/python -m zimantic reload
 NoNewPrivileges=yes
 PrivateTmp=yes

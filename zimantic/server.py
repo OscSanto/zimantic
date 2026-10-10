@@ -41,7 +41,6 @@ def create_app(searchClass) -> FastAPI:
 
     @app.get("/api/config")
     def config(request: Request):
-        # Page defaults so the UI does not hard-code them.
         return _json_with_etag(request, {
             "page_size": getattr(searchClass, "page_size", 10),
             "max_results": getattr(searchClass, "max_results", 100),
@@ -49,8 +48,6 @@ def create_app(searchClass) -> FastAPI:
 
     @app.get("/api/sources")
     def sources(request: Request):
-        # Source discovery only: clients can never force a refresh. Rebuilding the
-        # source set is an admin action carried out by `zimantic reload` or SIGHUP.
         return _json_with_etag(request, searchClass.source_dicts())
 
     @app.get("/api/health")
@@ -141,7 +138,6 @@ def _handle_reload_request(searchClass, guard: threading.Lock) -> None:
 
 
 def serve(searchClass, port: int) -> None:
-    # 0.0.0.0: reachable from other devices on the network, not only this machine.
     app = create_app(searchClass)
     try:
         PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")

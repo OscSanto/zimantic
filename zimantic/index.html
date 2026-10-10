@@ -819,7 +819,7 @@
 
   function makeStateUrl(question, source, page) {
     // Keep q/src/page in the query string so links are shareable and Back/
-    // Forward just work; readLocationState still accepts legacy #hash links.
+    // Forward just work.
     const url = new URL(location.href);
     url.hash = "";
     url.search = "";
@@ -835,9 +835,7 @@
   }
 
   function readLocationState() {
-    const queryParams = new URLSearchParams(location.search);
-    const hashParams = new URLSearchParams(location.hash.slice(1));
-    const params = queryParams.has("q") ? queryParams : hashParams;
+    const params = new URLSearchParams(location.search);
     const debug = params.get("debug");
     const pageNumber = Number.parseInt(params.get("page") || "1", 10);
     return {
@@ -848,7 +846,7 @@
     };
   }
 
-  function applyHashState(state) {
+  function applyLocationState(state) {
     debugMode = state.debug;
     document.body.classList.toggle("debug-mode", debugMode);
   }
@@ -915,7 +913,7 @@
     // Explicitly submitted with an empty field: drop the prior search and
     // re-center. A cleared-but-not-submitted field keeps its results, so an
     // empty debounce never wipes the page on its own.
-    const hadSearch = current !== null || Boolean(location.hash) || Boolean(location.search);
+    const hadSearch = current !== null || Boolean(location.search);
     resetResults();
     $("question").value = "";
     if (hadSearch) {
@@ -949,7 +947,7 @@
 
   window.addEventListener("popstate", () => {
     const state = readLocationState();
-    applyHashState(state);
+    applyLocationState(state);
     if (!state.question) {
       // Navigated back/forward to the no-search entry: match it.
       resetResults();
@@ -987,7 +985,7 @@
       $("status").textContent = `Could not load sources: ${error.message}`;
     }
     const state = readLocationState();
-    applyHashState(state);
+    applyLocationState(state);
     if (state.question) {
       $("question").value = state.question;
       runSearch(state.question, state.source, state.page);

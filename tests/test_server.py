@@ -55,7 +55,7 @@ class ServerTests(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TestClient(create_app(FakeSearch()))
 
-    def test_sources_and_legacy_json_search(self):
+    def test_sources_and_json_search(self):
         self.assertEqual(self.client.get("/api/sources").json()[0]["key"], "manual")
         response = self.client.get("/api/search?q=page")
         self.assertEqual(response.json()[0]["title"], "Page")

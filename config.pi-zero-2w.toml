@@ -1,10 +1,5 @@
-# zimantic settings tuned for a Raspberry Pi Zero 2 W (4 cores, 512 MB RAM).
-#
-# config.toml is optional: without it zimantic auto-detects this class of
-# hardware and uses these values anyway. Copy this file over config.toml when
-# you want to pin them, and adjust the paths if needed. Indexing on this device
-# is slow: build the indexes on a faster machine and copy indexes/ here, or use
-# `build --fast`. Sizing here favors staying inside RAM.
+# Settings tuned for a Raspberry Pi Zero 2 W (4 cores, 512 MB RAM).
+# Copy this file to config.toml to use them. Build indexes elsewhere or use `build --fast`.
 
 zim_dir = "./zims"
 model_dir = "./model"
@@ -17,11 +12,10 @@ kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
 kiwix_search_path = "/kiwix/search"
 
 page_size = 10
-# A smaller ranked pool keeps the per-search cache and ranking work down.
+# Smaller pool to reduce cache and ranking work.
 max_results = 50
 
-# Small batches: the model pads each batch to its longest passage, and a Zero
-# has little RAM to spare.
+# Small batches save RAM.
 batch_size = 8
 
 max_html_bytes = 4_194_304
@@ -30,7 +24,7 @@ max_embedding_tokens = 256
 preview_overflow = "skip"
 embedding_overflow = "truncate"
 
-# Leave CPU for the search workers: ONNX Runtime gets 2 threads on the Zero.
+# Leave CPU for search workers.
 embed_threads = 2
 
 # nprobe = 64
@@ -39,12 +33,10 @@ long_query = 10
 disambiguation_boost = 0.08
 disambiguation_penalty = 0.5
 
-# Two source workers and two simultaneous searches keeps memory and CPU bounded.
 search_workers = 2
 max_concurrent_searches = 2
 candidate_count = 16
 source_timeout = 12
 
-# A small cache: RAM, not CPU, is the limit on this device.
 cache_size = 64
 cache_bytes = 8_388_608  # 8 MiB

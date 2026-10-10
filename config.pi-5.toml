@@ -1,10 +1,5 @@
-# zimantic settings tuned for a Raspberry Pi 5 (4 cores, 4-8 GB RAM).
-#
-# config.toml is optional: without it zimantic auto-detects your hardware.
-# Copy this file over config.toml when you want to pin these values, and adjust
-# the paths if needed. There is enough RAM here to keep a larger result pool and
-# cache, and enough CPU to embed in bigger batches and serve several searches
-# at once.
+# Settings tuned for a Raspberry Pi 5 (4 cores, 4-8 GB RAM).
+# Copy this file to config.toml to use them.
 
 zim_dir = "./zims"
 model_dir = "./model"
@@ -19,7 +14,7 @@ kiwix_search_path = "/kiwix/search"
 page_size = 10
 max_results = 100
 
-# 16 is a good middle ground on a Pi 5; benchmark 32 against your ZIMs.
+# Moderate batch size for a Pi 5.
 batch_size = 16
 
 max_html_bytes = 4_194_304
@@ -28,7 +23,7 @@ max_embedding_tokens = 256
 preview_overflow = "skip"
 embedding_overflow = "truncate"
 
-# Leave one core for search workers and the web server.
+# Leave one core for search and the web server.
 embed_threads = 3
 
 # nprobe = 64

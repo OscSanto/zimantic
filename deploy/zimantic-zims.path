@@ -1,7 +1,6 @@
-# Watch zim_dir and trigger a fast index + reload when a ZIM is added.
-# The fast build unit only works at night (01:00-06:00 local time by default);
-# the nightly full build (deploy/zimantic-index-full.timer) picks up anything
-# added during the day.
+# Watch zim_dir and trigger a fast index + reload whenever a ZIM is added.
+# The nightly full build (deploy/zimantic-index-full.timer) is constrained to
+# its configured time window.
 #
 # Install:
 #   cp deploy/zimantic-zims.path deploy/zimantic-index.service ~/.config/systemd/user/
@@ -17,7 +16,8 @@
 Description=Index new ZIMs and rescan Zimantic
 
 [Path]
-PathChanged=%h/zimantic/zims
+Unit=zimantic-index.service
+PathChanged=%h/.local/share/zimantic/zims
 
 [Install]
 WantedBy=default.target

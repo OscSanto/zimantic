@@ -41,13 +41,8 @@ INTENT_RULES = (
     (re.compile(r"^wikihow", re.I), ("how to", "how do", "how can", "how should", "steps to")),
 )
 
-# Intent-gated disambiguation handling. A query that names the page exactly is
-# navigation, so the page is promoted; any other query that merely happens to
-# match it is demoted behind real articles.
+# Exact disambiguation-title queries are navigation; other matches are demoted.
 DISAMBIGUATION_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
-# An exact disambiguation-title query outranks the whole normal score range, which tops out near
-# 3/60 (RRF in all three lists) + 0.02 (lexical). Suffixed pages gate on the whole
-# title, so "air (disambiguation)" is navigation but plain "air" is not.
 DEFAULT_DISAMBIGUATION_BOOST = 0.08
 DEFAULT_DISAMBIGUATION_PENALTY = 0.5
 
@@ -56,6 +51,16 @@ def _exact_title_intent(query_words: list[str], title: str) -> bool:
     """True when the query names the full title exactly: navigation intent."""
     hub = _query_terms(title)
     return bool(query_words) and len(hub) == len(query_words) and set(hub) == set(query_words)
+
+
+def _disambiguation_intent(query: str, query_words: list[str], title: str) -> bool:
+    """True when a query explicitly requests a disambiguation page."""
+    if _exact_title_intent(query_words, title):
+        return True
+    if not query.rstrip().endswith("?"):
+        return False
+    base_title = DISAMBIGUATION_TITLE.sub("", title)
+    return _exact_title_intent(query_words, base_title)
 
 
 @dataclass
@@ -245,8 +250,7 @@ class Search:
     def __init__(self, cfg: dict, embedder=None, semantic: bool = True):
         self.cfg = cfg
         self.embedder = embedder
-        # semantic=False is the "fast" mode: start without loading FAISS or the
-        # model and serve title + ZIM full-text results only.
+        # Fast mode skips FAISS and the model.
         self.semantic = bool(semantic)
         self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
@@ -256,19 +260,14 @@ class Search:
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
         self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
-        # `results` is the legacy name for the page size; keep reading it so an
-        # old config.toml keeps working.
-        self.page_size = _int_config(
-            cfg, "page_size", _int_config(cfg, "results", DEFAULT_PAGE_SIZE)
-        )
+        self.page_size = _int_config(cfg, "page_size", DEFAULT_PAGE_SIZE)
         self.max_results = _int_config(cfg, "max_results", DEFAULT_MAX_RESULTS)
         self.max_concurrent_searches = _int_config(
             cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
         self._executor = ThreadPoolExecutor(max_workers=self.source_workers, thread_name_prefix="zimantic-search")
-        # In-flight search per cache key: concurrent identical queries share one
-        # computation instead of racing to compute the same pool.
+        # Identical in-flight queries share one computation.
         self._inflight: dict[Any, Future] = {}
         self._inflight_lock = threading.Lock()
         self.cache = QueryCache(
@@ -305,8 +304,7 @@ class Search:
             faiss_path = db_path.with_suffix(".faiss")
             if self.semantic and done_value == "1" and faiss_path.exists():
                 try:
-                    # Imported lazily: title + full-text-only servers (and
-                    # `serve --fast`) never need FAISS, so they skip its ~0.2s import.
+                    # Fast mode does not need the FAISS import.
                     import faiss
 
                     faiss_index = faiss.read_index(
@@ -739,11 +737,8 @@ class Search:
         }
 
     @staticmethod
-    def _unpack_cache(cached: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        if isinstance(cached, dict):
-            return list(cached.get("pool", [])), list(cached.get("sources", []))
-        # Legacy entries stored a bare list of final results.
-        return list(cached), []
+    def _unpack_cache(cached: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        return list(cached.get("pool", [])), list(cached.get("sources", []))
 
     def _query_vector(self, sources: list[SourceInfo], query: str):
         """Embed the query only when a selected local index actually has vectors.
@@ -896,7 +891,7 @@ class Search:
                     pending = Future()
                     self._inflight[key] = pending
                     break
-            # Someone else is computing this query: wait, then reuse their pool.
+            # Reuse another request's result when it finishes.
             try:
                 cached = existing.result(timeout=self.source_timeout * 4)
             except Exception:
@@ -908,8 +903,7 @@ class Search:
                 return
             # Owner failed or was cancelled; loop to claim or read a newer result.
 
-        # Fail fast rather than blocking an ASGI request thread. Clients can
-        # retry the explicit busy response without holding a server thread.
+        # Fail fast when all search slots are occupied.
         acquired = self._search_slots.acquire(blocking=False)
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
@@ -1394,7 +1388,7 @@ class Search:
             total = scores.get(identity, 0.0) + 0.02 * lexical
             disambig = ""
             if DISAMBIGUATION_TITLE.search(doc["title"]):
-                if _exact_title_intent(query_words, doc["title"]):
+                if _disambiguation_intent(query, query_words, doc["title"]):
                     total += disambig_boost
                     disambig = ", disambiguation exact"
                 else:

@@ -444,6 +444,12 @@ class DisambiguationRankingTests(unittest.TestCase):
         self.assertNotIn("kind", ranked[0])
         self.assertNotIn("members", ranked[0])
 
+    def test_question_and_unparenthesized_disambiguation_queries_promote_page(self):
+        for query in ("what is air?", "air disambiguation"):
+            with self.subTest(query=query):
+                ranked = self._search()._rank_results([self._result()], query, 10)
+                self.assertEqual(ranked[0]["id"], "manual:hub")
+
     def test_base_title_and_partial_queries_demote_hub(self):
         for query in ("air", "air quality"):
             with self.subTest(query=query):

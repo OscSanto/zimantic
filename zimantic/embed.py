@@ -1,4 +1,4 @@
-"""Turn text into vectors with multilingual-e5-small (ONNX, int8). This is the one model zimantic ships with."""
+"""Turn text into vectors with multilingual-e5-small."""
 import hashlib
 import os
 import sys
@@ -11,18 +11,14 @@ import sentencepiece
 from .settings import DEFAULT_MAX_EMBEDDING_TOKENS
 SPECIAL_TOKEN_COUNT = 2
 
-# sha256 of the exact files the README tells users to download. A mismatch only
-# warns: a different but valid conversion still works, it just may rank
-# differently from the documented model.
+# Checksums for the model files documented in the README.
 EXPECTED_CHECKSUMS = {
     "model.onnx": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
     "sentencepiece.bpe.model": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
 }
 
-# Leave a core for the search workers and web server: embedding gets a modest
-# fixed budget rather than every CPU, and spinning is disabled below so idle
-# model threads do not busy-wait on small hardware.
-DEFAULT_EMBED_THREADS = max(1, min(os.cpu_count() or 1, 4) - 1)
+# Leave a core for search and the web server.
+DEFAULT_EMBED_THREADS = max(1, (os.cpu_count() or 1) - 1)
 
 
 def _sha256(path: Path) -> str:
@@ -51,7 +47,6 @@ def verify_model_files(model_dir, warn=None) -> None:
             )
 
 
-# Turns text into vectors with multilingual-e5-small (ONNX, int8) currently.
 class Embedder:
     def __init__(
         self,
@@ -66,11 +61,10 @@ class Embedder:
         verify_model_files(model_dir)
         self.threads = int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
         opts = ort.SessionOptions()
-        opts.enable_cpu_mem_arena = False  # the arena kept ~600 MB after indexing; without it memory is freed
+        opts.enable_cpu_mem_arena = False
         opts.intra_op_num_threads = self.threads
         opts.inter_op_num_threads = 1
-        # Without this, idle ORT threads busy-wait between batches and steal CPU
-        # from concurrent searches on constrained hardware.
+        # Prevent idle ORT threads from busy-waiting between batches.
         try:
             opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         except Exception:
@@ -111,5 +105,5 @@ class Embedder:
         mask = (ids != 1).astype(np.int64)
         hidden = self.session.run(None, {"input_ids": ids, "attention_mask": mask, "token_type_ids": np.zeros_like(ids)})[0]
         weights = mask[..., None].astype(np.float32)
-        vectors = (hidden * weights).sum(1) / weights.sum(1)  # mean over real tokens: the pooling e5 was trained with
+        vectors = (hidden * weights).sum(1) / weights.sum(1)
         return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)

@@ -1,25 +1,13 @@
-# zimantic settings.
+# Zimantic settings. This file is optional; omitted keys use hardware-based defaults.
+# See config.pi-zero-2w.toml and config.pi-5.toml for tuned starting points.
 
-# This file is optional. When it is missing or empty, zimantic warns and uses
-# defaults auto-detected from the machine (mobile / desktop / supercomputer).
-# You only need to set the keys you want to override; anything you omit falls
-# back to those defaults. See config.pi-zero-2w.toml and config.pi-5.toml for
-# other tuned starting points.
+# Relative paths use the directory where `python -m zimantic` runs.
+# Absolute paths also work.
 
-# Relative paths (like ./zims) are relative to the folder you run `python -m zimantic` from (this project folder)
-#  Absolute paths also work, e.g. /mnt/usb/zims or C:/zims.
-
-# ---------------------------------------------------------------------------------------------
-# WHERE YOUR FILES ARE.
-# The defaults are folders inside this project; change them if your files live elsewhere.
-# ---------------------------------------------------------------------------------------------
-
-# Your .zim files: (download them from https://library.kiwix.org).
-# `python -m zimantic build <name>`    looks for <name>.zim in this folder.
+# ZIM files, downloaded from https://library.kiwix.org.
 zim_dir = "./zims"
 
-# The embedding model: this folder must contain model.onnx and sentencepiece.bpe.model
-# (see "Download the model" in the README).
+# Must contain model.onnx and sentencepiece.bpe.model (see the README).
 model_dir = "./model"
 
 # Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.
@@ -27,12 +15,9 @@ model_dir = "./model"
 # (Recomended; for large ZIMs, build the index on a faster machine and copy both files here)
 index_dir = "./indexes"
 
-# ---------------------------------------------------------------------------------------------
 # SERVER
-# ---------------------------------------------------------------------------------------------
 
-# Port for the search page: http://<this machine>:<port>. 
-# Reachable from other devices on the network.
+# Search page port; reachable from other devices on the network.
 port = 8090
 
 # Where result links open the article, served by kiwix-serve (optional; search works without it).
@@ -48,11 +33,9 @@ kiwix_server = ""
 kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
 kiwix_search_path = "/kiwix/search"
 
-# ---------------------------------------------------------------------------------------------
-# TUNING (the defaults are fine to start with)
-# ---------------------------------------------------------------------------------------------
+# TUNING
 
-# Results shown per page in the web UI and the default API page size.
+# Results per page in the UI and API.
 page_size = 10
 
 # Largest ranked result pool kept and served. Pages are drawn from this pool,
@@ -60,25 +43,19 @@ page_size = 10
 # the whole pool once; larger values cost a little more per search and cache.
 max_results = 100
 
-# Articles embedded at once while indexing. The CPU model pads each batch to its
-# longest passage, so larger batches can be slower despite doing fewer calls.
-# Increase this on hardware where benchmarks show a gain; 32 is a good default.
-# Use ~8 on a Raspberry Pi Zero 2 W.
+# Articles embedded per batch. Larger batches use more memory; use about 8 on a Pi Zero 2 W.
 batch_size = 32
 
-# ONNX Runtime threads used for embedding. Left unset, Zimantic uses one fewer
-# than the CPU count (up to three), leaving a core for the search workers and
-# the web server. Set an explicit number to override.
+# ONNX Runtime threads for embedding. Unset leaves a core for search and the web server.
 # embed_threads = 3
 
-# Maximum HTML read from each article while extracting text.
+# Maximum HTML read per article.
 max_html_bytes = 4_194_304
 
-# Maximum characters stored and returned in each result preview.
+# Maximum preview characters stored and returned.
 max_preview_chars = 1_000
 
-# Maximum embedding sequence length, including the model's two special tokens.
-# This is an application budget for the shipped model, not a preview length.
+# Maximum embedding sequence length, including two special tokens.
 max_embedding_tokens = 256
 
 # What to do when adding a block would exceed each independent budget.
@@ -91,8 +68,7 @@ embedding_overflow = "truncate"
 # Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
 # nprobe = 64
 
-# Meaning-search results below this cosine similarity are discarded. Title and
-# full-text matches are not affected. Lower this for broader semantic recall.
+# Meaning matches below this cosine similarity are discarded.
 min_cosine_similarity = 0.85
 
 # A naive approach to determining if query requires a deeper search (e.g. pasted sentences from article)
@@ -102,15 +78,15 @@ min_cosine_similarity = 0.85
 long_query = 10
 
 # Disambiguation pages (titles detected from the "(disambiguation)" suffix,
-# rendered footer, or category). A query that names the full title exactly is
-# navigation, so the page is promoted above the normal score range. Any other
-# query that merely matches it is demoted behind real articles. Set
-# disambiguation_penalty = 1 to disable.
+# rendered footer, or category). A query that names the full title exactly,
+# including "air disambiguation" without parentheses, is navigation. A question
+# that names the base title and ends in "?" is also treated as navigation. Such
+# pages are promoted above the normal score range; other matches are demoted.
+# Set disambiguation_penalty = 1 to disable.
 disambiguation_boost = 0.08
 disambiguation_penalty = 0.5
 
-# Search performance and resource limits.
-# Source searches run in parallel up to this many workers. Keep this modest on a Pi.
+# Search workers.
 search_workers = 4
 # Maximum simultaneous user searches. Several people can search at once up to
 # this many; each search may still use all source workers. Lower it on a Pi.
@@ -119,10 +95,6 @@ max_concurrent_searches = 4
 candidate_count = 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
 source_timeout = 12
-# Small LRU cache of exact queries (query + selected sources). A finished
-# streamed search is cached too, so the JSON endpoint gets it for free, and
-# every page of a query reuses the same ranked pool. Bounded by both entry
-# count and total bytes (the byte budget is what keeps a Pi's memory in check).
-# Set cache_size to 0 to disable.
+# Exact-query LRU cache. Set cache_size to 0 to disable.
 cache_size = 256
 cache_bytes = 33_554_432  # 32 MiB
