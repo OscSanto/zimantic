@@ -1760,40 +1760,26 @@ class Search:
     ) -> dict[int, dict[str, Any]]:
         if not rowids:
             return {}
-        has_excerpt = any(
-            row[1] == "excerpt" for row in db.execute("PRAGMA table_info(docs)")
-        )
-        select_columns = (
-            "rowid, title, excerpt, path, target"
-            if has_excerpt
-            else "rowid, title, path, target"
-        )
-
-        def normalize(row: tuple[Any, ...]) -> tuple[int, Any, Any, Any]:
-            if has_excerpt:
-                return int(row[0]), row[1], row[3], row[4]
-            return int(row[0]), row[1], row[2], row[3]
-
-        rows: dict[int, tuple[int, Any, Any, Any]] = {}
+        rows: dict[int, tuple[Any, ...]] = {}
         values = list(rowids)
         for start in range(0, len(values), 900):
             batch = values[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                f"SELECT {select_columns} FROM docs "
+                "SELECT rowid, title, path, target FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
-            rows.update({int(row[0]): normalize(row) for row in db.execute(query, batch)})
+            rows.update({int(row[0]): row for row in db.execute(query, batch)})
 
         target_ids = {int(row[3]) for row in rows.values() if row[3] is not None}
         for start in range(0, len(target_ids), 900):
             batch = list(target_ids)[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                f"SELECT {select_columns} FROM docs "
+                "SELECT rowid, title, path, target FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
-            rows.update({int(row[0]): normalize(row) for row in db.execute(query, batch)})
+            rows.update({int(row[0]): row for row in db.execute(query, batch)})
 
         # kiwix_url is optional: without it results have no article link, so the
         # UI renders the title as plain text instead of building a broken URL.

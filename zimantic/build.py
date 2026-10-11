@@ -265,20 +265,11 @@ def _save(db, embedder, rows, next_entry: int) -> None:
     it is used for embeddings but is not written to new indexes.
     """
     article_ids = {row[0] for row in rows if row[2]}
-    columns = {row[1] for row in db.execute("PRAGMA table_info(docs)")}
     with db:
-        if "excerpt" in columns:
-            # Continue interrupted builds created by older versions. New rows
-            # stay preview-free, and searches ignore the legacy values.
-            db.executemany(
-                "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
-                [(row[0], row[1], "", row[3], row[4]) for row in rows],
-            )
-        else:
-            db.executemany(
-                "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
-                [(row[0], row[1], row[3], row[4]) for row in rows],
-            )
+        db.executemany(
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+            [(row[0], row[1], row[3], row[4]) for row in rows],
+        )
         articles = [row for row in rows if row[0] in article_ids]
         if articles and embedder is not None:
             passages = []

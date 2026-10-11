@@ -111,10 +111,10 @@ def _title_search(rows, query, limit=1):
     db = sqlite3.connect(":memory:", check_same_thread=False)
     db.execute(
         "CREATE VIRTUAL TABLE docs USING fts5("
-        "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        "title, path UNINDEXED, target UNINDEXED)"
     )
     db.executemany(
-        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
         rows,
     )
     source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
@@ -454,11 +454,11 @@ class SearchContractTests(unittest.TestCase):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+            "title, path UNINDEXED, target UNINDEXED)"
         )
         db.execute(
-            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
-            (1, "Tire Change", "A useful tire change guide.", "tire-change", None),
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+            (1, "Tire Change", "tire-change", None),
         )
 
         class FakeFaiss:
@@ -494,12 +494,12 @@ class SearchContractTests(unittest.TestCase):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+            "title, path UNINDEXED, target UNINDEXED)"
         )
         db.executemany(
-            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
             [
-                (rowid, f"Title {rowid}", f"Excerpt {rowid}", f"path-{rowid}", None)
+                (rowid, f"Title {rowid}", f"path-{rowid}", None)
                 for rowid in range(1, 1802)
             ],
         )
@@ -519,7 +519,7 @@ class SearchContractTests(unittest.TestCase):
         selects = [
             statement
             for statement in statements
-            if statement.startswith("SELECT rowid, title, excerpt, path, target FROM docs")
+            if statement.startswith("SELECT rowid, title, path, target FROM docs")
         ]
         self.assertEqual(len(selects), 3)
         self.assertEqual(len(docs), 1801)
@@ -529,13 +529,13 @@ class SearchContractTests(unittest.TestCase):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+            "title, path UNINDEXED, target UNINDEXED)"
         )
         db.executemany(
-            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
             [
-                (1, "Below threshold", "A weak semantic match.", "weak", None),
-                (2, "Above threshold", "A strong semantic match.", "strong", None),
+                (1, "Below threshold", "weak", None),
+                (2, "Above threshold", "strong", None),
             ],
         )
 
@@ -628,11 +628,11 @@ class SearchContractTests(unittest.TestCase):
         # Exact token matching misses these because the query word is a truncated
         # or base form of the title word; only the prefix fallback surfaces them.
         cases = [
-            ((1, "Tire Changes", "", "tire-changes", None), "tire change", "Tire Changes"),
-            ((1, "Gettysburg Address", "", "gettysburg-address", None), "gettysburg addres", "Gettysburg Address"),
-            ((1, "Collected Poems", "", "collected-poems", None), "collected poem", "Collected Poems"),
-            ((1, "Declaration of Independence", "", "declaration-independence", None), "declaration independen", "Declaration of Independence"),
-            ((1, "The Praise of Folly", "", "praise-of-folly", None), "praise of fol", "The Praise of Folly"),
+            ((1, "Tire Changes", "tire-changes", None), "tire change", "Tire Changes"),
+            ((1, "Gettysburg Address", "gettysburg-address", None), "gettysburg addres", "Gettysburg Address"),
+            ((1, "Collected Poems", "collected-poems", None), "collected poem", "Collected Poems"),
+            ((1, "Declaration of Independence", "declaration-independence", None), "declaration independen", "Declaration of Independence"),
+            ((1, "The Praise of Folly", "praise-of-folly", None), "praise of fol", "The Praise of Folly"),
         ]
         for row, query, expected in cases:
             with self.subTest(query=query):
@@ -698,12 +698,12 @@ def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
     db = sqlite3.connect(index_dir / f"{name}.sqlite")
     db.executescript(
         "CREATE VIRTUAL TABLE docs USING fts5("
-        "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED, "
+        "title, path UNINDEXED, target UNINDEXED, "
         "tokenize='unicode61 remove_diacritics 2');"
         "CREATE TABLE meta(key TEXT PRIMARY KEY, value);"
     )
     db.executemany(
-        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
         rows,
     )
     db.execute("INSERT INTO meta VALUES ('done', ?)", (done,))
@@ -725,7 +725,7 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_index_without_vectors_still_serves_title_results(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)])
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
             search.refresh_sources()
@@ -755,7 +755,7 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_finished_stream_is_cached_for_search_method(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)])
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
             search.refresh_sources()
@@ -775,7 +775,7 @@ class GracefulDegradationTests(unittest.TestCase):
             _write_index(
                 tmp,
                 "manual",
-                rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)],
+                rows=[(1, "Tire Change", "tire-change", None)],
             )
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
@@ -795,7 +795,7 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)])
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
             search.refresh_sources()
@@ -811,7 +811,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIsNotNone(search.cache.get(key))
 
             # Adding an index changes what is searchable, so stale answers drop.
-            _write_index(tmp, "second", rows=[(1, "Second page", "", "second", None)])
+            _write_index(tmp, "second", rows=[(1, "Second page", "second", None)])
             search.reload()
             self.assertIsNone(search.cache.get(key))
             search._executor.shutdown(wait=True)
@@ -819,7 +819,7 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_reload_keeps_cache_when_nothing_changed(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)])
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
             search.refresh_sources()
@@ -838,7 +838,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
             self.assertEqual(search.reload()["indexes"], [])
 
-            _write_index(tmp, "manual", done="fast", rows=[(1, "Tire Change", "", "tire-change", None)])
+            _write_index(tmp, "manual", done="fast", rows=[(1, "Tire Change", "tire-change", None)])
             summary = search.reload()
             self.assertEqual(summary["added"], ["manual"])
             self.assertIn("manual", search.indexes)
@@ -856,7 +856,7 @@ class GracefulDegradationTests(unittest.TestCase):
             _write_index(
                 tmp,
                 "manual",
-                rows=[(1, "Old title", "", "old", None)],
+                rows=[(1, "Old title", "old", None)],
             )
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
@@ -866,7 +866,7 @@ class GracefulDegradationTests(unittest.TestCase):
             _write_index(
                 tmp,
                 "replacement",
-                rows=[(1, "New title", "", "new", None)],
+                rows=[(1, "New title", "new", None)],
             )
             (tmp / "replacement.sqlite").replace(tmp / "manual.sqlite")
 
@@ -893,7 +893,7 @@ class PaginationTests(unittest.TestCase):
     def test_pages_are_prefixes_of_one_ranked_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            rows = [(i, f"Tire Change {i}", "", f"tire-{i}", None) for i in range(1, 6)]
+            rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 6)]
             _write_index(tmp, "manual", rows=rows)
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
@@ -911,7 +911,7 @@ class PaginationTests(unittest.TestCase):
     def test_second_page_reuses_the_cached_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            rows = [(i, f"Tire Change {i}", "", f"tire-{i}", None) for i in range(1, 6)]
+            rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 6)]
             _write_index(tmp, "manual", rows=rows)
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
@@ -929,8 +929,8 @@ class PaginationTests(unittest.TestCase):
     def test_display_source_filter_keeps_counts_for_all_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "alpha", rows=[(1, "Tire Change Alpha", "", "a", None)])
-            _write_index(tmp, "beta", rows=[(1, "Tire Change Beta", "", "b", None)])
+            _write_index(tmp, "alpha", rows=[(1, "Tire Change Alpha", "a", None)])
+            _write_index(tmp, "beta", rows=[(1, "Tire Change Beta", "b", None)])
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
             search.refresh_sources()
@@ -953,7 +953,7 @@ class PaginationTests(unittest.TestCase):
     def test_concurrent_identical_searches_share_one_computation(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "", "tire", None)])
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire", None)])
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
             search.refresh_sources()
@@ -995,7 +995,7 @@ class PaginationTests(unittest.TestCase):
     def test_debug_flag_gates_ranking_explanation(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "", "tire", None)])
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire", None)])
             search = _bare_search(self._cfg(tmp))
             search._load_indexes()
             search.refresh_sources()
@@ -1014,11 +1014,11 @@ class ProductionHardeningTests(unittest.TestCase):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+            "title, path UNINDEXED, target UNINDEXED)"
         )
         db.execute(
-            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
-            (1, "Tire Change", "A useful tire change guide.", "tire-change", None),
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+            (1, "Tire Change", "tire-change", None),
         )
         return db
 
