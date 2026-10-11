@@ -183,6 +183,22 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b"zimantic-article-navigate", article.content)
             self.assertIn(b"zimantic-parent-article-navigate", article.content)
             self.assertIn(b"/random?zim=manual", article.content)
+            self.assertLess(
+                article.content.index(b'data-zimantic-action="close"'),
+                article.content.index(b'data-zimantic-action="previous"'),
+            )
+            self.assertLess(
+                article.content.index(b'data-zimantic-action="previous"'),
+                article.content.index(b'>Random</a>'),
+            )
+            self.assertLess(
+                article.content.index(b'data-zimantic-action="print"'),
+                article.content.index(b'data-zimantic-action="parent-previous"'),
+            )
+            self.assertLess(
+                article.content.index(b'data-zimantic-action="parent-previous"'),
+                article.content.index(b'data-zimantic-action="home"'),
+            )
             self.assertNotIn(b"zimantic-toolbar-brand", article.content)
             self.assertNotIn(b'>Search</a>', article.content)
             toolbar_script = b"<script data-zimantic-toolbar>"
