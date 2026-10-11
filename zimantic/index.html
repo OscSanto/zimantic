@@ -298,6 +298,8 @@
   let activeThumbnails = 0;
   let streamRenderTimer = null;
   let modalPreviousFocus = null;
+  let activeModalUrl = null;
+  let modalRootPending = false;
 
   function cancelStreamRender() {
     if (streamRenderTimer !== null) {
@@ -458,26 +460,77 @@
       event.altKey;
   }
 
-  function openArticleModal(link) {
+  function articleUrlValue(articleUrl) {
+    return articleUrl.pathname + articleUrl.search + articleUrl.hash;
+  }
+
+  function readModalUrl(value) {
+    if (!value) return null;
+    try {
+      const articleUrl = new URL(value, location.href);
+      if (
+        articleUrl.origin !== location.origin ||
+        !articleUrl.pathname.startsWith("/article/")
+      ) {
+        return null;
+      }
+      return articleUrl;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function showArticleModal(articleUrl, articleTitle) {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
     const title = $("articleModalTitle");
     if (!modal || !frame || !title) return;
-    modalPreviousFocus = document.activeElement;
-    title.textContent = link.textContent || "Article";
+    if (modal.hidden) modalPreviousFocus = document.activeElement;
+    const shouldLoad = activeModalUrl !== articleUrl;
+    activeModalUrl = articleUrl;
+    modalRootPending = shouldLoad;
+    title.textContent = articleTitle || "Article";
     frame.title = title.textContent;
-    frame.src = link.href;
+    if (shouldLoad) frame.src = articleUrl;
     modal.hidden = false;
     document.body.classList.add("modal-open");
     $("articleModalClose").focus();
   }
 
-  function closeArticleModal() {
+  function openArticleModal(link) {
+    const articleUrl = new URL(link.href, location.href);
+    if (current) {
+      history.pushState(
+        {...(history.state || {}), zimanticModal: true},
+        "",
+        makeStateUrl(
+          current.question,
+          activeSource,
+          current.page,
+          articleUrlValue(articleUrl)
+        )
+      );
+    }
+    showArticleModal(articleUrl.href, link.textContent || "Article");
+  }
+
+  function closeArticleModal({navigateHistory = true} = {}) {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
     if (!modal || modal.hidden) return;
+    if (navigateHistory && new URL(location.href).searchParams.has("modal")) {
+      if (history.state?.zimanticModal) {
+        history.back();
+        return;
+      }
+      const url = new URL(location.href);
+      url.searchParams.delete("modal");
+      history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+    }
     modal.hidden = true;
     document.body.classList.remove("modal-open");
+    activeModalUrl = null;
+    modalRootPending = false;
     if (frame) frame.src = "about:blank";
     if (modalPreviousFocus instanceof HTMLElement && document.contains(modalPreviousFocus)) {
       modalPreviousFocus.focus();
@@ -488,7 +541,15 @@
   $("articleModalFrame").addEventListener("load", () => {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
-    if (modal.hidden || !frame.src || frame.src === "about:blank") return;
+    if (
+      modal.hidden ||
+      !modalRootPending ||
+      !frame.src ||
+      frame.src === "about:blank"
+    ) {
+      return;
+    }
+    modalRootPending = false;
     // Sandboxed documents have an opaque origin, so only "*" can target them.
     frame.contentWindow.postMessage({type: "zimantic-modal-root"}, "*");
   });
@@ -983,15 +1044,16 @@
     }
   }
 
-  function makeStateUrl(question, source, page) {
-    // Keep q/src/page in the query string so links are shareable and Back/
-    // Forward just work.
+  function makeStateUrl(question, source, page, modal = null) {
+    // Keep search and modal state in the query string so links are shareable
+    // and Back/Forward just work.
     const url = new URL(location.href);
     url.hash = "";
     url.search = "";
     url.searchParams.set("q", question);
     if (source) url.searchParams.set("src", source);
     if (page > 0) url.searchParams.set("page", String(page + 1));
+    if (modal) url.searchParams.set("modal", modal);
     return url.pathname + url.search;
   }
 
@@ -1005,8 +1067,18 @@
     return {
       question: (params.get("q") || "").trim(),
       source: params.get("src") || null,
-      page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0
+      page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0,
+      modal: params.get("modal") || null
     };
+  }
+
+  function syncArticleModal(modalValue) {
+    const articleUrl = readModalUrl(modalValue);
+    if (articleUrl) {
+      showArticleModal(articleUrl.href, "Article");
+    } else {
+      closeArticleModal({navigateHistory: false});
+    }
   }
 
   $("badges").addEventListener("click", event => {
@@ -1128,6 +1200,7 @@
 
   window.addEventListener("popstate", () => {
     const state = readLocationState();
+    syncArticleModal(state.modal);
     if (!state.question) {
       // Navigated back/forward to the no-search entry: match it.
       resetResults();
@@ -1165,6 +1238,7 @@
       $("status").textContent = `Could not load sources: ${error.message}`;
     }
     const state = readLocationState();
+    syncArticleModal(state.modal);
     if (state.question) {
       $("question").value = state.question;
       runSearch(state.question, state.source, state.page);

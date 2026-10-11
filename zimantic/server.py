@@ -45,6 +45,7 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
   width: 100% !important;
   z-index: 2147483647 !important;
 }
+[data-zimantic-toolbar],
 [data-zimantic-toolbar] * { box-sizing: border-box !important; }
 [data-zimantic-toolbar] a,
 [data-zimantic-toolbar] button {
@@ -80,6 +81,13 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
 }
+[data-zimantic-toolbar] .zimantic-toolbar-article {
+  max-width: min(32vw, 360px) !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
 [data-zimantic-toolbar] .zimantic-toolbar-home-short {
   display: none !important;
 }
@@ -87,6 +95,15 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
   display: none !important;
 }
 [data-zimantic-toolbar] .zimantic-toolbar-home.compact .zimantic-toolbar-home-short {
+  display: inline !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-article-short {
+  display: none !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-article.compact .zimantic-toolbar-article-full {
+  display: none !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-article.compact .zimantic-toolbar-article-short {
   display: inline !important;
 }
 [data-zimantic-toolbar] .zimantic-toolbar-breadcrumbs {
@@ -154,16 +171,20 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     if (!toolbar) return;
     const status = toolbar.querySelector("[data-zimantic-toolbar-status]");
     const home = toolbar.querySelector("[data-zimantic-home]");
+    const permalink = toolbar.querySelector("[data-zimantic-permalink]");
     const actions = toolbar.querySelector(".zimantic-toolbar-actions");
     const announce = message => {
       if (status) status.textContent = message;
     };
-    const fitHomeLabel = () => {
-      if (!home || !actions) return;
-      home.classList.remove("compact");
-      const available = actions.getBoundingClientRect().left -
-        home.getBoundingClientRect().left - 12;
-      home.classList.toggle("compact", home.scrollWidth > available);
+    const fitToolbarLabels = () => {
+      if (!actions) return;
+      for (const control of [home, permalink]) {
+        if (!control) continue;
+        control.classList.remove("compact");
+        const available = actions.getBoundingClientRect().left -
+          control.getBoundingClientRect().left - 12;
+        control.classList.toggle("compact", control.scrollWidth > available);
+      }
     };
     toolbar.addEventListener("click", event => {
       const control = event.target.closest("[data-zimantic-action]");
@@ -182,11 +203,24 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           window.close();
         }
       } else if (action === "copy") {
+        if (
+          event.button !== 0 ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        event.preventDefault();
         if (!navigator.clipboard || !navigator.clipboard.writeText) {
           announce("Copy unavailable");
         } else {
           navigator.clipboard.writeText(location.href).then(
-            () => announce("Link copied"),
+            () => {
+              control.textContent = "Link copied";
+              announce("Link copied");
+            },
             () => announce("Copy unavailable")
           );
         }
@@ -194,10 +228,10 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         window.print();
       }
     });
-    fitHomeLabel();
-    window.addEventListener("resize", fitHomeLabel);
+    fitToolbarLabels();
+    window.addEventListener("resize", fitToolbarLabels);
     if (window.ResizeObserver) {
-      new ResizeObserver(fitHomeLabel).observe(toolbar);
+      new ResizeObserver(fitToolbarLabels).observe(toolbar);
     }
   };
   if (document.readyState === "loading") {
@@ -215,6 +249,16 @@ def _article_toolbar(zim: str, article: dict) -> str:
     zim_name = html_escape(str(zim), quote=True)
     article_path = str(article.get("path") or "").strip("/")
     path_parts = [part for part in article_path.split("/") if part]
+    permalink_url = (
+        f"/article/{quote_path(zim, safe='')}/"
+        f"{quote_path(article_path, safe='/')}"
+        if article_path
+        else zim_url
+    )
+    article_title = html_escape(
+        str(article.get("title") or article_path or "Permalink"),
+        quote=False,
+    )
     breadcrumbs = []
     for depth in range(1, len(path_parts)):
         parent_path = "/".join(path_parts[:depth])
@@ -228,7 +272,15 @@ def _article_toolbar(zim: str, article: dict) -> str:
             f'title="Open {html_escape(parent_path, quote=True)}">'
             f'{html_escape(path_parts[depth - 1])}</a>'
         )
-    breadcrumb_html = "".join(breadcrumbs)
+    breadcrumb_html = "".join(breadcrumbs) + (
+        '<span class="zimantic-toolbar-separator" aria-hidden="true">/</span>'
+        f'<a class="zimantic-toolbar-article" data-zimantic-permalink '
+        f'data-zimantic-action="copy" href="{permalink_url}" '
+        f'title="Open or copy this article\'s permalink">'
+        f'<span class="zimantic-toolbar-article-full">{article_title}</span>'
+        '<span class="zimantic-toolbar-article-short" aria-hidden="true">'
+        "Permalink</span></a>"
+    )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
     <button type="button" data-zimantic-action="back" title="Go back or close this tab">← Back</button>
@@ -240,7 +292,6 @@ def _article_toolbar(zim: str, article: dict) -> str:
     <span class="zimantic-toolbar-breadcrumbs">{breadcrumb_html}</span>
   </div>
   <div class="zimantic-toolbar-actions">
-    <button type="button" data-zimantic-action="copy" title="Copy this article's link">Copy Link</button>
     <button type="button" data-zimantic-action="print" title="Print this article">Print</button>
     <a href="/" title="Search your library">Zimantic</a>
   </div>

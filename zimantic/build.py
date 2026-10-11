@@ -1,4 +1,5 @@
 """Build a resumable SQLite and optional FAISS index for one ZIM."""
+import logging
 import os
 import secrets
 import sqlite3
@@ -14,6 +15,8 @@ from .zim import (
     DEFAULT_MAX_ENTRY_BYTES,
     read_entry,
 )
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
@@ -90,7 +93,10 @@ def build(
             )
         if done == "fast":
             if fast:
-                print(f"{zim_path.stem}: already indexed for title/full-text search (use --force to rebuild)")
+                logger.info(
+                    f"{zim_path.stem}: already indexed for title/full-text search "
+                    "(use --force to rebuild)"
+                )
                 return
             print(f"{zim_path.stem}: upgrading title-only index to full (re-reading entries beside current index)")
             db.close()
@@ -113,7 +119,13 @@ def build(
         zim = Archive(str(zim_path))
         start = int(meta.get("next", 0))
         batch = []
-        for i in tqdm(range(start, zim.entry_count), initial=start, total=zim.entry_count, desc=zim_path.stem):
+        for i in tqdm(
+            range(start, zim.entry_count),
+            initial=start,
+            total=zim.entry_count,
+            desc=zim_path.stem,
+            delay=5,
+        ):
             row = read_entry(
                 zim,
                 i,
@@ -136,7 +148,7 @@ def build(
                 db.execute("DROP TABLE IF EXISTS vecs")
                 db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
                 db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(filesize),))
-            print(f"{zim_path.stem}: title + full-text index ready")
+            logger.debug(f"{zim_path.stem}: title + full-text index ready")
             return
 
         _write_faiss(db, build_faiss_path)

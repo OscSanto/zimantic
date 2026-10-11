@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import signal
 import sys
@@ -19,36 +20,58 @@ def _graceful_interrupt(_signum: int, _frame) -> None:
 
 # The systemd.path unit can fire the moment a file is created. Poll until its
 # size stops changing so a truncated download is not indexed.
-STABLE_POLL_SECONDS = 10
+STABLE_POLL_SECONDS = 5
+
+
+def _wait_for_stable_sizes(paths: set[Path]) -> None:
+    """Wait for a batch of ZIMs to finish being written before indexing them."""
+    sizes: dict[Path, int] = {}
+    for path in paths:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        sizes[path] = size
+
+    while sizes:
+        time.sleep(STABLE_POLL_SECONDS)
+        downloading: dict[Path, int] = {}
+        for path, size in sizes.items():
+            try:
+                current = path.stat().st_size
+            except OSError:
+                continue
+            if current != size:
+                downloading[path] = current
+                print(
+                    f"zimantic: {path.name} is now {current} bytes; waiting for it to finish downloading",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        sizes = downloading
 
 
 def _wait_for_stable_size(path: Path) -> None:
-    """Wait for a ZIM to finish being written before indexing it."""
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return
-    print(
-        f"zimantic: {path.name} is {size} bytes; waiting for it to finish downloading",
-        file=sys.stderr,
-        flush=True,
-    )
-    while True:
-        time.sleep(STABLE_POLL_SECONDS)
+    """Wait for one ZIM to finish being written before indexing it."""
+    _wait_for_stable_sizes({path})
+
+
+def _find_downloading_sizes(zim_sizes: dict[Path, int]) -> set[Path]:
+    """Find ZIMs whose sizes changed during the initial polling interval."""
+    time.sleep(STABLE_POLL_SECONDS)
+
+    downloading: set[Path] = set()
+    for path, size in zim_sizes.items():
         try:
             current = path.stat().st_size
         except OSError:
-            return
-        if current == size:
-            return
-        size = current
-        print(
-            f"zimantic: {path.name} is now {size} bytes; still downloading",
-            file=sys.stderr,
-            flush=True,
-        )
+            continue
+        if current != size:
+            downloading.add(path)
+    return downloading
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     parser = argparse.ArgumentParser(prog="zimantic")
     
@@ -146,6 +169,7 @@ def main() -> None:
             return
 
         zim_sizes = {zim: zim.stat().st_size for zim in zims}
+        downloading = _find_downloading_sizes(zim_sizes)
 
         by_stem: dict[str, list[Path]] = {}
         for zim in zims:
@@ -187,7 +211,9 @@ def main() -> None:
         failures: list[tuple[Path, BaseException]] = []
         try:
             for zim in zims:
-                _wait_for_stable_size(zim)
+                if zim in downloading:
+                    _wait_for_stable_sizes(downloading)
+                    downloading.clear()
                 try:
                     build_zim(
                         zim,
