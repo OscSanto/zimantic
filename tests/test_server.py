@@ -9,13 +9,21 @@ from zimantic.server import create_app
 
 
 class FakeSearch:
-    cache = QueryCache(4)
+    def __init__(self):
+        self.cache = QueryCache(4)
+        self.search_page_calls = []
+        self.stream_calls = []
+        self.refresh_calls = 0
 
     def local_names(self):
         return ["manual"]
 
     def source_dicts(self):
         return [{"key": "manual", "name": "Manual", "available": True}]
+
+    def refresh_sources(self):
+        self.refresh_calls += 1
+        return self.source_dicts()
 
     @staticmethod
     def _validate_query(query):
@@ -24,6 +32,7 @@ class FakeSearch:
         return query
 
     def search_page(self, query, zim, limit, offset, source, debug):
+        self.search_page_calls.append((query, zim, limit, offset, source, debug))
         result = {"id": "manual:page", "title": "Page"}
         if debug:
             result.update({"score": 1.0, "explain": "debug"})
@@ -39,6 +48,7 @@ class FakeSearch:
         return self.search_page(query, zim, limit, offset, source, debug)["results"]
 
     def stream_search(self, query, zim, limit=None, offset=0, source=None, debug=False):
+        self.stream_calls.append((query, zim, limit, offset, source, debug))
         result = {"id": "manual:page", "title": "Page"}
         if debug:
             result.update({"score": 1.0, "explain": "debug"})
@@ -59,8 +69,10 @@ class FakeSearch:
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.client = TestClient(create_app(FakeSearch()))
-        cls.debug_client = TestClient(create_app(FakeSearch(), debug=True))
+        cls.search = FakeSearch()
+        cls.debug_search = FakeSearch()
+        cls.client = TestClient(create_app(cls.search))
+        cls.debug_client = TestClient(create_app(cls.debug_search, debug=True))
 
     def test_sources_and_json_search(self):
         self.assertEqual(self.client.get("/api/sources").json()[0]["key"], "manual")
@@ -75,6 +87,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-offset"], "10")
         self.assertNotIn("score", response.json()[0])
+        self.assertEqual(
+            self.search.search_page_calls[-1],
+            ("page", None, 5, 10, "manual", False),
+        )
 
     def test_debug_mode_is_server_wide(self):
         response = self.debug_client.get("/api/search?q=page")
@@ -84,6 +100,7 @@ class ServerTests(unittest.TestCase):
         stream = self.debug_client.get("/api/search/stream?q=page")
         events = [json.loads(line) for line in stream.text.splitlines()]
         self.assertEqual(events[-1]["results"][0]["score"], 1.0)
+        self.assertTrue(self.debug_search.stream_calls[-1][-1])
 
     def test_config_reports_debug_mode(self):
         self.assertFalse(self.client.get("/api/config").json()["debug"])
@@ -94,6 +111,7 @@ class ServerTests(unittest.TestCase):
         response = self.client.get("/api/sources?refresh=true")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["key"], "manual")
+        self.assertEqual(self.search.refresh_calls, 0)
 
     def test_sources_supports_etag_revalidation(self):
         first = self.client.get("/api/sources")

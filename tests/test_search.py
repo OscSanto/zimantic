@@ -7,6 +7,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import sqlite3
+from unittest.mock import patch
 
 import numpy as np
 
@@ -121,33 +122,44 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(_title_prefix_query("praise of fol"), "praise* AND fol*")
         self.assertEqual(_title_prefix_query("c"), '"c"')
 
-    def test_cache_key_ignores_page_size_and_display_filter(self):
-        # The ranked pool is shared by every page/filter, so none of those may
-        # appear in the cache key.
+    def test_cache_key_normalizes_query_and_source_selection(self):
         self.assertEqual(
-            Search._cache_key("How  TO change", None),
-            Search._cache_key("how to change", None),
+            Search._cache_key("How  TO change", ["beta", "alpha"]),
+            Search._cache_key("how to change", ["alpha", "beta"]),
         )
-        self.assertEqual(Search._cache_key("q", None), Search._cache_key("q", None))
+        self.assertNotEqual(
+            Search._cache_key("q", ["manual"]),
+            Search._cache_key("q", ["other"]),
+        )
 
     def test_hybrid_ranking_is_deterministic(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
         doc = {
-            "id": "manual:tire",
+            "id": "manual:z-tire",
             "source_key": "manual",
             "source": "Manual",
             "title": "Tire change",
             "lead": "Change a tire safely.",
-            "path": "tire",
-            "url": "http://example/tire",
+            "path": "z-tire",
+            "url": "http://example/z-tire",
+            "source_rank": 1,
+        }
+        tie = {
+            "id": "manual:a-tire",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Tire change",
+            "lead": "Change a tire safely.",
+            "path": "a-tire",
+            "url": "http://example/a-tire",
             "source_rank": 1,
         }
         result = SourceResult(
             source=source,
-            items=[doc],
-            semantic=[(0.9, doc)],
-            keyword=[(-1.0, doc)],
-            fulltext=[(0, doc)],
+            items=[doc, tie],
+            semantic=[(0.9, doc), (0.9, tie)],
+            keyword=[(-1.0, doc), (-1.0, tie)],
+            fulltext=[(0, doc), (0, tie)],
         )
         search = object.__new__(Search)
         search.cfg = {"long_query": 10, "candidate_count": 16}
@@ -155,10 +167,10 @@ class SearchContractTests(unittest.TestCase):
         first = search._rank_results([result], "how to change tires", 10)
         second = search._rank_results([result], "how to change tires", 10)
         self.assertEqual(first, second)
-        self.assertEqual(first[0]["id"], "manual:tire")
+        self.assertEqual([item["id"] for item in first], ["manual:a-tire", "manual:z-tire"])
         self.assertIn("title 100%", first[0]["explain"])
 
-    def test_ranking_deduplicates_redirect_hits_and_preserves_source_rank(self):
+    def test_ranking_deduplicates_repeated_hits_and_preserves_source_rank(self):
         semantic_source = SourceInfo("semantic", "Semantic", "semantic", "local")
         title_source = SourceInfo("titles", "Titles", "titles", "local")
         unrelated = {
@@ -316,6 +328,41 @@ class SearchContractTests(unittest.TestCase):
         result = events[-1]["results"][0]
         self.assertEqual(result["title"], "Tire Change")
         self.assertEqual(result["path"], "tire-change")
+
+    def test_document_hydration_batches_large_rowid_sets(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
+        )
+        db.executemany(
+            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+            [
+                (rowid, f"Title {rowid}", f"Excerpt {rowid}", f"path-{rowid}", None)
+                for rowid in range(1, 1802)
+            ],
+        )
+        db.commit()
+        statements = []
+        db.set_trace_callback(statements.append)
+
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        search = object.__new__(Search)
+        search.cfg = {"kiwix_url": "http://example/content"}
+        search.preview_chars = 100
+        try:
+            docs = search._fetch_docs(db=db, source=source, rowids=set(range(1, 1802)))
+        finally:
+            db.close()
+
+        selects = [
+            statement
+            for statement in statements
+            if statement.startswith("SELECT rowid, title, excerpt, path, target FROM docs")
+        ]
+        self.assertEqual(len(selects), 3)
+        self.assertEqual(len(docs), 1801)
+        self.assertEqual(docs[1801]["path"], "path-1801")
 
     def test_semantic_results_below_cosine_threshold_are_ignored(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
@@ -500,7 +547,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(results[0]["path"], "tire-change")
             search._executor.shutdown(wait=True)
 
-    def test_finished_stream_is_cached_for_json_endpoint(self):
+    def test_finished_stream_is_cached_for_search_method(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "A useful tire change guide.", "tire-change", None)])
@@ -512,7 +559,8 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(events[-1]["type"], "done")
             self.assertIsNotNone(search.cache.get(search._cache_key("tire change", None)))
 
-            cached = search.search("tire change", limit=1)
+            with patch.object(search, "_search_source", side_effect=AssertionError("cache miss")):
+                cached = search.search("tire change", limit=1)
             self.assertEqual(cached[0]["title"], "Tire Change")
             search._executor.shutdown(wait=True)
 
@@ -777,24 +825,48 @@ class ProductionHardeningTests(unittest.TestCase):
 
     def test_malformed_disambiguation_tuning_falls_back_to_defaults(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
-        search = object.__new__(Search)
-        search.cfg = {"disambiguation_boost": "high", "disambiguation_penalty": "nope"}
-        search.candidate_count = 16
-        search.max_results = 100
+        hub = {
+            "id": "manual:hub",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Air (disambiguation)",
+            "lead": "Air may refer to several things.",
+            "path": "Air_(disambiguation)",
+            "source_rank": 1,
+        }
+        article = {
+            "id": "manual:air",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Air",
+            "lead": "Air is a mixture of gases.",
+            "path": "Air",
+            "source_rank": 1,
+        }
         result = SourceResult(
             source=source,
-            items=[{
-                "id": "manual:air",
-                "source_key": "manual",
-                "source": "Manual",
-                "title": "Air",
-                "lead": "Air is a mixture of gases.",
-                "path": "Air",
-                "source_rank": 1,
-            }],
+            items=[hub, article],
+            keyword=[(-1.0, article)],
+            fulltext=[(0, article)],
         )
-        ranked = search._rank_results([result], "air", 10)
-        self.assertEqual(ranked[0]["title"], "Air")
+
+        malformed = object.__new__(Search)
+        malformed.cfg = {
+            "disambiguation_boost": "high",
+            "disambiguation_penalty": "nope",
+        }
+        malformed.candidate_count = 16
+        defaults = object.__new__(Search)
+        defaults.cfg = {}
+        defaults.candidate_count = 16
+
+        ranked = malformed._rank_results([result], "air", 10)
+        expected = defaults._rank_results([result], "air", 10)
+        self.assertEqual([item["id"] for item in ranked], [item["id"] for item in expected])
+        self.assertEqual(
+            [item["score"] for item in ranked],
+            [item["score"] for item in expected],
+        )
 
     def test_exhausted_search_slots_report_busy_without_blocking(self):
         search = _bare_search({"kiwix_url": "http://example/content"})

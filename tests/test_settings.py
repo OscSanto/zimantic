@@ -32,14 +32,15 @@ class HardwareProfileTests(unittest.TestCase):
 class LoadConfigTests(unittest.TestCase):
     def test_missing_file_warns_and_uses_a_complete_profile(self):
         warnings = []
-        load_config("/nonexistent/config.toml", warn=warnings.append)
+        with patch.object(settings, "profile_for_hardware", return_value="desktop"):
+            cfg = load_config("/nonexistent/config.toml", warn=warnings.append)
 
         self.assertTrue(warnings)
         self.assertIn("not found", warnings[0])
-        # Every profile carries the keys build/serve read without fallback.
-        for profile in PROFILES.values():
-            for key in ("index_dir", "zim_dir", "model_dir", "port", "batch_size"):
-                self.assertIn(key, profile)
+        # The returned config, not just the profile constants, must be complete.
+        for key in ("index_dir", "zim_dir", "model_dir", "port", "batch_size"):
+            self.assertIn(key, cfg)
+            self.assertEqual(cfg[key], PROFILES["desktop"][key])
 
     def test_empty_file_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
