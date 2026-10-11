@@ -215,8 +215,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         const url = typeof navigation?.[direction] === "string"
           ? navigation[direction]
           : "";
+        const availableKey = `${direction}Available`;
+        const available = typeof navigation?.[availableKey] === "boolean"
+          ? navigation[availableKey]
+          : Boolean(url);
         control.hidden = !navigation?.modal;
-        control.disabled = !url;
+        control.disabled = !available;
         if (url) {
           control.dataset.zimanticUrl = url;
         } else {
@@ -292,11 +296,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         }
       } else if (action === "previous" || action === "next") {
         const url = control.dataset.zimanticUrl;
-        if (!url || control.disabled || window.parent === window) return;
+        if (control.disabled || window.parent === window) return;
         event.preventDefault();
         window.parent.postMessage({
           type: "zimantic-article-navigate",
           url,
+          direction: action,
         }, "*");
       } else if (action === "parent-previous" || action === "parent-next") {
         const url = control.dataset.zimanticUrl;
