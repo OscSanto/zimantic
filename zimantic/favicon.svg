@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="32" height="32">
+  <!-- Dark Space Background -->
+  <rect width="16" height="16" fill="#0b0f19" />
+
+  <!-- Graph Connections (RDF Edges) -->
+  <path d="M 3 8 H 13 M 8 3 V 13" stroke="#4fd1c5" stroke-width="1" opacity="0.8" />
+
+  <!-- Peripheral Semantic Nodes -->
+  <circle cx="2.5" cy="8" r="1.5" fill="#ed8936" /> <!-- Left / Subject -->
+  <circle cx="13.5" cy="8" r="1.5" fill="#48bb78" /> <!-- Right / Object -->
+  <circle cx="8" cy="2.5" r="1.5" fill="#9f7aea" /> <!-- Top -->
+  <circle cx="8" cy="13.5" r="1.5" fill="#e53e3e" /> <!-- Bottom -->
+
+  <!-- Central Query Node Core (Gradient Glow Effect) -->
+  <circle cx="8" cy="8" r="4" fill="#00b4d8" />
+  <circle cx="8" cy="8" r="3.2" fill="#0077b6" />
+
+  <text 
+    x="8" 
+    y="10.8" 
+    fill="#ffffff" 
+    font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" 
+    font-size="8.5" 
+    font-weight="900" 
+    text-anchor="middle">?</text>
+</svg>

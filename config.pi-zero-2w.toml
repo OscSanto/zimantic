@@ -44,6 +44,7 @@ disambiguation_penalty = 0.5
 search_workers = 2
 max_concurrent_searches = 2
 candidate_count = 16
+max_stream_ranks = 8
 source_timeout = 12
 
 cache_size = 64

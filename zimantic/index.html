@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Zimantic</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>
     :root {
       --bg: #0f1115;
@@ -163,7 +164,12 @@
       word-break: break-word;
     }
     .result-snippet p:last-child { margin-bottom: 0; }
-    .result-snippet mark { background: var(--mark-bg); border-radius: 2px; font-weight: 600; }
+    .result-snippet mark {
+      background: unset;
+      color: var(--accent);
+      font-style: italic;
+      font-weight: 600;
+    }
     .result-snippet.none { color: var(--muted); font-style: italic; }
     .result-thumb {
       background: var(--mark-bg);
@@ -203,29 +209,6 @@
       position: relative;
       width: 100%;
     }
-    .article-modal-header {
-      align-items: center;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      gap: 12px;
-      min-height: 48px;
-      padding: 6px 10px 6px 16px;
-    }
-    .article-modal-title {
-      flex: 1;
-      font-weight: 600;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .article-modal-close {
-      background: transparent;
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 6px 10px;
-    }
-    .article-modal-close:hover { background: var(--mark-bg); }
     .article-modal-frame {
       background: #fff;
       border: 0;
@@ -287,11 +270,7 @@
 
 <div id="articleModal" class="article-modal" hidden>
   <button class="article-modal-backdrop" type="button" tabindex="-1" aria-label="Close article"></button>
-  <section class="article-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="articleModalTitle">
-    <div class="article-modal-header">
-      <div id="articleModalTitle" class="article-modal-title">Article</div>
-      <button id="articleModalClose" class="article-modal-close" type="button">Close</button>
-    </div>
+  <section class="article-modal-dialog" role="dialog" aria-modal="true" aria-label="Article">
     <iframe id="articleModalFrame" class="article-modal-frame" title="Article" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
   </section>
 </div>
@@ -309,11 +288,11 @@
   const BUSY_RETRY_LIMIT = 5;
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
-  const SOURCE_FILTER_LIMIT = 50;
+  const SOURCE_FILTER_LIMIT = 10;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
   let sources = [];
   let current = null;
-  let activeSource = null;
+  let selectedSourceKeys = new Set();
   let sourceFilterQuery = "";
   let requestController = null;
   let pageController = null;
@@ -341,7 +320,10 @@
     if (streamRenderTimer !== null) return;
     streamRenderTimer = setTimeout(() => {
       streamRenderTimer = null;
-      if (sequence === searchSequence && current) renderView();
+      if (sequence === searchSequence && current) {
+        renderView();
+        renderNotice();
+      }
     }, STREAM_RENDER_DELAY);
   }
 
@@ -428,6 +410,16 @@
     return sources.filter(source => source.available);
   }
 
+  function setSelectedSources(values) {
+    selectedSourceKeys = new Set(
+      (Array.isArray(values) ? values : values ? [values] : []).filter(Boolean)
+    );
+  }
+
+  function sourceFilterParams(params) {
+    selectedSourceKeys.forEach(source => params.append("source", source));
+  }
+
   function renderSourceFilters() {
     const panel = $("sourceFilters");
     const options = $("sourceFilterOptions");
@@ -450,14 +442,26 @@
         return `${source.name} ${source.key}`.toLocaleLowerCase().includes(query);
       })
       : nonEmptyOutcomes;
-    const visible = matching.slice(0, SOURCE_FILTER_LIMIT);
+    const sorted = matching.sort((left, right) => {
+      const countDifference =
+        (current.counts[right.source.key] || 0) - (current.counts[left.source.key] || 0);
+      return countDifference || left.source.name.localeCompare(right.source.name);
+    });
+    const visible = sorted.slice(0, SOURCE_FILTER_LIMIT);
+    const visibleKeys = new Set(visible.map(outcome => outcome.source.key));
+    const otherOutcomes = !query
+      ? nonEmptyOutcomes.filter(outcome =>
+        !visibleKeys.has(outcome.source.key) && (current.counts[outcome.source.key] || 0) > 0
+      )
+      : [];
 
     const all = document.createElement("button");
     all.className = "secondary source-filter-option";
     all.type = "button";
     all.dataset.source = "";
-    all.setAttribute("aria-pressed", activeSource ? "false" : "true");
-    all.textContent = "All sources";
+    all.dataset.sourceAction = "all";
+    all.setAttribute("aria-pressed", selectedSourceKeys.size ? "false" : "true");
+    all.textContent = "All Sources";
 
     const entries = visible.map(outcome => {
       // Counts come from the ranked pool (server-reported), not per-source
@@ -472,10 +476,27 @@
       button.type = "button";
       button.dataset.source = outcome.source.key;
       button.disabled = Boolean(outcome.error);
-      button.setAttribute("aria-pressed", activeSource === outcome.source.key ? "true" : "false");
+      button.setAttribute(
+        "aria-pressed",
+        selectedSourceKeys.has(outcome.source.key) ? "true" : "false"
+      );
       button.textContent = label;
       return button;
     });
+    const otherKeys = otherOutcomes.map(outcome => outcome.source.key);
+    if (!selectedSourceKeys.size && !query && otherKeys.length) {
+      const otherCount = otherOutcomes.reduce(
+        (total, outcome) => total + (current.counts[outcome.source.key] || 0),
+        0
+      );
+      const other = document.createElement("button");
+      other.className = "source-filter-option ok";
+      other.type = "button";
+      other.dataset.sourceAction = "other";
+      other.setAttribute("aria-pressed", "false");
+      other.textContent = `Other: ${otherCount}`;
+      entries.push(other);
+    }
     options.replaceChildren(all, ...entries);
 
     if (!matching.length) {
@@ -492,8 +513,13 @@
   }
 
   function renderFilterLine(count) {
-    $("filterLine").innerHTML = activeSource
-      ? `Showing only <strong>${escapeHtml(current.outcomes.get(activeSource)?.source.name || activeSource)}</strong>: ${count} result${count === 1 ? "" : "s"}.
+    const selected = [...selectedSourceKeys];
+    $("filterLine").innerHTML = selected.length
+      ? `Showing only <strong>${escapeHtml(selected.map(key =>
+        current.outcomes.get(key)?.source.name ||
+        sources.find(source => source.key === key)?.name ||
+        key
+      ).join(", "))}</strong>: ${count} result${count === 1 ? "" : "s"}.
          <button class="linklike" type="button" data-source="">Show all sources</button>`
       : "";
   }
@@ -552,21 +578,18 @@
     }
   }
 
-  function showArticleModal(articleUrl, articleTitle) {
+  function showArticleModal(articleUrl) {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
-    const title = $("articleModalTitle");
-    if (!modal || !frame || !title) return;
+    if (!modal || !frame) return;
     if (modal.hidden) modalPreviousFocus = document.activeElement;
     const shouldLoad = activeModalUrl !== articleUrl;
     activeModalUrl = articleUrl;
     modalRootPending = shouldLoad;
-    title.textContent = articleTitle || "Article";
-    frame.title = title.textContent;
     if (shouldLoad) frame.src = articleUrl;
     modal.hidden = false;
     document.body.classList.add("modal-open");
-    $("articleModalClose").focus();
+    frame.focus();
   }
 
   function openArticleModal(link) {
@@ -577,13 +600,13 @@
         "",
         makeStateUrl(
           current.question,
-          activeSource,
+          selectedSourceKeys,
           current.page,
           articleUrlValue(articleUrl)
         )
       );
     }
-    showArticleModal(articleUrl.href, link.textContent || "Article");
+    showArticleModal(articleUrl.href);
   }
 
   function closeArticleModal({navigateHistory = true} = {}) {
@@ -959,8 +982,7 @@
         current.outcomes.set(event.source.key, event);
         if (typeof event.count === "number") current.counts[event.source.key] = event.count;
         $("status").textContent = `${event.completed}/${event.total_sources} sources complete`;
-        renderSourceFilters();
-        renderNotice();
+        scheduleStreamRender(sequence);
       } else if (event.type === "snapshot") {
         applyPage(event);
         scheduleStreamRender(sequence);
@@ -972,6 +994,7 @@
           ? `${current.completed}/${current.sourcesTotal} sources complete · ${current.total} result${current.total === 1 ? "" : "s"}`
           : "No searchable sources.";
         renderView();
+        renderNotice();
       } else if (event.type === "error") {
         busy = Boolean(event.busy);
         $("status").textContent = event.error || "Search failed";
@@ -995,7 +1018,7 @@
     return false;
   }
 
-  async function runSearch(question, source = null, page = 0) {
+  async function runSearch(question, selectedSources = [], page = 0) {
     question = question.trim();
     if (!question) return;
     if (requestController) requestController.abort();
@@ -1007,7 +1030,7 @@
     requestController = controller;
     const sequence = ++searchSequence;
     const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
-    activeSource = source;
+    setSelectedSources(selectedSources);
     current = {
       question,
       terms: queryTerms(question),
@@ -1039,7 +1062,7 @@
         limit: String(PAGE_SIZE),
         offset: String(pageIndex * PAGE_SIZE)
       });
-      if (source) params.set("source", source);
+      sourceFilterParams(params);
       // Always query every source: no zim params means the server searches all
       // currently available sources. The server ranks one pool and sends only
       // this page; page size, offset and the display filter are not cached keys.
@@ -1085,7 +1108,7 @@
       limit: String(PAGE_SIZE),
       offset: String(pageIndex * PAGE_SIZE)
     });
-    if (activeSource) params.set("source", activeSource);
+    sourceFilterParams(params);
     $("status").textContent = "Loading page…";
     try {
       const response = await fetch("/search?" + params, { signal: controller.signal });
@@ -1116,21 +1139,26 @@
     }
   }
 
-  function makeStateUrl(question, source, page, modal = null) {
+  function makeStateUrl(question, selectedSources, page, modal = null) {
     // Keep search and modal state in the query string so links are shareable
     // and Back/Forward just work.
     const url = new URL(location.href);
     url.hash = "";
     url.search = "";
     url.searchParams.set("q", question);
-    if (source) url.searchParams.set("src", source);
+    const sourceValues = selectedSources instanceof Set
+      ? [...selectedSources]
+      : Array.isArray(selectedSources)
+        ? selectedSources
+        : selectedSources ? [selectedSources] : [];
+    sourceValues.forEach(source => url.searchParams.append("src", source));
     if (page > 0) url.searchParams.set("page", String(page + 1));
     if (modal) url.searchParams.set("modal", modal);
     return url.pathname + url.search;
   }
 
   function makePageUrl(page) {
-    return makeStateUrl(current.question, activeSource, page);
+    return makeStateUrl(current.question, selectedSourceKeys, page);
   }
 
   function readLocationState() {
@@ -1138,7 +1166,7 @@
     const pageNumber = Number.parseInt(params.get("page") || "1", 10);
     return {
       question: (params.get("q") || "").trim(),
-      source: params.get("src") || null,
+      selectedSources: [...new Set(params.getAll("src").filter(Boolean))],
       page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0,
       modal: params.get("modal") || null
     };
@@ -1147,7 +1175,7 @@
   function syncArticleModal(modalValue) {
     const articleUrl = readModalUrl(modalValue);
     if (articleUrl) {
-      showArticleModal(articleUrl.href, "Article");
+      showArticleModal(articleUrl.href);
     } else {
       closeArticleModal({navigateHistory: false});
     }
@@ -1159,12 +1187,39 @@
   });
 
   $("sourceFilterOptions").addEventListener("click", event => {
-    const button = event.target.closest("button[data-source]");
+    const button = event.target.closest("button[data-source], button[data-source-action]");
     if (!button || button.disabled || !current) return;
     const key = button.dataset.source || null;
-    // Clicking the active source filter again returns to "All sources".
-    activeSource = (activeSource && activeSource === key) ? null : key;
-    history.pushState(null, "", makeStateUrl(current.question, activeSource, 0));
+    if (button.dataset.sourceAction === "all") {
+      selectedSourceKeys.clear();
+    } else if (button.dataset.sourceAction === "other") {
+      const outcomes = [...current.outcomes.values()];
+      const nonEmptyOutcomes = outcomes.filter(outcome =>
+        outcome.error || (current.counts[outcome.source.key] || 0) > 0
+      );
+      const visibleKeys = new Set(
+        nonEmptyOutcomes
+          .sort((left, right) => {
+            const countDifference =
+              (current.counts[right.source.key] || 0) - (current.counts[left.source.key] || 0);
+            return countDifference || left.source.name.localeCompare(right.source.name);
+          })
+          .slice(0, SOURCE_FILTER_LIMIT)
+          .map(outcome => outcome.source.key)
+      );
+      setSelectedSources(
+        nonEmptyOutcomes
+          .filter(outcome =>
+            !visibleKeys.has(outcome.source.key) && (current.counts[outcome.source.key] || 0) > 0
+          )
+          .map(outcome => outcome.source.key)
+      );
+    } else if (selectedSourceKeys.has(key)) {
+      selectedSourceKeys.delete(key);
+    } else {
+      selectedSourceKeys.add(key);
+    }
+    history.pushState(null, "", makeStateUrl(current.question, selectedSourceKeys, 0));
     renderSourceFilters();
     loadPage(0);
   });
@@ -1172,8 +1227,8 @@
   $("filterLine").addEventListener("click", event => {
     const button = event.target.closest("button[data-source]");
     if (button) {
-      activeSource = null;
-      history.pushState(null, "", makeStateUrl(current.question, null, 0));
+      selectedSourceKeys.clear();
+      history.pushState(null, "", makeStateUrl(current.question, selectedSourceKeys, 0));
       renderSourceFilters();
       loadPage(0);
     }
@@ -1194,11 +1249,10 @@
     if (!link || !current) return;
     event.preventDefault();
     const page = Number(link.dataset.page);
-    history.pushState(null, "", makeStateUrl(current.question, activeSource, page));
+    history.pushState(null, "", makeStateUrl(current.question, selectedSourceKeys, page));
     loadPage(page);
   });
 
-  $("articleModalClose").addEventListener("click", closeArticleModal);
   $("articleModal").addEventListener("click", event => {
     if (event.target.classList.contains("article-modal-backdrop")) {
       closeArticleModal();
@@ -1225,7 +1279,7 @@
     cancelThumbnails();
     thumbnailCache.clear();
     current = null;
-    activeSource = null;
+    selectedSourceKeys = new Set();
     resultList = null;
     document.body.classList.remove("search-active");
     $("status").textContent = "";
@@ -1263,7 +1317,11 @@
       clearSearch(pushHistory);
       return;
     }
-    history[pushHistory ? "pushState" : "replaceState"](null, "", makeStateUrl(question, null, 0));
+    history[pushHistory ? "pushState" : "replaceState"](
+      null,
+      "",
+      makeStateUrl(question, [], 0)
+    );
     runSearch(question);
   }
 
@@ -1291,11 +1349,10 @@
     $("question").value = state.question;
     if (current && current.question === state.question) {
       // Same query: just move the page or display filter, no re-search.
-      activeSource = state.source;
+      setSelectedSources(state.selectedSources);
       loadPage(state.page);
     } else {
-      activeSource = state.source;
-      runSearch(state.question, state.source, state.page);
+      runSearch(state.question, state.selectedSources, state.page);
     }
   });
 
@@ -1322,7 +1379,7 @@
     syncArticleModal(state.modal);
     if (state.question) {
       $("question").value = state.question;
-      runSearch(state.question, state.source, state.page);
+      runSearch(state.question, state.selectedSources, state.page);
     } else {
       $("question").focus();
     }

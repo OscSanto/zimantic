@@ -37,7 +37,7 @@ include-package-data = true
 include = ["zimantic*"]
 
 [tool.setuptools.package-data]
-zimantic = ["index.html"]
+zimantic = ["index.html", "favicon.svg"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

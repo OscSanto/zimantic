@@ -31,6 +31,7 @@ MAX_QUERY_LENGTH = 4096
 DEFAULT_CANDIDATES = 16
 DEFAULT_SOURCE_TIMEOUT = 12
 DEFAULT_MAX_CONCURRENT_SEARCHES = 4
+DEFAULT_MAX_STREAM_RANKS = 16
 DEFAULT_NPROBE_FRACTION = 0.06
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
@@ -336,6 +337,9 @@ class Search:
         self.max_results = _int_config(cfg, "max_results", DEFAULT_MAX_RESULTS)
         self.max_concurrent_searches = _int_config(
             cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
+        )
+        self.max_stream_ranks = _int_config(
+            cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
         self._executor = ThreadPoolExecutor(max_workers=self.source_workers, thread_name_prefix="zimantic-search")
@@ -1099,7 +1103,7 @@ class Search:
     def _page_state(
         self,
         pool: list[dict[str, Any]],
-        source: str | None,
+        source: str | list[str] | None,
         offset: int,
         page_size: int,
         debug: bool,
@@ -1109,7 +1113,10 @@ class Search:
         `source` is a display-only filter: the pool was ranked over every
         selected source, so narrowing here never changes what was searched.
         """
-        scoped = pool if not source else [doc for doc in pool if doc.get("source_key") == source]
+        selected = {source} if isinstance(source, str) else set(source or [])
+        scoped = pool if not selected else [
+            doc for doc in pool if doc.get("source_key") in selected
+        ]
         total = len(scoped)
         page = scoped[offset:offset + page_size]
         return {
@@ -1155,7 +1162,7 @@ class Search:
         zim: list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
-        source: str | None = None,
+        source: str | list[str] | None = None,
         debug: bool = False,
     ) -> dict[str, Any]:
         """Return one page plus totals, using the streaming coordinator."""
@@ -1181,7 +1188,7 @@ class Search:
         zim: list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
-        source: str | None = None,
+        source: str | list[str] | None = None,
         debug: bool = False,
     ) -> list[dict]:
         """Return one page of the final result set."""
@@ -1193,7 +1200,7 @@ class Search:
         cached: Any,
         query: str,
         sources: list[SourceInfo],
-        source: str | None,
+        source: str | list[str] | None,
         offset: int,
         page_size: int,
         debug: bool,
@@ -1243,7 +1250,7 @@ class Search:
         zim: list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
-        source: str | None = None,
+        source: str | list[str] | None = None,
         debug: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """Yield source progress and one page of the ranked pool.
@@ -1345,6 +1352,21 @@ class Search:
             title_query = _title_query(query)
             fulltext_query = _fulltext_query(query)
             pool_target = self._pool_target()
+            max_stream_ranks = max(
+                1,
+                getattr(
+                    self,
+                    "max_stream_ranks",
+                    _int_config(
+                        self.cfg,
+                        "max_stream_ranks",
+                        DEFAULT_MAX_STREAM_RANKS,
+                    ),
+                ),
+            )
+            rank_interval = max(1, math.ceil(total_sources / max_stream_ranks))
+            pool: list[dict[str, Any]] = []
+            counts: dict[str, int] = {}
             for src in sources:
                 futures.append(
                     self._executor.submit(
@@ -1370,28 +1392,38 @@ class Search:
                         status="error",
                     )
                 completed.append(result)
-                pool = self._rank_results(completed, query, pool_target)
-                counts = self._source_counts(pool)
+                should_rank = (
+                    len(completed) == 1
+                    or len(completed) % rank_interval == 0
+                    or len(completed) == total_sources
+                )
+                if should_rank:
+                    pool = self._rank_results(completed, query, pool_target)
+                    counts = self._source_counts(pool)
                 yield {
                     "type": "source",
                     **result.to_event(counts.get(src.key, 0)),
                     "completed": len(completed),
                     "total_sources": total_sources,
                 }
-                state = self._page_state(pool, source, offset, page_size, debug)
-                yield {
-                    "type": "snapshot",
-                    "results": state["results"],
-                    "completed": len(completed),
-                    "total_sources": total_sources,
-                    "total": state["total"],
-                    "has_more": state["has_more"],
-                    "offset": offset,
-                    "limit": page_size,
-                    "counts": state["counts"],
-                }
+                if should_rank:
+                    state = self._page_state(pool, source, offset, page_size, debug)
+                    yield {
+                        "type": "snapshot",
+                        "results": state["results"],
+                        "completed": len(completed),
+                        "total_sources": total_sources,
+                        "total": state["total"],
+                        "has_more": state["has_more"],
+                        "offset": offset,
+                        "limit": page_size,
+                        "counts": state["counts"],
+                    }
 
-            pool = self._rank_results(completed, query, pool_target)
+            if len(completed) != total_sources:
+                pool = self._rank_results(completed, query, pool_target)
+                counts = self._source_counts(pool)
+            self._populate_result_mimetypes(pool)
             counts = self._source_counts(pool)
             # The cache holds only the deduplicated ranked pool plus compact
             # source outcomes, never a copy of every source's item list.
@@ -1531,16 +1563,17 @@ class Search:
                 rowids.add(int(rowid))
                 keyword.append((float(bm25), {"rowid": int(rowid)}))
 
-        fulltext_paths: list[tuple[int, str]] = []
+        fulltext_rows: list[tuple[int, int]] = []
         if index.searcher and index.archive:
             # libzim's Searcher is not documented as thread-safe: serialise it.
             with index.lock:
                 try:
                     paths = index.searcher.search(Query().set_query(fulltext_query or query)).getResults(0, count)
-                    fulltext_paths = [(rank, path) for rank, path in enumerate(paths)]
-                    for _, path in fulltext_paths:
+                    for rank, path in enumerate(paths):
                         try:
-                            rowids.add(index.archive.get_entry_by_path(path)._index)
+                            rowid = index.archive.get_entry_by_path(path)._index
+                            rowids.add(rowid)
+                            fulltext_rows.append((rank, rowid))
                         except (KeyError, RuntimeError, ValueError):
                             continue
                 except (RuntimeError, ValueError) as error:
@@ -1553,11 +1586,7 @@ class Search:
                 semantic.append((score, doc))
         keyword = [(score, docs[row["rowid"]]) for score, row in keyword if row["rowid"] in docs]
         if index.archive:
-            for rank, path in fulltext_paths:
-                try:
-                    rowid = index.archive.get_entry_by_path(path)._index
-                except (KeyError, RuntimeError):
-                    continue
+            for rank, rowid in fulltext_rows:
                 doc = docs.get(rowid)
                 if doc:
                     fulltext.append((rank, doc))
@@ -1605,24 +1634,6 @@ class Search:
         # kiwix_url is optional: without it results have no article link, so the
         # UI renders the title as plain text instead of building a broken URL.
         kiwix_url = str(self.cfg.get("kiwix_url") or "").strip().rstrip("/")
-        mimetypes: dict[str, str] = {}
-        local_index = getattr(self, "indexes", {}).get(
-            source.local_name or source.book
-        )
-        archive = getattr(local_index, "archive", None)
-        if archive is not None:
-            with local_index.lock:
-                for row in rows.values():
-                    path = row[3]
-                    if path in mimetypes:
-                        continue
-                    try:
-                        item = archive.get_entry_by_path(path).get_item()
-                        mimetypes[path] = (
-                            item.mimetype or "application/octet-stream"
-                        ).split(";", 1)[0].strip().lower()
-                    except (KeyError, RuntimeError, ValueError):
-                        continue
         docs: dict[int, dict[str, Any]] = {}
         for rowid in values:
             original = rows.get(rowid)
@@ -1640,7 +1651,7 @@ class Search:
                 "title": title,
                 "lead": self._preview(excerpt or ""),
                 "path": path,
-                "mimetype": mimetypes.get(path),
+                "mimetype": None,
                 "url": (
                     f"/article/{quote(source.local_name or source.book, safe='')}/"
                     f"{quote(path, safe='/')}"
@@ -1654,6 +1665,41 @@ class Search:
             }
             docs[rowid] = doc
         return docs
+
+    def _populate_result_mimetypes(self, pool: list[dict[str, Any]]) -> None:
+        """Read MIME metadata only for documents that survive global ranking."""
+        if not pool:
+            return
+        with self._state_lock:
+            sources = dict(self.sources)
+            indexes = dict(self.indexes)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for doc in pool:
+            source = sources.get(doc.get("source_key"))
+            if source is None or source.mode != "local" or not source.local_name:
+                continue
+            index = indexes.get(source.local_name)
+            if index is not None and index.archive is not None:
+                grouped.setdefault(source.local_name, []).append(doc)
+
+        for local_name, docs in grouped.items():
+            index = indexes[local_name]
+            try:
+                self._acquire_index(index)
+            except RuntimeError:
+                continue
+            try:
+                with index.lock:
+                    for doc in docs:
+                        try:
+                            item = index.archive.get_entry_by_path(doc["path"]).get_item()
+                            doc["mimetype"] = (
+                                item.mimetype or "application/octet-stream"
+                            ).split(";", 1)[0].strip().lower()
+                        except (KeyError, RuntimeError, ValueError):
+                            continue
+            finally:
+                self._release_index(index)
 
     def _preview(self, text: str) -> str:
         limit = getattr(

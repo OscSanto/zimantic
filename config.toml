@@ -93,13 +93,17 @@ long_query = 10
 disambiguation_boost = 0.08
 disambiguation_penalty = 0.5
 
-# Search workers.
-search_workers = 4
+# Search workers. More workers reduce wall-clock time when many ZIMs are on
+# separate storage, but increase concurrent I/O and SQLite connections.
+search_workers = 8
 # Maximum simultaneous user searches. Several people can search at once up to
 # this many; each search may still use all source workers. Lower it on a Pi.
 max_concurrent_searches = 4
 # Number of candidates requested from each retrieval backend before fusion.
 candidate_count = 16
+# Maximum intermediate ranking passes during a streamed search. The final
+# ranking always includes every source; lower this on slow CPUs.
+max_stream_ranks = 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
 source_timeout = 12
 # Exact-query LRU cache. Set cache_size to 0 to disable.

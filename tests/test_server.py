@@ -82,6 +82,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.headers["x-total-count"], "1")
         self.assertEqual(response.headers["x-has-more"], "false")
 
+    def test_favicon_is_served(self):
+        response = self.client.get("/favicon.svg")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("image/svg+xml"))
+        self.assertIn(b"<svg", response.content)
+
     def test_large_articles_stream_in_chunks(self):
         content = memoryview(b"x" * (512 * 1024 + 1))
         self.search.read_article = lambda zim, path: {
@@ -106,6 +112,11 @@ class ServerTests(unittest.TestCase):
             self.search.search_page_calls[-1],
             ("page", None, 5, 10, "manual", False),
         )
+
+    def test_search_accepts_multiple_source_filters(self):
+        response = self.client.get("/search?q=page&source=manual&source=other")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.search.search_page_calls[-1][4], ["manual", "other"])
 
     def test_debug_mode_is_server_wide(self):
         response = self.debug_client.get("/search?q=page")

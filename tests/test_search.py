@@ -322,6 +322,59 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(event_types.count("snapshot"), 2)
         self.assertEqual(len(events[-1]["results"]), 2)
 
+    def test_stream_bounds_intermediate_ranking_passes_for_many_sources(self):
+        sources = [
+            SourceInfo(f"source-{index}", f"Source {index}", f"source-{index}", "local")
+            for index in range(20)
+        ]
+        search = _bare_search(
+            {
+                "long_query": 10,
+                "candidate_count": 2,
+                "max_stream_ranks": 4,
+            }
+        )
+        search.max_stream_ranks = 4
+        search.semantic = False
+        search.sources = {source.key: source for source in sources}
+        search._state_lock = threading.RLock()
+        search._search_slots = threading.BoundedSemaphore(1)
+        search.embedder = None
+        rank_sizes = []
+
+        def fake_source_search(source, query, title_query, fulltext_query, query_vector, limit):
+            doc = {
+                "id": f"{source.key}:page",
+                "source_key": source.key,
+                "source": source.name,
+                "title": source.name,
+                "lead": "",
+                "path": "page",
+                "url": None,
+                "source_rank": 1,
+            }
+            return SourceResult(source=source, items=[doc], fulltext=[(0, doc)])
+
+        real_rank_results = search._rank_results
+
+        def rank_results(source_results, query, limit):
+            rank_sizes.append(len(source_results))
+            return real_rank_results(source_results, query, limit)
+
+        search._search_source = fake_source_search
+        search._rank_results = rank_results
+        try:
+            events = list(search.stream_search("source page", limit=2))
+        finally:
+            search._executor.shutdown(wait=True)
+
+        self.assertEqual(rank_sizes, [1, 5, 10, 15, 20])
+        self.assertEqual(
+            sum(event["type"] == "snapshot" for event in events),
+            len(rank_sizes),
+        )
+        self.assertEqual(len(events[-1]["results"]), 2)
+
     def test_local_source_uses_batched_document_hydration(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
@@ -782,6 +835,14 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual([doc["source_key"] for doc in page["results"]], ["beta"])
             self.assertEqual(page["total"], 1)
             self.assertEqual(page["counts"], {"alpha": 1, "beta": 1})
+
+            page = search.search_page("tire change", limit=10, source=["alpha", "beta"])
+
+            self.assertEqual(
+                [doc["source_key"] for doc in page["results"]],
+                ["alpha", "beta"],
+            )
+            self.assertEqual(page["total"], 2)
             search._executor.shutdown(wait=True)
 
     def test_concurrent_identical_searches_share_one_computation(self):

@@ -21,6 +21,7 @@ from .search import (
 )
 
 PAGE = Path(__file__).parent / "index.html"
+FAVICON = Path(__file__).parent / "favicon.svg"
 PID_FILE = Path("zimantic.pid")
 logger = logging.getLogger(__name__)
 
@@ -376,6 +377,10 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     def page():
         return FileResponse(PAGE)
 
+    @app.get("/favicon.svg", include_in_schema=False)
+    def favicon():
+        return FileResponse(FAVICON, media_type="image/svg+xml")
+
     @app.get("/zims")
     def zims():
         return searchClass.local_names()
@@ -461,12 +466,13 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     def api_search(
         q: str = Query(..., min_length=1, max_length=4096),
         zim: list[str] | None = Query(None),
-        source: str | None = Query(None),
+        source: list[str] | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
     ):
+        source_filter = source[0] if source and len(source) == 1 else source
         try:
-            page = searchClass.search_page(q, zim, limit, offset, source, debug)
+            page = searchClass.search_page(q, zim, limit, offset, source_filter, debug)
         except SearchBusyError as error:
             raise HTTPException(
                 status_code=503, detail=str(error), headers={"Retry-After": "1"}
@@ -489,7 +495,7 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     def api_search_stream(
         q: str = Query(..., min_length=1, max_length=4096),
         zim: list[str] | None = Query(None),
-        source: str | None = Query(None),
+        source: list[str] | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
     ):
@@ -499,7 +505,10 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
         def events():
-            for event in searchClass.stream_search(q, zim, limit, offset, source, debug):
+            source_filter = source[0] if source and len(source) == 1 else source
+            for event in searchClass.stream_search(
+                q, zim, limit, offset, source_filter, debug
+            ):
                 yield json.dumps(event, separators=(",", ":")) + "\n"
 
         return StreamingResponse(events(), media_type="application/x-ndjson")

@@ -25,7 +25,7 @@ Zero 2 W.
 - **Best of three searches**: meaning, title-word and full-text retrieval are fused into a single ranking.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Source-aware UI**: discover sources, filter results without re-searching, tolerate individual source failures, and optionally load thumbnails after text results appear. Every search covers **all** available sources; source filters change what is displayed, never what is searched.
+- **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. Every search covers **all** available sources; source filters change what is displayed, never what is searched.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
@@ -404,4 +404,8 @@ Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic r
 
 Exact queries use a small LRU cache controlled by `cache_size` and `cache_bytes` (32 MiB by default).
 The ranked pool is shared across pages and display filters, and invalidated when searchable sources
-change.
+change. For large libraries, `search_workers` controls how many ZIM indexes are searched in
+parallel. `max_stream_ranks` limits intermediate progress-ranking passes; the final result still
+ranks every source, while a lower value reduces CPU use on small devices. The automatic profiles
+use 8 workers and 16 intermediate passes on desktops, and 2 workers and 8 passes on low-memory
+devices.
