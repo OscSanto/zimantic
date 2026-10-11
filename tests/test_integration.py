@@ -87,6 +87,7 @@ def _create_zim(
 ) -> None:
     creator = Creator(str(path))
     creator.config_indexing(True, "eng")
+    creator.set_mainpath(pages[0][0])
     with creator:
         for page_path, title, html in pages:
             creator.add_item(_Page(page_path, title, html))
@@ -157,15 +158,64 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             client = TestClient(create_app(search))
 
-            response = client.get("/api/search", params={"q": "rotors"})
+            response = client.get("/search", params={"q": "rotors"})
             self.assertEqual(response.status_code, 200)
             result = response.json()[0]
             self.assertEqual(result["title"], "Beta")
             self.assertEqual(result["path"], "Beta")
-            self.assertEqual(result["url"], "http://kiwix/content/manual/Beta")
+            self.assertEqual(result["url"], "/article/manual/Beta")
             self.assertEqual(response.headers["x-total-count"], "1")
 
-            stream = client.get("/api/search/stream", params={"q": "rotors"})
+            article = client.get("/article/manual/Beta")
+            self.assertEqual(article.status_code, 200)
+            self.assertTrue(article.headers["content-type"].startswith("text/html"))
+            self.assertIn(b"brakes and rotors", article.content)
+            self.assertIn(b'data-zimantic-toolbar', article.content)
+            self.assertIn(b'data-zimantic-action="back"', article.content)
+            self.assertIn(b"/random?zim=manual", article.content)
+            self.assertNotIn(b"zimantic-toolbar-brand", article.content)
+            self.assertNotIn(b'>Search</a>', article.content)
+            toolbar_script = b"<script data-zimantic-toolbar>"
+            self.assertIn(toolbar_script, article.content)
+            self.assertLess(
+                article.content.index(toolbar_script),
+                article.content.index(b"<body>"),
+            )
+            self.assertNotIn(b"&lt;script data-zimantic-toolbar", article.content)
+
+            random_article = client.get(
+                "/random",
+                params={"zim": "manual"},
+                follow_redirects=False,
+            )
+            self.assertEqual(random_article.status_code, 307)
+            self.assertRegex(
+                random_article.headers["location"],
+                r"^/article/manual/(Alpha|Beta)$",
+            )
+
+            homepage = client.get("/article/manual", follow_redirects=False)
+            self.assertEqual(homepage.status_code, 307)
+            self.assertIn("/article/manual/", homepage.headers["location"])
+            homepage_article = client.get(homepage.headers["location"])
+            self.assertEqual(homepage_article.status_code, 200)
+
+            missing = client.get("/article/manual/missing")
+            self.assertEqual(missing.status_code, 404)
+
+            health = client.get("/health").json()
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(health["sources"], 1)
+            self.assertTrue(health["embedding"]["loaded"] is False)
+            self.assertEqual(health["indexes"][0]["status"], "ok")
+            self.assertTrue(health["indexes"][0]["capabilities"]["article"])
+            self.assertGreater(health["indexes"][0]["entry_count"], 0)
+            self.assertEqual(
+                client.get("/sources").json()[0]["homepage"],
+                health["indexes"][0]["homepage"],
+            )
+
+            stream = client.get("/search/stream", params={"q": "rotors"})
             self.assertEqual(stream.status_code, 200)
             self.assertEqual(
                 [json.loads(line)["type"] for line in stream.text.splitlines()],
@@ -288,6 +338,10 @@ class LocalIntegrationTests(unittest.TestCase):
                 missing_zim_search.search("beta", limit=1)[0]["title"],
                 "Beta",
             )
+            health = missing_zim_search.health()
+            self.assertEqual(health["status"], "degraded")
+            self.assertFalse(health["indexes"][0]["capabilities"]["article"])
+            self.assertIn("ZIM archive unavailable", health["indexes"][0]["issues"])
 
     def test_redirects_collapse_and_disambiguation_ranking_survive_real_build(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -301,11 +355,21 @@ class LocalIntegrationTests(unittest.TestCase):
                 redirects=[("Breeze", "Breeze", "Air")],
             )
             search = self._open_search(root)
+            client = TestClient(create_app(search))
 
             redirect_results = search.search("breeze", limit=10)
             self.assertEqual(len(redirect_results), 1)
             self.assertEqual(redirect_results[0]["title"], "Air")
             self.assertEqual(redirect_results[0]["path"], "Air")
+            redirect_article = client.get(
+                "/article/manual/Breeze",
+                follow_redirects=False,
+            )
+            self.assertEqual(redirect_article.status_code, 307)
+            self.assertEqual(
+                redirect_article.headers["location"],
+                "/article/manual/Air",
+            )
 
             ordinary_results = search.search("air", limit=10)
             self.assertEqual(ordinary_results[0]["title"], "Air")
@@ -331,28 +395,28 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             client = TestClient(create_app(search))
 
-            self.assertEqual(client.get("/api/search", params={"q": " "}).status_code, 400)
+            self.assertEqual(client.get("/search", params={"q": " "}).status_code, 400)
             self.assertEqual(
-                client.get("/api/search", params={"q": "x" * 4097}).status_code,
+                client.get("/search", params={"q": "x" * 4097}).status_code,
                 422,
             )
             self.assertEqual(
-                client.get("/api/search", params={"q": "article", "limit": 0}).status_code,
+                client.get("/search", params={"q": "article", "limit": 0}).status_code,
                 422,
             )
             self.assertEqual(
-                client.get("/api/search", params={"q": "article", "offset": -1}).status_code,
+                client.get("/search", params={"q": "article", "offset": -1}).status_code,
                 422,
             )
 
-            sources = client.get("/api/sources")
+            sources = client.get("/sources")
             old_etag = sources.headers["etag"]
             self.assertEqual(
-                client.get("/api/sources", headers={"If-None-Match": old_etag}).status_code,
+                client.get("/sources", headers={"If-None-Match": old_etag}).status_code,
                 304,
             )
 
-            response = client.get("/api/search", params={"q": "article"})
+            response = client.get("/search", params={"q": "article"})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers.get("content-encoding"), "gzip")
             self.assertEqual(len(response.json()), 2)
@@ -364,10 +428,10 @@ class LocalIntegrationTests(unittest.TestCase):
                 zim_name="other",
             )
             search.reload()
-            changed_sources = client.get("/api/sources")
+            changed_sources = client.get("/sources")
             self.assertNotEqual(changed_sources.headers["etag"], old_etag)
             self.assertEqual(
-                client.get("/api/sources", headers={"If-None-Match": old_etag}).status_code,
+                client.get("/sources", headers={"If-None-Match": old_etag}).status_code,
                 200,
             )
 

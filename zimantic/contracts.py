@@ -15,6 +15,7 @@ class SourceInfo:
     available: bool = True
     error: str | None = None
     intent_phrases: tuple[str, ...] = ()
+    homepage: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -26,6 +27,7 @@ class SourceInfo:
             "available": self.available,
             "error": self.error,
             "intent_phrases": list(self.intent_phrases),
+            "homepage": self.homepage,
         }
 
 

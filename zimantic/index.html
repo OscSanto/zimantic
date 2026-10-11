@@ -134,6 +134,66 @@
       overflow: hidden;
     }
     .result-thumb img { display: block; height: 100%; object-fit: cover; width: 100%; }
+    .modal-open { overflow: hidden; }
+    .article-modal[hidden] { display: none; }
+    .article-modal {
+      inset: 0;
+      position: fixed;
+      z-index: 1000;
+    }
+    .article-modal-backdrop {
+      background: rgba(0, 0, 0, .68);
+      border: 0;
+      border-radius: 0;
+      cursor: default;
+      inset: 0;
+      padding: 0;
+      position: absolute;
+    }
+    .article-modal-dialog {
+      background: var(--panel);
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      margin: 0;
+      max-width: none;
+      overflow: hidden;
+      position: relative;
+      width: 100%;
+    }
+    .article-modal-header {
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 12px;
+      min-height: 48px;
+      padding: 6px 10px 6px 16px;
+    }
+    .article-modal-title {
+      flex: 1;
+      font-weight: 600;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .article-modal-close {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 10px;
+    }
+    .article-modal-close:hover { background: var(--mark-bg); }
+    .article-modal-frame {
+      background: #fff;
+      border: 0;
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+    }
     .empty { color: var(--muted); padding: 16px 0; }
     .source-list { display: grid; gap: 4px; }
     .source-list label { align-items: flex-start; display: flex; gap: 8px; padding: 4px; }
@@ -177,6 +237,17 @@
   <nav class="pager" id="pager" aria-label="Results pagination"></nav>
 </div>
 
+<div id="articleModal" class="article-modal" hidden>
+  <button class="article-modal-backdrop" type="button" tabindex="-1" aria-label="Close article"></button>
+  <section class="article-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="articleModalTitle">
+    <div class="article-modal-header">
+      <div id="articleModalTitle" class="article-modal-title">Article</div>
+      <button id="articleModalClose" class="article-modal-close" type="button">Close</button>
+    </div>
+    <iframe id="articleModalFrame" class="article-modal-frame" title="Article"></iframe>
+  </section>
+</div>
+
 <script>
 (function () {
   "use strict";
@@ -206,6 +277,8 @@
   const thumbnailControllers = new Set();
   let activeThumbnails = 0;
   let streamRenderTimer = null;
+  let modalPreviousFocus = null;
+  let modalRootMarked = false;
 
   function cancelStreamRender() {
     if (streamRenderTimer !== null) {
@@ -335,6 +408,56 @@
   function setText(node, selector, text) {
     node.querySelector(selector).textContent = text;
   }
+
+  function modifiedClick(event) {
+    return event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey;
+  }
+
+  function openArticleModal(link) {
+    const modal = $("articleModal");
+    const frame = $("articleModalFrame");
+    const title = $("articleModalTitle");
+    if (!modal || !frame || !title) return;
+    modalPreviousFocus = document.activeElement;
+    title.textContent = link.textContent || "Article";
+    frame.title = title.textContent;
+    modalRootMarked = false;
+    frame.src = link.href;
+    modal.hidden = false;
+    document.body.classList.add("modal-open");
+    $("articleModalClose").focus();
+  }
+
+  function closeArticleModal() {
+    const modal = $("articleModal");
+    const frame = $("articleModalFrame");
+    if (!modal || modal.hidden) return;
+    modal.hidden = true;
+    document.body.classList.remove("modal-open");
+    if (frame) frame.src = "about:blank";
+    modalRootMarked = false;
+    if (modalPreviousFocus instanceof HTMLElement && document.contains(modalPreviousFocus)) {
+      modalPreviousFocus.focus();
+    }
+    modalPreviousFocus = null;
+  }
+
+  $("articleModalFrame").addEventListener("load", () => {
+    const modal = $("articleModal");
+    const frame = $("articleModalFrame");
+    if (modal.hidden || modalRootMarked || !frame.src || frame.src === "about:blank") return;
+    modalRootMarked = true;
+    frame.contentWindow.postMessage({type: "zimantic-modal-root"}, location.origin);
+  });
+  window.addEventListener("message", event => {
+    const frame = $("articleModalFrame");
+    if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
+    if (event.data?.type === "zimantic-article-close") closeArticleModal();
+  });
 
   function setResultNode(node, item) {
     node.dataset.key = resultKey(item);
@@ -751,7 +874,7 @@
       // this page; page size, offset and the display filter are not cached keys.
       let busyRetries = 0;
       while (true) {
-        const response = await fetch("/api/search/stream?" + params, { signal: controller.signal });
+        const response = await fetch("/search/stream?" + params, { signal: controller.signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const busy = await consumeStream(response, sequence);
         if (!busy || busyRetries >= BUSY_RETRY_LIMIT || sequence !== searchSequence) break;
@@ -793,7 +916,7 @@
     if (activeSource) params.set("source", activeSource);
     $("status").textContent = "Loading page…";
     try {
-      const response = await fetch("/api/search?" + params, { signal: controller.signal });
+      const response = await fetch("/search?" + params, { signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const items = await response.json();
       current.page = pageIndex;
@@ -867,6 +990,14 @@
     }
   });
 
+  $("results").addEventListener("click", event => {
+    const target = event.target instanceof Element ? event.target : null;
+    const link = target?.closest(".result-title a[href]");
+    if (!link || modifiedClick(event)) return;
+    event.preventDefault();
+    openArticleModal(link);
+  });
+
   $("pager").addEventListener("click", event => {
     const link = event.target.closest("a[data-page]");
     if (!link || !current) return;
@@ -874,6 +1005,19 @@
     const page = Number(link.dataset.page);
     history.pushState(null, "", makeStateUrl(current.question, activeSource, page));
     loadPage(page);
+  });
+
+  $("articleModalClose").addEventListener("click", closeArticleModal);
+  $("articleModal").addEventListener("click", event => {
+    if (event.target.classList.contains("article-modal-backdrop")) {
+      closeArticleModal();
+    }
+  });
+  window.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !$("articleModal").hidden) {
+      event.preventDefault();
+      closeArticleModal();
+    }
   });
 
   function resetResults() {
@@ -964,8 +1108,8 @@
       // Source discovery is read-only; refreshing the index/catalog set is an
       // admin action done only via `zimantic reload` or SIGHUP.
       const [configResponse, sourcesResponse] = await Promise.all([
-        fetch("/api/config"),
-        fetch("/api/sources"),
+        fetch("/config"),
+        fetch("/sources"),
       ]);
       if (configResponse.ok) {
         const config = await configResponse.json();

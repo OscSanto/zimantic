@@ -4,8 +4,10 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 import math
+import posixpath
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import threading
 from typing import Any, Iterator
@@ -79,6 +81,7 @@ class _LocalIndex:
     _active_searches: int = 0
     _retired: bool = False
     _closed: bool = False
+    done: str = "1"
 
     @property
     def semantic(self) -> bool:
@@ -92,6 +95,18 @@ class SearchQueryError(ValueError):
 
 class SearchBusyError(Exception):
     """Too many searches are already running; the client should retry."""
+
+
+class ArticleNotFoundError(Exception):
+    """The requested local ZIM or article path does not exist."""
+
+
+class ArticleUnavailableError(Exception):
+    """A local ZIM exists but cannot currently serve the requested article."""
+
+
+class ArticleTooLargeError(ArticleUnavailableError):
+    """The requested entry exceeds the configured serving limit."""
 
 
 def _int_config(cfg: dict, key: str, default: int, minimum: int = 1) -> int:
@@ -341,6 +356,7 @@ class Search:
                 db_path=uri,
                 db_signature=_file_signature(db_path),
                 faiss_signature=_file_signature(faiss_path),
+                done=done_value,
             )
         except sqlite3.Error:
             db.close()
@@ -561,12 +577,26 @@ class Search:
                 key = _zim_key(local_name)
                 if key in local:
                     key = local_name
+                homepage = None
+                index = self.indexes[local_name]
+                if index.archive is not None:
+                    try:
+                        with index.lock:
+                            homepage = self._resolve_article_entry(index.archive).path
+                    except (
+                        ArticleNotFoundError,
+                        ArticleUnavailableError,
+                        RuntimeError,
+                        ValueError,
+                    ):
+                        homepage = None
                 local[key] = SourceInfo(
                     key=key,
                     name=local_name,
                     book=local_name,
                     mode="local",
                     local_name=local_name,
+                    homepage=homepage,
                     intent_phrases=_intent_phrases(local_name),
                 )
 
@@ -650,6 +680,221 @@ class Search:
     def local_names(self) -> list[str]:
         with self._state_lock:
             return list(self.indexes)
+
+    @staticmethod
+    def _article_path(path: str) -> str:
+        path = unquote(str(path))
+        if not path or path.startswith("/") or "\\" in path:
+            raise ArticleNotFoundError("invalid article path")
+        if any(part == ".." for part in path.split("/")):
+            raise ArticleNotFoundError("invalid article path")
+        normalized = posixpath.normpath(path)
+        if normalized in {"", "."} or normalized != path:
+            raise ArticleNotFoundError("invalid article path")
+        return path
+
+    @staticmethod
+    def _resolve_article_entry(archive: Archive, path: str | None = None):
+        try:
+            entry = archive.main_entry if path is None else archive.get_entry_by_path(path)
+        except (KeyError, RuntimeError, ValueError) as error:
+            raise ArticleNotFoundError("article not found") from error
+
+        seen: set[str] = set()
+        for _ in range(32):
+            if not entry.is_redirect:
+                return entry
+            if entry.path in seen:
+                raise ArticleUnavailableError("article redirect cycle")
+            seen.add(entry.path)
+            try:
+                entry = entry.get_redirect_entry()
+            except (KeyError, RuntimeError, ValueError) as error:
+                raise ArticleUnavailableError("article redirect is unavailable") from error
+        raise ArticleUnavailableError("article redirect chain is too long")
+
+    def read_article(self, zim_name: str, path: str | None = None) -> dict[str, Any]:
+        """Read one local ZIM entry without changing indexes or search state."""
+        with self._state_lock:
+            index = self.indexes.get(zim_name)
+        if index is None:
+            raise ArticleNotFoundError("ZIM not found")
+        if index.archive is None:
+            raise ArticleUnavailableError("ZIM archive is unavailable")
+
+        acquired = False
+        try:
+            try:
+                self._acquire_index(index)
+            except RuntimeError as error:
+                raise ArticleUnavailableError("ZIM is being reloaded") from error
+            acquired = True
+            requested_path = None if path is None else self._article_path(path)
+            with index.lock:
+                try:
+                    entry = self._resolve_article_entry(index.archive, requested_path)
+                    item = entry.get_item()
+                    mimetype = (
+                        item.mimetype or "application/octet-stream"
+                    ).split(";", 1)[0].strip().lower()
+                    max_bytes = _int_config(
+                        self.cfg,
+                        "max_article_bytes",
+                        33_554_432,
+                        minimum=1,
+                    )
+                    size = int(getattr(item, "size", 0) or 0)
+                    if size > max_bytes:
+                        raise ArticleTooLargeError(
+                            f"article exceeds the {max_bytes} byte serving limit"
+                        )
+                    content = item.content
+                except (ArticleNotFoundError, ArticleUnavailableError):
+                    raise
+                except (KeyError, RuntimeError, ValueError) as error:
+                    raise ArticleUnavailableError("article content is unavailable") from error
+            if len(content) > max_bytes:
+                raise ArticleTooLargeError(
+                    f"article exceeds the {max_bytes} byte serving limit"
+                )
+            return {
+                "zim": zim_name,
+                "path": entry.path,
+                "title": entry.title,
+                "mimetype": mimetype,
+                "content": content,
+            }
+        finally:
+            if acquired:
+                self._release_index(index)
+
+    def random_article_path(self, zim_name: str) -> str:
+        """Return a random indexed article path without changing search state."""
+        with self._state_lock:
+            index = self.indexes.get(zim_name)
+        if index is None:
+            raise ArticleNotFoundError("ZIM not found")
+        if index.archive is None:
+            raise ArticleUnavailableError("ZIM archive is unavailable")
+
+        acquired = False
+        try:
+            try:
+                self._acquire_index(index)
+            except RuntimeError as error:
+                raise ArticleUnavailableError("ZIM is being reloaded") from error
+            acquired = True
+            db = self._db_for(index)
+            with index.lock:
+                try:
+                    count = int(
+                        db.execute(
+                            "SELECT count(*) FROM docs WHERE target IS NULL"
+                        ).fetchone()[0]
+                    )
+                    if count < 1:
+                        raise ArticleNotFoundError("ZIM has no indexed articles")
+                    offset = secrets.randbelow(count)
+                    row = db.execute(
+                        "SELECT path FROM docs "
+                        "WHERE target IS NULL ORDER BY rowid LIMIT 1 OFFSET ?",
+                        (offset,),
+                    ).fetchone()
+                except ArticleNotFoundError:
+                    raise
+                except (sqlite3.Error, TypeError, ValueError) as error:
+                    raise ArticleUnavailableError(
+                        "random article selection is unavailable"
+                    ) from error
+            if not row or not row[0]:
+                raise ArticleUnavailableError("random article selection is unavailable")
+            return self._article_path(str(row[0]))
+        finally:
+            if acquired:
+                self._release_index(index)
+
+    def health(self) -> dict[str, Any]:
+        """Return read-only index, archive, and capability diagnostics."""
+        with self._state_lock:
+            indexes = sorted(self.indexes.items())
+            source_count = len(self.sources)
+            embedder_loaded = self.embedder is not None
+
+        reports: list[dict[str, Any]] = []
+        for name, index in indexes:
+            reasons: list[str] = []
+            index_dir = self.cfg.get("index_dir")
+            db_path = Path(index_dir) / f"{name}.sqlite" if index_dir else None
+            db_current = (
+                index.db_path is None
+                or db_path is None
+                or _file_signature(db_path) == index.db_signature
+            )
+            if not db_current:
+                reasons.append("index file changed since load")
+
+            zim_dir = self.cfg.get("zim_dir")
+            archive_path = Path(zim_dir) / f"{name}.zim" if zim_dir else None
+            archive_current = (
+                archive_path is not None
+                and archive_path.exists()
+                and index.archive is not None
+            )
+            if not archive_current:
+                reasons.append("ZIM archive unavailable")
+
+            vectors_expected = self.semantic and index.done == "1"
+            vectors_loaded = index.faiss_index is not None
+            if vectors_expected and not vectors_loaded:
+                reasons.append("semantic vectors unavailable")
+
+            report: dict[str, Any] = {
+                "name": name,
+                "status": "ok" if not reasons else "degraded",
+                "index_file": db_current,
+                "archive": archive_current,
+                "capabilities": {
+                    "title": True,
+                    "fulltext": index.searcher is not None,
+                    "semantic": vectors_loaded,
+                    "article": archive_current,
+                },
+            }
+            if reasons:
+                report["issues"] = reasons
+
+            acquired = False
+            if archive_current:
+                try:
+                    self._acquire_index(index)
+                    acquired = True
+                    with index.lock:
+                        report["entry_count"] = int(index.archive.entry_count)
+                        try:
+                            report["homepage"] = self._resolve_article_entry(index.archive).path
+                        except ArticleNotFoundError:
+                            report["homepage"] = None
+                except (RuntimeError, ValueError):
+                    report["status"] = "degraded"
+                    report.setdefault("issues", []).append("archive check failed")
+                finally:
+                    if acquired:
+                        self._release_index(index)
+            reports.append(report)
+
+        status = "ok"
+        if not reports or any(report["status"] != "ok" for report in reports):
+            status = "degraded"
+        return {
+            "status": status,
+            "indexes": reports,
+            "sources": source_count,
+            "embedding": {
+                "enabled": self.semantic,
+                "loaded": embedder_loaded,
+            },
+            "cache": self.cache.stats(),
+        }
 
     def _selected_sources(self, zim: list[str] | None) -> list[SourceInfo]:
         with self._state_lock:
@@ -1225,9 +1470,14 @@ class Search:
                 "lead": self._preview(excerpt or ""),
                 "path": path,
                 "url": (
-                    f"{kiwix_url}/{quote(source.book)}/{quote(path)}"
-                    if kiwix_url
-                    else None
+                    f"/article/{quote(source.local_name or source.book, safe='')}/"
+                    f"{quote(path, safe='/')}"
+                    if source.mode == "local" and (source.local_name or source.book)
+                    else (
+                        f"{kiwix_url}/{quote(source.book)}/{quote(path)}"
+                        if kiwix_url
+                        else None
+                    )
                 ),
             }
             docs[rowid] = doc

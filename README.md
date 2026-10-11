@@ -29,11 +29,13 @@ Zero 2 W.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
+- **Built-in article serving**: local result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
 - **Web page and JSON API**: search from any browser on the network or use your own programs.
+  Routes use short paths such as `/search`, `/article/<zim>/<path>` and `/health`.
 
-Zimantic finds articles, while [kiwix-serve](https://kiwix.org/en/applications/) displays them.
-Searching does not require Kiwix, but displaying the article pages does. Zimantic works alongside
-Kiwix rather than replacing it.
+Zimantic can search and serve articles from its local ZIM archives. An optional
+[kiwix-serve](https://kiwix.org/en/applications/) remains useful for sources that are only
+available through a Kiwix server, but local indexed results do not require it.
 
 ### Measured memory use
 
@@ -223,10 +225,9 @@ so less common languages may contain mistakes.
   Raspberry Pi OS (aarch64) is required.
 - About 120 MB for the embedding model, plus your ZIM files
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
-- *Searching does not require Kiwix.* To open the articles from the result links, run
-  [kiwix-serve](https://kiwix.org/en/applications/) with the same ZIMs (set its address as `kiwix_url` in `config.toml`).
-  kiwix-serve needs its own memory (roughly 100–300 MB depending on the ZIM); on a 512 MB Pi Zero 2 W
-  which leaves little headroom for Zimantic.
+- Local indexed results are served directly by Zimantic, so `kiwix-serve` is not required.
+  To serve remote-only results through Kiwix, run `kiwix-serve` and uncomment `kiwix_url` in
+  `config.toml`; it is disabled by default.
 
 ## Where your files go
 
@@ -280,7 +281,7 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
 5. **Check `config.toml`.** Point `zim_dir`, `model_dir` and `index_dir` at your folders if needed.
-   Set `kiwix_url` to the address where kiwix-serve runs.
+   Set `kiwix_server` and uncomment `kiwix_url` only if you also want remote Kiwix sources.
 
 6. **Check the installation:**
 
@@ -361,26 +362,30 @@ signal-triggered shutdown) is reported and ignored.
 Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you copy finished indexes from
 another machine, watch `indexes/` and run only `reload`.
 
-To open articles from the results, run kiwix-serve with the same ZIMs, in a second terminal:
-
-```bash
-sudo apt install kiwix-tools             # Debian/Ubuntu/Raspberry Pi OS; other systems: kiwix.org/en/applications
-kiwix-serve --port 8085 zims/*.zim       # matches the default kiwix_url in config.toml
-```
-
 A running `serve` picks up new indexes with `zimantic reload`; a fast index remains
 searchable while a full replacement is built.
 
 JSON API examples:
 
-- `GET /api/search?q=...&zim=<name>&limit=10&offset=0&source=<key>` returns one page of results.
+- `GET /search?q=...&zim=<name>&limit=10&offset=0&source=<key>` returns one page of results.
   Totals are in `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers.
-- `GET /api/search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
+- `GET /search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
   events and result snapshots.
+- `GET /article/<zim>/<path>` serves a local ZIM entry directly; `GET /article/<zim>` serves
+  the resolved ZIM homepage. Redirects are followed, article links and assets remain under the same
+  route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` only limits
+  HTML read during indexing; `max_article_bytes` limits the uncompressed response body because
+  Zimantic reads each requested entry into memory, including binary assets. HTML articles include a small
+  navigation bar with Back, Home, Random, Search, Copy link and Print controls. Back uses browser
+  history when available, otherwise it attempts to close the tab and falls back to the search page
+  if the browser disallows scripted tab closing. `GET /random?zim=<name>` redirects to a
+  random indexed article.
 - Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
   search endpoints. Debug output is configured for the whole server; it is not a URL parameter.
-- `GET /api/sources`, `/api/config`, `/api/zims` and `/api/health` return source, configuration,
-  local-index and health information.
+- `GET /sources`, `/config`, `/zims` and `/health` return source, configuration,
+  local-index and health information. Source records include a `homepage` path when the local ZIM
+  exposes one. Health is read-only and reports index/archive capabilities, entry counts, homepage
+  resolution, embedding state, and cache statistics.
 
 Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
 `kill -HUP <pid>`.

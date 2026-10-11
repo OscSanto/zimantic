@@ -6,7 +6,10 @@ model_dir = "./model"
 index_dir = "./indexes"
 
 port = 8090
-kiwix_url = "http://localhost:8085/content"
+# Optional Kiwix compatibility for remote-only results. Start kiwix-serve separately:
+#   kiwix-serve --port=8085 ./zims/*.zim
+# Then uncomment this setting (use this machine's address for other clients):
+# kiwix_url = "http://localhost:8085/content"
 kiwix_server = ""
 kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
 kiwix_search_path = "/kiwix/search"
@@ -18,6 +21,7 @@ max_results = 100
 batch_size = 16
 
 max_html_bytes = 4_194_304
+max_article_bytes = 33_554_432
 max_preview_chars = 1_000
 embedding_tokens = 256
 

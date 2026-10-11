@@ -75,15 +75,30 @@ class ServerTests(unittest.TestCase):
         cls.debug_client = TestClient(create_app(cls.debug_search, debug=True))
 
     def test_sources_and_json_search(self):
-        self.assertEqual(self.client.get("/api/sources").json()[0]["key"], "manual")
-        response = self.client.get("/api/search?q=page")
+        self.assertEqual(self.client.get("/sources").json()[0]["key"], "manual")
+        response = self.client.get("/search?q=page")
         self.assertEqual(response.json()[0]["title"], "Page")
         # Totals travel as headers so the body stays a plain list.
         self.assertEqual(response.headers["x-total-count"], "1")
         self.assertEqual(response.headers["x-has-more"], "false")
 
+    def test_large_articles_stream_in_chunks(self):
+        content = memoryview(b"x" * (512 * 1024 + 1))
+        self.search.read_article = lambda zim, path: {
+            "path": path,
+            "title": "Large",
+            "mimetype": "application/octet-stream",
+            "content": content,
+        }
+        try:
+            response = self.client.get("/article/manual/large")
+        finally:
+            del self.search.read_article
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, bytes(content))
+
     def test_search_accepts_page_and_filter_parameters(self):
-        response = self.client.get("/api/search?q=page&offset=10&source=manual&limit=5")
+        response = self.client.get("/search?q=page&offset=10&source=manual&limit=5")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-offset"], "10")
         self.assertNotIn("score", response.json()[0])
@@ -93,39 +108,39 @@ class ServerTests(unittest.TestCase):
         )
 
     def test_debug_mode_is_server_wide(self):
-        response = self.debug_client.get("/api/search?q=page")
+        response = self.debug_client.get("/search?q=page")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["explain"], "debug")
 
-        stream = self.debug_client.get("/api/search/stream?q=page")
+        stream = self.debug_client.get("/search/stream?q=page")
         events = [json.loads(line) for line in stream.text.splitlines()]
         self.assertEqual(events[-1]["results"][0]["score"], 1.0)
         self.assertTrue(self.debug_search.stream_calls[-1][-1])
 
     def test_config_reports_debug_mode(self):
-        self.assertFalse(self.client.get("/api/config").json()["debug"])
-        self.assertTrue(self.debug_client.get("/api/config").json()["debug"])
+        self.assertFalse(self.client.get("/config").json()["debug"])
+        self.assertTrue(self.debug_client.get("/config").json()["debug"])
 
     def test_sources_ignores_client_refresh_parameter(self):
         # Clients cannot force a source refresh: any refresh parameter is ignored.
-        response = self.client.get("/api/sources?refresh=true")
+        response = self.client.get("/sources?refresh=true")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["key"], "manual")
         self.assertEqual(self.search.refresh_calls, 0)
 
     def test_sources_supports_etag_revalidation(self):
-        first = self.client.get("/api/sources")
+        first = self.client.get("/sources")
         etag = first.headers["etag"]
-        second = self.client.get("/api/sources", headers={"If-None-Match": etag})
+        second = self.client.get("/sources", headers={"If-None-Match": etag})
         self.assertEqual(second.status_code, 304)
 
     def test_reload_is_not_exposed_over_http(self):
         # Reload is an admin action via `zimantic reload` (SIGHUP), never over HTTP.
-        response = self.client.post("/api/reload")
+        response = self.client.post("/reload")
         self.assertEqual(response.status_code, 404)
 
     def test_streaming_search_returns_ndjson(self):
-        response = self.client.get("/api/search/stream?q=page")
+        response = self.client.get("/search/stream?q=page")
         self.assertTrue(response.headers["content-type"].startswith("application/x-ndjson"))
         self.assertEqual(
             [json.loads(line)["type"] for line in response.text.splitlines()],
@@ -133,10 +148,10 @@ class ServerTests(unittest.TestCase):
         )
 
     def test_streaming_search_validates_query(self):
-        self.assertEqual(self.client.get("/api/search/stream?q=%20").status_code, 400)
+        self.assertEqual(self.client.get("/search/stream?q=%20").status_code, 400)
 
     def test_health_reports_indexes_and_cache(self):
-        body = self.client.get("/api/health").json()
+        body = self.client.get("/health").json()
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["indexes"], ["manual"])
         self.assertIn("size", body["cache"])

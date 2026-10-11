@@ -809,8 +809,7 @@ class ProductionHardeningTests(unittest.TestCase):
         )
         return db
 
-    def test_missing_kiwix_url_leaves_results_unlinked(self):
-        # kiwix_url is documented as optional; a result without it must not crash.
+    def test_local_results_do_not_require_kiwix_url(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
         search = object.__new__(Search)
         search.cfg = {}  # no kiwix_url
@@ -820,7 +819,7 @@ class ProductionHardeningTests(unittest.TestCase):
             doc = search._fetch_docs(source, db, {1})[1]
         finally:
             db.close()
-        self.assertIsNone(doc["url"])
+        self.assertEqual(doc["url"], "/article/manual/tire-change")
         self.assertEqual(doc["path"], "tire-change")
 
     def test_malformed_disambiguation_tuning_falls_back_to_defaults(self):
