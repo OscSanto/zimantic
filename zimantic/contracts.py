@@ -16,6 +16,8 @@ class SourceInfo:
     error: str | None = None
     intent_phrases: tuple[str, ...] = ()
     homepage: str | None = None
+    icon_path: str | None = None
+    icon_url: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -28,6 +30,7 @@ class SourceInfo:
             "error": self.error,
             "intent_phrases": list(self.intent_phrases),
             "homepage": self.homepage,
+            "icon_url": self.icon_url,
         }
 
 

@@ -41,6 +41,7 @@ from zimantic.search import (
     _LocalIndex,
     _bounded_catalog_url,
     _fulltext_query,
+    _find_archive_icon_path,
     _nprobe,
     _parse_remote_xml,
     _query_terms,
@@ -74,6 +75,33 @@ def _bare_search(cfg):
     return search
 
 
+class _IconItem:
+    def __init__(self, mimetype, content):
+        self.mimetype = mimetype
+        self.content = content
+        self.size = len(content)
+
+
+class _IconEntry:
+    def __init__(self, path, item):
+        self.path = path
+        self._item = item
+
+    def get_item(self):
+        return self._item
+
+
+class _IconArchive:
+    def __init__(self, entries, main_path):
+        self._entries = entries
+        self.main_entry = entries[main_path]
+
+    def get_entry_by_path(self, path):
+        if path not in self._entries:
+            raise KeyError(path)
+        return self._entries[path]
+
+
 def _title_search(rows, query, limit=1):
     """Run a title-only search (no semantic or full-text) over an in-memory FTS.
 
@@ -103,6 +131,53 @@ def _title_search(rows, query, limit=1):
 
 
 class SearchContractTests(unittest.TestCase):
+    def test_source_icon_prefers_zim_metadata(self):
+        homepage = _IconEntry(
+            "Main_Page",
+            _IconItem(
+                "text/html",
+                b'<link rel="icon" href="./assets/home.png">',
+            ),
+        )
+        archive = _IconArchive(
+            {
+                "Main_Page": homepage,
+                "assets/home.png": _IconEntry(
+                    "assets/home.png",
+                    _IconItem("image/png", b"home"),
+                ),
+                "-/icon": _IconEntry(
+                    "-/icon",
+                    _IconItem("image/png", b"zim"),
+                ),
+            },
+            "Main_Page",
+        )
+        self.assertEqual(_find_archive_icon_path(archive, "Main_Page"), "-/icon")
+
+    def test_source_icon_reads_homepage_relative_link(self):
+        homepage = _IconEntry(
+            "mainPage",
+            _IconItem(
+                "text/html",
+                b'<link rel="icon" type="image/png" href="./_res_/favicon.png">',
+            ),
+        )
+        archive = _IconArchive(
+            {
+                "mainPage": homepage,
+                "_res_/favicon.png": _IconEntry(
+                    "_res_/favicon.png",
+                    _IconItem("image/png", b"favicon"),
+                ),
+            },
+            "mainPage",
+        )
+        self.assertEqual(
+            _find_archive_icon_path(archive, "mainPage"),
+            "_res_/favicon.png",
+        )
+
     def test_nprobe_scales_with_ivf_list_count(self):
         index = types.SimpleNamespace(nlist=10_000)
 

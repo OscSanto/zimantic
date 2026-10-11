@@ -39,6 +39,9 @@ DEFAULT_MAX_RESULTS = 100
 DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
 DEFAULT_KIWIX_CATALOG_LIMIT = 50_000
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
+ICON_METADATA_PATH = "-/icon"
+ICON_MAX_BYTES = 1 << 20
+ICON_DISCOVERY_HTML_BYTES = 512 << 10
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "how", "what", "where", "when", "why", "who", "which", "can", "could",
@@ -54,6 +57,112 @@ INTENT_RULES = (
 DISAMBIGUATION_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
 DEFAULT_DISAMBIGUATION_BOOST = 0.08
 DEFAULT_DISAMBIGUATION_PENALTY = 0.5
+
+
+def _html_attribute(tag: str, name: str) -> str:
+    match = re.search(
+        rf"\b{re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+        tag,
+        re.I,
+    )
+    if not match:
+        return ""
+    return next((value for value in match.groups() if value is not None), "")
+
+
+def _archive_path_from_href(base: str, href: str) -> str | None:
+    parsed = urlsplit(href.strip())
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return None
+    path = unquote(parsed.path)
+    if path.startswith("/"):
+        candidate = path[1:]
+    else:
+        candidate = posixpath.join(posixpath.dirname(base), path)
+    if not candidate or any(part == ".." for part in candidate.split("/")):
+        return None
+    normalized = posixpath.normpath(candidate)
+    return normalized if normalized not in {"", "."} else None
+
+
+def _icon_entry_path(archive: Archive, path: str) -> str | None:
+    try:
+        entry = archive.get_entry_by_path(path)
+        item = entry.get_item()
+        mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
+        size = int(getattr(item, "size", 0) or 0)
+    except (KeyError, RuntimeError, ValueError):
+        return None
+    if size > ICON_MAX_BYTES:
+        return None
+    if mimetype.startswith("image/") or (
+        path.casefold().endswith(".ico")
+        and mimetype in {"application/octet-stream", "binary/octet-stream"}
+    ):
+        return path
+    return None
+
+
+def _find_archive_icon_path(archive: Archive, homepage: str | None) -> str | None:
+    """Find a small image that represents a local ZIM source."""
+    metadata_icon = _icon_entry_path(archive, ICON_METADATA_PATH)
+    if metadata_icon:
+        return metadata_icon
+
+    linked_paths: list[str] = []
+    if homepage:
+        try:
+            entry = (
+                archive.main_entry
+                if homepage == archive.main_entry.path
+                else archive.get_entry_by_path(homepage)
+            )
+            item = entry.get_item()
+            mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
+            size = int(getattr(item, "size", 0) or 0)
+            if (
+                mimetype in {"text/html", "application/xhtml+xml"}
+                and size <= ICON_DISCOVERY_HTML_BYTES
+            ):
+                html = bytes(item.content).decode("utf-8", "ignore")
+                for match in re.finditer(r"<link\b[^>]*>", html, re.I):
+                    tag = match.group(0)
+                    rel = _html_attribute(tag, "rel").casefold()
+                    href = _html_attribute(tag, "href")
+                    if "icon" in rel and href:
+                        path = _archive_path_from_href(homepage, href)
+                        if path:
+                            linked_paths.append(path)
+        except (KeyError, RuntimeError, ValueError) as error:
+            logger.debug("could not inspect ZIM homepage %s for an icon: %s", homepage, error)
+
+    candidates = linked_paths + [
+        "favicon.ico",
+        "favicon.png",
+        "apple-touch-icon.png",
+    ]
+    if homepage:
+        base = posixpath.dirname(homepage)
+        candidates.extend(
+            posixpath.join(base, name)
+            for name in ("favicon.ico", "favicon.png", "apple-touch-icon.png")
+            if base
+        )
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        icon = _icon_entry_path(archive, candidate)
+        if icon:
+            return icon
+    return None
+
+
+def _source_icon_url(zim_name: str, icon_path: str | None) -> str | None:
+    if not icon_path:
+        return None
+    return f"/source-icon/{quote(zim_name, safe='')}"
 
 
 def _exact_title_intent(query_words: list[str], title: str) -> bool:
@@ -695,11 +804,13 @@ class Search:
                 if key in local:
                     key = local_name
                 homepage = None
+                icon_path = None
                 index = self.indexes[local_name]
                 if index.archive is not None:
                     try:
                         with index.lock:
                             homepage = self._resolve_article_entry(index.archive).path
+                            icon_path = _find_archive_icon_path(index.archive, homepage)
                     except (
                         ArticleNotFoundError,
                         ArticleUnavailableError,
@@ -714,6 +825,8 @@ class Search:
                     mode="local",
                     local_name=local_name,
                     homepage=homepage,
+                    icon_path=icon_path,
+                    icon_url=_source_icon_url(local_name, icon_path),
                     intent_phrases=_intent_phrases(local_name),
                 )
 
@@ -904,6 +1017,21 @@ class Search:
         finally:
             if acquired:
                 self._release_index(index)
+
+    def read_source_icon(self, zim_name: str) -> dict[str, Any]:
+        """Read the source illustration selected during local source discovery."""
+        with self._state_lock:
+            source = next(
+                (
+                    source
+                    for source in self.sources.values()
+                    if source.local_name == zim_name
+                ),
+                None,
+            )
+        if source is None or source.mode != "local" or not source.icon_path:
+            raise ArticleNotFoundError("source icon not found")
+        return self.read_article(zim_name, source.icon_path)
 
     def random_article_path(self, zim_name: str) -> str:
         """Return a random indexed article path without changing search state."""
@@ -1648,6 +1776,7 @@ class Search:
                 "id": f"{source.key}:{path}",
                 "source_key": source.key,
                 "source": source.name,
+                "source_icon": source.icon_url,
                 "title": title,
                 "lead": self._preview(excerpt or ""),
                 "path": path,
@@ -1780,6 +1909,7 @@ class Search:
                 "id": f"{source.key}:{link or title}",
                 "source_key": source.key,
                 "source": source.name,
+                "source_icon": source.icon_url,
                 "title": title or "(untitled)",
                 "lead": snippet,
                 "path": link,

@@ -18,6 +18,13 @@ class FakeSearch:
     def local_names(self):
         return ["manual"]
 
+    @staticmethod
+    def read_source_icon(zim):
+        return {
+            "content": b"icon",
+            "mimetype": "image/png",
+        }
+
     def source_dicts(self):
         return [{"key": "manual", "name": "Manual", "available": True}]
 
@@ -106,6 +113,12 @@ class ServerTests(unittest.TestCase):
             manifest.headers["content-type"].startswith("application/manifest+json")
         )
         self.assertEqual(manifest.json()["icons"][0]["type"], "image/png")
+
+    def test_source_icon_is_served(self):
+        response = self.client.get("/source-icon/manual")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("image/png"))
+        self.assertEqual(response.content, b"icon")
 
     def test_large_articles_stream_in_chunks(self):
         content = memoryview(b"x" * (512 * 1024 + 1))

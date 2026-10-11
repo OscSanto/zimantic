@@ -158,7 +158,27 @@
       pointer-events: none;
       vertical-align: .12em;
     }
-    .result-meta { font-size: .8rem; margin: 2px 0 6px; }
+    .result-meta {
+      align-items: center;
+      display: flex;
+      font-size: .8rem;
+      gap: 6px;
+      margin: 2px 0 6px;
+      min-height: 16px;
+    }
+    .result-url {
+      color: var(--ok);
+      font-size: .82rem;
+      margin: -2px 0 6px;
+      overflow-wrap: anywhere;
+    }
+    .result-source-icon {
+      border-radius: 3px;
+      flex: 0 0 16px;
+      height: 16px;
+      object-fit: contain;
+      width: 16px;
+    }
     .result-snippet { font-size: .92rem; margin-top: 6px; overflow-wrap: anywhere; }
     .result-snippet p {
       margin: 0 0 8px;
@@ -328,6 +348,16 @@
         renderNotice();
       }
     }, STREAM_RENDER_DELAY);
+  }
+
+  function yieldToBrowser() {
+    return new Promise(resolve => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(resolve);
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
   }
 
   function escapeHtml(value) {
@@ -527,8 +557,61 @@
       : "";
   }
 
-  function setText(node, selector, text) {
-    node.querySelector(selector).textContent = text;
+  function setSourceMeta(node, item) {
+    const meta = node.querySelector(".result-meta");
+    meta.replaceChildren();
+    if (item.source_icon) {
+      const icon = document.createElement("img");
+      icon.className = "result-source-icon";
+      icon.alt = "";
+      icon.width = 16;
+      icon.height = 16;
+      icon.loading = "lazy";
+      icon.decoding = "async";
+      icon.src = item.source_icon;
+      icon.addEventListener("error", () => icon.remove(), {once: true});
+      meta.appendChild(icon);
+    }
+    meta.appendChild(document.createTextNode(item.source || ""));
+  }
+
+  function resultUrlLabel(item) {
+    const rawUrl = String(item.url || "").trim();
+    const rawPath = String(item.path || "").trim();
+    if (!rawUrl && !rawPath) return "";
+
+    const decodeSegment = segment => {
+      try {
+        return decodeURIComponent(segment);
+      } catch (_) {
+        return segment;
+      }
+    };
+    const segments = value => value.split("/").filter(Boolean).map(decodeSegment);
+
+    if (!rawUrl) {
+      return [item.source, ...segments(rawPath)].filter(Boolean).join(" › ");
+    }
+
+    try {
+      const parsed = new URL(rawUrl, location.href);
+      const path = segments(parsed.pathname);
+      if (parsed.origin === location.origin && path[0] === "article") {
+        return [item.source, ...segments(rawPath || path.slice(2).join("/"))]
+          .filter(Boolean)
+          .join(" › ");
+      }
+      return [`${parsed.protocol}//${parsed.host}`, ...path].join(" › ");
+    } catch (_) {
+      return [item.source, ...segments(rawPath)].filter(Boolean).join(" › ");
+    }
+  }
+
+  function setResultUrl(node, item) {
+    const url = node.querySelector(".result-url");
+    const label = resultUrlLabel(item);
+    url.textContent = label;
+    url.hidden = !label;
   }
 
   function mediaBadge(mimetype) {
@@ -674,7 +757,8 @@
       title.textContent = displayTitle;
     }
     appendMediaBadge(title, item.mimetype);
-    setText(node, ".result-meta", item.source || "");
+    setSourceMeta(node, item);
+    setResultUrl(node, item);
     const snippet = node.querySelector(".result-snippet");
     const lead = item.lead || "";
     if (lead) {
@@ -709,6 +793,7 @@
     node.innerHTML = `<div class="result-body">
       <div class="result-title"></div>
       <div class="result-meta"></div>
+      <div class="result-url" hidden></div>
       <div class="result-snippet"></div>
     </div>`;
     setResultNode(node, item);
@@ -988,7 +1073,9 @@
         scheduleStreamRender(sequence);
       } else if (event.type === "snapshot") {
         applyPage(event);
-        scheduleStreamRender(sequence);
+        renderView();
+        renderNotice();
+        return true;
       } else if (event.type === "done") {
         applyPage(event);
         current.streaming = false;
@@ -1002,6 +1089,7 @@
         busy = Boolean(event.busy);
         $("status").textContent = event.error || "Search failed";
       }
+      return false;
     };
     while (true) {
       const part = await reader.read();
@@ -1009,9 +1097,11 @@
       buffer += decoder.decode(part.value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
-      lines.forEach(consumeLine);
+      for (const line of lines) {
+        if (consumeLine(line)) await yieldToBrowser();
+      }
     }
-    if (buffer) consumeLine(buffer);
+    if (buffer && consumeLine(buffer)) await yieldToBrowser();
     if (busy) return true;
     if (sequence === searchSequence && current && current.streaming) {
       current.streaming = false;

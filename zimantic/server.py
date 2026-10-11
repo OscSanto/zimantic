@@ -51,7 +51,7 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
   gap: 6px !important;
   margin: 0 0 16px !important;
   padding: 6px 10px !important;
-  position: sticky !important;
+  position: fixed !important;
   top: 0 !important;
   width: 100% !important;
   z-index: 2147483647 !important;
@@ -411,6 +411,18 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     @app.get("/site.webmanifest", include_in_schema=False)
     def web_manifest():
         return FileResponse(WEB_MANIFEST, media_type="application/manifest+json")
+
+    @app.get("/source-icon/{zim}", include_in_schema=False)
+    def source_icon(zim: str):
+        try:
+            icon = searchClass.read_source_icon(zim)
+        except ArticleNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ArticleTooLargeError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
+        except ArticleUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return _article_content_response(icon["content"], icon["mimetype"])
 
     @app.get("/zims")
     def zims():
