@@ -1,6 +1,7 @@
 import hashlib
 from html import escape as html_escape
 import json
+import logging
 from pathlib import Path
 import os
 import re
@@ -21,6 +22,8 @@ from .search import (
 
 PAGE = Path(__file__).parent / "index.html"
 PID_FILE = Path("zimantic.pid")
+logger = logging.getLogger(__name__)
+
 # Result payloads are text-heavy; gzip cuts them several-fold over the network.
 GZIP_MIN_SIZE = 512
 ARTICLE_STREAM_THRESHOLD = 512 * 1024
@@ -508,22 +511,21 @@ def _handle_reload_request(searchClass, guard: threading.Lock) -> None:
     """SIGHUP handler: reload in a worker thread so the event loop is not blocked
     while indexes are reopened. A second signal during a reload is ignored."""
     if not guard.acquire(blocking=False):
-        print("zimantic: reload already in progress; ignoring signal", flush=True)
+        logger.warning("zimantic: reload already in progress; ignoring signal")
         return
 
     def _reload():
         try:
             summary = searchClass.reload()
-            print(
+            logger.info(
                 "zimantic: reloaded "
                 f"{len(summary.get('indexes', []))} index(es) "
                 f"(+{len(summary.get('added', []))} new, "
                 f"~{len(summary.get('upgraded', []))} upgraded, "
-                f"-{len(summary.get('removed', []))} removed)",
-                flush=True,
+                f"-{len(summary.get('removed', []))} removed)"
             )
         except Exception as error:  # never let a reload take the process down
-            print(f"zimantic: reload failed: {error}", flush=True)
+            logger.error("zimantic: reload failed: %s", error)
         finally:
             guard.release()
 
@@ -535,7 +537,7 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
     try:
         PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as error:
-        print(f"zimantic: could not write PID file {PID_FILE}: {error}", flush=True)
+        logger.error("zimantic: could not write PID file %s: %s", PID_FILE, error)
 
     # Optional Kiwix catalog discovery runs in the background so an unreachable
     # Kiwix server cannot delay binding the port.
@@ -548,10 +550,9 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
         guard = threading.Lock()
         signal.signal(sighup, lambda _signum, _frame: _handle_reload_request(searchClass, guard))
 
-    print(
+    logger.info(
         f"zimantic: server loaded at http://localhost:{port}\n"
-        f"zimantic: PID {os.getpid()}; reload with `zimantic reload` ",
-        flush=True,
+        f"zimantic: PID {os.getpid()}; reload with `zimantic reload` "
     )
     try:
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

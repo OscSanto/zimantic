@@ -4,6 +4,50 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+class LoggingTests(unittest.TestCase):
+    def test_configures_faiss_to_log_only_warnings_and_errors(self):
+        import zimantic.__main__ as main_module
+
+        faiss_logger = main_module.logging.getLogger("faiss")
+        previous_level = faiss_logger.level
+        try:
+            with patch.object(main_module.logging, "basicConfig") as basic_config:
+                main_module._configure_logging(main_module.logging.INFO)
+
+            basic_config.assert_called_once_with(
+                level=main_module.logging.INFO,
+                format="%(message)s",
+            )
+            self.assertEqual(faiss_logger.level, main_module.logging.WARNING)
+        finally:
+            faiss_logger.setLevel(previous_level)
+
+    @patch("zimantic.__main__.sys.stderr")
+    def test_serve_defaults_to_info_when_stderr_is_terminal(self, stderr):
+        import zimantic.__main__ as main_module
+
+        stderr.isatty.return_value = True
+
+        self.assertEqual(main_module._get_log_level("serve", 0), main_module.logging.INFO)
+
+    @patch("zimantic.__main__.sys.stderr")
+    def test_serve_defaults_to_warning_when_stderr_is_not_terminal(self, stderr):
+        import zimantic.__main__ as main_module
+
+        stderr.isatty.return_value = False
+
+        self.assertEqual(main_module._get_log_level("serve", 0), main_module.logging.WARNING)
+
+    @patch("zimantic.__main__.sys.stderr")
+    def test_explicit_verbosity_is_unchanged_for_serve(self, stderr):
+        import zimantic.__main__ as main_module
+
+        stderr.isatty.return_value = True
+
+        self.assertEqual(main_module._get_log_level("serve", 1), main_module.logging.INFO)
+        self.assertEqual(main_module._get_log_level("serve", 2), main_module.logging.DEBUG)
+
+
 class StableSizeTests(unittest.TestCase):
     def test_waits_until_size_is_unchanged_regardless_of_file_size(self):
         import zimantic.__main__ as main_module

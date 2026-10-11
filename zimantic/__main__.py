@@ -6,6 +6,9 @@ import sys
 import time
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
+
 def _graceful_interrupt(_signum: int, _frame) -> None:
     """Turn SIGTERM (a systemd stop) into KeyboardInterrupt.
 
@@ -21,6 +24,27 @@ def _graceful_interrupt(_signum: int, _frame) -> None:
 # The systemd.path unit can fire the moment a file is created. Poll until its
 # size stops changing so a truncated download is not indexed.
 STABLE_POLL_SECONDS = 5
+
+
+def _add_verbosity_argument(parser: argparse.ArgumentParser, default=argparse.SUPPRESS) -> None:
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=default,
+        help="increase logging verbosity (-v for info, -vv for debug)",
+    )
+
+
+def _get_log_level(command: str, verbosity: int) -> int:
+    if command == "serve" and verbosity == 0 and sys.stderr.isatty():
+        return logging.INFO
+    return (logging.WARNING, logging.INFO, logging.DEBUG)[min(verbosity, 2)]
+
+
+def _configure_logging(log_level: int) -> None:
+    logging.basicConfig(level=log_level, format="%(message)s")
+    logging.getLogger("faiss").setLevel(logging.WARNING)
 
 
 def _wait_for_stable_sizes(paths: set[Path]) -> None:
@@ -43,10 +67,10 @@ def _wait_for_stable_sizes(paths: set[Path]) -> None:
                 continue
             if current != size:
                 downloading[path] = current
-                print(
-                    f"zimantic: {path.name} is now {current} bytes; waiting for it to finish downloading",
-                    file=sys.stderr,
-                    flush=True,
+                logger.info(
+                    "zimantic: %s is now %s bytes; waiting for it to finish downloading",
+                    path.name,
+                    current,
                 )
         sizes = downloading
 
@@ -71,14 +95,14 @@ def _find_downloading_sizes(zim_sizes: dict[Path, int]) -> set[Path]:
     return downloading
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
     parser = argparse.ArgumentParser(prog="zimantic")
+    _add_verbosity_argument(parser, default=0)
     
     # subcommands: build (files/folders, default zim_dir), serve, reload
     commands = parser.add_subparsers(dest="command", required=True)
 
     serve_cmd = commands.add_parser("serve", help="run the search page and JSON API")
+    _add_verbosity_argument(serve_cmd)
     serve_cmd.add_argument(
         "--fast",
         action="store_true",
@@ -91,6 +115,7 @@ def main() -> None:
     )
 
     build = commands.add_parser("build", help="index ZIM files")
+    _add_verbosity_argument(build)
     build.add_argument(
         "paths",
         nargs="*",
@@ -113,6 +138,7 @@ def main() -> None:
         "reload",
         help="ask a running serve process to rescan index_dir (sends SIGHUP; suitable for systemd.path or cron)",
     )
+    _add_verbosity_argument(reload_cmd)
     reload_cmd.add_argument(
         "--pid",
         type=Path,
@@ -121,6 +147,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    log_level = _get_log_level(args.command, args.verbose)
+    _configure_logging(log_level)
 
     # `reload` only needs the PID file.
     if args.command in {"build", "serve"}:
@@ -165,7 +193,7 @@ def main() -> None:
                     zims.append(zim)
 
         if not zims:
-            print("zimantic: no .zim files to index")
+            logger.info("zimantic: no .zim files to index")
             return
 
         zim_sizes = {zim: zim.stat().st_size for zim in zims}
@@ -178,17 +206,16 @@ def main() -> None:
         for stem, paths in sorted(by_stem.items()):
             sizes = {zim_sizes[path] for path in paths}
             if len(sizes) > 1:
-                print(
-                    f"zimantic: warning: ignoring ZIM files with conflicting "
-                    f"index identity {stem!r}: "
-                    f"{', '.join(f'{path} ({zim_sizes[path]} bytes)' for path in paths)}",
-                    file=sys.stderr,
+                logger.warning(
+                    "zimantic: ignoring ZIM files with conflicting index identity %r: %s",
+                    stem,
+                    ", ".join(f"{path} ({zim_sizes[path]} bytes)" for path in paths),
                 )
                 continue
             accepted.extend(paths)
         zims = sorted(accepted, key=zim_sizes.__getitem__)
         if not zims:
-            print("zimantic: no non-conflicting .zim files to index")
+            logger.info("zimantic: no non-conflicting .zim files to index")
             return
 
         # fast builds never embed: skip loading the model so they start instantly.
@@ -200,13 +227,13 @@ def main() -> None:
                 threads=cfg.get("embed_threads"),
             )
         global_progress = None
-        if len(zims) > 1 and sys.stdout.isatty():
+        if len(zims) > 1 and sys.stderr.isatty():
             global_progress = tqdm(
                 total=sum(zim_sizes.values()),
                 desc="all ZIMs",
                 unit="B",
                 unit_scale=True,
-                file=sys.stdout,
+                file=sys.stderr,
             )
         failures: list[tuple[Path, BaseException]] = []
         try:
@@ -227,7 +254,7 @@ def main() -> None:
                         force=args.force,
                     )
                 except Exception as error:
-                    print(f"zimantic: failed to index {zim}: {error}", file=sys.stderr)
+                    logger.error("zimantic: failed to index %s: %s", zim, error)
                     failures.append((zim, error))
                 if global_progress is not None:
                     global_progress.update(zim_sizes[zim])
@@ -242,10 +269,9 @@ def main() -> None:
 
         search = Search(cfg, semantic=not args.fast)
         if not search.local_names():
-            print(
-                "zimantic: warning: no sources are indexed yet; "
-                "run `zimantic build --fast` before serving searches",
-                file=sys.stderr,
+            logger.warning(
+                "zimantic: no sources are indexed yet; "
+                "run `zimantic build --fast` before serving searches"
             )
         if not args.fast:
             # Load the model off the critical path: the server answers title and
@@ -265,9 +291,9 @@ def main() -> None:
         from .server import serve
 
         if args.fast:
-            print("zimantic: fast mode: title and ZIM full-text search only")
+            logger.info("zimantic: fast mode: title and ZIM full-text search only")
         if args.debug:
-            print("zimantic: debug mode: ranking scores and explanations enabled")
+            logger.info("zimantic: debug mode: ranking scores and explanations enabled")
         serve(search, cfg["port"], debug=args.debug)
 
     elif args.command == "reload":
@@ -294,7 +320,7 @@ def main() -> None:
                 f"zimantic: permission denied signalling PID {pid}; "
                 "run the reload command as the same user as the server"
             )
-        print(f"zimantic: reload signal (SIGHUP) sent to PID {pid}")
+        logger.info("zimantic: reload signal (SIGHUP) sent to PID %s", pid)
 
 if __name__ == "__main__":
     main()

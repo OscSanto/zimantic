@@ -72,7 +72,7 @@
       cursor: pointer;
     }
     button:disabled { cursor: default; opacity: .6; }
-    button.secondary, button.badge {
+    button.secondary, button.source-filter-option {
       background: transparent;
       border: 1px solid var(--border);
       color: var(--muted);
@@ -81,17 +81,35 @@
     button.secondary { padding: 6px 12px; font-size: .85rem; }
     .status { min-height: 1.4em; margin: 12px 0 6px; font-size: .85rem; }
     .query-used { color: var(--accent); font-family: var(--mono); }
-    .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-    button.badge {
+    .source-filters { margin-bottom: 8px; }
+    .source-filter-toolbar {
+      align-items: center;
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .source-filter-heading, .source-filter-status {
+      color: var(--muted);
+      font-size: .85rem;
+    }
+    .source-filter-search {
+      flex: 1;
+      max-width: 360px;
+      padding: 6px 10px !important;
+      font-size: .85rem !important;
+    }
+    .source-filter-options { display: flex; flex-wrap: wrap; gap: 6px; }
+    button.source-filter-option {
       border-radius: 100px;
       font-size: .75rem;
       max-width: 100%;
       overflow-wrap: anywhere;
       padding: 3px 10px;
     }
-    button.badge.ok { border-color: var(--ok-border); color: var(--ok); cursor: pointer; }
-    button.badge.err { border-color: var(--err-border); color: var(--err); }
-    button.badge[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.source-filter-option.ok { border-color: var(--ok-border); color: var(--ok); cursor: pointer; }
+    button.source-filter-option.err { border-color: var(--err-border); color: var(--err); }
+    button.source-filter-option[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .source-filter-status { margin-top: 6px; font-size: .78rem; }
     .filter-line { min-height: 1.2em; font-size: .85rem; margin-bottom: 14px; }
     .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 18px 0 8px; font-size: .85rem; }
     .pager:empty { display: none; }
@@ -251,7 +269,16 @@
   </form>
 
   <div class="status" id="status"></div>
-  <div class="badges" id="badges" role="group" aria-label="Filter by source"></div>
+  <div class="source-filters" id="sourceFilters" hidden>
+    <div class="source-filter-toolbar">
+      <span class="source-filter-heading">Filter by source</span>
+      <input id="sourceFilterSearch" class="source-filter-search" type="search"
+        placeholder="Search sources" aria-label="Search sources">
+    </div>
+    <div class="source-filter-options" id="sourceFilterOptions"
+      role="group" aria-label="Filter by source"></div>
+    <div class="source-filter-status" id="sourceFilterStatus" aria-live="polite"></div>
+  </div>
   <div class="filter-line" id="filterLine"></div>
   <div id="notice"></div>
   <div id="results"><div class="empty"></div></div>
@@ -282,10 +309,12 @@
   const BUSY_RETRY_LIMIT = 5;
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
+  const SOURCE_FILTER_LIMIT = 50;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
   let sources = [];
   let current = null;
   let activeSource = null;
+  let sourceFilterQuery = "";
   let requestController = null;
   let pageController = null;
   let searchSequence = 0;
@@ -394,29 +423,72 @@
   }
 
   function activeSources() {
-    // Every available source is always searched; the Filter by source badges
+    // Every available source is always searched; the source filters
     // only narrow what is displayed (see renderView).
     return sources.filter(source => source.available);
   }
 
-  function renderBadges() {
+  function renderSourceFilters() {
+    const panel = $("sourceFilters");
+    const options = $("sourceFilterOptions");
+    const status = $("sourceFilterStatus");
     if (!current) {
-      $("badges").innerHTML = "";
+      panel.hidden = true;
+      options.replaceChildren();
+      status.textContent = "";
       return;
     }
-    const all = `<button class="badge" type="button" data-source="" aria-pressed="${activeSource ? "false" : "true"}">All sources</button>`;
-    const entries = [...current.outcomes.values()].map(outcome => {
+    panel.hidden = false;
+    const outcomes = [...current.outcomes.values()];
+    const nonEmptyOutcomes = outcomes.filter(outcome =>
+      outcome.error || (current.counts[outcome.source.key] || 0) > 0
+    );
+    const query = sourceFilterQuery.trim().toLocaleLowerCase();
+    const matching = query
+      ? nonEmptyOutcomes.filter(outcome => {
+        const source = outcome.source;
+        return `${source.name} ${source.key}`.toLocaleLowerCase().includes(query);
+      })
+      : nonEmptyOutcomes;
+    const visible = matching.slice(0, SOURCE_FILTER_LIMIT);
+
+    const all = document.createElement("button");
+    all.className = "secondary source-filter-option";
+    all.type = "button";
+    all.dataset.source = "";
+    all.setAttribute("aria-pressed", activeSource ? "false" : "true");
+    all.textContent = "All sources";
+
+    const entries = visible.map(outcome => {
       // Counts come from the ranked pool (server-reported), not per-source
       // candidate lists, so they match what the filtered view actually shows.
       const count = current.counts[outcome.source.key] || 0;
-      const cls = outcome.error ? "badge err" : count > 0 ? "badge ok" : "badge";
+      const cls = outcome.error
+        ? "source-filter-option err"
+        : count > 0 ? "source-filter-option ok" : "source-filter-option";
       const label = outcome.error ? `${outcome.source.name}: ${outcome.error}` : `${outcome.source.name}: ${count}`;
-      const disabled = outcome.error ? "disabled" : "";
-      const pressed = activeSource === outcome.source.key ? "true" : "false";
-      return `<button class="${cls}" type="button" data-source="${escapeHtml(outcome.source.key)}"
-        ${disabled} aria-pressed="${pressed}">${escapeHtml(label)}</button>`;
-    }).join("");
-    $("badges").innerHTML = all + entries;
+      const button = document.createElement("button");
+      button.className = cls;
+      button.type = "button";
+      button.dataset.source = outcome.source.key;
+      button.disabled = Boolean(outcome.error);
+      button.setAttribute("aria-pressed", activeSource === outcome.source.key ? "true" : "false");
+      button.textContent = label;
+      return button;
+    });
+    options.replaceChildren(all, ...entries);
+
+    if (!matching.length) {
+      status.textContent = query
+        ? "No matching sources."
+        : outcomes.length ? "No sources have results." : "No sources have reported yet.";
+    } else if (!query && matching.length > SOURCE_FILTER_LIMIT) {
+      status.textContent = `Showing ${visible.length} of ${matching.length} sources. Search to find a source.`;
+    } else if (matching.length > visible.length) {
+      status.textContent = `${visible.length} of ${matching.length} matching sources shown. Refine your search to find a source.`;
+    } else {
+      status.textContent = "";
+    }
   }
 
   function renderFilterLine(count) {
@@ -732,7 +804,7 @@
       if (current.page >= pageCount) current.page = pageCount - 1;
       if (current.page < 0) current.page = 0;
     }
-    renderBadges();
+    renderSourceFilters();
     renderFilterLine(current.total);
     renderPager(current.total, pageCount);
     renderResults(current.pageItems);
@@ -887,7 +959,7 @@
         current.outcomes.set(event.source.key, event);
         if (typeof event.count === "number") current.counts[event.source.key] = event.count;
         $("status").textContent = `${event.completed}/${event.total_sources} sources complete`;
-        renderBadges();
+        renderSourceFilters();
         renderNotice();
       } else if (event.type === "snapshot") {
         applyPage(event);
@@ -1081,14 +1153,19 @@
     }
   }
 
-  $("badges").addEventListener("click", event => {
+  $("sourceFilterSearch").addEventListener("input", event => {
+    sourceFilterQuery = event.target.value;
+    renderSourceFilters();
+  });
+
+  $("sourceFilterOptions").addEventListener("click", event => {
     const button = event.target.closest("button[data-source]");
     if (!button || button.disabled || !current) return;
     const key = button.dataset.source || null;
-    // Clicking the active source badge again returns to "All sources".
+    // Clicking the active source filter again returns to "All sources".
     activeSource = (activeSource && activeSource === key) ? null : key;
     history.pushState(null, "", makeStateUrl(current.question, activeSource, 0));
-    renderBadges();
+    renderSourceFilters();
     loadPage(0);
   });
 
@@ -1097,7 +1174,7 @@
     if (button) {
       activeSource = null;
       history.pushState(null, "", makeStateUrl(current.question, null, 0));
-      renderBadges();
+      renderSourceFilters();
       loadPage(0);
     }
   });
@@ -1152,7 +1229,11 @@
     resultList = null;
     document.body.classList.remove("search-active");
     $("status").textContent = "";
-    $("badges").innerHTML = "";
+    $("sourceFilters").hidden = true;
+    $("sourceFilterOptions").replaceChildren();
+    $("sourceFilterStatus").textContent = "";
+    sourceFilterQuery = "";
+    $("sourceFilterSearch").value = "";
     $("filterLine").innerHTML = "";
     $("notice").textContent = "";
     $("pager").innerHTML = "";

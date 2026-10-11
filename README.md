@@ -315,6 +315,8 @@ uv sync
 
 ```bash
 zimantic build                        # index every .zim in zim_dir (the default)
+zimantic -v build                     # show info-level logging
+zimantic build -vv                    # show debug-level logging
 zimantic build zims/x.zim             # index one file
 zimantic build zims/a.zim zims/b.zim  # several files
 zimantic build /media/usb             # every .zim in a folder
@@ -329,6 +331,8 @@ zimantic reload                       # ask a running server to rescan index_dir
 
 `build` accepts files or folders; a folder means all its `*.zim` files, and no arguments uses `zim_dir`.
 Already-built ZIMs are skipped. Pass `--force` to rebuild selected indexes.
+Logging defaults to warnings, except that `serve` uses info when stderr is a terminal;
+repeat `--verbose`/`-v` for info and debug output.
 
 **Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
 model. Title-word and ZIM full-text search still work; run a normal `build` later to add vectors.

@@ -69,9 +69,11 @@ def build(
             and recorded_size is not None
             and str(filesize) != recorded_size
         ):
-            print(
-                f"{zim_path.stem}: source ZIM changed size "
-                f"({recorded_size} -> {filesize} bytes); rebuilding"
+            logger.warning(
+                "%s: source ZIM changed size (%s -> %s bytes); rebuilding",
+                zim_path.stem,
+                recorded_size,
+                filesize,
             )
             db.close()
             db = None
@@ -85,7 +87,7 @@ def build(
             done = ""
         if done == "1":
             if faiss_path.exists():
-                print(f"{zim_path.stem}: already built (use --force to rebuild)")
+                logger.info("%s: already built (use --force to rebuild)", zim_path.stem)
                 return
             raise RuntimeError(
                 f"{zim_path.stem}: index is marked done but {faiss_path} is missing; "
@@ -98,7 +100,11 @@ def build(
                     "(use --force to rebuild)"
                 )
                 return
-            print(f"{zim_path.stem}: upgrading title-only index to full (re-reading entries beside current index)")
+            logger.info(
+                "%s: upgrading title-only index to full "
+                "(re-reading entries beside current index)",
+                zim_path.stem,
+            )
             db.close()
             db = None
             build_db_path, build_faiss_path = _upgrade_paths(db_path, faiss_path)
@@ -110,7 +116,7 @@ def build(
                 db.close()
                 db = None
                 _publish_upgrade(build_db_path, build_faiss_path, db_path, faiss_path)
-                print(f"{zim_path.stem}: full index ready")
+                logger.debug("%s: full index ready", zim_path.stem)
                 return
             if staged_done == "fast":
                 raise RuntimeError(f"{zim_path.stem}: upgrade staging file is marked fast; delete it and retry")

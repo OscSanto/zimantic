@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+import logging
 import math
 import posixpath
 from pathlib import Path
@@ -22,6 +23,8 @@ from libzim.search import Query, Searcher
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .contracts import SourceInfo, SourceResult
 from .zim import DEFAULT_PREVIEW_CHARS, truncate_at_word_boundary
+
+logger = logging.getLogger(__name__)
 
 
 MAX_QUERY_LENGTH = 4096
@@ -418,7 +421,11 @@ class Search:
                     if hasattr(faiss_index, "nprobe"):
                         faiss_index.nprobe = _nprobe(faiss_index, self.cfg)
                 except Exception as error:  # corrupt/unreadable vectors: keep going
-                    print(f"{db_path.stem}: vectors unavailable ({error}); using title and full-text search")
+                    logger.warning(
+                        "%s: vectors unavailable (%s); using title and full-text search",
+                        db_path.stem,
+                        error,
+                    )
                     faiss_index = None
 
             archive = None
@@ -429,7 +436,11 @@ class Search:
                     archive = Archive(str(zim_path))
                     searcher = Searcher(archive) if archive.has_fulltext_index else None
                 except Exception as error:  # unreadable ZIM: title search still works
-                    print(f"{db_path.stem}: ZIM unavailable ({error}); title search only")
+                    logger.warning(
+                        "%s: ZIM unavailable (%s); title search only",
+                        db_path.stem,
+                        error,
+                    )
                     archive = None
                     searcher = None
             # The connection used for the one-off "done" check is not used for
@@ -473,15 +484,15 @@ class Search:
             try:
                 embedder = factory()
             except Exception as error:  # missing/corrupt model must not kill serve
-                print(
-                    f"zimantic: embedding model unavailable ({error}); "
+                logger.warning(
+                    "zimantic: embedding model unavailable (%s); "
                     "using title and full-text search",
-                    flush=True,
+                    error,
                 )
                 return
             with self._state_lock:
                 self.embedder = embedder
-            print("zimantic: embedding model ready; semantic search enabled", flush=True)
+            logger.info("zimantic: embedding model ready; semantic search enabled")
 
         threading.Thread(target=_load, name="zimantic-embedder", daemon=True).start()
 
@@ -666,9 +677,9 @@ class Search:
             try:
                 sources = self.refresh_sources()
             except Exception as error:  # a catalog failure must not affect serving
-                print(f"zimantic: catalog refresh failed ({error})", flush=True)
+                logger.warning("zimantic: catalog refresh failed (%s)", error)
                 return
-            print(f"zimantic: Kiwix catalog ready ({len(sources)} source(s))", flush=True)
+            logger.info("zimantic: Kiwix catalog ready (%d source(s))", len(sources))
 
         threading.Thread(target=_refresh, name="zimantic-catalog", daemon=True).start()
 
@@ -1132,7 +1143,10 @@ class Search:
         try:
             return embedder.embed([f"query: {query}"])
         except Exception as error:
-            print(f"zimantic: query embedding failed ({error}); using title and full-text search")
+            logger.warning(
+                "zimantic: query embedding failed (%s); using title and full-text search",
+                error,
+            )
             return None
 
     def search_page(
