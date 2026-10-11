@@ -778,7 +778,12 @@
     return articleUrl.pathname + articleUrl.search;
   }
 
-  function readParentArticleNavigation(html, parentUrl, articleUrl) {
+  function readParentArticleNavigation(
+    html,
+    parentUrl,
+    articleUrl,
+    {requireAdjacent = true} = {},
+  ) {
     const document = new DOMParser().parseFromString(html, "text/html");
     const articleParts = articleRouteParts(articleUrl);
     if (!articleParts) return null;
@@ -810,7 +815,7 @@
     const currentValue = articleRouteValue(articleUrl);
     const index = links.findIndex(link => articleRouteValue(link) === currentValue);
     if (index < 0) return null;
-    if (!links[index - 1] && !links[index + 1]) return null;
+    if (requireAdjacent && !links[index - 1] && !links[index + 1]) return null;
     const urlAt = offset => {
       const link = links[index + offset];
       return link ? articleUrlValue(link) : null;
@@ -863,7 +868,12 @@
         ) {
           return;
         }
-        navigation = readParentArticleNavigation(html, parentUrl, articleUrl);
+        navigation = readParentArticleNavigation(
+          html,
+          parentUrl,
+          articleUrl,
+          {requireAdjacent: parentUrl !== previousUrl},
+        );
       } catch (_) {
         if (request !== parentNavigationSequence) return;
       }
