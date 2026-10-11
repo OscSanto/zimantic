@@ -671,7 +671,7 @@
       const articleUrl = new URL(value, location.href);
       if (
         articleUrl.origin !== location.origin ||
-        !articleUrl.pathname.startsWith("/article/")
+        !articleUrl.pathname.startsWith("/content/")
       ) {
         return null;
       }
@@ -744,7 +744,7 @@
         try {
           const articleUrl = new URL(link.href, location.href);
           return articleUrl.origin === location.origin &&
-            articleUrl.pathname.startsWith("/article/");
+            articleUrl.pathname.startsWith("/content/");
         } catch (_) {
           return false;
         }

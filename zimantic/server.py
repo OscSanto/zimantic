@@ -50,6 +50,7 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
   font: 14px/1.3 system-ui, sans-serif !important;
   gap: 6px !important;
   margin: 0 0 16px !important;
+  min-height: 0 !important;
   padding: 6px 10px !important;
   position: fixed !important;
   top: 0 !important;
@@ -359,13 +360,13 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 
 
 def _article_toolbar(zim: str, article: dict) -> str:
-    zim_url = f"/article/{quote_path(zim, safe='')}"
+    zim_url = f"/content/{quote_path(zim, safe='')}"
     random_url = f"/random?zim={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
     article_path = str(article.get("path") or "").strip("/")
     path_parts = [part for part in article_path.split("/") if part]
     permalink_url = (
-        f"/article/{quote_path(zim, safe='')}/"
+        f"/content/{quote_path(zim, safe='')}/"
         f"{quote_path(article_path, safe='/')}"
         if article_path
         else zim_url
@@ -378,7 +379,7 @@ def _article_toolbar(zim: str, article: dict) -> str:
     for depth in range(1, len(path_parts)):
         parent_path = "/".join(path_parts[:depth])
         parent_url = (
-            f"/article/{quote_path(zim, safe='')}/"
+            f"/content/{quote_path(zim, safe='')}/"
             f"{quote_path(parent_path, safe='/')}"
         )
         breadcrumbs.append(
@@ -590,7 +591,7 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
         requested_path = None if path is None else path.strip("/")
         if requested_path != article["path"]:
             location = (
-                f"/article/{quote_path(zim, safe='')}/"
+                f"/content/{quote_path(zim, safe='')}/"
                 f"{quote_path(article['path'], safe='/')}"
             )
             return Response(status_code=307, headers={"Location": location})
@@ -599,11 +600,11 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
             content = _decorate_html_article(content, zim, article)
         return _article_content_response(content, article["mimetype"])
 
-    @app.get("/article/{zim}")
+    @app.get("/content/{zim}")
     def article_homepage(zim: str):
         return article_response(zim)
 
-    @app.get("/article/{zim}/{path:path}")
+    @app.get("/content/{zim}/{path:path}")
     def article(zim: str, path: str):
         return article_response(zim, path)
 
@@ -619,7 +620,7 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
         except ArticleUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         location = (
-            f"/article/{quote_path(zim, safe='')}/"
+            f"/content/{quote_path(zim, safe='')}/"
             f"{quote_path(path, safe='/')}"
         )
         return Response(

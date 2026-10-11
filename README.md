@@ -31,7 +31,7 @@ Zero 2 W.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
 - **Built-in article serving**: local result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
 - **Web page and JSON API**: search from any browser on the network or use your own programs.
-  Routes use short paths such as `/search`, `/article/<zim>/<path>` and `/health`.
+  Routes use short paths such as `/search`, `/content/<zim>/<path>` and `/health`.
 
 Zimantic can search and serve articles from its local ZIM archives. An optional
 [kiwix-serve](https://kiwix.org/en/applications/) remains useful for sources that are only
@@ -384,7 +384,7 @@ JSON API examples:
   Totals are in `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers.
 - `GET /search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
   events and result snapshots.
-- `GET /article/<zim>/<path>` serves a local ZIM entry directly; `GET /article/<zim>` serves
+- `GET /content/<zim>/<path>` serves a local ZIM entry directly; `GET /content/<zim>` serves
   the resolved ZIM homepage. Redirects are followed, article links and assets remain under the same
   route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` only limits
   HTML read during indexing; `max_article_bytes` limits the uncompressed response body because

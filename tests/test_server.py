@@ -129,7 +129,7 @@ class ServerTests(unittest.TestCase):
             "content": content,
         }
         try:
-            response = self.client.get("/article/manual/large")
+            response = self.client.get("/content/manual/large")
         finally:
             del self.search.read_article
         self.assertEqual(response.status_code, 200)

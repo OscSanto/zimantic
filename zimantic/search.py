@@ -1804,7 +1804,7 @@ class Search:
                 "path": path,
                 "mimetype": None,
                 "url": (
-                    f"/article/{quote(source.local_name or source.book, safe='')}/"
+                    f"/content/{quote(source.local_name or source.book, safe='')}/"
                     f"{quote(path, safe='/')}"
                     if source.mode == "local" and (source.local_name or source.book)
                     else (

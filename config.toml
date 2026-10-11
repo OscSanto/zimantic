@@ -23,7 +23,7 @@ port = 8090
 # Optional Kiwix compatibility for remote-only results. Start kiwix-serve separately, for example:
 #   kiwix-serve --port=8085 ./zims/*.zim
 # Then uncomment this setting. Use this machine's address instead of localhost if results are
-# opened by other devices. Local indexed results are served directly by Zimantic at /article.
+# opened by other devices. Local indexed results are served directly by Zimantic at /content.
 # kiwix_url = "http://localhost:8085/content"
 
 # Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
@@ -60,7 +60,7 @@ max_html_bytes = 4_194_304
 # high for large, friendly ZIM articles; lower it on memory-constrained hosts.
 max_entry_bytes = 1073741824
 
-# Maximum uncompressed local ZIM entry served by /article. This caps per-request memory use for
+# Maximum uncompressed local ZIM entry served by /content. This caps per-request memory use for
 # HTML and binary assets alike; max_html_bytes is the separate indexing/parser limit.
 max_article_bytes = 33_554_432
 

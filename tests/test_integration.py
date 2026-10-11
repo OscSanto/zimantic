@@ -163,15 +163,16 @@ class LocalIntegrationTests(unittest.TestCase):
             result = response.json()[0]
             self.assertEqual(result["title"], "Beta")
             self.assertEqual(result["path"], "Beta")
-            self.assertEqual(result["url"], "/article/manual/Beta")
+            self.assertEqual(result["url"], "/content/manual/Beta")
             self.assertEqual(result["mimetype"], "text/html")
             self.assertEqual(response.headers["x-total-count"], "1")
 
-            article = client.get("/article/manual/Beta")
+            article = client.get("/content/manual/Beta")
             self.assertEqual(article.status_code, 200)
             self.assertTrue(article.headers["content-type"].startswith("text/html"))
             self.assertIn(b"brakes and rotors", article.content)
             self.assertIn(b'data-zimantic-toolbar', article.content)
+            self.assertIn(b"min-height: 0 !important", article.content)
             self.assertIn(b'data-zimantic-action="close"', article.content)
             self.assertIn(b'data-zimantic-action="home"', article.content)
             self.assertIn(b'data-zimantic-action="previous"', article.content)
@@ -217,16 +218,16 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(random_article.status_code, 307)
             self.assertRegex(
                 random_article.headers["location"],
-                r"^/article/manual/(Alpha|Beta)$",
+                r"^/content/manual/(Alpha|Beta)$",
             )
 
-            homepage = client.get("/article/manual", follow_redirects=False)
+            homepage = client.get("/content/manual", follow_redirects=False)
             self.assertEqual(homepage.status_code, 307)
-            self.assertIn("/article/manual/", homepage.headers["location"])
+            self.assertIn("/content/manual/", homepage.headers["location"])
             homepage_article = client.get(homepage.headers["location"])
             self.assertEqual(homepage_article.status_code, 200)
 
-            missing = client.get("/article/manual/missing")
+            missing = client.get("/content/manual/missing")
             self.assertEqual(missing.status_code, 404)
 
             health = client.get("/health").json()
@@ -387,13 +388,13 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(redirect_results[0]["title"], "Air")
             self.assertEqual(redirect_results[0]["path"], "Air")
             redirect_article = client.get(
-                "/article/manual/Breeze",
+                "/content/manual/Breeze",
                 follow_redirects=False,
             )
             self.assertEqual(redirect_article.status_code, 307)
             self.assertEqual(
                 redirect_article.headers["location"],
-                "/article/manual/Air",
+                "/content/manual/Air",
             )
 
             ordinary_results = search.search("air", limit=10)

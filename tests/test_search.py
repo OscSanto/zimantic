@@ -1032,7 +1032,7 @@ class ProductionHardeningTests(unittest.TestCase):
             doc = search._fetch_docs(source, db, {1})[1]
         finally:
             db.close()
-        self.assertEqual(doc["url"], "/article/manual/tire-change")
+        self.assertEqual(doc["url"], "/content/manual/tire-change")
         self.assertEqual(doc["path"], "tire-change")
 
     def test_malformed_disambiguation_tuning_falls_back_to_defaults(self):
