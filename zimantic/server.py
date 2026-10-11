@@ -21,7 +21,14 @@ from .search import (
 )
 
 PAGE = Path(__file__).parent / "index.html"
-FAVICON = Path(__file__).parent / "favicon.svg"
+ASSET_DIR = Path(__file__).parent
+FAVICON = ASSET_DIR / "favicon.ico"
+FAVICON_16 = ASSET_DIR / "favicon-16x16.png"
+FAVICON_32 = ASSET_DIR / "favicon-32x32.png"
+APPLE_TOUCH_ICON = ASSET_DIR / "apple-touch-icon.png"
+ANDROID_CHROME_192 = ASSET_DIR / "android-chrome-192x192.png"
+ANDROID_CHROME_512 = ASSET_DIR / "android-chrome-512x512.png"
+WEB_MANIFEST = ASSET_DIR / "site.webmanifest"
 PID_FILE = Path("zimantic.pid")
 logger = logging.getLogger(__name__)
 
@@ -377,9 +384,33 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     def page():
         return FileResponse(PAGE)
 
-    @app.get("/favicon.svg", include_in_schema=False)
+    @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
-        return FileResponse(FAVICON, media_type="image/svg+xml")
+        return FileResponse(FAVICON, media_type="image/x-icon")
+
+    @app.get("/favicon-16x16.png", include_in_schema=False)
+    def favicon_16():
+        return FileResponse(FAVICON_16, media_type="image/png")
+
+    @app.get("/favicon-32x32.png", include_in_schema=False)
+    def favicon_32():
+        return FileResponse(FAVICON_32, media_type="image/png")
+
+    @app.get("/apple-touch-icon.png", include_in_schema=False)
+    def apple_touch_icon():
+        return FileResponse(APPLE_TOUCH_ICON, media_type="image/png")
+
+    @app.get("/android-chrome-192x192.png", include_in_schema=False)
+    def android_chrome_192():
+        return FileResponse(ANDROID_CHROME_192, media_type="image/png")
+
+    @app.get("/android-chrome-512x512.png", include_in_schema=False)
+    def android_chrome_512():
+        return FileResponse(ANDROID_CHROME_512, media_type="image/png")
+
+    @app.get("/site.webmanifest", include_in_schema=False)
+    def web_manifest():
+        return FileResponse(WEB_MANIFEST, media_type="application/manifest+json")
 
     @app.get("/zims")
     def zims():

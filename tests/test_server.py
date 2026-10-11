@@ -83,10 +83,29 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.headers["x-has-more"], "false")
 
     def test_favicon_is_served(self):
-        response = self.client.get("/favicon.svg")
+        response = self.client.get("/favicon.ico")
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.headers["content-type"].startswith("image/svg+xml"))
-        self.assertIn(b"<svg", response.content)
+        self.assertTrue(response.headers["content-type"].startswith("image/x-icon"))
+        self.assertTrue(response.content.startswith(b"\x00\x00\x01\x00"))
+
+        for path in (
+            "/favicon-16x16.png",
+            "/favicon-32x32.png",
+            "/apple-touch-icon.png",
+            "/android-chrome-192x192.png",
+            "/android-chrome-512x512.png",
+        ):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.headers["content-type"].startswith("image/png"))
+            self.assertTrue(response.content.startswith(b"\x89PNG\r\n\x1a\n"))
+
+        manifest = self.client.get("/site.webmanifest")
+        self.assertEqual(manifest.status_code, 200)
+        self.assertTrue(
+            manifest.headers["content-type"].startswith("application/manifest+json")
+        )
+        self.assertEqual(manifest.json()["icons"][0]["type"], "image/png")
 
     def test_large_articles_stream_in_chunks(self):
         content = memoryview(b"x" * (512 * 1024 + 1))
