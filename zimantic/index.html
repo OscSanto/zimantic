@@ -333,6 +333,8 @@
   let streamRenderTimer = null;
   let modalPreviousFocus = null;
   let activeModalUrl = null;
+  let previousModalArticleUrl = null;
+  let pendingModalArticleUrl = null;
   let modalRootPending = false;
   let activeParentNavigation = null;
   let parentNavigationSequence = 0;
@@ -683,10 +685,13 @@
     const frame = $("articleModalFrame");
     if (!modal || !frame) return;
     if (modal.hidden) modalPreviousFocus = document.activeElement;
+    const previousActiveArticleUrl = readModalUrl(activeModalUrl);
     const shouldLoad = activeModalUrl !== articleUrl;
     activeModalUrl = articleUrl;
     modalRootPending = shouldLoad;
     if (shouldLoad) {
+      previousModalArticleUrl = previousActiveArticleUrl?.href || null;
+      pendingModalArticleUrl = articleUrl;
       activeParentNavigation = null;
       parentNavigationSequence++;
       frame.src = articleUrl;
@@ -816,33 +821,59 @@
     };
   }
 
+  function previousArticleNavigation(navigation, previousArticleUrl, articleUrl) {
+    if (!navigation || !previousArticleUrl || !articleUrl) return null;
+    const previousValue = articleUrlValue(previousArticleUrl);
+    if (previousValue === articleUrlValue(articleUrl)) return null;
+    return {
+      previous: previousValue,
+      next: navigation.next,
+    };
+  }
+
   async function loadParentArticleNavigation(articleUrl) {
     const request = ++parentNavigationSequence;
-    const parentUrl = parentArticleUrl(articleUrl);
     activeParentNavigation = null;
     postArticleModalNavigation();
-    if (!parentUrl) return;
-    try {
-      const response = await fetch(parentUrl);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      if (
-        response.url &&
-        articleRouteValue(new URL(response.url)) === articleRouteValue(articleUrl)
-      ) {
-        return;
+    const previousUrl = readModalUrl(previousModalArticleUrl);
+    const actualParentUrl = parentArticleUrl(articleUrl);
+    const parentUrls = previousUrl
+      ? [previousUrl, actualParentUrl]
+      : [actualParentUrl];
+    const seenParents = new Set();
+    for (const parentUrl of parentUrls) {
+      if (!parentUrl) continue;
+      const parentValue = articleRouteValue(parentUrl);
+      if (seenParents.has(parentValue)) continue;
+      seenParents.add(parentValue);
+      let navigation = null;
+      try {
+        const response = await fetch(parentUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (
+          response.url &&
+          articleRouteValue(new URL(response.url)) === articleRouteValue(articleUrl)
+        ) {
+          continue;
+        }
+        const html = await response.text();
+        if (
+          request !== parentNavigationSequence ||
+          activeModalUrl !== articleUrl.href
+        ) {
+          return;
+        }
+        navigation = readParentArticleNavigation(html, parentUrl, articleUrl);
+      } catch (_) {
+        if (request !== parentNavigationSequence) return;
       }
-      const html = await response.text();
-      if (
-        request !== parentNavigationSequence ||
-        activeModalUrl !== articleUrl.href
-      ) {
-        return;
-      }
-      activeParentNavigation = readParentArticleNavigation(html, parentUrl, articleUrl);
-    } catch (_) {
-      if (request !== parentNavigationSequence) return;
-      activeParentNavigation = null;
+      if (!navigation) continue;
+      activeParentNavigation = parentUrl === previousUrl
+        ? previousArticleNavigation(navigation, previousUrl, articleUrl)
+        : navigation;
+      if (activeParentNavigation) break;
     }
+    if (request !== parentNavigationSequence) return;
     postArticleModalNavigation();
   }
 
@@ -869,6 +900,8 @@
     modal.hidden = true;
     document.body.classList.remove("modal-open");
     activeModalUrl = null;
+    previousModalArticleUrl = null;
+    pendingModalArticleUrl = null;
     modalRootPending = false;
     activeParentNavigation = null;
     parentNavigationSequence++;
@@ -914,7 +947,18 @@
     if (event.data?.type === "zimantic-article-ready") {
       const articleUrl = readModalUrl(event.data.url);
       if (articleUrl) {
+        const activeArticleUrl = readModalUrl(activeModalUrl);
+        const pendingArticleUrl = readModalUrl(pendingModalArticleUrl);
+        if (
+          activeArticleUrl &&
+          articleUrlValue(activeArticleUrl) !== articleUrlValue(articleUrl) &&
+          (!pendingArticleUrl ||
+            articleUrlValue(pendingArticleUrl) !== articleUrlValue(articleUrl))
+        ) {
+          previousModalArticleUrl = activeArticleUrl.href;
+        }
         activeModalUrl = articleUrl.href;
+        pendingModalArticleUrl = null;
         loadParentArticleNavigation(articleUrl);
       }
     }

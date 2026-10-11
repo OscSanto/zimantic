@@ -390,9 +390,10 @@ JSON API examples:
   Zimantic reads each requested entry into memory, including binary assets. HTML articles include a small
   navigation bar with Back, Home, Random, Search, Copy link and Print controls. Modal articles
   also expose icon-only navigation through visible search results and, for nested articles, the
-  adjacent article links listed on the article's parent page. Back uses browser history when
-  available, otherwise it attempts to close the tab and falls back to the search page if the
-  browser disallows scripted tab closing. `GET /random?zim=<name>` redirects to a random indexed
+  adjacent article links listed on the article's parent page. When an article was reached from
+  another modal article, that preceding article can also provide the navigation context. Back
+  uses browser history when available, otherwise it attempts to close the tab and falls back to
+  the search page if the browser disallows scripted tab closing. `GET /random?zim=<name>` redirects to a random indexed
   article.
 - Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
   search endpoints. Debug output is configured for the whole server; it is not a URL parameter.
