@@ -85,6 +85,22 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
 [data-zimantic-toolbar] .zimantic-toolbar-actions {
   margin-left: auto !important;
 }
+[data-zimantic-toolbar] .zimantic-toolbar-context-nav {
+  align-items: center !important;
+  display: flex !important;
+  flex: 0 0 auto !important;
+  gap: 6px !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-context-nav button:disabled {
+  cursor: default !important;
+  opacity: .45 !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-parent-nav {
+  flex: 0 0 auto !important;
+  min-width: 30px !important;
+  padding-left: 6px !important;
+  padding-right: 6px !important;
+}
 [data-zimantic-toolbar] .zimantic-toolbar-home {
   max-width: min(32vw, 360px) !important;
   min-width: 0 !important;
@@ -164,29 +180,63 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
 
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 (() => {
-  const markModalRoot = () => {
-    history.replaceState(
-      Object.assign({}, history.state || {}, {zimanticModalRoot: true}),
-      "",
-      location.href
-    );
-  };
-  window.addEventListener("message", event => {
-    if (event.source !== window.parent) return;
-    if (event.data?.type === "zimantic-modal-root") {
-      markModalRoot();
-    }
-  });
   const initialize = () => {
     const toolbar = document.querySelector("nav[data-zimantic-toolbar]");
     if (!toolbar) return;
     const status = toolbar.querySelector("[data-zimantic-toolbar-status]");
     const home = toolbar.querySelector("[data-zimantic-home]");
     const permalink = toolbar.querySelector("[data-zimantic-permalink]");
+    const previous = toolbar.querySelector("[data-zimantic-context-previous]");
+    const next = toolbar.querySelector("[data-zimantic-context-next]");
+    const parentPrevious = toolbar.querySelector("[data-zimantic-parent-previous]");
+    const parentNext = toolbar.querySelector("[data-zimantic-parent-next]");
     const actions = toolbar.querySelector(".zimantic-toolbar-actions");
+    let selectedSearchText = "";
+    const contextControls = [
+      [previous, "previous"],
+      [next, "next"],
+    ];
+    const parentControls = [
+      [parentPrevious, "previous"],
+      [parentNext, "next"],
+    ];
     const announce = message => {
       if (status) status.textContent = message;
     };
+    const setContextNavigation = navigation => {
+      for (const [control, direction] of contextControls) {
+        if (!control) continue;
+        const url = typeof navigation?.[direction] === "string"
+          ? navigation[direction]
+          : "";
+        control.hidden = !navigation?.modal;
+        control.disabled = !url;
+        if (url) {
+          control.dataset.zimanticUrl = url;
+        } else {
+          delete control.dataset.zimanticUrl;
+        }
+      }
+      for (const [control, direction] of parentControls) {
+        if (!control) continue;
+        const url = typeof navigation?.parent?.[direction] === "string"
+          ? navigation.parent[direction]
+          : "";
+        control.hidden = !navigation?.parent;
+        control.disabled = !url;
+        if (url) {
+          control.dataset.zimanticUrl = url;
+        } else {
+          delete control.dataset.zimanticUrl;
+        }
+      }
+    };
+    window.addEventListener("message", event => {
+      if (event.source !== window.parent) return;
+      if (event.data?.type === "zimantic-modal-navigation") {
+        setContextNavigation(event.data);
+      }
+    });
     const fitToolbarLabels = () => {
       if (!actions) return;
       for (const control of [home, permalink]) {
@@ -197,22 +247,59 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         control.classList.toggle("compact", control.scrollWidth > available);
       }
     };
+    const selectedText = () => {
+      const selection = typeof window.getSelection === "function"
+        ? window.getSelection()
+        : null;
+      return (selection?.toString() || "").replace(/\\s+/g, " ").trim().slice(0, 4096);
+    };
+    if (home) {
+      home.addEventListener("pointerdown", () => {
+        selectedSearchText = selectedText();
+      });
+      home.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+          selectedSearchText = selectedText();
+        }
+      });
+    }
     toolbar.addEventListener("click", event => {
       const control = event.target.closest("[data-zimantic-action]");
       if (!control) return;
       const action = control.dataset.zimanticAction;
-      if (action === "back") {
+      if (action === "close") {
+        event.preventDefault();
         if (window.parent !== window) {
-          if (history.state?.zimanticModalRoot) {
-            window.parent.postMessage({type: "zimantic-article-close"}, "*");
-          } else {
-            history.back();
-          }
-        } else if (history.length > 1) {
-          history.back();
+          window.parent.postMessage({type: "zimantic-article-close"}, "*");
         } else {
           window.close();
         }
+      } else if (action === "home") {
+        const query = selectedSearchText || selectedText();
+        selectedSearchText = "";
+        if (window.parent !== window) {
+          event.preventDefault();
+          window.parent.postMessage({type: "zimantic-search", query}, "*");
+        } else if (query) {
+          event.preventDefault();
+          location.href = `/?q=${encodeURIComponent(query)}`;
+        }
+      } else if (action === "previous" || action === "next") {
+        const url = control.dataset.zimanticUrl;
+        if (!url || control.disabled || window.parent === window) return;
+        event.preventDefault();
+        window.parent.postMessage({
+          type: "zimantic-article-navigate",
+          url,
+        }, "*");
+      } else if (action === "parent-previous" || action === "parent-next") {
+        const url = control.dataset.zimanticUrl;
+        if (!url || control.disabled || window.parent === window) return;
+        event.preventDefault();
+        window.parent.postMessage({
+          type: "zimantic-parent-article-navigate",
+          url,
+        }, "*");
       } else if (action === "copy") {
         if (
           event.button !== 0 ||
@@ -243,6 +330,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     window.addEventListener("resize", fitToolbarLabels);
     if (window.ResizeObserver) {
       new ResizeObserver(fitToolbarLabels).observe(toolbar);
+    }
+    if (window.parent !== window) {
+      window.parent.postMessage({
+        type: "zimantic-article-ready",
+        url: location.href,
+      }, "*");
     }
   };
   if (document.readyState === "loading") {
@@ -278,23 +371,31 @@ def _article_toolbar(zim: str, article: dict) -> str:
             f"{quote_path(parent_path, safe='/')}"
         )
         breadcrumbs.append(
-            f'<span class="zimantic-toolbar-separator" aria-hidden="true">/</span>'
+            f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
             f'<a class="zimantic-toolbar-breadcrumb" href="{parent_url}" '
             f'title="Open {html_escape(parent_path, quote=True)}">'
             f'{html_escape(path_parts[depth - 1])}</a>'
         )
     breadcrumb_html = "".join(breadcrumbs) + (
-        '<span class="zimantic-toolbar-separator" aria-hidden="true">/</span>'
+        '<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
+        '<button type="button" class="zimantic-toolbar-parent-nav" '
+        'data-zimantic-action="parent-previous" data-zimantic-parent-previous '
+        'hidden disabled aria-label="Previous link in parent page" '
+        'title="Open the previous link in the parent page">←</button>'
         f'<a class="zimantic-toolbar-article" data-zimantic-permalink '
         f'data-zimantic-action="copy" href="{permalink_url}" '
         f'title="Open or copy this article\'s permalink">'
         f'<span class="zimantic-toolbar-article-full">{article_title}</span>'
         '<span class="zimantic-toolbar-article-short" aria-hidden="true">'
         "Permalink</span></a>"
+        '<button type="button" class="zimantic-toolbar-parent-nav" '
+        'data-zimantic-action="parent-next" data-zimantic-parent-next '
+        'hidden disabled aria-label="Next link in parent page" '
+        'title="Open the next link in the parent page">→</button>'
     )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
-    <button type="button" data-zimantic-action="back" title="Go back or close this tab">← Back</button>
+    <button type="button" data-zimantic-action="close" title="Close article">Close</button>
     <a href="{random_url}" title="Open a random article">Random</a>
     <a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" title="Open this ZIM's homepage">
       <span class="zimantic-toolbar-home-full">{zim_name}</span>
@@ -304,7 +405,15 @@ def _article_toolbar(zim: str, article: dict) -> str:
   </div>
   <div class="zimantic-toolbar-actions">
     <button type="button" data-zimantic-action="print" title="Print this article">Print</button>
-    <a href="/" title="Search your library">Zimantic</a>
+    <span class="zimantic-toolbar-context-nav" aria-label="Adjacent search results">
+      <button type="button" data-zimantic-action="previous"
+        data-zimantic-context-previous hidden disabled aria-label="Previous search result"
+        title="Open the previous search result">←</button>
+      <button type="button" data-zimantic-action="next"
+        data-zimantic-context-next hidden disabled aria-label="Next search result"
+        title="Open the next search result">→</button>
+    </span>
+    <a href="/" data-zimantic-action="home" title="Search your library">Zimantic</a>
   </div>
   <span class="zimantic-toolbar-status" data-zimantic-toolbar-status aria-live="polite"></span>
 </nav>"""
@@ -554,7 +663,18 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
             ):
                 yield json.dumps(event, separators=(",", ":")) + "\n"
 
-        return StreamingResponse(events(), media_type="application/x-ndjson")
+        # Keep each NDJSON event visible to fetch() as it arrives. The global
+        # GZipMiddleware buffers compressed stream data until a flush/final
+        # block, which makes browsers wait for the whole search.
+        return StreamingResponse(
+            events(),
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Encoding": "identity",
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return app
 

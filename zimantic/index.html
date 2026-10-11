@@ -114,7 +114,8 @@
     button.source-filter-option.err { border-color: var(--err-border); color: var(--err); }
     button.source-filter-option[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
     .source-filter-status { margin-top: 6px; font-size: .78rem; }
-    .filter-line { min-height: 1.2em; font-size: .85rem; margin-bottom: 14px; }
+    .filter-line { min-height: 1.2em; font-size: .85rem; }
+    .source-results-break { border: 0; border-top: 1px solid #989898; margin: 0.8rem 7px 0; }
     .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 18px 0 8px; font-size: .85rem; }
     .pager:empty { display: none; }
     .pager a, .pager span { padding: 6px 12px; }
@@ -167,10 +168,12 @@
       min-height: 16px;
     }
     .result-url {
-      color: var(--ok);
+      color: var(--muted);
       font-size: .82rem;
-      margin: -2px 0 6px;
-      overflow-wrap: anywhere;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .result-source-icon {
       border-radius: 3px;
@@ -331,6 +334,8 @@
   let modalPreviousFocus = null;
   let activeModalUrl = null;
   let modalRootPending = false;
+  let activeParentNavigation = null;
+  let parentNavigationSequence = 0;
 
   function cancelStreamRender() {
     if (streamRenderTimer !== null) {
@@ -480,8 +485,15 @@
         (current.counts[right.source.key] || 0) - (current.counts[left.source.key] || 0);
       return countDifference || left.source.name.localeCompare(right.source.name);
     });
-    const visible = sorted.slice(0, SOURCE_FILTER_LIMIT);
-    const visibleKeys = new Set(visible.map(outcome => outcome.source.key));
+    const topVisible = sorted.slice(0, SOURCE_FILTER_LIMIT);
+    const selectedVisible = query
+      ? []
+      : sorted.filter(outcome => selectedSourceKeys.has(outcome.source.key));
+    const visibleKeys = new Set([
+      ...topVisible.map(outcome => outcome.source.key),
+      ...selectedVisible.map(outcome => outcome.source.key),
+    ]);
+    const visible = sorted.filter(outcome => visibleKeys.has(outcome.source.key));
     const otherOutcomes = !query
       ? nonEmptyOutcomes.filter(outcome =>
         !visibleKeys.has(outcome.source.key) && (current.counts[outcome.source.key] || 0) > 0
@@ -517,7 +529,7 @@
       return button;
     });
     const otherKeys = otherOutcomes.map(outcome => outcome.source.key);
-    if (!selectedSourceKeys.size && !query && otherKeys.length) {
+    if (!query && otherKeys.length) {
       const otherCount = otherOutcomes.reduce(
         (total, outcome) => total + (current.counts[outcome.source.key] || 0),
         0
@@ -536,24 +548,14 @@
       status.textContent = query
         ? "No matching sources."
         : outcomes.length ? "No sources have results." : "No sources have reported yet.";
-    } else if (!query && matching.length > SOURCE_FILTER_LIMIT) {
-      status.textContent = `Showing ${visible.length} of ${matching.length} sources. Search to find a source.`;
-    } else if (matching.length > visible.length) {
-      status.textContent = `${visible.length} of ${matching.length} matching sources shown. Refine your search to find a source.`;
     } else {
       status.textContent = "";
     }
   }
 
-  function renderFilterLine(count) {
-    const selected = [...selectedSourceKeys];
-    $("filterLine").innerHTML = selected.length
-      ? `Showing only <strong>${escapeHtml(selected.map(key =>
-        current.outcomes.get(key)?.source.name ||
-        sources.find(source => source.key === key)?.name ||
-        key
-      ).join(", "))}</strong>: ${count} result${count === 1 ? "" : "s"}.
-         <button class="linklike" type="button" data-source="">Show all sources</button>`
+  function renderFilterLine() {
+    $("filterLine").innerHTML = selectedSourceKeys.size
+      ? '<hr class="source-results-break" aria-hidden="true">'
       : "";
   }
 
@@ -572,7 +574,19 @@
       icon.addEventListener("error", () => icon.remove(), {once: true});
       meta.appendChild(icon);
     }
-    meta.appendChild(document.createTextNode(item.source || ""));
+    const source = document.createElement("span");
+    source.textContent = item.source || "";
+    meta.appendChild(source);
+    const separator = document.createElement("span");
+    separator.className = "result-meta-separator";
+    separator.setAttribute("aria-hidden", "true");
+    separator.hidden = true;
+    separator.textContent = "›";
+    meta.appendChild(separator);
+    const url = document.createElement("span");
+    url.className = "result-url";
+    url.hidden = true;
+    meta.appendChild(url);
   }
 
   function resultUrlLabel(item) {
@@ -590,26 +604,26 @@
     const segments = value => value.split("/").filter(Boolean).map(decodeSegment);
 
     if (!rawUrl) {
-      return [item.source, ...segments(rawPath)].filter(Boolean).join(" › ");
+      return segments(rawPath).join(" › ");
     }
 
     try {
       const parsed = new URL(rawUrl, location.href);
       const path = segments(parsed.pathname);
       if (parsed.origin === location.origin && path[0] === "article") {
-        return [item.source, ...segments(rawPath || path.slice(2).join("/"))]
-          .filter(Boolean)
-          .join(" › ");
+        return segments(rawPath || path.slice(2).join("/")).join(" › ");
       }
       return [`${parsed.protocol}//${parsed.host}`, ...path].join(" › ");
     } catch (_) {
-      return [item.source, ...segments(rawPath)].filter(Boolean).join(" › ");
+      return segments(rawPath).join(" › ");
     }
   }
 
   function setResultUrl(node, item) {
+    const separator = node.querySelector(".result-meta-separator");
     const url = node.querySelector(".result-url");
     const label = resultUrlLabel(item);
+    separator.hidden = !label;
     url.textContent = label;
     url.hidden = !label;
   }
@@ -672,22 +686,27 @@
     const shouldLoad = activeModalUrl !== articleUrl;
     activeModalUrl = articleUrl;
     modalRootPending = shouldLoad;
-    if (shouldLoad) frame.src = articleUrl;
+    if (shouldLoad) {
+      activeParentNavigation = null;
+      parentNavigationSequence++;
+      frame.src = articleUrl;
+    }
     modal.hidden = false;
     document.body.classList.add("modal-open");
     frame.focus();
   }
 
-  function openArticleModal(link) {
-    const articleUrl = new URL(link.href, location.href);
-    if (current) {
+  function navigateArticleModal(articleUrl) {
+    const locationState = readLocationState();
+    const question = current?.question || locationState.question;
+    if (question) {
       history.pushState(
         {...(history.state || {}), zimanticModal: true},
         "",
         makeStateUrl(
-          current.question,
-          selectedSourceKeys,
-          current.page,
+          question,
+          current ? selectedSourceKeys : locationState.selectedSources,
+          current?.page ?? locationState.page,
           articleUrlValue(articleUrl)
         )
       );
@@ -695,15 +714,154 @@
     showArticleModal(articleUrl.href);
   }
 
+  function openArticleModal(link) {
+    navigateArticleModal(new URL(link.href, location.href));
+  }
+
+  function articleResultLinks() {
+    return [...$("results").querySelectorAll(".result-title a[href]")]
+      .filter(link => {
+        if (link.dataset.mimetype && link.dataset.mimetype !== "text/html") return false;
+        try {
+          const articleUrl = new URL(link.href, location.href);
+          return articleUrl.origin === location.origin &&
+            articleUrl.pathname.startsWith("/article/");
+        } catch (_) {
+          return false;
+        }
+      });
+  }
+
+  function articleModalNavigation() {
+    const articleUrl = readModalUrl(activeModalUrl);
+    if (!articleUrl) return {previous: null, next: null};
+    const links = articleResultLinks();
+    const currentValue = articleUrlValue(articleUrl);
+    const index = links.findIndex(link => {
+      try {
+        return articleUrlValue(new URL(link.href, location.href)) === currentValue;
+      } catch (_) {
+        return false;
+      }
+    });
+    if (index < 0) return {previous: null, next: null};
+    const urlFor = offset => {
+      const link = links[index + offset];
+      return link ? articleUrlValue(new URL(link.href, location.href)) : null;
+    };
+    return {
+      previous: urlFor(-1),
+      next: urlFor(1),
+    };
+  }
+
+  function articleRouteParts(articleUrl) {
+    const parts = articleUrl.pathname.split("/").filter(Boolean);
+    return parts[0] === "article" && parts.length >= 3 ? parts : null;
+  }
+
+  function parentArticleUrl(articleUrl) {
+    const parts = articleRouteParts(articleUrl);
+    if (!parts || parts.length < 4) return null;
+    return new URL(
+      articleUrl.pathname.slice(0, articleUrl.pathname.lastIndexOf("/")),
+      location.origin
+    );
+  }
+
+  function articleRouteValue(articleUrl) {
+    return articleUrl.pathname + articleUrl.search;
+  }
+
+  function readParentArticleNavigation(html, parentUrl, articleUrl) {
+    const document = new DOMParser().parseFromString(html, "text/html");
+    const articleParts = articleRouteParts(articleUrl);
+    if (!articleParts) return null;
+    const links = [];
+    const seen = new Set();
+    for (const link of document.querySelectorAll("a[href]")) {
+      if (link.closest("[data-zimantic-toolbar]")) continue;
+      const href = link.getAttribute("href");
+      if (!href || href.startsWith("#")) continue;
+      let linkUrl;
+      try {
+        linkUrl = new URL(href, parentUrl);
+      } catch (_) {
+        continue;
+      }
+      const linkParts = articleRouteParts(linkUrl);
+      if (
+        linkUrl.origin !== location.origin ||
+        !linkParts ||
+        linkParts[1] !== articleParts[1]
+      ) {
+        continue;
+      }
+      const value = articleRouteValue(linkUrl);
+      if (seen.has(value)) continue;
+      seen.add(value);
+      links.push(linkUrl);
+    }
+    const currentValue = articleRouteValue(articleUrl);
+    const index = links.findIndex(link => articleRouteValue(link) === currentValue);
+    if (index < 0) return null;
+    if (!links[index - 1] && !links[index + 1]) return null;
+    const urlAt = offset => {
+      const link = links[index + offset];
+      return link ? articleUrlValue(link) : null;
+    };
+    return {
+      previous: urlAt(-1),
+      next: urlAt(1),
+    };
+  }
+
+  async function loadParentArticleNavigation(articleUrl) {
+    const request = ++parentNavigationSequence;
+    const parentUrl = parentArticleUrl(articleUrl);
+    activeParentNavigation = null;
+    postArticleModalNavigation();
+    if (!parentUrl) return;
+    try {
+      const response = await fetch(parentUrl);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (
+        response.url &&
+        articleRouteValue(new URL(response.url)) === articleRouteValue(articleUrl)
+      ) {
+        return;
+      }
+      const html = await response.text();
+      if (
+        request !== parentNavigationSequence ||
+        activeModalUrl !== articleUrl.href
+      ) {
+        return;
+      }
+      activeParentNavigation = readParentArticleNavigation(html, parentUrl, articleUrl);
+    } catch (_) {
+      if (request !== parentNavigationSequence) return;
+      activeParentNavigation = null;
+    }
+    postArticleModalNavigation();
+  }
+
+  function postArticleModalNavigation() {
+    const frame = $("articleModalFrame");
+    if (!frame?.contentWindow || $("articleModal").hidden) return;
+    frame.contentWindow.postMessage({
+      type: "zimantic-modal-navigation",
+      modal: true,
+      parent: activeParentNavigation,
+      ...articleModalNavigation(),
+    }, "*");
+  }
+
   function closeArticleModal({navigateHistory = true} = {}) {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
     if (!modal || modal.hidden) return;
     if (navigateHistory && new URL(location.href).searchParams.has("modal")) {
-      if (history.state?.zimanticModal) {
-        history.back();
-        return;
-      }
       const url = new URL(location.href);
       url.searchParams.delete("modal");
       history.replaceState(history.state, "", url.pathname + url.search + url.hash);
@@ -712,6 +870,8 @@
     document.body.classList.remove("modal-open");
     activeModalUrl = null;
     modalRootPending = false;
+    activeParentNavigation = null;
+    parentNavigationSequence++;
     if (frame) frame.src = "about:blank";
     if (modalPreviousFocus instanceof HTMLElement && document.contains(modalPreviousFocus)) {
       modalPreviousFocus.focus();
@@ -724,20 +884,60 @@
     const frame = $("articleModalFrame");
     if (
       modal.hidden ||
-      !modalRootPending ||
       !frame.src ||
       frame.src === "about:blank"
     ) {
       return;
     }
-    modalRootPending = false;
-    // Sandboxed documents have an opaque origin, so only "*" can target them.
-    frame.contentWindow.postMessage({type: "zimantic-modal-root"}, "*");
+    if (modalRootPending) {
+      modalRootPending = false;
+      // Sandboxed documents have an opaque origin, so only "*" can target them.
+      frame.contentWindow.postMessage({type: "zimantic-modal-root"}, "*");
+    }
+    postArticleModalNavigation();
   });
   window.addEventListener("message", event => {
     const frame = $("articleModalFrame");
     if (event.source !== frame.contentWindow) return;
+    if (event.data?.type === "zimantic-search") {
+      const question = String(event.data.query || "").trim().slice(0, 4096);
+      if (!question) {
+        closeArticleModal();
+        return;
+      }
+      closeArticleModal({navigateHistory: false});
+      $("question").value = question;
+      submitSearch(false);
+      return;
+    }
     if (event.data?.type === "zimantic-article-close") closeArticleModal();
+    if (event.data?.type === "zimantic-article-ready") {
+      const articleUrl = readModalUrl(event.data.url);
+      if (articleUrl) {
+        activeModalUrl = articleUrl.href;
+        loadParentArticleNavigation(articleUrl);
+      }
+    }
+    if (event.data?.type === "zimantic-article-navigate") {
+      const articleUrl = readModalUrl(event.data.url);
+      if (!articleUrl) return;
+      const navigation = articleModalNavigation();
+      const target = articleUrlValue(articleUrl);
+      if (target !== navigation.previous && target !== navigation.next) return;
+      navigateArticleModal(articleUrl);
+    }
+    if (event.data?.type === "zimantic-parent-article-navigate") {
+      const articleUrl = readModalUrl(event.data.url);
+      if (!articleUrl || !activeParentNavigation) return;
+      const target = articleUrlValue(articleUrl);
+      if (
+        target !== activeParentNavigation.previous &&
+        target !== activeParentNavigation.next
+      ) {
+        return;
+      }
+      navigateArticleModal(articleUrl);
+    }
   });
 
   function setResultNode(node, item) {
@@ -793,7 +993,6 @@
     node.innerHTML = `<div class="result-body">
       <div class="result-title"></div>
       <div class="result-meta"></div>
-      <div class="result-url" hidden></div>
       <div class="result-snippet"></div>
     </div>`;
     setResultNode(node, item);
@@ -919,6 +1118,7 @@
     renderFilterLine(current.total);
     renderPager(current.total, pageCount);
     renderResults(current.pageItems);
+    postArticleModalNavigation();
   }
 
   function renderNotice() {

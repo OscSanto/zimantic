@@ -185,6 +185,8 @@ class ServerTests(unittest.TestCase):
     def test_streaming_search_returns_ndjson(self):
         response = self.client.get("/search/stream?q=page")
         self.assertTrue(response.headers["content-type"].startswith("application/x-ndjson"))
+        self.assertEqual(response.headers["content-encoding"], "identity")
+        self.assertEqual(response.headers["x-accel-buffering"], "no")
         self.assertEqual(
             [json.loads(line)["type"] for line in response.text.splitlines()],
             ["started", "done"],

@@ -388,10 +388,12 @@ JSON API examples:
   route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` only limits
   HTML read during indexing; `max_article_bytes` limits the uncompressed response body because
   Zimantic reads each requested entry into memory, including binary assets. HTML articles include a small
-  navigation bar with Back, Home, Random, Search, Copy link and Print controls. Back uses browser
-  history when available, otherwise it attempts to close the tab and falls back to the search page
-  if the browser disallows scripted tab closing. `GET /random?zim=<name>` redirects to a
-  random indexed article.
+  navigation bar with Back, Home, Random, Search, Copy link and Print controls. Modal articles
+  also expose icon-only navigation through visible search results and, for nested articles, the
+  adjacent article links listed on the article's parent page. Back uses browser history when
+  available, otherwise it attempts to close the tab and falls back to the search page if the
+  browser disallows scripted tab closing. `GET /random?zim=<name>` redirects to a random indexed
+  article.
 - Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
   search endpoints. Debug output is configured for the whole server; it is not a URL parameter.
 - `GET /sources`, `/config`, `/zims` and `/health` return source, configuration,
