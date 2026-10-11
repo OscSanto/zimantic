@@ -22,7 +22,13 @@ from libzim.search import Query, Searcher
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .contracts import SourceInfo, SourceResult
-from .zim import DEFAULT_PREVIEW_CHARS, truncate_at_word_boundary
+from .zim import (
+    DEFAULT_MAX_ENTRY_BYTES,
+    DEFAULT_MAX_HTML_BYTES,
+    DEFAULT_PREVIEW_CHARS,
+    read_entry,
+    truncate_at_word_boundary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -460,6 +466,10 @@ class Search:
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
         )
+        self.preview_cache = QueryCache(
+            _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
+            _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
+        )
         self._load_indexes()
         # Local indexes are ready immediately; the optional Kiwix catalog is
         # refreshed in the background so an unreachable Kiwix server cannot
@@ -693,6 +703,9 @@ class Search:
                 with self._state_lock:
                     self._cache_generation = getattr(self, "_cache_generation", 0) + 1
                 self.cache.clear()
+                preview_cache = getattr(self, "preview_cache", None)
+                if preview_cache is not None:
+                    preview_cache.clear()
             self.refresh_sources()
             with self._state_lock:
                 indexes = sorted(self.indexes)
@@ -862,6 +875,9 @@ class Search:
             with self._state_lock:
                 self._cache_generation = getattr(self, "_cache_generation", 0) + 1
             self.cache.clear()
+            preview_cache = getattr(self, "preview_cache", None)
+            if preview_cache is not None:
+                preview_cache.clear()
         return sources
 
     def _catalog_entries(self, server: str) -> list[dict[str, str]]:
@@ -1336,6 +1352,7 @@ class Search:
         """Replay a cached pool as a finished stream (progress + one page)."""
         pool, cached_sources = self._unpack_cache(cached)
         state = self._page_state(pool, source, offset, page_size, debug)
+        self._hydrate_results(state["results"])
         total_sources = len(sources)
         yield {
             "type": "started",
@@ -1553,6 +1570,12 @@ class Search:
                 counts = self._source_counts(pool)
             self._populate_result_mimetypes(pool)
             counts = self._source_counts(pool)
+            state = self._page_state(pool, source, offset, page_size, debug)
+            self._hydrate_results(state["results"])
+            hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
+            for doc in pool:
+                if doc["id"] in hydrated:
+                    doc["lead"] = hydrated[doc["id"]]
             # The cache holds only the deduplicated ranked pool plus compact
             # source outcomes, never a copy of every source's item list.
             cache_value = {
@@ -1567,7 +1590,6 @@ class Search:
                 current_generation = getattr(self, "_cache_generation", 0)
             if current_generation == generation:
                 self.cache.put(cache_key, cache_value)
-            state = self._page_state(pool, source, offset, page_size, debug)
             yield {
                 "type": "done",
                 "results": state["results"],
@@ -1738,26 +1760,40 @@ class Search:
     ) -> dict[int, dict[str, Any]]:
         if not rowids:
             return {}
-        rows: dict[int, tuple[Any, ...]] = {}
+        has_excerpt = any(
+            row[1] == "excerpt" for row in db.execute("PRAGMA table_info(docs)")
+        )
+        select_columns = (
+            "rowid, title, excerpt, path, target"
+            if has_excerpt
+            else "rowid, title, path, target"
+        )
+
+        def normalize(row: tuple[Any, ...]) -> tuple[int, Any, Any, Any]:
+            if has_excerpt:
+                return int(row[0]), row[1], row[3], row[4]
+            return int(row[0]), row[1], row[2], row[3]
+
+        rows: dict[int, tuple[int, Any, Any, Any]] = {}
         values = list(rowids)
         for start in range(0, len(values), 900):
             batch = values[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                "SELECT rowid, title, excerpt, path, target FROM docs "
+                f"SELECT {select_columns} FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
-            rows.update({int(row[0]): row for row in db.execute(query, batch)})
+            rows.update({int(row[0]): normalize(row) for row in db.execute(query, batch)})
 
-        target_ids = {int(row[4]) for row in rows.values() if row[4] is not None}
+        target_ids = {int(row[3]) for row in rows.values() if row[3] is not None}
         for start in range(0, len(target_ids), 900):
             batch = list(target_ids)[start:start + 900]
             placeholders = ",".join("?" for _ in batch)
             query = (
-                "SELECT rowid, title, excerpt, path, target FROM docs "
+                f"SELECT {select_columns} FROM docs "
                 f"WHERE rowid IN ({placeholders})"
             )
-            rows.update({int(row[0]): row for row in db.execute(query, batch)})
+            rows.update({int(row[0]): normalize(row) for row in db.execute(query, batch)})
 
         # kiwix_url is optional: without it results have no article link, so the
         # UI renders the title as plain text instead of building a broken URL.
@@ -1767,18 +1803,18 @@ class Search:
             original = rows.get(rowid)
             if not original:
                 continue
-            target = int(original[4]) if original[4] is not None else rowid
+            target = int(original[3]) if original[3] is not None else rowid
             row = rows.get(target)
             if not row:
                 continue
-            _, title, excerpt, path, _ = row
+            _, title, path, _ = row
             doc = {
                 "id": f"{source.key}:{path}",
                 "source_key": source.key,
                 "source": source.name,
                 "source_icon": source.icon_url,
                 "title": title,
-                "lead": self._preview(excerpt or ""),
+                "lead": "",
                 "path": path,
                 "mimetype": None,
                 "url": (
@@ -1794,6 +1830,101 @@ class Search:
             }
             docs[rowid] = doc
         return docs
+
+    def _extract_previews(
+        self,
+        local_name: str,
+        docs: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        """Extract previews for one local source while holding its archive lock."""
+        with self._state_lock:
+            index = self.indexes.get(local_name)
+        if index is None or index.archive is None:
+            return {doc["id"]: "" for doc in docs}
+
+        try:
+            self._acquire_index(index)
+        except RuntimeError:
+            return {doc["id"]: "" for doc in docs}
+
+        previews: dict[str, str] = {}
+        try:
+            with index.lock:
+                for doc in docs:
+                    try:
+                        entry = index.archive.get_entry_by_path(doc["path"])
+                        row = read_entry(
+                            index.archive,
+                            entry._index,
+                            max_html_bytes=_int_config(
+                                self.cfg,
+                                "max_html_bytes",
+                                DEFAULT_MAX_HTML_BYTES,
+                            ),
+                            max_entry_bytes=_int_config(
+                                self.cfg,
+                                "max_article_bytes",
+                                33_554_432,
+                            ),
+                            max_preview_chars=self.preview_chars,
+                        )
+                    except (KeyError, OSError, RuntimeError, ValueError) as error:
+                        logger.warning(
+                            "%s: preview unavailable for %s (%s)",
+                            local_name,
+                            doc["path"],
+                            error,
+                        )
+                        previews[doc["id"]] = ""
+                        continue
+                    previews[doc["id"]] = self._preview(row[2] if row else "")
+        finally:
+            self._release_index(index)
+        return previews
+
+    def _hydrate_results(self, docs: list[dict[str, Any]]) -> None:
+        """Populate only the displayed local results, in parallel by source."""
+        with self._state_lock:
+            sources = dict(self.sources)
+        preview_cache = getattr(self, "preview_cache", None)
+        if preview_cache is None:
+            preview_cache = QueryCache(0, 0)
+            self.preview_cache = preview_cache
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for doc in docs:
+            source = sources.get(doc.get("source_key"))
+            if source is None or source.mode != "local" or not source.local_name:
+                continue
+            key = (source.key, doc["path"])
+            cached = preview_cache.get(key)
+            if cached is not None:
+                doc["lead"] = cached
+                continue
+            if doc.get("lead"):
+                continue
+            grouped.setdefault(source.local_name, []).append(doc)
+
+        futures = {
+            self._executor.submit(self._extract_previews, local_name, source_docs): (
+                local_name,
+                source_docs,
+            )
+            for local_name, source_docs in grouped.items()
+        }
+        for future in as_completed(futures):
+            local_name, source_docs = futures[future]
+            try:
+                previews = future.result()
+            except (RuntimeError, ValueError, OSError) as error:
+                logger.warning("%s: preview extraction failed (%s)", local_name, error)
+                previews = {doc["id"]: "" for doc in source_docs}
+            for doc in source_docs:
+                lead = previews.get(doc["id"], "")
+                doc["lead"] = lead
+                source = sources.get(doc.get("source_key"))
+                if source is not None:
+                    preview_cache.put((source.key, doc["path"]), lead)
 
     def _populate_result_mimetypes(self, pool: list[dict[str, Any]]) -> None:
         """Read MIME metadata only for documents that survive global ranking."""
@@ -1983,7 +2114,6 @@ class Search:
         for identity, doc in docs.items():
             title_tokens = _content_terms(doc["title"])
             title_token_set = set(title_tokens)
-            preview_tokens = _content_terms(doc.get("lead", ""))
             title_matches = sum(term in title_token_set for term in query_words)
             title_coverage = title_matches / len(query_words) if query_words else 0.0
             title_density = _density(query_words, title_tokens)
@@ -1991,15 +2121,13 @@ class Search:
             # complete matches without letting a short partial match win.
             title_quality = title_coverage * (1.0 + title_density) / 2.0
             phrase_hit = _phrase(query_words, title_tokens)
-            snippet_coverage = _coverage(query_words, preview_tokens)
             source = source_by_key.get(doc["source_key"])
             intent = _intent_match(source, query) if source is not None else 0.0
             lexical = (
                 5.0 * title_quality
                 + 2.0 * phrase_hit
                 + intent
-                + 0.5 * snippet_coverage
-            ) / 8.5
+            ) / 8.0
             source_rank = int(doc.get("source_rank", 100000))
             total = scores.get(identity, 0.0) + 0.02 * lexical
             disambig = ""
@@ -2015,8 +2143,7 @@ class Search:
                 f"({title_matches}/{len(query_words) if query_words else 0}, "
                 f"density {round(title_density * 100)}%), "
                 f"phrase {'yes' if phrase_hit else 'no'}, "
-                f"intent {'yes' if intent else 'no'}, "
-                f"snippet {round(snippet_coverage * 100)}%"
+                f"intent {'yes' if intent else 'no'}"
                 f"{disambig}"
             )
             output = dict(doc)

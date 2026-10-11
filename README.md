@@ -87,25 +87,25 @@ repeats the same text under `lang-*` classes (parallel translations, as in TED t
 `lang-default` copy is kept. Visible blocks are collected in priority order, with paragraphs
 preferred, and block boundaries keep neighboring text runs from running together.
 
-Each article stores one **excerpt** for both previews and embeddings, bounded to
-`max_preview_chars` (1,000 by default) at a word boundary. The embedder trims that same text to
-`embedding_tokens` (256) when it builds the vector, so the model never sees more than its budget.
-Extraction reads up to 4 MiB per page by default. The builder skips an entry only when its
-decompressed size exceeds `max_entry_bytes` (1 GiB on desktop, 256 MiB on the mobile profile);
-this high safety ceiling preserves large, friendly articles while preventing pathological entries
-from exhausting memory before the parser limit can be applied.
+Each article's **excerpt** is extracted transiently for the embedding and discarded after the
+vector is built. At search time, only the displayed local results are extracted again for previews,
+bounded to `max_preview_chars` (1,000 by default) at a word boundary. Extraction reads up to 4 MiB
+per page by default. The builder skips an entry only when its decompressed size exceeds
+`max_entry_bytes` (1 GiB on desktop, 256 MiB on the mobile profile); this high safety ceiling
+preserves large, friendly articles while preventing pathological entries from exhausting memory
+before the parser limit can be applied.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable text:
 HTML, XHTML, plain text and PDFs. PDF text is read from the file's embedded text layer, so scanned
 documents without one are skipped.
 
-**Embedding.** Titles and excerpts are embedded with
+**Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-The model receives at most `embedding_tokens`; the same excerpt is used for results, which expose
-at most `max_preview_chars` characters.
+The model receives at most `embedding_tokens`. Search previews are generated independently from
+the local ZIM only for the final displayed page.
 
 **Storage.** Each ZIM gets two files in `index_dir`:
-- `<name>.sqlite`: titles, the shared excerpt, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
+- `<name>.sqlite`: titles, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
 - `<name>.faiss`: the vectors, in one of two layouts depending on article count:
 
 The index identity is `(ZIM filename stem, source byte size)`, not the source path. This lets a ZIM
@@ -124,7 +124,8 @@ The `.faiss` file is memory-mapped, so searches read only the clusters they touc
 
 Builds resume from the last saved batch. FAISS files are published atomically, and a fast index
 remains available while a full replacement is built. Rebuild with `build --force` after changing
-extraction or excerpt settings.
+extraction or excerpt settings. Rebuilding also removes excerpts stored by indexes created before
+on-demand preview extraction was introduced.
 
 ### 2. Starting the server
 
@@ -156,7 +157,7 @@ which rescans `index_dir` for added, removed or upgraded indexes. `kill -HUP <pi
 
 3. **Collapse redirects**: every hit on a redirect is replaced by the article it points to, and duplicates are merged, so each article appears only once.
 4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall.
-5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; phrase matches, snippet coverage, and configured source intent provide additional deterministic signals.
+5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; phrase matches and configured source intent provide additional deterministic signals.
 6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is treated as navigation, whether it writes `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
 Search ranks one pool of results (up to `max_results`, at least `candidate_count`) and caches it by

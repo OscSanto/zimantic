@@ -289,15 +289,10 @@ class LocalIntegrationTests(unittest.TestCase):
                 next(result for result in results if result["title"] == "Photosynthesis")["mimetype"],
                 "application/pdf",
             )
-
-            db = sqlite3.connect(indexes / "library.sqlite")
-            try:
-                excerpt = db.execute(
-                    "SELECT excerpt FROM docs WHERE title = 'Photosynthesis'"
-                ).fetchone()[0]
-            finally:
-                db.close()
-            self.assertIn("light energy", excerpt)
+            self.assertIn(
+                "light energy",
+                next(result for result in results if result["title"] == "Photosynthesis")["lead"],
+            )
 
     def test_interrupted_upgrade_keeps_published_index_until_reload(self):
         with tempfile.TemporaryDirectory() as tmp:

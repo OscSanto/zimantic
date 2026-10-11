@@ -420,8 +420,9 @@ def truncate_at_word_boundary(text: str, max_chars: int) -> str:
 def _join_blocks(candidates: list[str], max_chars: int) -> str:
     """Join the opening blocks up to ``max_chars``, truncating the last one.
 
-    One excerpt serves both the preview and the embedding. The model truncates
-    it to ``embedding_tokens`` when it builds the vector, so there is no need to
+    The bounded text is used for the embedding during indexing and can also be
+    used as a preview during runtime result hydration. The model truncates it
+    to ``embedding_tokens`` when it builds the vector, so there is no need to
     compute a separate token-budgeted text here; measured on real indexes this
     loses only a few characters of model input per article.
     """
@@ -448,8 +449,9 @@ def extract_excerpt(
 ) -> str:
     """Return the article's opening text, bounded to ``max_preview_chars``.
 
-    The same stored excerpt is the UI preview and the embedding input; the
-    embedder truncates it to ``embedding_tokens`` when it creates the vector.
+    The returned text is used as the UI preview at query time and as the
+    embedding input during indexing; the embedder truncates it to
+    ``embedding_tokens`` when it creates the vector.
     """
     max_chars = max(1, int(max_preview_chars))
     candidates = list(iter_text_blocks(html, max_chars=max_chars))

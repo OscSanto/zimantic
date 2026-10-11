@@ -22,8 +22,8 @@ def _create_fast_index(path: Path) -> None:
     db = sqlite3.connect(path)
     db.executescript(build_module.SCHEMA)
     db.execute(
-        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
-        (1, "Old title", "", "old", None),
+        "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+        (1, "Old title", "old", None),
     )
     db.execute("INSERT INTO meta VALUES ('done', 'fast')")
     db.commit()
@@ -34,8 +34,8 @@ def _create_done_index(path: Path) -> None:
     db = sqlite3.connect(path)
     db.executescript(build_module.SCHEMA)
     db.execute(
-        "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
-        (1, "Old title", "Old excerpt", "old", None),
+        "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+        (1, "Old title", "old", None),
     )
     db.execute("INSERT INTO meta VALUES ('done', '1')")
     db.commit()
@@ -253,7 +253,7 @@ class BuildBatchTests(unittest.TestCase):
 
         self.assertEqual(saved, [(2, 2), (2, 4), (1, 5)])
 
-    def test_saved_excerpt_is_persisted_and_truncated_for_embedding(self):
+    def test_excerpt_is_transient_and_truncated_for_embedding(self):
         class _FakeEmbedder:
             def __init__(self):
                 self.truncate_calls = []
@@ -277,9 +277,13 @@ class BuildBatchTests(unittest.TestCase):
             1,
         )
 
+        self.assertNotIn(
+            "excerpt",
+            {row[1] for row in db.execute("PRAGMA table_info(docs)")},
+        )
         self.assertEqual(
-            db.execute("SELECT excerpt FROM docs WHERE rowid = 1").fetchone(),
-            ("a stored excerpt",),
+            db.execute("SELECT title, path FROM docs WHERE rowid = 1").fetchone(),
+            ("A title", "article"),
         )
         self.assertEqual(
             embedder.truncate_calls,

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
-    title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED,
+    title, path UNINDEXED, target UNINDEXED,
     tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dropped once .faiss is written
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry to resume from; done: 'fast' | 1
@@ -261,14 +261,24 @@ def _publish_upgrade(
 def _save(db, embedder, rows, next_entry: int) -> None:
     """Store a batch and the resume point in one transaction.
 
-    Rows are (id, title, excerpt, path, target).
+    Rows are (id, title, excerpt, path, target). The excerpt is transient:
+    it is used for embeddings but is not written to new indexes.
     """
     article_ids = {row[0] for row in rows if row[2]}
+    columns = {row[1] for row in db.execute("PRAGMA table_info(docs)")}
     with db:
-        db.executemany(
-            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
-            [(row[0], row[1], row[2], row[3], row[4]) for row in rows],
-        )
+        if "excerpt" in columns:
+            # Continue interrupted builds created by older versions. New rows
+            # stay preview-free, and searches ignore the legacy values.
+            db.executemany(
+                "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
+                [(row[0], row[1], "", row[3], row[4]) for row in rows],
+            )
+        else:
+            db.executemany(
+                "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+                [(row[0], row[1], row[3], row[4]) for row in rows],
+            )
         articles = [row for row in rows if row[0] in article_ids]
         if articles and embedder is not None:
             passages = []

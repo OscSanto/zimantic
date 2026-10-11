@@ -64,7 +64,7 @@ max_entry_bytes = 1073741824
 # HTML and binary assets alike; max_html_bytes is the separate indexing/parser limit.
 max_article_bytes = 33_554_432
 
-# Preview characters stored per article; the same text is embedded, truncated to tokens below.
+# Maximum preview characters extracted for displayed results; build-time extraction is transient.
 max_preview_chars = 1_000
 
 # Embedding sequence length, including two special tokens. Excerpts longer than this are truncated.

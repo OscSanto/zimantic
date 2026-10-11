@@ -568,28 +568,58 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in result.items], ["Above threshold"])
         self.assertEqual(result.semantic[0][0], 0.90)
 
-    def test_local_result_preview_is_bounded(self):
-        db = sqlite3.connect(":memory:", check_same_thread=False)
-        db.execute(
-            "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, excerpt UNINDEXED, path UNINDEXED, target UNINDEXED)"
-        )
-        db.execute(
-            "INSERT INTO docs(rowid, title, excerpt, path, target) VALUES (?, ?, ?, ?, ?)",
-            (1, "Long page", "one " * 400, "long-page", None),
-        )
+    def test_local_result_preview_is_extracted_for_display(self):
+        class _Entry:
+            _index = 1
 
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        class _Archive:
+            def get_entry_by_path(self, path):
+                self.path = path
+                return _Entry()
+
+        source = SourceInfo(
+            "manual",
+            "Manual",
+            "manual",
+            "local",
+            local_name="manual",
+        )
         search = object.__new__(Search)
         search.cfg = {
-            "kiwix_url": "http://example/content",
+            "max_html_bytes": 4_194_304,
+            "max_article_bytes": 33_554_432,
             "max_preview_chars": 24,
+        }
+        search.preview_chars = 24
+        search.sources = {"manual": source}
+        search.indexes = {
+            "manual": _LocalIndex(
+                None,
+                None,
+                _Archive(),
+                None,
+                threading.Lock(),
+            )
+        }
+        search._state_lock = threading.RLock()
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        search.preview_cache = QueryCache(16)
+        doc = {
+            "id": "manual:long-page",
+            "source_key": "manual",
+            "title": "Long page",
+            "lead": "",
+            "path": "long-page",
         }
 
         try:
-            doc = search._fetch_docs(source, db, {1})[1]
+            with patch(
+                "zimantic.search.read_entry",
+                return_value=(1, "Long page", "one " * 400, "long-page", None),
+            ):
+                search._hydrate_results([doc])
         finally:
-            db.close()
+            search._executor.shutdown(wait=True)
 
         self.assertLessEqual(len(doc["lead"]), 24)
         self.assertTrue(doc["lead"].endswith("one"))
