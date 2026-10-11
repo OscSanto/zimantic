@@ -38,6 +38,15 @@ _PLAIN_TEXT_ASSET = re.compile(
     r"|(?i:(^|/)(?:assets?|static|_static|_assets|media|vendor|node_modules"
     r"|mathjax|fonts?|images?|img|css|js|scripts?|downloads?)/)"
 )
+# HTML entries that are really assets with a wrong MIME type: an unmistakable
+# non-HTML extension (scripts, stylesheets, JSON data, media). zimit crawls
+# sometimes label a <site>.js or <site>.css as text/html, which would otherwise
+# become a title-only search result.
+_HTML_ASSET_PATH = re.compile(
+    r"\.(?:js|mjs|cjs|css|scss|less|json|xml|svg|png|jpe?g|gif|webp|ico|map"
+    r"|woff2?|ttf|otf|eot|mp3|mp4|webm|pdf)$",
+    re.I,
+)
 REFRESH_SCAN_BYTES = 64 << 10
 REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
 BOILERPLATE = re.compile(
@@ -195,6 +204,10 @@ class _TextExtractor(HTMLParser):
         self.blocks = []
         self.active = []
         self.block_order = 0
+        # Early termination bookkeeping (see _can_stop): a lang-* class disables
+        # it, and _priority0_chars tracks closed top-priority (p) blocks.
+        self._saw_lang = False
+        self._priority0_chars = 0
 
     @staticmethod
     def _is_chrome(tag, attributes) -> bool:
@@ -250,6 +263,7 @@ class _TextExtractor(HTMLParser):
             match = _ELEMENT_LANG.search(attributes.get("class") or "")
             if match:
                 block["lang"] = match.group(1)
+                self._saw_lang = True
             self.blocks.append(block)
             self.active.append(block)
             self.block_order += 1
@@ -275,6 +289,8 @@ class _TextExtractor(HTMLParser):
                     if len(text) >= MIN_BLOCK_CHARS:
                         for parent in self.active[:index]:
                             parent["nested"] = True
+                        if block["priority"] == 0 and not block["nested"]:
+                            self._priority0_chars += len(text)
                     break
         if tag in self.SEPARATOR_TAGS and self.active:
             self._separate()
@@ -310,6 +326,20 @@ class _TextExtractor(HTMLParser):
             for _, _, text in sorted(candidates, key=lambda candidate: candidate[:2])
     ]
 
+    def _can_stop(self, max_chars: int) -> bool:
+        """True once parsing the rest of the page cannot change the excerpt.
+
+        The excerpt is the opening blocks in (priority, order) order, filled to
+        ``max_chars``. Once the closed top-priority blocks already sum past that
+        budget, no later block can sort before them (top priority is the minimum
+        and order only grows), so the lead alone determines the result. We stop
+        only when every still-open block is already marked nested: an open
+        non-nested container could otherwise still yield a candidate later.
+        """
+        if self._saw_lang or self._priority0_chars < max_chars:
+            return False
+        return all(block["nested"] for block in self.active)
+
 
 def is_disambiguation(title: str, text: str, html: bytes = b"") -> bool:
     """True for a MediaWiki disambiguation page.
@@ -336,17 +366,39 @@ def disambiguation_title(title: str) -> str:
     return title if DISAMBIG_TITLE.search(title) else title + DISAMBIGUATION_SUFFIX
 
 
-CHUNK = 65536  # bytes of HTML per feed() call (64 KB)
+# Bytes of HTML per feed() call. Small enough that early termination (see
+# _TextExtractor._can_stop) stops near the lead of a typical article, rather
+# than only after the whole page has already been fed.
+CHUNK = 8192
+
+# <script> and <style> content is never article text, and it can be tens of KB
+# of CSS/JS. Stripping it up front also sidesteps html.parser's CDATA handling,
+# which misbehaves when a single very large block is fed in small chunks.
+_SCRIPT_STYLE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1>", re.I | re.S)
+
+# <head> (and a stray <title>) carry metadata, not visible text. They are
+# stripped before the loader-shell emptiness check so an ordinary <title> does
+# not hide the fact that the page body has no text (see _is_loader_shell).
+_HEAD = re.compile(rb"<head\b[^>]*>.*?</head>", re.I | re.S)
+_TITLE = re.compile(rb"<title\b[^>]*>.*?</title>", re.I | re.S)
 
 
-def iter_text_blocks(html: bytes) -> Iterator[str]:
-    """Yield substantial article blocks, preferring paragraphs over fallbacks."""
+def iter_text_blocks(html: bytes, max_chars: int | None = None) -> Iterator[str]:
+    """Yield substantial article blocks, preferring paragraphs over fallbacks.
+
+    When ``max_chars`` is given, parsing stops as soon as the opening blocks
+    provably fill that budget (see ``_TextExtractor._can_stop``), so a long page
+    costs only its lead rather than the whole document.
+    """
     parser = _TextExtractor()
+    html = _SCRIPT_STYLE.sub(b" ", html)
 
     # "ignore" drops bytes that aren't valid UTF-8 rather than crashing.
     decoder = codecs.getincrementaldecoder("utf-8")("ignore")
     for start in range(0, len(html), CHUNK):
         parser.feed(decoder.decode(html[start:start + CHUNK]))
+        if max_chars is not None and parser._can_stop(max_chars):
+            break
     parser.feed(decoder.decode(b"", final=True))
     yield from parser.candidates()
 
@@ -396,7 +448,7 @@ def extract_excerpt(
     embedder truncates it to ``embedding_tokens`` when it creates the vector.
     """
     max_chars = max(1, int(max_preview_chars))
-    candidates = list(iter_text_blocks(html))
+    candidates = list(iter_text_blocks(html, max_chars=max_chars))
     if not candidates:
         return ""
     return _join_blocks(candidates, max_chars)
@@ -430,31 +482,6 @@ def _fragment_slug(fragment: str) -> str:
     return parts[-1] if parts else ""
 
 
-def _spa_body(zim: Archive, entry, fragment: str) -> bytes | None:
-    """Companion text for an app-shell stub, or None.
-
-    Two conventions are supported: Kiwix's ``content/page_content_<id>.json``
-    keyed by the numeric page id, and app bundles that keep a ``<slug>.json``
-    companion for the deep link, commonly under ``videos/`` or ``playlists/``.
-    The result may be HTML or plain text; the caller decides how to read it.
-    """
-    match = SPA_PAGE_ID.search(entry.path)
-    if match:
-        body = _json_body(zim, SPA_CONTENT_PATH.format(id=match.group(1)))
-        if body is not None:
-            return body
-    slug = _fragment_slug(fragment)
-    if not slug:
-        return None
-    for directory in SPA_COMPANION_DIRS:
-        candidate = posixpath.join(directory, slug + ".json") if directory else slug + ".json"
-        body = _json_body(zim, candidate)
-        if body is not None:
-            return body
-    # Some bundles keep the JSON beside the stub entry.
-    return _json_body(zim, posixpath.join(posixpath.dirname(entry.path), slug + ".json"))
-
-
 # Directories where a markdown companion for an app-shell route may live.
 MARKDOWN_COMPANION_DIRS = ("", "content/curriculum", "curriculum", "content", "pages", "docs")
 MARKDOWN_EXTENSIONS = (".md", ".markdown")
@@ -467,45 +494,79 @@ MARKDOWN_MIME_TYPES = frozenset({
 })
 
 
-def _markdown_body(zim: Archive, entry, fragment: str) -> bytes | None:
-    """Markdown companion for an app-shell stub, or None.
+def _markdown_source(zim: Archive, path: str) -> bytes | None:
+    """Return the entry at ``path`` when it is a Markdown source, else None.
 
-    A docs/curriculum ZIM often serves each route through a meta-refresh stub
-    while the article body lives in a ``content/.../<route>.md`` entry. The route
-    usually keeps its full path (``a/b/c``) in the fragment, so both the whole
-    route and its last segment are tried under the usual content directories.
     Companions are recognized by their common Markdown extension or MIME type;
     ZIM packaging does not always keep those signals consistent.
     """
+    if not path or not zim.has_entry_by_path(path):
+        return None
+    item = zim.get_entry_by_path(path).get_item()
+    mimetype = item.mimetype.split(";", 1)[0].strip().lower()
+    extension = posixpath.splitext(path)[1].lower()
+    if extension in MARKDOWN_EXTENSIONS or mimetype in MARKDOWN_MIME_TYPES:
+        return bytes(item.content)
+    return None
+
+
+def _companion(zim: Archive, entry, fragment: str):
+    """Return an app-shell stub's companion body, or None.
+
+    Returns ``("body", bytes)`` for a JSON companion whose text may be HTML or
+    plain text, or ``("markdown", bytes)`` for a Markdown source. Several
+    conventions are tried, most specific first:
+
+    * Kiwix's ``content/page_content_<id>.json`` keyed by the numeric page id.
+    * Media bundles that keep a ``<slug>.json`` companion for the deep link (for
+      example ``videos/<slug>.json`` or ``playlists/<slug>.json``), or beside
+      the stub entry itself.
+    * Docs/curriculum bundles whose ``<route>.md`` holds the body (freeCodeCamp
+      and similar), under the usual content directories or beside the stub.
+    """
+    slug = _fragment_slug(fragment)
+    base = posixpath.dirname(entry.path)
+
+    json_candidates = []
+    match = SPA_PAGE_ID.search(entry.path)
+    if match:
+        json_candidates.append(SPA_CONTENT_PATH.format(id=match.group(1)))
+    if slug:
+        for directory in SPA_COMPANION_DIRS:
+            json_candidates.append(
+                posixpath.join(directory, slug + ".json") if directory else slug + ".json"
+            )
+        json_candidates.append(posixpath.join(base, slug + ".json"))
+    for candidate in json_candidates:
+        body = _json_body(zim, candidate)
+        if body is not None:
+            return ("body", body)
+
     route = fragment.split("?", 1)[0].split("#", 1)[0].strip("/")
     if not route:
         return None
     names = (route, posixpath.basename(route))
-    base = posixpath.dirname(entry.path)
-    candidates = []
+    markdown_candidates = []
     for directory in MARKDOWN_COMPANION_DIRS:
         for name in names:
             for extension in MARKDOWN_EXTENSIONS:
-                candidates.append(
+                markdown_candidates.append(
                     posixpath.join(directory, name + extension)
                     if directory
                     else name + extension
                 )
-            candidates.append(
+            markdown_candidates.append(
                 posixpath.join(directory, name) if directory else name
             )
-    candidates.extend(
+    markdown_candidates.extend(
         posixpath.join(base, names[1] + extension)
         for extension in MARKDOWN_EXTENSIONS
     )
-    candidates.append(posixpath.join(base, names[1]))
-    for candidate in candidates:
-        if candidate and zim.has_entry_by_path(candidate):
-            item = zim.get_entry_by_path(candidate).get_item()
-            mimetype = item.mimetype.split(";", 1)[0].strip().lower()
-            extension = posixpath.splitext(candidate)[1].lower()
-            if extension in MARKDOWN_EXTENSIONS or mimetype in MARKDOWN_MIME_TYPES:
-                return bytes(item.content)
+    markdown_candidates.append(posixpath.join(base, names[1]))
+    for candidate in markdown_candidates:
+        source = _markdown_source(zim, candidate)
+        if source is not None:
+            return ("markdown", source)
     return None
 
 
@@ -546,6 +607,27 @@ def is_javascript_shell(html: bytes, text: str) -> bool:
     if "javascript" not in folded or ("enable" not in folded and "disabled" not in folded):
         return False
     return any(marker in html for marker in JS_SHELL_MARKERS)
+
+
+def _is_loader_shell(html: bytes) -> bool:
+    """True when a page ships no visible text, only script/style/link references.
+
+    A JavaScript app that renders content it does not ship (PhET simulations and
+    similar) has a body of only <script>/<link>/<style> elements and a title.
+    Such pages are kept as title-only entries: giving them a shared meta
+    description as the excerpt would collapse every article onto the shell.
+
+    Head metadata (title, meta, ...) is not visible text, so it is stripped
+    before checking for emptiness; otherwise the usual <title> would make every
+    page look like it had a body and the check would never fire.
+    """
+    stripped = _HEAD.sub(b" ", html)
+    stripped = _TITLE.sub(b" ", stripped)
+    stripped = _SCRIPT_STYLE.sub(b" ", stripped)
+    stripped = re.sub(rb"<[^>]+>", b" ", stripped)
+    if stripped.strip():
+        return False
+    return (b"<script" in html or b"<link" in html) and bool(_HTML_TAG.search(html))
 
 
 def _plain_text_excerpt(raw: bytes, max_chars: int) -> str:
@@ -698,6 +780,11 @@ def read_entry(
         return i, title, excerpt, entry.path, None
 
     html = raw
+    if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(html):
+        # A script/data file served as HTML (zimit crawls do this for <site>.js)
+        # has no markup. A real page that merely ends in .js — a cheatsheet
+        # about Commander.js — does contain HTML tags, so keep it.
+        return None
     refresh_url = _refresh_url(html)
 
     if refresh_url:
@@ -706,28 +793,28 @@ def read_entry(
         path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), base))
         if not zim.has_entry_by_path(path):
             return None
-        body = _spa_body(zim, entry, fragment) if fragment else None
-        if body is None and fragment:
-            markdown = _markdown_body(zim, entry, fragment)
-            if markdown is not None:
-                excerpt, md_title = _markdown_excerpt(markdown, max_preview_chars)
-                if excerpt and not is_javascript_shell(markdown, excerpt):
+        companion = _companion(zim, entry, fragment) if fragment else None
+        if companion is not None:
+            kind, body = companion
+            if kind == "markdown":
+                excerpt, md_title = _markdown_excerpt(body, max_preview_chars)
+                if excerpt and not is_javascript_shell(body, excerpt):
                     return i, entry.title or md_title, excerpt, entry.path, None
-        if body is not None:
-            # Keep this page's own title and path: it is a deep link into the
-            # app route, and its body is real text. Storing the shell target
-            # instead would collapse every article onto "index.html".
-            excerpt = extract_excerpt(body, max_preview_chars=max_preview_chars)
-            if not excerpt and not _HTML_TAG.search(body):
-                # Plain-text companions (video/playlist descriptions) have no
-                # HTML blocks, so normalize them directly. An HTML body with no
-                # visible text stays empty instead of leaking its markup.
-                excerpt = _plain_text_excerpt(body, max_preview_chars)
-            if excerpt and not is_javascript_shell(body, excerpt):
-                title = disambiguation_title(entry.title) if is_disambiguation(
-                    entry.title, excerpt, body
-                ) else entry.title
-                return i, title, excerpt, entry.path, None
+            else:
+                # Keep this page's own title and path: it is a deep link into the
+                # app route, and its body is real text. Storing the shell target
+                # instead would collapse every article onto "index.html".
+                excerpt = extract_excerpt(body, max_preview_chars=max_preview_chars)
+                if not excerpt and not _HTML_TAG.search(body):
+                    # Plain-text companions (video/playlist descriptions) have no
+                    # HTML blocks, so normalize them directly. An HTML body with no
+                    # visible text stays empty instead of leaking its markup.
+                    excerpt = _plain_text_excerpt(body, max_preview_chars)
+                if excerpt and not is_javascript_shell(body, excerpt):
+                    title = disambiguation_title(entry.title) if is_disambiguation(
+                        entry.title, excerpt, body
+                    ) else entry.title
+                    return i, title, excerpt, entry.path, None
         target = zim.get_entry_by_path(path)
         return i, entry.title, "", target.path, target._index
 
@@ -741,6 +828,11 @@ def read_entry(
         # than a title-only entry.
         if any(marker in html for marker in JS_SHELL_MARKERS):
             return None
+        if _is_loader_shell(html):
+            # A JS app that renders content it does not ship: keep the page as
+            # title-only, without a shared meta description that would collapse
+            # every article onto the shell.
+            return i, entry.title, "", entry.path, None
         excerpt = truncate_at_word_boundary(_meta_description(html), max_preview_chars)
     title = disambiguation_title(entry.title) if is_disambiguation(entry.title, excerpt, html) else entry.title
     return i, title, excerpt, entry.path, None

@@ -182,6 +182,32 @@ class TextExtractionTests(unittest.TestCase):
             ["A useful article paragraph with enough text to be indexed."],
         )
 
+    def test_bounded_parse_matches_full_parse_when_lead_fills_budget(self):
+        # A long lead paragraph fills a small budget, so parsing can stop there;
+        # the bounded parse must agree with the full parse (and skip chrome).
+        lead = " ".join(f"word{i}" for i in range(120))
+        html = (
+            b"<html><body>"
+            b"<p>" + lead.encode() + b"</p>"
+            b'<div class="navbox"><p>Navigation box text that must never appear.</p></div>'
+            b"</body></html>"
+        )
+        bounded = list(iter_text_blocks(html, max_chars=200))
+        self.assertEqual(bounded, list(iter_text_blocks(html)))
+        self.assertEqual(len(bounded), 1)
+        self.assertNotIn("Navigation", bounded[0])
+
+    def test_bounded_parse_does_not_stop_before_parallel_translations(self):
+        # A lang-* page must still be parsed fully so the lang-default copy wins.
+        html = (
+            b'<p class="title lang-default">The primary language title of the talk is shown here.</p>'
+            b'<p class="title lang-fr">Le titre principal de la conference est affiche ici.</p>'
+        )
+        self.assertEqual(
+            list(iter_text_blocks(html, max_chars=50)),
+            list(iter_text_blocks(html)),
+        )
+
     def test_html_limit_is_configurable(self):
         self.assertEqual(DEFAULT_MAX_HTML_BYTES, 4 * 1024 * 1024)
         self.assertEqual(read_entry(_Archive(), 0, max_html_bytes=20)[2], "")
@@ -418,6 +444,55 @@ class TextExtractionTests(unittest.TestCase):
         row = read_entry(_WordArchive(), 0)
         self.assertIsNotNone(row)
         self.assertIn("permission", row[2])
+
+    def test_mislabeled_html_asset_is_skipped(self):
+        # A script served as text/html (zimit crawls do this for <site>.js) is
+        # an asset, not an article, and must not become a title-only result.
+        class _AssetItem:
+            mimetype = "text/html"
+            content = b"var app = function () { return 1; };"
+
+        class _AssetEntry:
+            is_redirect = False
+            title = "site.js"
+            path = "gobyexample.com/site.js"
+
+            def get_item(self):
+                return _AssetItem()
+
+        class _AssetArchive:
+            def _get_entry_by_id(self, _index):
+                return _AssetEntry()
+
+        self.assertIsNone(read_entry(_AssetArchive(), 0))
+
+    def test_html_page_at_a_js_path_is_kept(self):
+        # A real article whose URL happens to end in .js (a cheatsheet about a
+        # JavaScript library) contains markup and must not be mistaken for an
+        # asset.
+        class _CheatsheetItem:
+            mimetype = "text/html"
+            content = (
+                b"<html><body><p>Commander.js is a complete solution for "
+                b"node.js command-line programs with options and subcommands."
+                b"</p></body></html>"
+            )
+
+        class _CheatsheetEntry:
+            is_redirect = False
+            title = "Commander.js cheatsheet"
+            path = "devhints.io/commander.js"
+
+            def get_item(self):
+                return _CheatsheetItem()
+
+        class _CheatsheetArchive:
+            def _get_entry_by_id(self, _index):
+                return _CheatsheetEntry()
+
+        row = read_entry(_CheatsheetArchive(), 0)
+        self.assertIsNotNone(row)
+        self.assertIn("complete solution", row[2])
 
     def test_plain_text_asset_with_query_string_is_not_indexed(self):
         class _LogoItem:
@@ -897,6 +972,44 @@ class JavaScriptShellTests(unittest.TestCase):
 
     def test_javascript_shell_pages_are_not_indexed(self):
         self.assertIsNone(read_entry(_ShellArchive(), 0))
+
+    def test_loader_shell_keeps_title_only(self):
+        # A PhET-style body of only <script src> references and a <title>: no
+        # visible text, no meta-refresh, no recognized shell marker. The shared
+        # meta description must be ignored (it would collapse every article onto
+        # the shell), so the page is kept as title-only.
+        html = (
+            b'<html><head><title>Acid-Base Solutions</title>'
+            b'<meta name="description" '
+            b'content="A shared description given to every simulation page.">'
+            b"</head>"
+            b'<body style="background-color:black;">'
+            b'<script type="text/javascript" src="app.js"></script>'
+            b'<script type="text/javascript" src="sim.js"></script>'
+            b"</body></html>"
+        )
+
+        class _LoaderItem:
+            mimetype = "text/html"
+            content = html
+
+        class _LoaderEntry:
+            is_redirect = False
+            title = "Acid-Base Solutions"
+            path = "acid-base-solutions_en.html"
+
+            def get_item(self):
+                return _LoaderItem()
+
+        class _LoaderArchive:
+            def _get_entry_by_id(self, _index):
+                return _LoaderEntry()
+
+        row = read_entry(_LoaderArchive(), 0)
+        self.assertIsNotNone(row)
+        self.assertEqual(row[1], "Acid-Base Solutions")
+        self.assertEqual(row[2], "")
+        self.assertEqual(row[3], "acid-base-solutions_en.html")
 
     def test_javascript_shell_detection_ignores_real_articles(self):
         article = (
