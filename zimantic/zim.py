@@ -13,6 +13,10 @@ set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
 DEFAULT_PREVIEW_CHARS = 1000
 DEFAULT_MAX_HTML_BYTES = 4 << 20
+# This protects the builder from pathological decompressed entries while still
+# accepting genuinely large articles by default. Profiles can lower it for
+# memory-constrained machines.
+DEFAULT_MAX_ENTRY_BYTES = 1 << 30
 # text/html is the common case; XHTML parses the same way, plain text is split
 # into an excerpt with a simple normalization, and PDFs are read through their
 # embedded text layer.
@@ -724,6 +728,7 @@ def read_entry(
     i: int,
     fast: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
 ):
     """Return (id, title, excerpt, path, target_id), or None.
@@ -747,6 +752,14 @@ def read_entry(
 
     if fast:
         return i, entry.title, "", entry.path, None
+
+    try:
+        entry_limit = max(1, int(max_entry_bytes))
+    except (TypeError, ValueError):
+        entry_limit = DEFAULT_MAX_ENTRY_BYTES
+    entry_size = int(getattr(item, "size", 0) or 0)
+    if entry_size > entry_limit:
+        return None
 
     content = item.content
     try:

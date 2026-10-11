@@ -136,24 +136,15 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
 
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 (() => {
-  const modalRootStorageKey = "zimantic-modal-root-pending";
   const markModalRoot = () => {
     history.replaceState(
       Object.assign({}, history.state || {}, {zimanticModalRoot: true}),
       "",
       location.href
     );
-    sessionStorage.removeItem(modalRootStorageKey);
   };
-  if (window.parent !== window) {
-    const hasRefresh = [...document.querySelectorAll("meta[http-equiv]")].some(
-      meta => meta.httpEquiv.toLowerCase() === "refresh"
-    );
-    if (hasRefresh) sessionStorage.setItem(modalRootStorageKey, "1");
-    if (sessionStorage.getItem(modalRootStorageKey) === "1") markModalRoot();
-  }
   window.addEventListener("message", event => {
-    if (event.source !== window.parent || event.origin !== location.origin) return;
+    if (event.source !== window.parent) return;
     if (event.data?.type === "zimantic-modal-root") {
       markModalRoot();
     }

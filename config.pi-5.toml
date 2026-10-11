@@ -10,9 +10,14 @@ port = 8090
 #   kiwix-serve --port=8085 ./zims/*.zim
 # Then uncomment this setting (use this machine's address for other clients):
 # kiwix_url = "http://localhost:8085/content"
+# Optional URL of a running kiwix-serve HTTP API for catalog discovery and
+# remote full-text fallback; leave blank to use only local Zimantic indexes.
 kiwix_server = ""
-kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
+kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=50000"
 kiwix_search_path = "/kiwix/search"
+kiwix_catalog_limit = 50000
+kiwix_result_limit = 1000
+max_kiwix_response_bytes = 67108864
 
 page_size = 10
 max_results = 100
@@ -21,6 +26,7 @@ max_results = 100
 batch_size = 16
 
 max_html_bytes = 4_194_304
+max_entry_bytes = 1073741824
 max_article_bytes = 33_554_432
 max_preview_chars = 1_000
 embedding_tokens = 256

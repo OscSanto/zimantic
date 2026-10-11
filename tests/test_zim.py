@@ -212,6 +212,29 @@ class TextExtractionTests(unittest.TestCase):
         self.assertEqual(DEFAULT_MAX_HTML_BYTES, 4 * 1024 * 1024)
         self.assertEqual(read_entry(_Archive(), 0, max_html_bytes=20)[2], "")
 
+    def test_entry_limit_is_checked_before_materializing_content(self):
+        class _LargeItem:
+            mimetype = "text/html"
+            size = 100
+
+            @property
+            def content(self):
+                raise AssertionError("content should not be materialized")
+
+        class _LargeEntry:
+            is_redirect = False
+            title = "Large"
+            path = "large"
+
+            def get_item(self):
+                return _LargeItem()
+
+        class _LargeArchive:
+            def _get_entry_by_id(self, index):
+                return _LargeEntry()
+
+        self.assertIsNone(read_entry(_LargeArchive(), 0, max_entry_bytes=99))
+
     def test_preview_limit_is_configurable(self):
         self.assertEqual(DEFAULT_PREVIEW_CHARS, 1000)
         excerpt = read_entry(_Archive(), 0, max_preview_chars=20)[2]

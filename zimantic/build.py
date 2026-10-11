@@ -11,6 +11,7 @@ from libzim.reader import Archive
 from .zim import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
+    DEFAULT_MAX_ENTRY_BYTES,
     read_entry,
 )
 
@@ -33,6 +34,7 @@ def build(
     batch_size: int,
     fast: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     force: bool = False,
 ) -> None:
@@ -117,6 +119,7 @@ def build(
                 i,
                 fast=fast,
                 max_html_bytes=max_html_bytes,
+                max_entry_bytes=max_entry_bytes,
                 max_preview_chars=max_preview_chars,
             )
             if row:

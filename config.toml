@@ -28,10 +28,14 @@ port = 8090
 
 # Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
 # sources that do not have a local Zimantic index. Leave blank to use local
-# indexes only. With the standard Kiwix proxy setup this is often http://localhost:8085.
+# indexes only. Point this at a running kiwix-serve HTTP API (not a ZIM folder);
+# with the standard local setup this is often http://localhost:8085.
 kiwix_server = ""
-kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=-1"
+kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=50000"
 kiwix_search_path = "/kiwix/search"
+kiwix_catalog_limit = 50000
+kiwix_result_limit = 1000
+max_kiwix_response_bytes = 67108864
 
 # TUNING
 
@@ -51,6 +55,10 @@ batch_size = 32
 
 # Maximum HTML read per article.
 max_html_bytes = 4_194_304
+
+# Maximum decompressed entry materialized while building. This is intentionally
+# high for large, friendly ZIM articles; lower it on memory-constrained hosts.
+max_entry_bytes = 1073741824
 
 # Maximum uncompressed local ZIM entry served by /article. This caps per-request memory use for
 # HTML and binary assets alike; max_html_bytes is the separate indexing/parser limit.

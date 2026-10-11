@@ -90,7 +90,10 @@ preferred, and block boundaries keep neighboring text runs from running together
 Each article stores one **excerpt** for both previews and embeddings, bounded to
 `max_preview_chars` (1,000 by default) at a word boundary. The embedder trims that same text to
 `embedding_tokens` (256) when it builds the vector, so the model never sees more than its budget.
-Extraction reads up to 4 MiB per page by default.
+Extraction reads up to 4 MiB per page by default. The builder skips an entry only when its
+decompressed size exceeds `max_entry_bytes` (1 GiB on desktop, 256 MiB on the mobile profile);
+this high safety ceiling preserves large, friendly articles while preventing pathological entries
+from exhausting memory before the parser limit can be applied.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable text:
 HTML, XHTML, plain text and PDFs. PDF text is read from the file's embedded text layer, so scanned
@@ -104,6 +107,10 @@ at most `max_preview_chars` characters.
 **Storage.** Each ZIM gets two files in `index_dir`:
 - `<name>.sqlite`: titles, the shared excerpt, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
 - `<name>.faiss`: the vectors, in one of two layouts depending on article count:
+
+The index identity is `(ZIM filename stem, source byte size)`, not the source path. This lets a ZIM
+move between nested folders below `zim_dir` without rebuilding. If one scan finds the same stem at
+different sizes, those conflicting inputs are rejected with a warning.
 
 | ZIM size | Vector index | Why |
 |---|---|---|
@@ -123,7 +130,8 @@ extraction or excerpt settings.
 
 At startup Zimantic opens every **finished** index and keeps it open; nothing is reloaded per search.
 The page automatically lists local indexes. With `kiwix_server`, it also discovers catalog sources and
-can search them with Kiwix full-text search.
+can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries and
+remote XML responses are capped at 64 MiB by default; both limits are configurable.
 
 An index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
 search**. `serve --fast` also skips the model and all vectors.

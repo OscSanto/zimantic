@@ -35,7 +35,19 @@ _install_optional_dependency_stubs()
 
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult
-from zimantic.search import Search, SearchBusyError, _LocalIndex, _fulltext_query, _nprobe, _query_terms, _title_prefix_query, _title_query
+from zimantic.search import (
+    Search,
+    SearchBusyError,
+    _LocalIndex,
+    _bounded_catalog_url,
+    _fulltext_query,
+    _nprobe,
+    _parse_remote_xml,
+    _query_terms,
+    _read_limited_response,
+    _title_prefix_query,
+    _title_query,
+)
 
 
 def _bare_search(cfg):
@@ -131,6 +143,27 @@ class SearchContractTests(unittest.TestCase):
             Search._cache_key("q", ["manual"]),
             Search._cache_key("q", ["other"]),
         )
+
+    def test_catalog_limit_replaces_unbounded_count(self):
+        url = _bounded_catalog_url(
+            "http://kiwix/entries?count=-1&foo=bar",
+            50_000,
+        )
+        self.assertEqual(url, "http://kiwix/entries?count=50000&foo=bar")
+
+    def test_remote_xml_rejects_dtds(self):
+        with self.assertRaises(ValueError):
+            _parse_remote_xml(b"<!DOCTYPE root [<!ENTITY x 'y'>]><root/>")
+
+    def test_remote_response_reader_enforces_a_hard_limit(self):
+        class _Response:
+            headers = {}
+
+            def read(self, size=-1):
+                return b"x" * 4
+
+        with self.assertRaises(ValueError):
+            _read_limited_response(_Response(), 3)
 
     def test_hybrid_ranking_is_deterministic(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
@@ -546,6 +579,20 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(results[0]["title"], "Tire Change")
             self.assertEqual(results[0]["path"], "tire-change")
             search._executor.shutdown(wait=True)
+
+    def test_archive_lookup_allows_nested_moves_but_rejects_size_conflicts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "collection" / "nested"
+            nested.mkdir(parents=True)
+            moved = nested / "manual.zim"
+            moved.write_bytes(b"x" * 10)
+            search = _bare_search({"zim_dir": str(root)})
+
+            self.assertEqual(search._find_zim_path("manual", 10), moved)
+            (root / "other").mkdir()
+            (root / "other" / "manual.zim").write_bytes(b"x" * 11)
+            self.assertIsNone(search._find_zim_path("manual", 10))
 
     def test_finished_stream_is_cached_for_search_method(self):
         with tempfile.TemporaryDirectory() as tmp:

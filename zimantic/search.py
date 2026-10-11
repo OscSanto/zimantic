@@ -12,7 +12,7 @@ import sqlite3
 import threading
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, unquote, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -32,6 +32,9 @@ DEFAULT_NPROBE_FRACTION = 0.06
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
+DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
+DEFAULT_KIWIX_CATALOG_LIMIT = 50_000
+DEFAULT_KIWIX_RESULT_LIMIT = 1_000
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "how", "what", "where", "when", "why", "who", "which", "can", "could",
@@ -82,10 +85,13 @@ class _LocalIndex:
     _retired: bool = False
     _closed: bool = False
     done: str = "1"
+    source_size: int | None = None
+    zim_path: str | None = None
+    zim_signature: tuple[int, int, int, int] | None = None
 
     @property
     def semantic(self) -> bool:
-        """True when vectors are loaded and meaning search can run."""
+        """True when vectors are loaded and semantic search can run."""
         return self.faiss_index is not None
 
 
@@ -138,6 +144,54 @@ def _file_signature(path: Path) -> tuple[int, int, int, int] | None:
     except OSError:
         return None
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def _bounded_catalog_url(url: str, limit: int) -> str:
+    """Replace an unbounded Kiwix catalog count with a large finite limit."""
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    bounded = []
+    replaced = False
+    for key, value in query:
+        if key == "count":
+            if not replaced:
+                bounded.append((key, str(limit)))
+                replaced = True
+        else:
+            bounded.append((key, value))
+    if not replaced:
+        bounded.append(("count", str(limit)))
+    return urlunsplit(parts._replace(query=urlencode(bounded)))
+
+
+def _read_limited_response(response, limit: int) -> bytes:
+    """Read a remote response without allowing unbounded memory growth."""
+    content_length = response.headers.get("Content-Length")
+    try:
+        advertised = int(content_length) if content_length else 0
+    except (TypeError, ValueError):
+        advertised = 0
+    if advertised > limit:
+        raise ValueError(f"response exceeds the {limit} byte limit")
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(min(64 * 1024, limit - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f"response exceeds the {limit} byte limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _parse_remote_xml(payload: bytes) -> ET.Element:
+    """Parse trusted-shaped XML while rejecting DTD/entity expansion inputs."""
+    if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", payload, re.IGNORECASE):
+        raise ValueError("DTD and entity declarations are not supported")
+    return ET.fromstring(payload)
 
 
 def _nprobe(faiss_index: Any, cfg: dict) -> int:
@@ -285,6 +339,7 @@ class Search:
         # Identical in-flight queries share one computation.
         self._inflight: dict[Any, Future] = {}
         self._inflight_lock = threading.Lock()
+        self._cache_generation = 0
         self.cache = QueryCache(
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
@@ -298,6 +353,33 @@ class Search:
     @staticmethod
     def _index_uri(db_path: Path) -> str:
         return db_path.resolve().as_uri() + "?mode=ro"
+
+    def _find_zim_path(self, stem: str, source_size: int | None) -> Path | None:
+        """Find a matching archive anywhere below the configured ZIM directory."""
+        zim_dir = self.cfg.get("zim_dir")
+        if not zim_dir:
+            return None
+        try:
+            candidates = sorted(
+                path for path in Path(zim_dir).rglob("*.zim")
+                if path.stem == stem
+            )
+        except OSError:
+            return None
+
+        matching: list[Path] = []
+        for path in candidates:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if source_size is None or size == source_size:
+                matching.append(path)
+            elif source_size is not None:
+                # A stem with a different size is a conflicting identity, not
+                # a valid archive for this index.
+                return None
+        return matching[0] if matching else None
 
     def _open_index(self, db_path: Path) -> _LocalIndex | None:
         """Open one finished index. Missing or unreadable vectors degrade the
@@ -314,6 +396,13 @@ class Search:
                 db.close()
                 return None
             done_value = str(done[0])
+            size_row = db.execute(
+                "SELECT value FROM meta WHERE key = 'filesize'"
+            ).fetchone()
+            try:
+                source_size = int(size_row[0]) if size_row else None
+            except (TypeError, ValueError):
+                source_size = None
 
             faiss_index = None
             faiss_path = db_path.with_suffix(".faiss")
@@ -334,8 +423,8 @@ class Search:
 
             archive = None
             searcher = None
-            zim_path = Path(self.cfg["zim_dir"]) / f"{db_path.stem}.zim"
-            if zim_path.exists():
+            zim_path = self._find_zim_path(db_path.stem, source_size)
+            if zim_path is not None:
                 try:
                     archive = Archive(str(zim_path))
                     searcher = Searcher(archive) if archive.has_fulltext_index else None
@@ -357,6 +446,9 @@ class Search:
                 db_signature=_file_signature(db_path),
                 faiss_signature=_file_signature(faiss_path),
                 done=done_value,
+                source_size=source_size,
+                zim_path=str(zim_path) if zim_path is not None else None,
+                zim_signature=_file_signature(zim_path) if zim_path is not None else None,
             )
         except sqlite3.Error:
             db.close()
@@ -373,7 +465,7 @@ class Search:
 
         Loading the ONNX model and sentencepiece vocabulary costs most of
         `serve` startup, so it happens off the critical path: the server starts
-        serving title and full-text results immediately and gains meaning search
+        serving title and full-text results immediately and gains semantic search
         as soon as `factory()` returns. Searches issued meanwhile degrade
         gracefully; `_query_vector` treats a missing embedder as no vectors.
         """
@@ -389,7 +481,7 @@ class Search:
                 return
             with self._state_lock:
                 self.embedder = embedder
-            print("zimantic: embedding model ready; meaning search enabled", flush=True)
+            print("zimantic: embedding model ready; semantic search enabled", flush=True)
 
         threading.Thread(target=_load, name="zimantic-embedder", daemon=True).start()
 
@@ -433,6 +525,14 @@ class Search:
                             self.semantic
                             and current.faiss_signature != faiss_signature
                         )
+                        or (
+                            current.zim_path
+                            != (
+                                str(self._find_zim_path(name, current.source_size))
+                                if current.source_size is not None
+                                else current.zim_path
+                            )
+                        )
                     )
                 )
                 if current is not None and not changed:
@@ -466,6 +566,8 @@ class Search:
             if any_changed:
                 # Index content, and therefore what is searchable, changed;
                 # cached answers under the same names can no longer be fresh.
+                with self._state_lock:
+                    self._cache_generation = getattr(self, "_cache_generation", 0) + 1
                 self.cache.clear()
             self.refresh_sources()
             with self._state_lock:
@@ -629,16 +731,36 @@ class Search:
             # The set of searchable sources changed, so prior answers can be stale.
             # Keeping the cache while the source set is unchanged lets repeated
             # queries (e.g. page reloads) be answered without recomputing.
+            with self._state_lock:
+                self._cache_generation = getattr(self, "_cache_generation", 0) + 1
             self.cache.clear()
         return sources
 
     def _catalog_entries(self, server: str) -> list[dict[str, str]]:
-        path = str(self.cfg.get("kiwix_catalog_path", "/kiwix/catalog/v2/entries?count=-1"))
+        path = str(
+            self.cfg.get(
+                "kiwix_catalog_path",
+                "/kiwix/catalog/v2/entries?count=50000",
+            )
+        )
         url = server + (path if path.startswith("/") else "/" + path)
+        url = _bounded_catalog_url(
+            url,
+            _int_config(
+                self.cfg,
+                "kiwix_catalog_limit",
+                DEFAULT_KIWIX_CATALOG_LIMIT,
+            ),
+        )
+        response_limit = _int_config(
+            self.cfg,
+            "max_kiwix_response_bytes",
+            DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
+        )
         try:
             request = Request(url, headers={"Accept": "application/atom+xml, application/xml"})
             with urlopen(request, timeout=self.source_timeout) as response:
-                root = ET.fromstring(response.read())
+                root = _parse_remote_xml(_read_limited_response(response, response_limit))
         except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError):
             return []
 
@@ -833,13 +955,12 @@ class Search:
             if not db_current:
                 reasons.append("index file changed since load")
 
-            zim_dir = self.cfg.get("zim_dir")
-            archive_path = Path(zim_dir) / f"{name}.zim" if zim_dir else None
-            archive_current = (
-                archive_path is not None
-                and archive_path.exists()
-                and index.archive is not None
+            archive_path = (
+                Path(index.zim_path)
+                if index.zim_path
+                else self._find_zim_path(name, index.source_size)
             )
+            archive_current = archive_path is not None and archive_path.exists() and index.archive is not None
             if not archive_current:
                 reasons.append("ZIM archive unavailable")
 
@@ -1122,7 +1243,10 @@ class Search:
         query = self._validate_query(query)
         page_size = self._page_size(limit)
         offset = max(0, int(offset))
-        key = self._cache_key(query, zim)
+        cache_key = self._cache_key(query, zim)
+        with self._state_lock:
+            generation = getattr(self, "_cache_generation", 0)
+        inflight_key = (generation, cache_key)
         sources = self._selected_sources(zim)
         total_sources = len(sources)
 
@@ -1130,24 +1254,32 @@ class Search:
         # the owner and compute once.
         pending: Future | None = None
         while True:
-            cached = self.cache.get(key)
-            if cached is not None:
+            cached = self.cache.get(cache_key)
+            if (
+                cached is not None
+                and isinstance(cached, dict)
+                and cached.get("generation") == generation
+            ):
                 yield from self._cached_events(
                     cached, query, sources, source, offset, page_size, debug
                 )
                 return
             with self._inflight_lock:
-                existing = self._inflight.get(key)
+                existing = self._inflight.get(inflight_key)
                 if existing is None:
                     pending = Future()
-                    self._inflight[key] = pending
+                    self._inflight[inflight_key] = pending
                     break
             # Reuse another request's result when it finishes.
             try:
                 cached = existing.result(timeout=self.source_timeout * 4)
             except Exception:
                 cached = None
-            if cached is not None:
+            if (
+                cached is not None
+                and isinstance(cached, dict)
+                and cached.get("generation") == generation
+            ):
                 yield from self._cached_events(
                     cached, query, sources, source, offset, page_size, debug
                 )
@@ -1176,8 +1308,11 @@ class Search:
                 "limit": page_size,
             }
             if not sources:
-                cache_value = {"pool": [], "sources": []}
-                self.cache.put(key, cache_value)
+                cache_value = {"generation": generation, "pool": [], "sources": []}
+                with self._state_lock:
+                    current_generation = getattr(self, "_cache_generation", 0)
+                if current_generation == generation:
+                    self.cache.put(cache_key, cache_value)
                 yield {
                     "type": "done",
                     "results": [],
@@ -1247,13 +1382,17 @@ class Search:
             # The cache holds only the deduplicated ranked pool plus compact
             # source outcomes, never a copy of every source's item list.
             cache_value = {
+                "generation": generation,
                 "pool": pool,
                 "sources": [
                     result.to_event(counts.get(result.source.key, 0))
                     for result in completed
                 ],
             }
-            self.cache.put(key, cache_value)
+            with self._state_lock:
+                current_generation = getattr(self, "_cache_generation", 0)
+            if current_generation == generation:
+                self.cache.put(cache_key, cache_value)
             state = self._page_state(pool, source, offset, page_size, debug)
             yield {
                 "type": "done",
@@ -1271,7 +1410,7 @@ class Search:
                 future.cancel()
             if acquired:
                 self._search_slots.release()
-            self._finish_inflight(key, pending, cache_value)
+            self._finish_inflight(inflight_key, pending, cache_value)
 
     def _search_source(
         self,
@@ -1356,7 +1495,7 @@ class Search:
                 ]
                 rowids.update(rowid for _, rowid in semantic_ids)
             except Exception as error:
-                errors.append(f"meaning search unavailable: {error}")
+                errors.append(f"semantic search unavailable: {error}")
                 semantic_ids = []
         else:
             semantic_ids = []
@@ -1537,16 +1676,29 @@ class Search:
         server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
         path = str(self.cfg.get("kiwix_search_path", "/kiwix/search"))
         endpoint = server + (path if path.startswith("/") else "/" + path)
+        result_limit = min(
+            max(self.candidate_count, limit),
+            _int_config(
+                self.cfg,
+                "kiwix_result_limit",
+                DEFAULT_KIWIX_RESULT_LIMIT,
+            ),
+        )
         params = urlencode({
             "pattern": query,
             "books.name": source.book,
-            "pageLength": max(self.candidate_count, limit),
+            "pageLength": result_limit,
             "format": "xml",
         })
+        response_limit = _int_config(
+            self.cfg,
+            "max_kiwix_response_bytes",
+            DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
+        )
         try:
             request = Request(endpoint + "?" + params, headers={"Accept": "application/xml"})
             with urlopen(request, timeout=self.source_timeout) as response:
-                root = ET.fromstring(response.read())
+                root = _parse_remote_xml(_read_limited_response(response, response_limit))
         except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError) as error:
             return SourceResult(source=source, error=f"Kiwix search failed: {error}", status="error")
 

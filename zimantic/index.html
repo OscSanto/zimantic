@@ -265,7 +265,7 @@
       <div id="articleModalTitle" class="article-modal-title">Article</div>
       <button id="articleModalClose" class="article-modal-close" type="button">Close</button>
     </div>
-    <iframe id="articleModalFrame" class="article-modal-frame" title="Article"></iframe>
+    <iframe id="articleModalFrame" class="article-modal-frame" title="Article" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
   </section>
 </div>
 
@@ -275,8 +275,8 @@
 
   const $ = id => document.getElementById(id);
   let PAGE_SIZE = 10;  // replaced with the server's page_size at startup
-  const AUTO_SUBMIT_DELAY = 400;
-  const STREAM_RENDER_DELAY = 150;
+  const AUTO_SUBMIT_DELAY = 250;
+  const STREAM_RENDER_DELAY = 75;
   const BUSY_RETRY_BASE_DELAY = 1000;
   const BUSY_RETRY_MAX_DELAY = 8000;
   const BUSY_RETRY_LIMIT = 5;
@@ -298,7 +298,6 @@
   let activeThumbnails = 0;
   let streamRenderTimer = null;
   let modalPreviousFocus = null;
-  let modalRootMarked = false;
 
   function cancelStreamRender() {
     if (streamRenderTimer !== null) {
@@ -467,7 +466,6 @@
     modalPreviousFocus = document.activeElement;
     title.textContent = link.textContent || "Article";
     frame.title = title.textContent;
-    modalRootMarked = false;
     frame.src = link.href;
     modal.hidden = false;
     document.body.classList.add("modal-open");
@@ -481,7 +479,6 @@
     modal.hidden = true;
     document.body.classList.remove("modal-open");
     if (frame) frame.src = "about:blank";
-    modalRootMarked = false;
     if (modalPreviousFocus instanceof HTMLElement && document.contains(modalPreviousFocus)) {
       modalPreviousFocus.focus();
     }
@@ -491,13 +488,13 @@
   $("articleModalFrame").addEventListener("load", () => {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
-    if (modal.hidden || modalRootMarked || !frame.src || frame.src === "about:blank") return;
-    modalRootMarked = true;
-    frame.contentWindow.postMessage({type: "zimantic-modal-root"}, location.origin);
+    if (modal.hidden || !frame.src || frame.src === "about:blank") return;
+    // Sandboxed documents have an opaque origin, so only "*" can target them.
+    frame.contentWindow.postMessage({type: "zimantic-modal-root"}, "*");
   });
   window.addEventListener("message", event => {
     const frame = $("articleModalFrame");
-    if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
+    if (event.source !== frame.contentWindow) return;
     if (event.data?.type === "zimantic-article-close") closeArticleModal();
   });
 
@@ -945,6 +942,7 @@
     // Paging and source filtering reuse the server's cached ranked pool and
     // return a single page. No full document reload, no re-stream.
     if (!current) return;
+    const sequence = searchSequence;
     const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
     if (pageController) pageController.abort();
     const controller = new AbortController();
@@ -960,11 +958,11 @@
       const response = await fetch("/search?" + params, { signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const items = await response.json();
+      if (sequence !== searchSequence || controller !== pageController) return;
       current.page = pageIndex;
       current.pageItems = items;
       current.total = Number(response.headers.get("X-Total-Count") || items.length);
       current.hasMore = response.headers.get("X-Has-More") === "true";
-      if (controller !== pageController) return;
       const from = current.total ? pageIndex * PAGE_SIZE + 1 : 0;
       const to = Math.min((pageIndex + 1) * PAGE_SIZE, current.total);
       $("status").textContent = current.total
@@ -973,7 +971,13 @@
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
       renderView();
     } catch (error) {
-      if (error.name !== "AbortError") $("status").textContent = `Search failed: ${error.message}`;
+      if (
+        error.name !== "AbortError" &&
+        sequence === searchSequence &&
+        controller === pageController
+      ) {
+        $("status").textContent = `Search failed: ${error.message}`;
+      }
     } finally {
       if (controller === pageController) pageController = null;
     }

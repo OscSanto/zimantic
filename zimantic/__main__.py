@@ -111,6 +111,7 @@ def main() -> None:
         from .build import build as build_zim
         from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
         from .zim import (
+            DEFAULT_MAX_ENTRY_BYTES,
             DEFAULT_MAX_HTML_BYTES,
             DEFAULT_PREVIEW_CHARS,
         )
@@ -145,18 +146,26 @@ def main() -> None:
             return
 
         zim_sizes = {zim: zim.stat().st_size for zim in zims}
-        zims.sort(key=zim_sizes.__getitem__)
 
         by_stem: dict[str, list[Path]] = {}
         for zim in zims:
             by_stem.setdefault(zim.stem, []).append(zim)
-        for stem, paths in by_stem.items():
-            if len(paths) > 1:
+        accepted: list[Path] = []
+        for stem, paths in sorted(by_stem.items()):
+            sizes = {zim_sizes[path] for path in paths}
+            if len(sizes) > 1:
                 print(
-                    f"zimantic: warning: multiple input files share the index name "
-                    f"{stem!r}: {', '.join(map(str, paths))}",
+                    f"zimantic: warning: ignoring ZIM files with conflicting "
+                    f"index identity {stem!r}: "
+                    f"{', '.join(f'{path} ({zim_sizes[path]} bytes)' for path in paths)}",
                     file=sys.stderr,
                 )
+                continue
+            accepted.extend(paths)
+        zims = sorted(accepted, key=zim_sizes.__getitem__)
+        if not zims:
+            print("zimantic: no non-conflicting .zim files to index")
+            return
 
         # fast builds never embed: skip loading the model so they start instantly.
         embedder = None
@@ -187,6 +196,7 @@ def main() -> None:
                         cfg["batch_size"],
                         fast=args.fast,
                         max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
+                        max_entry_bytes=cfg.get("max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES),
                         max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
                         force=args.force,
                     )
