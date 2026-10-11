@@ -1452,6 +1452,24 @@ class Search:
         # kiwix_url is optional: without it results have no article link, so the
         # UI renders the title as plain text instead of building a broken URL.
         kiwix_url = str(self.cfg.get("kiwix_url") or "").strip().rstrip("/")
+        mimetypes: dict[str, str] = {}
+        local_index = getattr(self, "indexes", {}).get(
+            source.local_name or source.book
+        )
+        archive = getattr(local_index, "archive", None)
+        if archive is not None:
+            with local_index.lock:
+                for row in rows.values():
+                    path = row[3]
+                    if path in mimetypes:
+                        continue
+                    try:
+                        item = archive.get_entry_by_path(path).get_item()
+                        mimetypes[path] = (
+                            item.mimetype or "application/octet-stream"
+                        ).split(";", 1)[0].strip().lower()
+                    except (KeyError, RuntimeError, ValueError):
+                        continue
         docs: dict[int, dict[str, Any]] = {}
         for rowid in values:
             original = rows.get(rowid)
@@ -1469,6 +1487,7 @@ class Search:
                 "title": title,
                 "lead": self._preview(excerpt or ""),
                 "path": path,
+                "mimetype": mimetypes.get(path),
                 "url": (
                     f"/article/{quote(source.local_name or source.book, safe='')}/"
                     f"{quote(path, safe='/')}"

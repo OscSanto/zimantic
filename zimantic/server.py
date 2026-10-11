@@ -136,14 +136,26 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
 
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 (() => {
+  const modalRootStorageKey = "zimantic-modal-root-pending";
+  const markModalRoot = () => {
+    history.replaceState(
+      Object.assign({}, history.state || {}, {zimanticModalRoot: true}),
+      "",
+      location.href
+    );
+    sessionStorage.removeItem(modalRootStorageKey);
+  };
+  if (window.parent !== window) {
+    const hasRefresh = [...document.querySelectorAll("meta[http-equiv]")].some(
+      meta => meta.httpEquiv.toLowerCase() === "refresh"
+    );
+    if (hasRefresh) sessionStorage.setItem(modalRootStorageKey, "1");
+    if (sessionStorage.getItem(modalRootStorageKey) === "1") markModalRoot();
+  }
   window.addEventListener("message", event => {
     if (event.source !== window.parent || event.origin !== location.origin) return;
     if (event.data?.type === "zimantic-modal-root") {
-      history.replaceState(
-        Object.assign({}, history.state || {}, {zimanticModalRoot: true}),
-        "",
-        location.href
-      );
+      markModalRoot();
     }
   });
   const initialize = () => {
@@ -276,6 +288,30 @@ def _decorate_html_article(content: bytes | memoryview, zim: str, article: dict)
     return document.encode("utf-8")
 
 
+def _article_content_response(content: bytes | memoryview, mimetype: str) -> Response:
+    if len(content) > ARTICLE_STREAM_THRESHOLD:
+        # Python-libzim exposes the decompressed item as one memoryview.
+        # Chunking here avoids another whole-entry response copy and lets
+        # the client consume large assets incrementally.
+        def chunks():
+            for start in range(0, len(content), ARTICLE_STREAM_CHUNK):
+                yield bytes(content[start:start + ARTICLE_STREAM_CHUNK])
+
+        return StreamingResponse(
+            chunks(),
+            media_type=mimetype,
+            headers={
+                "Cache-Control": "no-cache",
+                "Content-Length": str(len(content)),
+            },
+        )
+    return Response(
+        content=content,
+        media_type=mimetype,
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 def _json_with_etag(request: Request, payload) -> Response:
     """JSON response with a content ETag, so a warm browser can revalidate
     source discovery cheaply with If-None-Match instead of re-downloading."""
@@ -346,27 +382,7 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
         content = article["content"]
         if article["mimetype"] == "text/html":
             content = _decorate_html_article(content, zim, article)
-        if len(content) > ARTICLE_STREAM_THRESHOLD:
-            # Python-libzim exposes the decompressed item as one memoryview.
-            # Chunking here avoids another whole-entry response copy and lets
-            # the client consume large assets incrementally.
-            def chunks():
-                for start in range(0, len(content), ARTICLE_STREAM_CHUNK):
-                    yield bytes(content[start:start + ARTICLE_STREAM_CHUNK])
-
-            return StreamingResponse(
-                chunks(),
-                media_type=article["mimetype"],
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Content-Length": str(len(content)),
-                },
-            )
-        return Response(
-            content=content,
-            media_type=article["mimetype"],
-            headers={"Cache-Control": "no-cache"},
-        )
+        return _article_content_response(content, article["mimetype"])
 
     @app.get("/article/{zim}")
     def article_homepage(zim: str):

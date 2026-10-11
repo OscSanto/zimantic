@@ -164,6 +164,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(result["title"], "Beta")
             self.assertEqual(result["path"], "Beta")
             self.assertEqual(result["url"], "/article/manual/Beta")
+            self.assertEqual(result["mimetype"], "text/html")
             self.assertEqual(response.headers["x-total-count"], "1")
 
             article = client.get("/article/manual/Beta")
@@ -258,6 +259,10 @@ class LocalIntegrationTests(unittest.TestCase):
             results = search.search("photosynthesis", limit=5)
             self.assertTrue(
                 any(result["title"] == "Photosynthesis" for result in results)
+            )
+            self.assertEqual(
+                next(result for result in results if result["title"] == "Photosynthesis")["mimetype"],
+                "application/pdf",
             )
 
             db = sqlite3.connect(indexes / "library.sqlite")

@@ -82,7 +82,13 @@
     .status { min-height: 1.4em; margin: 12px 0 6px; font-size: .85rem; }
     .query-used { color: var(--accent); font-family: var(--mono); }
     .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-    button.badge { border-radius: 100px; font-size: .75rem; padding: 3px 10px; }
+    button.badge {
+      border-radius: 100px;
+      font-size: .75rem;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      padding: 3px 10px;
+    }
     button.badge.ok { border-color: var(--ok-border); color: var(--ok); cursor: pointer; }
     button.badge.err { border-color: var(--err-border); color: var(--err); }
     button.badge[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -118,11 +124,26 @@
     .result-title { font-size: 1.02rem; font-weight: 600; }
     .result-title a { color: var(--text); text-decoration: none; }
     .result-title a:hover { color: var(--accent); text-decoration: underline; }
+    .result-media {
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--muted);
+      display: inline-flex;
+      font: .65rem var(--mono);
+      line-height: 1;
+      margin-left: 6px;
+      padding: 2px 4px;
+      pointer-events: none;
+      vertical-align: .12em;
+    }
     .result-meta { font-size: .8rem; margin: 2px 0 6px; }
-    .result-match { color: var(--muted); display: none; font: .72rem var(--mono); }
-    .debug-mode .result-match { display: block; }
     .result-snippet { font-size: .92rem; margin-top: 6px; overflow-wrap: anywhere; }
-    .result-snippet p { margin: 0 0 8px; }
+    .result-snippet p {
+      margin: 0 0 8px;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
     .result-snippet p:last-child { margin-bottom: 0; }
     .result-snippet mark { background: var(--mark-bg); border-radius: 2px; font-weight: 600; }
     .result-snippet.none { color: var(--muted); font-style: italic; }
@@ -262,7 +283,6 @@
   const THUMB_LIMIT = 128 * 1024;
   const THUMB_CONCURRENCY = 4;
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let debugMode = false;  // configured by the server, not the URL
   let sources = [];
   let current = null;
   let activeSource = null;
@@ -409,6 +429,28 @@
     node.querySelector(selector).textContent = text;
   }
 
+  function mediaBadge(mimetype) {
+    const mime = String(mimetype || "").toLowerCase();
+    if (!mime || mime === "text/html") return null;
+    if (mime.startsWith("video/")) return {icon: "▶", label: "Video"};
+    if (mime.startsWith("audio/")) return {icon: "♪", label: "Audio"};
+    if (mime.startsWith("image/")) return {icon: "IMG", label: "Image"};
+    if (mime === "application/pdf") return {icon: "PDF", label: "PDF"};
+    if (mime.startsWith("text/")) return {icon: "TXT", label: "Text"};
+    return {icon: "FILE", label: "File"};
+  }
+
+  function appendMediaBadge(title, mimetype) {
+    const media = mediaBadge(mimetype);
+    if (!media) return;
+    const badge = document.createElement("span");
+    badge.className = "result-media";
+    badge.title = media.label;
+    badge.setAttribute("aria-label", media.label);
+    badge.textContent = media.icon;
+    title.append(" ", badge);
+  }
+
   function modifiedClick(event) {
     return event.button !== 0 ||
       event.metaKey ||
@@ -469,14 +511,14 @@
       link.href = item.url;
       link.target = "_blank";
       link.rel = "noopener";
+      if (item.mimetype) link.dataset.mimetype = item.mimetype;
       link.textContent = displayTitle;
       title.appendChild(link);
     } else {
       title.textContent = displayTitle;
     }
-    const sourceRank = item.rank || item.source_rank || "—";
+    appendMediaBadge(title, item.mimetype);
     setText(node, ".result-meta", item.source || "");
-    setText(node, ".result-match", `${item.explain || "Source result"} · source rank ${sourceRank}`);
     const snippet = node.querySelector(".result-snippet");
     const lead = item.lead || "";
     if (lead) {
@@ -511,7 +553,6 @@
     node.innerHTML = `<div class="result-body">
       <div class="result-title"></div>
       <div class="result-meta"></div>
-      <div class="result-match"></div>
       <div class="result-snippet"></div>
     </div>`;
     setResultNode(node, item);
@@ -964,11 +1005,6 @@
     };
   }
 
-  function applyDebugMode(enabled) {
-    debugMode = enabled;
-    document.body.classList.toggle("debug-mode", debugMode);
-  }
-
   $("badges").addEventListener("click", event => {
     const button = event.target.closest("button[data-source]");
     if (!button || button.disabled || !current) return;
@@ -994,6 +1030,8 @@
     const target = event.target instanceof Element ? event.target : null;
     const link = target?.closest(".result-title a[href]");
     if (!link || modifiedClick(event)) return;
+    if (new URL(link.href, location.href).origin !== location.origin) return;
+    if (link.dataset.mimetype !== "text/html") return;
     event.preventDefault();
     openArticleModal(link);
   });
@@ -1116,7 +1154,6 @@
         if (Number.isInteger(config.page_size) && config.page_size > 0) {
           PAGE_SIZE = config.page_size;
         }
-        applyDebugMode(config.debug === true);
       }
       if (!sourcesResponse.ok) throw new Error(`HTTP ${sourcesResponse.status}`);
       sources = await sourcesResponse.json();
