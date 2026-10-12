@@ -49,6 +49,7 @@ from zimantic.contracts import SourceInfo, SourceResult
 from zimantic.search import (
     Search,
     SearchBusyError,
+    ArticleUnavailableError,
     _LocalIndex,
     _bounded_catalog_url,
     _fulltext_query,
@@ -113,6 +114,12 @@ class _IconArchive:
         if path not in self._entries:
             raise KeyError(path)
         return self._entries[path]
+
+
+class _HealthArchive:
+    """Minimal archive stand-in for ``Search.health`` diagnostics."""
+
+    entry_count = 0
 
 
 def _title_search(rows, query, limit=1):
@@ -926,6 +933,41 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(results[0]["path"], "tire-change")
             search._executor.shutdown(wait=True)
 
+    def test_health_reports_ok_when_homepage_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            zim = tmp / "manual.zim"
+            zim.write_bytes(b"zim")
+            search = _bare_search(self._cfg(tmp))
+            search.semantic = False
+            search.sources = {
+                "manual": SourceInfo(
+                    "manual", "Manual", "manual", "local", local_name="manual"
+                )
+            }
+            search.indexes = {
+                "manual": _LocalIndex(
+                    None,
+                    None,
+                    _HealthArchive(),
+                    None,
+                    threading.Lock(),
+                    zim_path=str(zim),
+                )
+            }
+            # A redirect cycle raises ArticleUnavailableError; /health must
+            # degrade the field, not bubble up as a 500.
+            with patch.object(
+                search,
+                "_resolve_article_entry",
+                side_effect=ArticleUnavailableError("article redirect cycle"),
+            ):
+                report = search.health()
+
+            self.assertEqual(report["status"], "ok")
+            self.assertIsNone(report["indexes"][0]["homepage"])
+            search._executor.shutdown(wait=True)
+
     def test_deferred_faiss_loads_vectors_after_indexes_open(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -1007,6 +1049,33 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(cached_events[1]["source"]["key"], "manual")
             self.assertEqual(cached_events[1]["count"], 1)
             self.assertEqual(cached_events[-1]["results"], first_events[-1]["results"])
+
+    def test_cached_source_counts_match_the_stream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(
+                tmp,
+                "manual",
+                rows=[(1, "Tire Change", "tire-change", None)],
+            )
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            # Enrichment can reorder or drop docs. Simulate it emptying the pool
+            # so a count recomputed *after* enrichment would be 0; a cache
+            # replay must still match the counts the live stream reported.
+            with patch.object(search, "_enrich_pool", return_value=[]):
+                live = list(search.stream_search("tire change", limit=1))
+                cached = list(search.stream_search("tire change", limit=1))
+            search._executor.shutdown(wait=True)
+
+            live_counts = [event.get("count") for event in live if event["type"] == "source"]
+            cached_counts = [
+                event.get("count") for event in cached if event["type"] == "source"
+            ]
+            self.assertEqual(live_counts, [1])
+            self.assertEqual(cached_counts, live_counts)
 
     def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1352,6 +1421,22 @@ class QueryCacheTests(unittest.TestCase):
         cache = QueryCache(100, max_bytes=0)
         cache.put("a", "x" * 10_000)
         self.assertEqual(cache.get("a"), "x" * 10_000)
+
+    def test_oversized_entry_is_dropped_without_emptying_the_cache(self):
+        cache = QueryCache(10, max_bytes=1000)
+        cache.put("small", "x" * 100)
+        cache.put("huge", "y" * 5000)
+
+        # The oversized entry can never fit, so it is dropped; the rest survives.
+        self.assertEqual(cache.stats()["size"], 1)
+        self.assertIsNone(cache.get("huge"))
+        self.assertEqual(cache.get("small"), "x" * 100)
+        self.assertLessEqual(cache.stats()["bytes"], 1000)
+
+        # Later inserts still work (the cache was not left permanently empty).
+        cache.put("small2", "z" * 50)
+        self.assertIsNotNone(cache.get("small"))
+        self.assertIsNotNone(cache.get("small2"))
 
 
 if __name__ == "__main__":

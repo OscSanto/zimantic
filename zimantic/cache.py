@@ -85,18 +85,25 @@ class QueryCache:
             size = _estimate_size(value)
         size = max(0, int(size))
         with self._lock:
+            # An entry bigger than the whole byte budget can never fit. Drop it
+            # rather than evicting every other entry trying to make room (which
+            # would leave the cache empty).
+            if self.max_bytes and size > self.max_bytes:
+                return
             previous = self._data.pop(key, None)
             if previous is not None:
                 self._bytes -= self._sizes.pop(key, 0)
-            self._data[key] = value
-            self._sizes[key] = size
-            self._bytes += size
+            # Evict least-recently-used entries before inserting so the new entry
+            # is never the one evicted to satisfy the budget.
             while self._data and (
-                len(self._data) > self.maxsize
-                or (self.max_bytes and self._bytes > self.max_bytes)
+                len(self._data) >= self.maxsize
+                or (self.max_bytes and self._bytes + size > self.max_bytes)
             ):
                 old_key, _ = self._data.popitem(last=False)
                 self._bytes -= self._sizes.pop(old_key, 0)
+            self._data[key] = value
+            self._sizes[key] = size
+            self._bytes += size
 
     def clear(self) -> None:
         with self._lock:

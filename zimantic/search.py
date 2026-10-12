@@ -1315,7 +1315,7 @@ class Search:
                         report["entry_count"] = int(index.archive.entry_count)
                         try:
                             report["homepage"] = self._resolve_article_entry(index.archive).path
-                        except ArticleNotFoundError:
+                        except (ArticleNotFoundError, ArticleUnavailableError):
                             report["homepage"] = None
                 except (RuntimeError, ValueError):
                     report["status"] = "degraded"
@@ -1689,6 +1689,7 @@ class Search:
         acquired = False
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
+        reported_counts: dict[str, int] = {}
         cache_value: Any = None
         try:
             # Wait briefly for a slot so a burst of retries can be absorbed;
@@ -1786,9 +1787,11 @@ class Search:
                 if should_rank:
                     pool = self._rank_results(completed, query, pool_target)
                     counts = self._source_counts(pool)
+                reported_count = counts.get(src.key, 0)
+                reported_counts[src.key] = reported_count
                 yield {
                     "type": "source",
-                    **result.to_event(counts.get(src.key, 0)),
+                    **result.to_event(reported_count),
                     "completed": len(completed),
                     "total_sources": total_sources,
                 }
@@ -1806,9 +1809,7 @@ class Search:
 
             if len(completed) != total_sources:
                 pool = self._rank_results(completed, query, pool_target)
-                counts = self._source_counts(pool)
             pool = self._enrich_pool(completed, query, pool, pool_target)
-            counts = self._source_counts(pool)
             state = self._page_state(pool, source, offset, page_size, debug)
             self._hydrate_results(state["results"])
             hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
@@ -1817,12 +1818,15 @@ class Search:
                     doc["lead"] = hydrated[doc["id"]]
             matched_by = self._matched_by(pool) if debug else None
             # The cache holds only the deduplicated ranked pool plus compact
-            # source outcomes, never a copy of every source's item list.
+            # source outcomes, never a copy of every source's item list. Source
+            # counts are the ones the live `source` events reported, so a cached
+            # replay shows the same per-source numbers as the original stream
+            # (`_enrich_pool` can reorder or drop docs, changing a fresh count).
             cache_value = {
                 "generation": generation,
                 "pool": pool,
                 "sources": [
-                    result.to_event(counts.get(result.source.key, 0))
+                    result.to_event(reported_counts.get(result.source.key, 0))
                     for result in completed
                 ],
                 "pool_target": pool_target,

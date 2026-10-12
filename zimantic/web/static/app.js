@@ -4,8 +4,8 @@
             const $ = (id) => document.getElementById(id);
             let PAGE_SIZE = 10; // replaced with the server's page_size at startup
             let debugMode = false;
-            const AUTO_SUBMIT_DELAY = 250;
-            const STREAM_RENDER_DELAY = 600;
+            const AUTO_SUBMIT_DELAY = 500;
+            const STREAM_RENDER_DELAY = 750;
             const STREAM_SEARCH_TIMEOUT = 15000;
             const BUSY_RETRY_BASE_DELAY = 1000;
             const BUSY_RETRY_MAX_DELAY = 8000;
@@ -334,9 +334,8 @@
             }
 
             function renderFilterLine() {
-                $("filterLine").innerHTML = selectedSourceKeys.size
-                    ? '<hr class="source-results-break" aria-hidden="true">'
-                    : "";
+                $("filterLine").innerHTML =
+                    '<hr class="source-results-break" aria-hidden="true">';
             }
 
             function setSourceMeta(node, item) {
@@ -835,7 +834,7 @@
                     if (!navigation) continue;
                     activeParentNavigation = navigation;
                     activeParentUrl = candidateParentUrl.href;
-                    if (activeParentNavigation) break;
+                    break;
                 }
                 if (request !== parentNavigationSequence) return;
                 postArticleModalNavigation();
@@ -1221,6 +1220,28 @@
                 if (!current?.streaming) loadThumbnails(items);
             }
 
+            function pageRangeText(total, page) {
+                if (!total) return "No results.";
+                const from = page * PAGE_SIZE + 1;
+                const to = Math.min((page + 1) * PAGE_SIZE, total);
+                return `${from}–${to} of ${total} result${total === 1 ? "" : "s"}`;
+            }
+
+            function searchStatusText() {
+                if (!current) return "";
+                const range = current.total
+                    ? pageRangeText(current.total, current.page)
+                    : current.sourcesTotal
+                      ? "No results."
+                      : "No searchable sources.";
+                // Keep the source tally visible once the stream has finished, on
+                // every page, so paging does not drop it from the status line.
+                return current.sourcesTotal > 0 &&
+                    current.completed === current.sourcesTotal
+                    ? `${range} · ${current.completed}/${current.sourcesTotal} sources complete`
+                    : range;
+            }
+
             function renderPager(total, pageCount) {
                 const pager = $("pager");
                 pager.innerHTML = "";
@@ -1246,6 +1267,10 @@
                 const to = Math.min((current.page + 1) * PAGE_SIZE, total);
                 label.textContent = `${from}–${to} of ${total}`;
                 pager.append(prev, label, next);
+                if (current.page > 0) {
+                    // Shortcut back to the first page from anywhere in the pager.
+                    pager.prepend(pageLink("« First", 0, false));
+                }
             }
 
             function renderView() {
@@ -1319,6 +1344,10 @@
                     while (bytes < maxBytes) {
                         const part = await reader.read();
                         if (part.done) break;
+                        // Stop before a chunk that would cross the cap so the
+                        // streamed path never returns more than the non-reader
+                        // fallback above (which slices to maxBytes).
+                        if (bytes + part.value.byteLength > maxBytes) break;
                         bytes += part.value.byteLength;
                         text += decoder.decode(part.value, { stream: true });
                     }
@@ -1452,10 +1481,8 @@
                         applyPage(event);
                         current.streaming = false;
                         cancelStreamRender();
-                        $("status").textContent = current.sourcesTotal
-                            ? `${current.completed}/${current.sourcesTotal} sources complete · ${current.total} result${current.total === 1 ? "" : "s"}`
-                            : "No searchable sources.";
                         renderView();
+                        $("status").textContent = searchStatusText();
                         renderNotice();
                     } else if (event.type === "error") {
                         busy = Boolean(event.busy);
@@ -1594,6 +1621,12 @@
                 const sequence = searchSequence;
                 const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
                 if (pageController) pageController.abort();
+                // Paging takes over the view: stop any in-flight stream so its
+                // final `done` event cannot overwrite this page's results.
+                if (requestController) {
+                    requestController.abort();
+                    requestController = null;
+                }
                 const controller = new AbortController();
                 pageController = controller;
                 const params = new URLSearchParams({
@@ -1622,13 +1655,9 @@
                             }
                         }
                     }
-                    const from = current.total ? pageIndex * PAGE_SIZE + 1 : 0;
-                    const to = Math.min((pageIndex + 1) * PAGE_SIZE, current.total);
-                    $("status").textContent = current.total
-                        ? `${from}–${to} of ${current.total} result${current.total === 1 ? "" : "s"}`
-                        : "No results.";
-                    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
                     renderView();
+                    $("status").textContent = searchStatusText();
+                    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
                 } catch (error) {
                     if (
                         error.name !== "AbortError" &&
@@ -1730,16 +1759,6 @@
                 history.pushState(null, "", makeStateUrl(current.question, selectedSourceKeys, 0));
                 renderSourceFilters();
                 loadPage(0);
-            });
-
-            $("filterLine").addEventListener("click", (event) => {
-                const button = event.target.closest("button[data-source]");
-                if (button) {
-                    selectedSourceKeys.clear();
-                    history.pushState(null, "", makeStateUrl(current.question, selectedSourceKeys, 0));
-                    renderSourceFilters();
-                    loadPage(0);
-                }
             });
 
             $("results").addEventListener("click", (event) => {
