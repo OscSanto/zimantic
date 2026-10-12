@@ -85,8 +85,13 @@ def _phrase_words(query: str) -> list[str]:
 
 
 def _title_query(query: str) -> str:
-    """FTS5 MATCH expression: every word must appear as an exact title token."""
-    return " AND ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in _query_words(query))
+    """FTS5 MATCH expression: every word must appear as an exact title token.
+
+    Words come from ``_query_words``, which only yields ``[^\\W_]+`` letters
+    and digits, so they can never contain the FTS5 string delimiter; plain
+    quoting is sufficient (the doubled-quote escape is unnecessary).
+    """
+    return " AND ".join(f'"{word}"' for word in _query_words(query))
 
 
 def _title_prefix_query(query: str) -> str:

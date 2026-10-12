@@ -18,6 +18,9 @@ from . import app as web_app
 def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     """Register browser, article, discovery, and search endpoints."""
 
+    # Serialized-JSON memo owned by this app instance (see _json_response).
+    memos: dict = {}
+
     @app.get("/", include_in_schema=False)
     def page():
         return FileResponse(web_app.PAGE)
@@ -56,9 +59,11 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/config")
     def config(request: Request):
-        return web_app._json_with_etag(
+        return web_app._json_response(
             request,
-            {
+            "config",
+            1 if debug else 0,
+            lambda: {
                 "page_size": getattr(search_class, "page_size", 10),
                 "max_results": getattr(search_class, "max_results", 100),
                 "max_article_bytes": getattr(search_class, "cfg", {}).get(
@@ -66,11 +71,20 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 ),
                 "debug": debug,
             },
+            memos,
         )
 
     @app.get("/sources")
     def sources(request: Request):
-        return web_app._json_with_etag(request, search_class.source_dicts())
+        version_of = getattr(search_class, "source_version", None)
+        version = version_of() if callable(version_of) else 0
+        return web_app._json_response(
+            request,
+            "sources",
+            version,
+            search_class.source_dicts,
+            memos,
+        )
 
     @app.get("/health")
     def health():
@@ -130,8 +144,12 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     def content_shell_response(zim: str, path: str | None = None):
         requested_path = None if path is None else path.strip("/")
         fallback_icon = zim_icon_url(zim)
+        read_head = getattr(search_class, "read_article_head", None)
         try:
-            article = search_class.read_article(zim, path)
+            if callable(read_head):
+                article = read_head(zim, path)
+            else:
+                article = search_class.read_article(zim, path)
         except (
             ArticleNotFoundError,
             ArticleTooLargeError,

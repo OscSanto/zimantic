@@ -51,11 +51,11 @@ from zimantic.search import (
     SearchBusyError,
     _LocalIndex,
     _bounded_catalog_url,
-    _entry_contains_phrase,
     _fulltext_query,
     _find_archive_icon_path,
     _nprobe,
     _parse_remote_xml,
+    _phrase_in_word_stream,
     _query_terms,
     _phrase_words,
     _read_limited_response,
@@ -145,51 +145,17 @@ def _title_search(rows, query, limit=1):
 
 class SearchContractTests(unittest.TestCase):
     def test_content_phrase_matching_keeps_stopwords_and_ignores_markup(self):
-        class _Item:
-            mimetype = "text/html"
-            content = (
-                b"<p>Ampiroxicam (INN) is a non-steroidal "
-                b"anti-inflammatory drug (NSAID).</p>"
-            )
-
-        class _Entry:
-            def get_item(self):
-                return _Item()
-
-        class _Archive:
-            def get_entry_by_path(self, path):
-                return _Entry()
-
-        query = "INN is a non-steroidal anti-inflammatory drug (NSAID"
-        self.assertTrue(
-            _entry_contains_phrase(
-                _Archive(),
-                "Ampiroxicam",
-                _phrase_words(query),
-                4096,
-            )
+        text = (
+            "<p>Ampiroxicam (INN) is a non-steroidal "
+            "anti-inflammatory drug (NSAID).</p>"
         )
+        query = "INN is a non-steroidal anti-inflammatory drug (NSAID"
+        self.assertTrue(_phrase_in_word_stream(text.casefold(), _phrase_words(query)))
 
     def test_content_phrase_matching_does_not_backtrack_on_long_separators(self):
-        class _Item:
-            mimetype = "text/html"
-            content = b"<p>tokyo " + (b" " * 128) + b"x</p>"
-
-        class _Entry:
-            def get_item(self):
-                return _Item()
-
-        class _Archive:
-            def get_entry_by_path(self, path):
-                return _Entry()
-
+        text = "<p>tokyo " + (" " * 128) + "x</p>"
         self.assertFalse(
-            _entry_contains_phrase(
-                _Archive(),
-                "article",
-                _phrase_words("tokyo banana"),
-                4096,
-            )
+            _phrase_in_word_stream(text.casefold(), _phrase_words("tokyo banana"))
         )
 
     def test_phrase_read_supplies_mimetype_and_preview_to_later_stages(self):
@@ -257,8 +223,7 @@ class SearchContractTests(unittest.TestCase):
         query = "INN is a non-steroidal anti-inflammatory drug (NSAID"
 
         pool = search._rank_results([result], query, 10)
-        pool = search._apply_content_phrase_boost([result], query, pool, 10)
-        search._populate_result_mimetypes(pool)
+        pool = search._enrich_pool([result], query, pool, 10)
 
         self.assertEqual(pool[0]["id"], "manual:exact")
         self.assertTrue(pool[0]["lead"])

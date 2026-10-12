@@ -20,6 +20,9 @@ class SourceInfo:
     icon_url: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        # ``icon_path`` is deliberately not exposed: it is a server-side lookup
+        # key used to serve ``/source-icon/{zim}`` and is meaningless to
+        # clients. The derived ``icon_url`` is the public form.
         return {
             "key": self.key,
             "name": self.name,

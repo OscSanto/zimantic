@@ -161,6 +161,11 @@ class Embedder:
 
     def embed(self, texts: list[str]) -> np.ndarray:
         """e5 expects each text to start with "query: " or "passage: "."""
+        if not texts:
+            # No current caller batches zero texts, but refuse to crash on
+            # ``max()`` over an empty list; the shape is unknown until the
+            # first real batch, so return a degenerate row-less array.
+            return np.empty((0, 0), dtype=np.float32)
         encoded = [self._ids(t) for t in texts]
         width = max(map(len, encoded))
         ids = np.array([e + [1] * (width - len(e)) for e in encoded], dtype=np.int64)

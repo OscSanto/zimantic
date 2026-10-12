@@ -877,11 +877,22 @@ def _article_content_response(content: bytes | memoryview, mimetype: str) -> Res
     )
 
 
-def _json_with_etag(request: Request, payload) -> Response:
-    """JSON response with a content ETag, so a warm browser can revalidate
-    source discovery cheaply with If-None-Match instead of re-downloading."""
-    body = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
-    etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
+def _json_response(request: Request, memo_key: str, version, payload_factory, memos) -> Response:
+    """JSON response with a content ETag, memoized per app instance.
+
+    Re-serializing and hashing a multi-megabyte payload on every poll would
+    make ETag revalidation nearly as expensive as a full download, so the
+    serialized body is reused until ``version`` changes. ``memos`` is owned by
+    the calling app, so two app instances never share cached payloads.
+    """
+    cached = memos.get(memo_key)
+    if cached is None or cached[0] != version:
+        payload = payload_factory()
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
+        etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
+        memos[memo_key] = (version, payload, body, etag)
+    else:
+        _, _, body, etag = cached
     headers = {"ETag": etag, "Cache-Control": "no-cache"}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
@@ -966,6 +977,12 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
     try:
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
     finally:
+        shutdown = getattr(searchClass, "close", None)
+        if callable(shutdown):
+            try:
+                shutdown()
+            except Exception as error:  # never mask the original shutdown path
+                logger.warning("zimantic: search shutdown failed (%s)", error)
         try:
             PID_FILE.unlink()
         except OSError:

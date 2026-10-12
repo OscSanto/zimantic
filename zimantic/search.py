@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import logging
 import math
 import posixpath
@@ -57,6 +57,7 @@ from .searching.sources import (
 )
 from .content.reader import (
     DEFAULT_MAX_HTML_BYTES,
+    DEFAULT_PARSE_TIMEOUT,
     DEFAULT_PREVIEW_CHARS,
     extract_excerpt,
     read_entry,
@@ -81,9 +82,18 @@ MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
 DEFAULT_LONG_QUERY = 10
 MAX_PHRASE_CANDIDATES = 16
+# How long an owner waits for a search slot before reporting busy. Absorbing a
+# short burst of retries this way lets an in-flight search finish and the
+# query be answered (or served from cache) instead of failing with 503.
+SLOT_WAIT_SECONDS = 2.0
+# Leading bytes returned by a head-only article read (shell title/favicon).
+HEAD_READ_BYTES = 256 << 10
 
 
 _HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
+
+# Entries whose readable text can be searched for an exact query phrase.
+_PHRASE_MIMETYPES = frozenset({"text/plain", "text/html", "application/xhtml+xml"})
 
 
 def _readable_words(text: str) -> Iterator[str]:
@@ -115,37 +125,27 @@ def _readable_words(text: str) -> Iterator[str]:
         position += 1
 
 
-def _entry_phrase_match(
-    archive: Archive,
-    path: str,
-    phrase_words: list[str],
-    max_html_bytes: int,
-) -> tuple[bool, str | None, bytes | None]:
-    """Check a full-text candidate for the query's exact readable-text phrase."""
-    if len(phrase_words) < 2:
-        return False, None, None
-    try:
-        item = archive.get_entry_by_path(path).get_item()
-        mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
-        raw = bytes(item.content[:max_html_bytes])
-    except (KeyError, RuntimeError, TypeError, ValueError):
-        return False, None, None
-    if mimetype not in {"text/plain", "text/html", "application/xhtml+xml"}:
-        return False, mimetype, None
-    text = raw.decode("utf-8", "ignore").casefold()
-    phrase = " ".join(phrase_words)
-    words = " ".join(_readable_words(text))
-    matched = f" {phrase} " in f" {words} "
-    return matched, mimetype, raw if matched else None
+def _phrase_in_word_stream(text: str, phrase_words: list[str]) -> bool:
+    """True when ``phrase_words`` appears as a contiguous run of readable words.
 
-
-def _entry_contains_phrase(
-    archive: Archive,
-    path: str,
-    phrase_words: list[str],
-    max_html_bytes: int,
-) -> bool:
-    return _entry_phrase_match(archive, path, phrase_words, max_html_bytes)[0]
+    Streams ``_readable_words`` and matches a rolling window against the phrase
+    in one linear pass, so no joined copy of the whole article's words is ever
+    materialized (a few MB per candidate on large pages).
+    """
+    width = len(phrase_words)
+    if width == 0:
+        return True
+    window: list[str] = []
+    for word in _readable_words(text):
+        if word == phrase_words[len(window)]:
+            window.append(word)
+            if len(window) == width:
+                return True
+        elif word == phrase_words[0]:
+            window = [word]
+        else:
+            window = []
+    return False
 
 
 class SearchQueryError(ValueError):
@@ -258,7 +258,39 @@ def _rrf_scores(
     return scores, details, fulltext_weight
 
 
-def _score_ranked_document(
+@dataclass(slots=True)
+class _RankedAssessment:
+    """Scored candidate plus everything needed to render its response dict.
+
+    Ranking computes one of these per candidate and sorts on the numeric
+    fields; the heavy ``output`` dict (ranking metadata and explanation) is
+    only rendered for the docs that survive the top-k cut.
+    """
+
+    identity: str
+    doc: dict[str, Any]
+    query_words: list[str]
+    title_tokens: list[str]
+    title_matches: int
+    title_coverage: float
+    title_density: float
+    title_quality: float
+    title_phrase_hit: int
+    content_phrase_hit: bool
+    intent: float
+    total: float
+    lexical: float
+    source_rank: int
+    source_casefold: str
+    path: str
+    rrf_score: float
+    rrf_details: dict[str, dict[str, dict[str, Any]]]
+    fulltext_weight: float
+    disambig: dict[str, Any]
+    user_page: dict[str, Any]
+
+
+def _assess_ranked_document(
     identity: str,
     doc: dict[str, Any],
     query_words: list[str],
@@ -267,7 +299,7 @@ def _score_ranked_document(
     scores: dict[str, float],
     rrf_details: dict[str, dict[str, dict[str, Any]]],
     fulltext_weight: float,
-):
+) -> _RankedAssessment:
     title_tokens = _content_terms(doc["title"])
     title_token_set = set(title_tokens)
     title_matches = sum(term in title_token_set for term in query_words)
@@ -316,26 +348,65 @@ def _score_ranked_document(
         user_page_action = "demote"
         user_page_factor = DEFAULT_USER_PAGE_PENALTY
         user_page_adjustment = total - before_user_page
+    return _RankedAssessment(
+        identity=identity,
+        doc=doc,
+        query_words=query_words,
+        title_tokens=title_tokens,
+        title_matches=title_matches,
+        title_coverage=title_coverage,
+        title_density=title_density,
+        title_quality=title_quality,
+        title_phrase_hit=title_phrase_hit,
+        content_phrase_hit=content_phrase_hit,
+        intent=intent,
+        total=total,
+        lexical=lexical,
+        source_rank=source_rank,
+        source_casefold=doc["source"].casefold(),
+        path=doc["path"],
+        rrf_score=rrf_score,
+        rrf_details=rrf_details,
+        fulltext_weight=fulltext_weight,
+        disambig=disambig,
+        user_page={
+            "action": user_page_action,
+            "factor": user_page_factor,
+            "adjustment": round(user_page_adjustment, 6),
+        },
+    )
+
+
+def _render_ranked_document(assessment: _RankedAssessment) -> dict[str, Any]:
+    """Build the public/ranking-friendly dict for a surviving candidate.
+
+    Kept separate from ``_assess_ranked_document`` so ranking only pays for the
+    nested ``ranking``/``explain`` structure on the docs that are actually kept.
+    """
+    a = assessment
+    title_phrase_hit = a.title_phrase_hit
+    phrase_hit = max(title_phrase_hit, a.content_phrase_hit)
+    user_page_action = a.user_page["action"]
     explanation = (
-        f"title {round(title_coverage * 100)}% "
-        f"({title_matches}/{len(query_words) if query_words else 0}, "
-        f"density {round(title_density * 100)}%), "
+        f"title {round(a.title_coverage * 100)}% "
+        f"({a.title_matches}/{len(a.query_words) if a.query_words else 0}, "
+        f"density {round(a.title_density * 100)}%), "
         f"phrase {'yes' if phrase_hit else 'no'}, "
-        f"intent {'yes' if intent else 'no'}"
-        f"{', disambiguation ' + disambig['action'] if disambig['action'] != 'none' else ''}"
+        f"intent {'yes' if a.intent else 'no'}"
+        f"{', disambiguation ' + a.disambig['action'] if a.disambig['action'] != 'none' else ''}"
         f"{', user page demote' if user_page_action == 'demote' else ''}"
     )
-    output = dict(doc)
+    output = dict(a.doc)
     output.pop("_content_phrase", None)
     output.update({
-        "score": total,
+        "score": a.total,
         "explain": explanation,
-        "rank": source_rank,
+        "rank": a.source_rank,
         "ranking": {
-            "final_score": round(total, 6),
-            "rrf_score": round(rrf_score, 6),
+            "final_score": round(a.total, 6),
+            "rrf_score": round(a.rrf_score, 6),
             "rrf": {
-                method: rrf_details.get(identity, {}).get(
+                method: a.rrf_details.get(a.identity, {}).get(
                     method,
                     {
                         "rank": None,
@@ -347,39 +418,27 @@ def _score_ranked_document(
                 for method, weight in (
                     ("semantic", 1.0),
                     ("title", 1.0),
-                    ("fulltext", fulltext_weight),
+                    ("fulltext", a.fulltext_weight),
                 )
             },
             "title": {
-                "query_terms": query_words,
-                "matches": title_matches,
-                "term_count": len(query_words),
-                "coverage": round(title_coverage, 6),
-                "density": round(title_density, 6),
-                "quality": round(title_quality, 6),
+                "query_terms": a.query_words,
+                "matches": a.title_matches,
+                "term_count": len(a.query_words),
+                "coverage": round(a.title_coverage, 6),
+                "density": round(a.title_density, 6),
+                "quality": round(a.title_quality, 6),
             },
             "phrase": bool(phrase_hit),
-            "content_phrase": content_phrase_hit,
-            "intent": bool(intent),
-            "lexical_score": round(lexical, 6),
-            "disambiguation": disambig,
-            "user_page": {
-                "action": user_page_action,
-                "factor": user_page_factor,
-                "adjustment": round(user_page_adjustment, 6),
-            },
-            "source_rank": source_rank,
+            "content_phrase": a.content_phrase_hit,
+            "intent": bool(a.intent),
+            "lexical_score": round(a.lexical, 6),
+            "disambiguation": a.disambig,
+            "user_page": a.user_page,
+            "source_rank": a.source_rank,
         },
     })
-    return (
-        total,
-        lexical,
-        title_quality,
-        source_rank,
-        doc["source"].casefold(),
-        doc["path"],
-        output,
-    )
+    return output
 
 
 class Search:
@@ -411,6 +470,7 @@ class Search:
             cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
+        self._slot_condition = threading.Condition()
         self._executor = ThreadPoolExecutor(
             max_workers=self.source_workers,
             thread_name_prefix="zimantic-search",
@@ -851,7 +911,7 @@ class Search:
                 index = self.indexes[local_name]
                 if index.archive is not None:
                     try:
-                        with index.lock:
+                        with index.read_lock:
                             homepage = self._resolve_article_entry(index.archive).path
                             icon_path = _find_archive_icon_path(index.archive, homepage)
                     except (
@@ -997,6 +1057,22 @@ class Search:
         with self._state_lock:
             return [source.to_dict() for source in self.sources.values()]
 
+    def source_version(self) -> int:
+        """Monotonic token that changes whenever the source set changes.
+
+        Lets the HTTP layer cache a serialized ``/sources`` payload instead of
+        rebuilding and hashing it on every poll (a large Kiwix catalog makes
+        that payload multi-megabyte).
+        """
+        with self._state_lock:
+            return getattr(self, "_cache_generation", 0)
+
+    def close(self) -> None:
+        """Release the search thread pool, cancelling work not yet started."""
+        executor = getattr(self, "_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
     def local_names(self) -> list[str]:
         with self._state_lock:
             return list(self.indexes)
@@ -1033,8 +1109,20 @@ class Search:
                 raise ArticleUnavailableError("article redirect is unavailable") from error
         raise ArticleUnavailableError("article redirect chain is too long")
 
-    def read_article(self, zim_name: str, path: str | None = None) -> dict[str, Any]:
-        """Read one local ZIM entry without changing indexes or search state."""
+    def read_article(
+        self,
+        zim_name: str,
+        path: str | None = None,
+        head_only: bool = False,
+    ) -> dict[str, Any]:
+        """Read one local ZIM entry without changing indexes or search state.
+
+        ``head_only`` returns just the leading bytes of the entry, which is all
+        the ``/content/`` shell needs to read a title and favicon from the
+        ``<head>``; the shell's iframe fetches the full entry separately, so
+        loading the whole (possibly tens-of-MB) article for the shell would be
+        a wasted read.
+        """
         with self._state_lock:
             index = self.indexes.get(zim_name)
         if index is None:
@@ -1050,7 +1138,7 @@ class Search:
                 raise ArticleUnavailableError("ZIM is being reloaded") from error
             acquired = True
             requested_path = None if path is None else self._article_path(path)
-            with index.lock:
+            with index.read_lock:
                 try:
                     entry = self._resolve_article_entry(index.archive, requested_path)
                     item = entry.get_item()
@@ -1068,12 +1156,14 @@ class Search:
                         raise ArticleTooLargeError(
                             f"article exceeds the {max_bytes} byte serving limit"
                         )
-                    content = item.content
+                    content = (
+                        item.content[:HEAD_READ_BYTES] if head_only else item.content
+                    )
                 except (ArticleNotFoundError, ArticleUnavailableError):
                     raise
                 except (KeyError, RuntimeError, ValueError) as error:
                     raise ArticleUnavailableError("article content is unavailable") from error
-            if len(content) > max_bytes:
+            if not head_only and len(content) > max_bytes:
                 raise ArticleTooLargeError(
                     f"article exceeds the {max_bytes} byte serving limit"
                 )
@@ -1087,6 +1177,12 @@ class Search:
         finally:
             if acquired:
                 self._release_index(index)
+
+    def read_article_head(
+        self, zim_name: str, path: str | None = None
+    ) -> dict[str, Any]:
+        """Read only the leading bytes of one entry (see ``read_article``)."""
+        return self.read_article(zim_name, path, head_only=True)
 
     def read_source_icon(self, zim_name: str) -> dict[str, Any]:
         """Read the source illustration selected during local source discovery."""
@@ -1120,21 +1216,30 @@ class Search:
                 raise ArticleUnavailableError("ZIM is being reloaded") from error
             acquired = True
             db = self._db_for(index)
-            with index.lock:
+            with index.read_lock:
                 try:
-                    count = int(
-                        db.execute(
-                            "SELECT count(*) FROM docs WHERE target IS NULL"
-                        ).fetchone()[0]
-                    )
-                    if count < 1:
+                    # A COUNT(*) scan plus an OFFSET walk is O(n) on the FTS5
+                    # table; for large ZIMs that is the whole cost of /random.
+                    # Sample rowids directly instead: rowids are dense entry
+                    # ids, so a bounded number of ranged lookups lands on a
+                    # random article in O(1) each. Redirect rows (target not
+                    # NULL) are skipped by the same predicate.
+                    if not db.execute(
+                        "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
+                    ).fetchone():
                         raise ArticleNotFoundError("ZIM has no indexed articles")
-                    offset = secrets.randbelow(count)
-                    row = db.execute(
-                        "SELECT path FROM docs "
-                        "WHERE target IS NULL ORDER BY rowid LIMIT 1 OFFSET ?",
-                        (offset,),
-                    ).fetchone()
+                    upper = max(1, int(getattr(index.archive, "entry_count", 0) or 0))
+                    row = None
+                    for _ in range(12):
+                        point = secrets.randbelow(upper)
+                        row = db.execute(
+                            "SELECT path FROM docs "
+                            "WHERE rowid >= ? AND target IS NULL "
+                            "ORDER BY rowid LIMIT 1",
+                            (point,),
+                        ).fetchone()
+                        if row and row[0]:
+                            break
                 except ArticleNotFoundError:
                     raise
                 except (sqlite3.Error, TypeError, ValueError) as error:
@@ -1206,7 +1311,7 @@ class Search:
                 try:
                     self._acquire_index(index)
                     acquired = True
-                    with index.lock:
+                    with index.read_lock:
                         report["entry_count"] = int(index.archive.entry_count)
                         try:
                             report["homepage"] = self._resolve_article_entry(index.archive).path
@@ -1581,12 +1686,15 @@ class Search:
         """Run one uncached search and publish progress to waiting callers."""
         total_sources = len(sources)
         inflight_key = (generation, cache_key)
-        # Fail fast when all search slots are occupied.
-        acquired = self._search_slots.acquire(blocking=False)
+        acquired = False
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
         cache_value: Any = None
         try:
+            # Wait briefly for a slot so a burst of retries can be absorbed;
+            # only give up (busy) when nothing frees within the budget. Done
+            # inside the try so an interrupt still releases the inflight key.
+            acquired = self._acquire_search_slot()
             if not acquired:
                 yield {
                     "type": "error",
@@ -1699,8 +1807,7 @@ class Search:
             if len(completed) != total_sources:
                 pool = self._rank_results(completed, query, pool_target)
                 counts = self._source_counts(pool)
-            pool = self._apply_content_phrase_boost(completed, query, pool, pool_target)
-            self._populate_result_mimetypes(pool)
+            pool = self._enrich_pool(completed, query, pool, pool_target)
             counts = self._source_counts(pool)
             state = self._page_state(pool, source, offset, page_size, debug)
             self._hydrate_results(state["results"])
@@ -1738,7 +1845,33 @@ class Search:
                 future.cancel()
             if acquired:
                 self._search_slots.release()
+                condition = getattr(self, "_slot_condition", None)
+                if condition is not None:
+                    with condition:
+                        condition.notify_all()
             self._finish_inflight(inflight_key, pending, cache_value)
+
+    def _acquire_search_slot(self) -> bool:
+        """Take a search slot, waiting up to ``SLOT_WAIT_SECONDS`` for one.
+
+        Returns False only when every slot stays busy for the whole budget, at
+        which point the caller reports busy. Test doubles without a condition
+        fall back to a non-blocking attempt.
+        """
+        if self._search_slots.acquire(blocking=False):
+            return True
+        condition = getattr(self, "_slot_condition", None)
+        if condition is None:
+            return False
+        deadline = time.monotonic() + SLOT_WAIT_SECONDS
+        with condition:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                condition.wait(remaining)
+                if self._search_slots.acquire(blocking=False):
+                    return True
 
     def _search_source(
         self,
@@ -1969,7 +2102,7 @@ class Search:
 
         previews: dict[str, str] = {}
         try:
-            with index.lock:
+            with index.read_lock:
                 for doc in docs:
                     try:
                         entry = index.archive.get_entry_by_path(doc["path"])
@@ -1987,6 +2120,7 @@ class Search:
                                 33_554_432,
                             ),
                             max_preview_chars=self.preview_chars,
+                            timeout=DEFAULT_PARSE_TIMEOUT,
                         )
                     except (KeyError, OSError, RuntimeError, ValueError) as error:
                         logger.warning(
@@ -2050,44 +2184,109 @@ class Search:
                 if source is not None:
                     preview_cache.put((source.key, doc["path"]), lead)
 
-    def _populate_result_mimetypes(self, pool: list[dict[str, Any]]) -> None:
-        """Read MIME metadata only for documents that survive global ranking."""
-        if not pool:
-            return
-        with self._state_lock:
-            sources = dict(self.sources)
-            indexes = dict(self.indexes)
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for doc in pool:
-            source = sources.get(doc.get("source_key"))
-            if source is None or source.mode != "local" or not source.local_name:
-                continue
-            index = indexes.get(source.local_name)
-            if (
-                index is not None
-                and index.archive is not None
-                and not doc.get("mimetype")
-            ):
-                grouped.setdefault(source.local_name, []).append(doc)
+    def _enrich_pool(
+        self,
+        source_results: list[SourceResult],
+        query: str,
+        pool: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Fill MIME types and run the content-phrase check in one archive pass.
 
-        for local_name, docs in grouped.items():
-            index = indexes[local_name]
+        Reading each local pool entry once (instead of a phrase pass followed
+        by a separate MIME pass) is what keeps a multi-word search from
+        re-reading the same articles. Metadata and the phrase flag are written
+        onto the source-level docs too, so a re-rank triggered by a phrase hit
+        inherits them without touching the archive again. Returns a re-ranked
+        pool when any phrase matched, otherwise the pool unchanged.
+        """
+        phrase_words = _phrase_words(query)
+        phrase_active = len(phrase_words) >= 2 and bool(pool)
+        _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
+        max_html_bytes = _int_config(self.cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES)
+        preview_chars = getattr(
+            self,
+            "preview_chars",
+            _int_config(self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS),
+        )
+        indexes = getattr(self, "indexes", {})
+
+        phrase_ids: set[str] = set()
+        if phrase_active:
+            checked = 0
+            for result in pool:
+                if checked >= MAX_PHRASE_CANDIDATES:
+                    break
+                if result["ranking"]["rrf"]["fulltext"]["rank"] is None:
+                    continue
+                source = source_by_key.get(result.get("source_key"))
+                if source is None or not source.local_name:
+                    continue
+                index = indexes.get(source.local_name)
+                if index is None or index.archive is None:
+                    continue
+                checked += 1
+                phrase_ids.add(result["id"])
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for result in pool:
+            source = source_by_key.get(result.get("source_key"))
+            if source is None or not source.local_name:
+                continue
+            grouped.setdefault(source.local_name, []).append(result)
+
+        found = False
+        for local_name, result_docs in grouped.items():
+            index = indexes.get(local_name)
+            if index is None or index.archive is None:
+                continue
             try:
                 self._acquire_index(index)
             except RuntimeError:
                 continue
             try:
-                with index.lock:
-                    for doc in docs:
+                with index.read_lock:
+                    for result in result_docs:
+                        is_phrase_candidate = result["id"] in phrase_ids
+                        if not is_phrase_candidate and result.get("mimetype"):
+                            continue  # nothing left to learn about this doc
                         try:
-                            item = index.archive.get_entry_by_path(doc["path"]).get_item()
-                            doc["mimetype"] = (
+                            item = index.archive.get_entry_by_path(result["path"]).get_item()
+                            mimetype = (
                                 item.mimetype or "application/octet-stream"
                             ).split(";", 1)[0].strip().lower()
                         except (KeyError, RuntimeError, ValueError):
                             continue
+                        source_doc = docs.get(result["id"])
+                        result["mimetype"] = mimetype
+                        if source_doc is not None:
+                            source_doc["mimetype"] = mimetype
+                        if not is_phrase_candidate or mimetype not in _PHRASE_MIMETYPES:
+                            continue
+                        try:
+                            raw = bytes(item.content[:max_html_bytes])
+                        except (KeyError, RuntimeError, TypeError, ValueError):
+                            continue
+                        hit = _phrase_in_word_stream(
+                            raw.decode("utf-8", "ignore").casefold(), phrase_words
+                        )
+                        if source_doc is not None:
+                            source_doc["_content_phrase"] = hit
+                        if not hit:
+                            continue
+                        found = True
+                        if mimetype in {"text/html", "application/xhtml+xml"}:
+                            preview = extract_excerpt(
+                                raw, max_preview_chars=preview_chars
+                            )
+                            if preview:
+                                lead = self._preview(preview)
+                                result["lead"] = lead
+                                if source_doc is not None:
+                                    source_doc["lead"] = lead
             finally:
                 self._release_index(index)
+        return self._rank_results(source_results, query, limit) if found else pool
 
     def _preview(self, text: str) -> str:
         limit = getattr(
@@ -2195,8 +2394,8 @@ class Search:
             query,
             max(self.candidate_count, limit),
         )
-        scored = [
-            _score_ranked_document(
+        assessed = [
+            _assess_ranked_document(
                 identity,
                 doc,
                 query_words,
@@ -2208,78 +2407,18 @@ class Search:
             )
             for identity, doc in docs.items()
         ]
-        scored.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3], item[4], item[5]))
+        assessed.sort(key=lambda item: (
+            -item.total,
+            -item.lexical,
+            -item.title_quality,
+            item.source_rank,
+            item.source_casefold,
+            item.path,
+        ))
         ranked = []
-        for final_rank, item in enumerate(scored[:limit], 1):
-            output = item[-1]
+        for final_rank, assessment in enumerate(assessed[:limit], 1):
+            output = _render_ranked_document(assessment)
             output["ranking"]["final_rank"] = final_rank
             ranked.append(output)
         return ranked
 
-    def _apply_content_phrase_boost(
-        self,
-        source_results: list[SourceResult],
-        query: str,
-        pool: list[dict[str, Any]],
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        """Inspect only top final candidates for an exact readable-text phrase."""
-        phrase_words = _phrase_words(query)
-        if len(phrase_words) < 2 or not pool:
-            return pool
-
-        _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
-        max_html_bytes = _int_config(
-            self.cfg,
-            "max_html_bytes",
-            DEFAULT_MAX_HTML_BYTES,
-        )
-        preview_chars = getattr(
-            self,
-            "preview_chars",
-            _int_config(self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS),
-        )
-        checked = 0
-        found = False
-        for result in pool:
-            if checked >= MAX_PHRASE_CANDIDATES:
-                break
-            if result["ranking"]["rrf"]["fulltext"]["rank"] is None:
-                continue
-            doc = docs.get(result["id"])
-            if doc is None:
-                continue
-            source = source_by_key.get(doc["source_key"])
-            if source is None or not source.local_name:
-                continue
-            index = getattr(self, "indexes", {}).get(source.local_name)
-            if index is None or index.archive is None:
-                continue
-            checked += 1
-            try:
-                self._acquire_index(index)
-            except RuntimeError:
-                continue
-            try:
-                with index.lock:
-                    phrase_hit, mimetype, raw = _entry_phrase_match(
-                        index.archive,
-                        doc["path"],
-                        phrase_words,
-                        max_html_bytes,
-                    )
-                    if mimetype:
-                        doc["mimetype"] = mimetype
-                    doc["_content_phrase"] = phrase_hit
-                    if phrase_hit and raw is not None:
-                        if mimetype in {"text/html", "application/xhtml+xml"}:
-                            preview = extract_excerpt(
-                                raw,
-                                max_preview_chars=preview_chars,
-                            )
-                            if preview:
-                                doc["lead"] = self._preview(preview)
-                    found = found or phrase_hit
-            finally:
-                self._release_index(index)
-        return self._rank_results(source_results, query, limit) if found else pool

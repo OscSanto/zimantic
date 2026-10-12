@@ -2,6 +2,7 @@ import codecs
 import json
 import posixpath
 import re
+import time
 from html.parser import HTMLParser
 from urllib.parse import unquote
 from typing import Iterator, NamedTuple
@@ -10,6 +11,19 @@ from libzim.reader import Archive, set_cluster_cache_max_size
 # libzim undercounts this cache: its 16 MB default really used ~170 MB.
 # 1 MB used ~4 MB and was not slower.
 set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
+
+# Best-effort budget for one entry parse (HTML or PDF). Parsers check a shared
+# deadline cooperatively between chunks/pages and return the partial result,
+# so an adversarial page slows a request down instead of hanging it. The
+# builder passes no timeout (offline; skipping entries would silently degrade
+# the index); the runtime preview path uses this default.
+DEFAULT_PARSE_TIMEOUT = 5.0
+
+# Parsing bookkeeping keeps one open block per candidate tag. Beyond this many
+# nested containers the page is not prose: stop accumulating text for the outer
+# blocks (marking them overflow) so per-chunk work stays bounded instead of
+# growing with nesting depth.
+MAX_ACTIVE_DEPTH = 200
 
 
 class EntryRecord(NamedTuple):
@@ -250,7 +264,8 @@ class _TextExtractor(HTMLParser):
 
     def _separate(self) -> None:
         for block in self.active:
-            block["parts"].append(" ")
+            if not block.get("overflow"):
+                block["parts"].append(" ")
 
     def handle_starttag(self, tag, attrs):
         if self.skipping:
@@ -273,6 +288,9 @@ class _TextExtractor(HTMLParser):
                 "priority": self.CANDIDATE_PRIORITIES[tag],
                 "order": self.block_order,
                 "nested": False,
+                # A container opened past the nesting budget cannot be article
+                # text; it tracks nesting only, so text and separators skip it.
+                "overflow": len(self.active) >= MAX_ACTIVE_DEPTH,
                 "parts": [],
             }
             match = _ELEMENT_LANG.search(attributes.get("class") or "")
@@ -314,7 +332,8 @@ class _TextExtractor(HTMLParser):
         if self.skipping:
             return
         for block in self.active:
-            block["parts"].append(data)
+            if not block.get("overflow"):
+                block["parts"].append(data)
 
     @staticmethod
     def _text(parts):
@@ -329,7 +348,7 @@ class _TextExtractor(HTMLParser):
         default_lang = "default" if "default" in langs else None
         candidates = []
         for block in self.blocks:
-            if block["nested"]:
+            if block["nested"] or block.get("overflow"):
                 continue
             if default_lang is not None and block.get("lang") not in (None, default_lang):
                 continue
@@ -350,10 +369,13 @@ class _TextExtractor(HTMLParser):
         and order only grows), so the lead alone determines the result. We stop
         only when every still-open block is already marked nested: an open
         non-nested container could otherwise still yield a candidate later.
+        Overflow containers are treated as satisfied (they never yield text).
         """
         if self._saw_lang or self._priority0_chars < max_chars:
             return False
-        return all(block["nested"] for block in self.active)
+        return all(
+            block["nested"] or block.get("overflow") for block in self.active
+        )
 
 
 def is_disambiguation(title: str, text: str, html: bytes = b"") -> bool:
@@ -398,12 +420,19 @@ _HEAD = re.compile(rb"<head\b[^>]*>.*?</head>", re.I | re.S)
 _TITLE = re.compile(rb"<title\b[^>]*>.*?</title>", re.I | re.S)
 
 
-def iter_text_blocks(html: bytes, max_chars: int | None = None) -> Iterator[str]:
+def iter_text_blocks(
+    html: bytes,
+    max_chars: int | None = None,
+    deadline: float | None = None,
+) -> Iterator[str]:
     """Yield substantial article blocks, preferring paragraphs over fallbacks.
 
     When ``max_chars`` is given, parsing stops as soon as the opening blocks
     provably fill that budget (see ``_TextExtractor._can_stop``), so a long page
-    costs only its lead rather than the whole document.
+    costs only its lead rather than the whole document. ``deadline`` is a
+    ``time.monotonic()`` budget: parsing stops between chunks once it passes and
+    yields whatever text was collected, so a pathological page cannot hang a
+    request.
     """
     parser = _TextExtractor()
     html = _SCRIPT_STYLE.sub(b" ", html)
@@ -412,6 +441,8 @@ def iter_text_blocks(html: bytes, max_chars: int | None = None) -> Iterator[str]
     decoder = codecs.getincrementaldecoder("utf-8")("ignore")
     for start in range(0, len(html), CHUNK):
         parser.feed(decoder.decode(html[start:start + CHUNK]))
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         if max_chars is not None and parser._can_stop(max_chars):
             break
     parser.feed(decoder.decode(b"", final=True))
@@ -457,15 +488,17 @@ def _join_blocks(candidates: list[str], max_chars: int) -> str:
 def extract_excerpt(
     html: bytes,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    deadline: float | None = None,
 ) -> str:
     """Return the article's opening text, bounded to ``max_preview_chars``.
 
     The returned text is used as the UI preview at query time and as the
     embedding input during indexing; the embedder truncates it to
-    ``embedding_tokens`` when it creates the vector.
+    ``embedding_tokens`` when it creates the vector. ``deadline`` bounds the
+    parse cooperatively (see ``iter_text_blocks``).
     """
     max_chars = max(1, int(max_preview_chars))
-    candidates = list(iter_text_blocks(html, max_chars=max_chars))
+    candidates = list(iter_text_blocks(html, max_chars=max_chars, deadline=deadline))
     if not candidates:
         return ""
     return _join_blocks(candidates, max_chars)
@@ -653,12 +686,18 @@ def _plain_text_excerpt(raw: bytes, max_chars: int) -> str:
     return truncate_at_word_boundary(" ".join(text.split()), max_chars)
 
 
-def _markdown_excerpt(raw: bytes, max_chars: int) -> tuple[str, str]:
+def _markdown_excerpt(
+    raw: bytes,
+    max_chars: int,
+    deadline: float | None = None,
+) -> tuple[str, str]:
     """Return ``(excerpt, front_matter_title)`` for a markdown document.
 
     Front matter and fenced code are dropped, section headings such as
     ``# --instructions--`` and list markers are removed, and link/image syntax
     is reduced to its label, so the excerpt is the prose a reader sees.
+    ``deadline`` skips any remaining cleanup steps once the parse budget is
+    spent, keeping the text normalized so far.
     """
     text = raw.decode("utf-8", "ignore")
     title = ""
@@ -668,13 +707,23 @@ def _markdown_excerpt(raw: bytes, max_chars: int) -> tuple[str, str]:
         if title_match:
             title = title_match.group(1).strip().strip("'\"")
         text = text[front.end():]
-    text = _MARKDOWN_FENCE.sub(" ", text)
-    text = _MARKDOWN_SECTION.sub(" ", text)
-    text = _MARKDOWN_LINK.sub(r"\1", text)
-    text = _MARKDOWN_HTML.sub(" ", text)
-    text = _MARKDOWN_HEADING.sub("", text)
-    text = _MARKDOWN_MARKER.sub("", text)
-    text = text.replace("`", "").replace("*", "").replace("~~", "")
+
+    def expired() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    if not expired():
+        text = _MARKDOWN_FENCE.sub(" ", text)
+    if not expired():
+        text = _MARKDOWN_SECTION.sub(" ", text)
+    if not expired():
+        text = _MARKDOWN_LINK.sub(r"\1", text)
+    if not expired():
+        text = _MARKDOWN_HTML.sub(" ", text)
+    if not expired():
+        text = _MARKDOWN_HEADING.sub("", text)
+    if not expired():
+        text = _MARKDOWN_MARKER.sub("", text)
+        text = text.replace("`", "").replace("*", "").replace("~~", "")
     return truncate_at_word_boundary(" ".join(text.split()), max_chars), title
 
 
@@ -695,6 +744,7 @@ def _pdf_module():
 def extract_pdf_excerpt(
     raw: bytes,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    deadline: float | None = None,
 ) -> str:
     """Return a PDF's opening text, bounded to ``max_preview_chars``.
 
@@ -702,7 +752,8 @@ def extract_pdf_excerpt(
     a long document costs little. A scanned PDF has no text layer and yields an
     empty string, which the caller treats as "not indexable" rather than storing
     a title-only or boilerplate entry. A password-protected or malformed PDF is
-    skipped the same way instead of failing the build.
+    skipped the same way instead of failing the build. ``deadline`` bounds the
+    page loop so a hostile PDF cannot monopolize a request.
     """
     if not raw:
         return ""
@@ -720,6 +771,8 @@ def extract_pdf_excerpt(
         pieces: list[str] = []
         total = 0
         for page in document:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             try:
                 text = page.get_text("text")
             except Exception:
@@ -741,8 +794,9 @@ def _read_pdf_entry(
     entry_id: int,
     raw: bytes,
     max_preview_chars: int,
+    deadline: float | None = None,
 ) -> EntryRecord | None:
-    excerpt = extract_pdf_excerpt(raw, max_preview_chars)
+    excerpt = extract_pdf_excerpt(raw, max_preview_chars, deadline=deadline)
     if len(excerpt) < MIN_BLOCK_CHARS:
         # No text layer (a scan), password-protected, or malformed: skip it
         # rather than store a title-only entry with no searchable body.
@@ -779,6 +833,7 @@ def _read_html_entry(
     entry_id: int,
     html: bytes,
     max_preview_chars: int,
+    deadline: float | None = None,
 ) -> EntryRecord | None:
     if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(html):
         # A script/data file served as HTML (zimit crawls do this for <site>.js)
@@ -797,7 +852,9 @@ def _read_html_entry(
         if companion is not None:
             kind, body = companion
             if kind == "markdown":
-                excerpt, md_title = _markdown_excerpt(body, max_preview_chars)
+                excerpt, md_title = _markdown_excerpt(
+                    body, max_preview_chars, deadline=deadline
+                )
                 if excerpt and not is_javascript_shell(body, excerpt):
                     return EntryRecord(
                         entry_id,
@@ -810,7 +867,9 @@ def _read_html_entry(
                 # Keep this page's own title and path: it is a deep link into the
                 # app route, and its body is real text. Storing the shell target
                 # instead would collapse every article onto "index.html".
-                excerpt = extract_excerpt(body, max_preview_chars=max_preview_chars)
+                excerpt = extract_excerpt(
+                    body, max_preview_chars=max_preview_chars, deadline=deadline
+                )
                 if not excerpt and not _HTML_TAG.search(body):
                     # Plain-text companions (video/playlist descriptions) have no
                     # HTML blocks, so normalize them directly. An HTML body with no
@@ -838,7 +897,7 @@ def _read_html_entry(
             target._index,
         )
 
-    excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars)
+    excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars, deadline=deadline)
     if is_javascript_shell(html, excerpt):
         # An app shell with no article text: nothing useful to index.
         return None
@@ -869,6 +928,7 @@ def read_entry(
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
     max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    timeout: float | None = None,
 ) -> EntryRecord | None:
     """Return (id, title, excerpt, path, target_id), or None.
 
@@ -877,6 +937,11 @@ def read_entry(
 
     fast=True stores the title and path without reading the article body, so no
     text (and therefore no vector) is produced.
+
+    ``timeout`` bounds the whole parse (HTML and PDF) cooperatively via a
+    shared ``time.monotonic()`` deadline; when it passes, the entry yields a
+    partial excerpt rather than hanging the caller. The builder passes no
+    timeout so nothing is silently dropped offline.
 
     """
     entry = zim._get_entry_by_id(i)
@@ -900,6 +965,10 @@ def read_entry(
     if entry_size > entry_limit:
         return None
 
+    deadline = (
+        time.monotonic() + float(timeout) if timeout is not None else None
+    )
+
     content = item.content
     try:
         html_limit = max(1, int(max_html_bytes))
@@ -911,7 +980,7 @@ def read_entry(
     del content, item
 
     if mimetype == "application/pdf":
-        return _read_pdf_entry(entry, i, raw, max_preview_chars)
+        return _read_pdf_entry(entry, i, raw, max_preview_chars, deadline=deadline)
     if mimetype == "text/plain":
         return _read_plain_text_entry(entry, i, raw, max_preview_chars)
-    return _read_html_entry(zim, entry, i, raw, max_preview_chars)
+    return _read_html_entry(zim, entry, i, raw, max_preview_chars, deadline=deadline)

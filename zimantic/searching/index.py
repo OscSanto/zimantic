@@ -23,7 +23,12 @@ class _LocalIndex:
     faiss_index: Any | None
     archive: Archive | None
     searcher: Searcher | None
-    lock: threading.Lock
+    lock: threading.Lock  # serializes libzim Searcher (not thread-safe)
+    # Serializes bulk archive-entry scans (previews, MIME fills, phrase
+    # checks, article reads) so they do not stall full-text search and vice
+    # versa. libzim entry reads are thread-safe, so this is a courtesy bound,
+    # not a correctness requirement.
+    read_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     db_path: str | None = None  # read-only sqlite URI, used for per-thread connections
     db_signature: tuple[int, int, int, int] | None = None
     faiss_signature: tuple[int, int, int, int] | None = None

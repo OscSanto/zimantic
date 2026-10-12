@@ -298,10 +298,11 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
                 if global_progress is not None:
                     global_progress.update(zim_sizes[zim])
         else:
-            with ThreadPoolExecutor(
+            pool = ThreadPoolExecutor(
                 max_workers=min(workers, len(zims)),
                 thread_name_prefix="zimantic-build",
-            ) as pool:
+            )
+            try:
                 futures = {pool.submit(run_build, zim): zim for zim in zims}
                 for future in as_completed(futures):
                     zim = futures[future]
@@ -312,6 +313,10 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
                         failures.append((zim, error))
                     if global_progress is not None:
                         global_progress.update(zim_sizes[zim])
+            finally:
+                # On Ctrl-C/SIGTERM drop builds that have not started yet
+                # instead of running every queued ZIM to completion.
+                pool.shutdown(wait=True, cancel_futures=True)
     finally:
         if embedding_pipeline is not None:
             embedding_pipeline.close()
