@@ -15,7 +15,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from .search import (
+from ..search import (
     ArticleNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
@@ -23,8 +23,8 @@ from .search import (
     SearchQueryError,
 )
 
-PAGE = Path(__file__).parent / "index.html"
-ASSET_DIR = Path(__file__).parent
+ASSET_DIR = Path(__file__).parent / "static"
+PAGE = ASSET_DIR / "index.html"
 FAVICON = ASSET_DIR / "favicon.ico"
 FAVICON_16 = ASSET_DIR / "favicon-16x16.png"
 FAVICON_32 = ASSET_DIR / "favicon-32x32.png"

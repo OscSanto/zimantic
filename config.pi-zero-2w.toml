@@ -26,6 +26,9 @@ max_results = 50
 # Small batches save RAM.
 batch_size = 8
 
+# Keep builds serial on the low-memory profile.
+build_workers = 1
+
 max_html_bytes = 4_194_304
 max_entry_bytes = 268435456
 max_article_bytes = 33_554_432

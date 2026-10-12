@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 import logging
 import math
 import posixpath
@@ -13,7 +13,7 @@ import sqlite3
 import threading
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, unquote, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -22,8 +22,35 @@ from libzim.search import Query, Searcher
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .contracts import SourceInfo, SourceResult
+from .searching.config import _file_signature, _float_config, _int_config
+from .searching.index import _LocalIndex, _nprobe
+from .searching.query import (
+    DEFAULT_DISAMBIGUATION_BOOST,
+    DEFAULT_DISAMBIGUATION_PENALTY,
+    DISAMBIGUATION_TITLE,
+    MAX_QUERY_LENGTH,
+    _content_terms,
+    _density,
+    _disambiguation_intent,
+    _fulltext_query,
+    _intent_match,
+    _phrase,
+    _query_terms,
+    _title_prefix_query,
+    _title_query,
+)
+from .searching.sources import (
+    _bounded_catalog_url,
+    _child_text,
+    _find_archive_icon_path,
+    _intent_phrases,
+    _local_name,
+    _parse_remote_xml,
+    _read_limited_response,
+    _source_icon_url,
+    _zim_key,
+)
 from .zim import (
-    DEFAULT_MAX_ENTRY_BYTES,
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     read_entry,
@@ -33,187 +60,16 @@ from .zim import (
 logger = logging.getLogger(__name__)
 
 
-MAX_QUERY_LENGTH = 4096
 DEFAULT_CANDIDATES = 16
 DEFAULT_SOURCE_TIMEOUT = 12
 DEFAULT_MAX_CONCURRENT_SEARCHES = 4
 DEFAULT_MAX_STREAM_RANKS = 16
-DEFAULT_NPROBE_FRACTION = 0.06
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
 DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
 DEFAULT_KIWIX_CATALOG_LIMIT = 50_000
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
-ICON_METADATA_PATH = "-/icon"
-ICON_MAX_BYTES = 1 << 20
-ICON_DISCOVERY_HTML_BYTES = 512 << 10
-STOPWORDS = {
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "how", "what", "where", "when", "why", "who", "which", "can", "could",
-    "do", "does", "did", "i", "you", "my", "me", "to", "of", "in", "on",
-    "at", "for", "with", "about", "find", "some", "any", "there", "it",
-    "that", "this", "and", "or", "if", "so", "will", "would", "should",
-}
-INTENT_RULES = (
-    (re.compile(r"^wikihow", re.I), ("how to", "how do", "how can", "how should", "steps to")),
-)
-
-# Exact disambiguation-title queries are navigation; other matches are demoted.
-DISAMBIGUATION_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
-DEFAULT_DISAMBIGUATION_BOOST = 0.08
-DEFAULT_DISAMBIGUATION_PENALTY = 0.5
-
-
-def _html_attribute(tag: str, name: str) -> str:
-    match = re.search(
-        rf"\b{re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
-        tag,
-        re.I,
-    )
-    if not match:
-        return ""
-    return next((value for value in match.groups() if value is not None), "")
-
-
-def _archive_path_from_href(base: str, href: str) -> str | None:
-    parsed = urlsplit(href.strip())
-    if parsed.scheme or parsed.netloc or not parsed.path:
-        return None
-    path = unquote(parsed.path)
-    if path.startswith("/"):
-        candidate = path[1:]
-    else:
-        candidate = posixpath.join(posixpath.dirname(base), path)
-    if not candidate or any(part == ".." for part in candidate.split("/")):
-        return None
-    normalized = posixpath.normpath(candidate)
-    return normalized if normalized not in {"", "."} else None
-
-
-def _icon_entry_path(archive: Archive, path: str) -> str | None:
-    try:
-        entry = archive.get_entry_by_path(path)
-        item = entry.get_item()
-        mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
-        size = int(getattr(item, "size", 0) or 0)
-    except (KeyError, RuntimeError, ValueError):
-        return None
-    if size > ICON_MAX_BYTES:
-        return None
-    if mimetype.startswith("image/") or (
-        path.casefold().endswith(".ico")
-        and mimetype in {"application/octet-stream", "binary/octet-stream"}
-    ):
-        return path
-    return None
-
-
-def _find_archive_icon_path(archive: Archive, homepage: str | None) -> str | None:
-    """Find a small image that represents a local ZIM source."""
-    metadata_icon = _icon_entry_path(archive, ICON_METADATA_PATH)
-    if metadata_icon:
-        return metadata_icon
-
-    linked_paths: list[str] = []
-    if homepage:
-        try:
-            entry = (
-                archive.main_entry
-                if homepage == archive.main_entry.path
-                else archive.get_entry_by_path(homepage)
-            )
-            item = entry.get_item()
-            mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
-            size = int(getattr(item, "size", 0) or 0)
-            if (
-                mimetype in {"text/html", "application/xhtml+xml"}
-                and size <= ICON_DISCOVERY_HTML_BYTES
-            ):
-                html = bytes(item.content).decode("utf-8", "ignore")
-                for match in re.finditer(r"<link\b[^>]*>", html, re.I):
-                    tag = match.group(0)
-                    rel = _html_attribute(tag, "rel").casefold()
-                    href = _html_attribute(tag, "href")
-                    if "icon" in rel and href:
-                        path = _archive_path_from_href(homepage, href)
-                        if path:
-                            linked_paths.append(path)
-        except (KeyError, RuntimeError, ValueError) as error:
-            logger.debug("could not inspect ZIM homepage %s for an icon: %s", homepage, error)
-
-    candidates = linked_paths + [
-        "favicon.ico",
-        "favicon.png",
-        "apple-touch-icon.png",
-    ]
-    if homepage:
-        base = posixpath.dirname(homepage)
-        candidates.extend(
-            posixpath.join(base, name)
-            for name in ("favicon.ico", "favicon.png", "apple-touch-icon.png")
-            if base
-        )
-    seen: set[str] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        icon = _icon_entry_path(archive, candidate)
-        if icon:
-            return icon
-    return None
-
-
-def _source_icon_url(zim_name: str, icon_path: str | None) -> str | None:
-    if not icon_path:
-        return None
-    return f"/source-icon/{quote(zim_name, safe='')}"
-
-
-def _exact_title_intent(query_words: list[str], title: str) -> bool:
-    """True when the query names the full title exactly: navigation intent."""
-    hub = _query_terms(title)
-    return bool(query_words) and len(hub) == len(query_words) and set(hub) == set(query_words)
-
-
-def _disambiguation_intent(query: str, query_words: list[str], title: str) -> bool:
-    """True when a query explicitly requests a disambiguation page."""
-    if _exact_title_intent(query_words, title):
-        return True
-    if not query.rstrip().endswith("?"):
-        return False
-    base_title = DISAMBIGUATION_TITLE.sub("", title)
-    return _exact_title_intent(query_words, base_title)
-
-
-@dataclass
-class _LocalIndex:
-    db: sqlite3.Connection | None
-    faiss_index: Any | None
-    archive: Archive | None
-    searcher: Searcher | None
-    lock: threading.Lock
-    db_path: str | None = None  # read-only sqlite URI, used for per-thread connections
-    db_signature: tuple[int, int, int, int] | None = None
-    faiss_signature: tuple[int, int, int, int] | None = None
-    _thread: threading.local = field(default_factory=threading.local)
-    _conns: list[sqlite3.Connection] = field(default_factory=list)
-    _lifecycle: threading.Condition = field(default_factory=threading.Condition, repr=False)
-    _active_searches: int = 0
-    _retired: bool = False
-    _closed: bool = False
-    done: str = "1"
-    source_size: int | None = None
-    zim_path: str | None = None
-    zim_signature: tuple[int, int, int, int] | None = None
-
-    @property
-    def semantic(self) -> bool:
-        """True when vectors are loaded and semantic search can run."""
-        return self.faiss_index is not None
-
-
 class SearchQueryError(ValueError):
     """The requested query cannot be processed."""
 
@@ -232,206 +88,6 @@ class ArticleUnavailableError(Exception):
 
 class ArticleTooLargeError(ArticleUnavailableError):
     """The requested entry exceeds the configured serving limit."""
-
-
-def _int_config(cfg: dict, key: str, default: int, minimum: int = 1) -> int:
-    try:
-        return max(minimum, int(cfg.get(key, default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _float_config(
-    cfg: dict,
-    key: str,
-    default: float,
-    minimum: float,
-    maximum: float,
-) -> float:
-    try:
-        value = float(cfg.get(key, default))
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(value):
-        return default
-    return min(maximum, max(minimum, value))
-
-
-def _file_signature(path: Path) -> tuple[int, int, int, int] | None:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
-
-
-def _bounded_catalog_url(url: str, limit: int) -> str:
-    """Replace an unbounded Kiwix catalog count with a large finite limit."""
-    parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
-    bounded = []
-    replaced = False
-    for key, value in query:
-        if key == "count":
-            if not replaced:
-                bounded.append((key, str(limit)))
-                replaced = True
-        else:
-            bounded.append((key, value))
-    if not replaced:
-        bounded.append(("count", str(limit)))
-    return urlunsplit(parts._replace(query=urlencode(bounded)))
-
-
-def _read_limited_response(response, limit: int) -> bytes:
-    """Read a remote response without allowing unbounded memory growth."""
-    content_length = response.headers.get("Content-Length")
-    try:
-        advertised = int(content_length) if content_length else 0
-    except (TypeError, ValueError):
-        advertised = 0
-    if advertised > limit:
-        raise ValueError(f"response exceeds the {limit} byte limit")
-
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = response.read(min(64 * 1024, limit - total + 1))
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > limit:
-            raise ValueError(f"response exceeds the {limit} byte limit")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _parse_remote_xml(payload: bytes) -> ET.Element:
-    """Parse trusted-shaped XML while rejecting DTD/entity expansion inputs."""
-    if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", payload, re.IGNORECASE):
-        raise ValueError("DTD and entity declarations are not supported")
-    return ET.fromstring(payload)
-
-
-def _nprobe(faiss_index: Any, cfg: dict) -> int:
-    """Choose IVF probes while allowing an explicit fixed override."""
-    nlist = getattr(faiss_index, "nlist", 0)
-    if "nprobe" in cfg:
-        probes = _int_config(cfg, "nprobe", 64)
-    elif nlist:
-        probes = math.ceil(nlist * DEFAULT_NPROBE_FRACTION)
-    else:
-        probes = 64
-    return min(probes, nlist) if nlist else probes
-
-
-def _zim_key(book: str) -> str:
-    return re.sub(r"_\d{4}-\d{2}(-\d{2})?$", "", book)
-
-
-def _intent_phrases(book: str) -> tuple[str, ...]:
-    key = _zim_key(book)
-    for pattern, phrases in INTENT_RULES:
-        if pattern.search(key):
-            return phrases
-    return ()
-
-
-def _local_name(element: ET.Element) -> str:
-    return element.tag.rsplit("}", 1)[-1]
-
-
-def _child_text(element: ET.Element, name: str) -> str:
-    for child in element:
-        if _local_name(child) == name:
-            return "".join(child.itertext()).strip()
-    return ""
-
-
-def _stem(word: str) -> str:
-    if len(word) > 4 and word.endswith("ies"):
-        return word[:-3] + "y"
-    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
-        return word[:-1]
-    return word
-
-
-def _content_terms(text: str) -> list[str]:
-    return [
-        _stem(word)
-        for word in re.findall(r"[^\W_]+", text.casefold(), re.UNICODE)
-        if word not in STOPWORDS | {"your", "their", "his", "her", "its", "our"}
-    ]
-
-
-def _query_terms(query: str) -> list[str]:
-    seen: set[str] = set()
-    terms: list[str] = []
-    for term in _content_terms(query):
-        if term not in seen:
-            seen.add(term)
-            terms.append(term)
-    return terms
-
-
-def _query_words(query: str) -> list[str]:
-    words = re.findall(r"[^\W_]+", query.casefold(), re.UNICODE)
-    kept = [word for word in words if word not in STOPWORDS]
-    return kept or words
-
-
-def _title_query(query: str) -> str:
-    """FTS5 MATCH expression: every word must appear as an exact title token."""
-    return " AND ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in _query_words(query))
-
-
-def _title_prefix_query(query: str) -> str:
-    """FTS5 MATCH expression with every word as a prefix token.
-
-    Used only as a fallback when exact title matching returns nothing, so a
-    truncated or base-form word still matches its title (e.g. "chang" or
-    "change" -> "Changes"). One-character words stay exact to avoid scanning
-    the whole index for prefixes like "c*".
-    """
-    return " AND ".join(
-        f"{word}*" if len(word) > 1 else f'"{word}"' for word in _query_words(query)
-    )
-
-
-def _fulltext_query(query: str) -> str:
-    """Query for the ZIM full-text index (libzim/Xapian): bare words.
-
-    libzim parses this with only Xapian's FLAG_CJK_NGRAM, so quotes, ``AND`` and
-    ``OR`` are treated as literal text rather than operators. We therefore send
-    plain words and rely on its default OP_AND to combine them.
-    """
-    return " ".join(_query_words(query))
-
-
-def _coverage(query: list[str], tokens: list[str]) -> float:
-    if not query:
-        return 0.0
-    present = set(tokens)
-    return sum(term in present for term in query) / len(query)
-
-
-def _phrase(query: list[str], tokens: list[str]) -> float:
-    if not query:
-        return 0.0
-    width = len(query)
-    return float(any(tokens[i:i + width] == query for i in range(len(tokens) - width + 1)))
-
-
-def _density(query: list[str], tokens: list[str]) -> float:
-    if not tokens:
-        return 0.0
-    wanted = set(query)
-    return sum(token in wanted for token in tokens) / len(tokens)
-
-
-def _intent_match(source: SourceInfo, question: str) -> float:
-    lowered = question.casefold()
-    return float(any(re.search(r"\b" + re.escape(phrase) + r"\b", lowered) for phrase in source.intent_phrases))
 
 
 class Search:

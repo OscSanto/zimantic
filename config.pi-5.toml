@@ -25,6 +25,9 @@ max_results = 100
 # Moderate batch size for a Pi 5.
 batch_size = 16
 
+# Independent ZIMs can be built concurrently; increase only with enough RAM.
+build_workers = 1
+
 max_html_bytes = 4_194_304
 max_entry_bytes = 1073741824
 max_article_bytes = 33_554_432

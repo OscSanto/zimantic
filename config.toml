@@ -50,6 +50,10 @@ max_results = 100
 # Articles embedded per batch. Larger batches use more memory; use about 8 on a Pi Zero 2 W.
 batch_size = 32
 
+# Independent ZIMs can be built concurrently. Full builds share one embedding model;
+# increase this only when the machine has enough CPU, RAM and storage bandwidth.
+build_workers = 1
+
 # ONNX Runtime threads for embedding. Unset leaves a core for search and the web server.
 # embed_threads = 3
 

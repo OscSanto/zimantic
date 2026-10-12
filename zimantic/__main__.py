@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import os
 import signal
@@ -135,6 +136,14 @@ def main() -> None:
         action="store_true",
         help="rebuild the selected ZIM indexes even if they are already complete",
     )
+    build.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="build up to N independent ZIMs concurrently (default: config build_workers)",
+    )
 
     reload_cmd = commands.add_parser(
         "reload",
@@ -198,6 +207,12 @@ def main() -> None:
             logger.info("zimantic: no .zim files to index")
             return
 
+        workers = args.workers
+        if workers is None:
+            workers = cfg.get("build_workers", 1)
+        if workers < 1:
+            parser.error("--workers must be at least 1")
+
         zim_sizes = {zim: zim.stat().st_size for zim in zims}
         downloading = _find_downloading_sizes(zim_sizes)
 
@@ -214,11 +229,22 @@ def main() -> None:
                     ", ".join(f"{path} ({zim_sizes[path]} bytes)" for path in paths),
                 )
                 continue
-            accepted.extend(paths)
+            if len(paths) > 1:
+                logger.warning(
+                    "zimantic: ignoring duplicate ZIM files with index identity %r: %s",
+                    stem,
+                    ", ".join(str(path) for path in paths[1:]),
+                )
+            accepted.append(paths[0])
         zims = sorted(accepted, key=zim_sizes.__getitem__)
         if not zims:
             logger.info("zimantic: no non-conflicting .zim files to index")
             return
+
+        # Do not submit a file while it is still being downloaded. Waiting for
+        # the whole batch also makes the worker pool independent of file order.
+        if downloading:
+            _wait_for_stable_sizes(downloading)
 
         # fast builds never embed: skip loading the model so they start instantly.
         embedder = None
@@ -238,28 +264,45 @@ def main() -> None:
                 file=sys.stderr,
             )
         failures: list[tuple[Path, BaseException]] = []
+
+        def run_build(zim: Path) -> None:
+            build_zim(
+                zim,
+                cfg["index_dir"],
+                embedder,
+                cfg["batch_size"],
+                fast=args.fast,
+                max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
+                max_entry_bytes=cfg.get("max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES),
+                max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
+                force=args.force,
+            )
+
         try:
-            for zim in zims:
-                if zim in downloading:
-                    _wait_for_stable_sizes(downloading)
-                    downloading.clear()
-                try:
-                    build_zim(
-                        zim,
-                        cfg["index_dir"],
-                        embedder,
-                        cfg["batch_size"],
-                        fast=args.fast,
-                        max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
-                        max_entry_bytes=cfg.get("max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES),
-                        max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
-                        force=args.force,
-                    )
-                except Exception as error:
-                    logger.error("zimantic: failed to index %s: %s", zim, error)
-                    failures.append((zim, error))
-                if global_progress is not None:
-                    global_progress.update(zim_sizes[zim])
+            if workers == 1 or len(zims) == 1:
+                for zim in zims:
+                    try:
+                        run_build(zim)
+                    except Exception as error:
+                        logger.error("zimantic: failed to index %s: %s", zim, error)
+                        failures.append((zim, error))
+                    if global_progress is not None:
+                        global_progress.update(zim_sizes[zim])
+            else:
+                with ThreadPoolExecutor(
+                    max_workers=min(workers, len(zims)),
+                    thread_name_prefix="zimantic-build",
+                ) as pool:
+                    futures = {pool.submit(run_build, zim): zim for zim in zims}
+                    for future in as_completed(futures):
+                        zim = futures[future]
+                        try:
+                            future.result()
+                        except Exception as error:
+                            logger.error("zimantic: failed to index %s: %s", zim, error)
+                            failures.append((zim, error))
+                        if global_progress is not None:
+                            global_progress.update(zim_sizes[zim])
         finally:
             if global_progress is not None:
                 global_progress.close()

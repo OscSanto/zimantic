@@ -1,4 +1,6 @@
+import importlib
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -122,6 +124,51 @@ class StableSizeTests(unittest.TestCase):
 
         self.assertEqual(sleep.call_count, 2)
         sleep.assert_called_with(main_module.STABLE_POLL_SECONDS)
+
+
+class BuildWorkerTests(unittest.TestCase):
+    def test_build_workers_process_independent_zims_concurrently(self):
+        import zimantic.__main__ as main_module
+        from zimantic import settings
+
+        build_module = importlib.import_module("zimantic.build")
+        barrier = threading.Barrier(2)
+        built = []
+
+        def fake_build(zim_path, *_args, **_kwargs):
+            barrier.wait(timeout=2)
+            built.append(zim_path.name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            first = directory / "first.zim"
+            second = directory / "second.zim"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            config = {
+                "zim_dir": str(directory),
+                "index_dir": str(directory / "indexes"),
+                "batch_size": 1,
+                "build_workers": 1,
+            }
+            with (
+                patch.object(main_module.sys, "argv", [
+                    "zimantic",
+                    "build",
+                    "--fast",
+                    "--workers",
+                    "2",
+                    str(first),
+                    str(second),
+                ]),
+                patch.object(settings, "load_config", return_value=config),
+                patch.object(main_module, "_configure_logging"),
+                patch.object(main_module, "_find_downloading_sizes", return_value=set()),
+                patch.object(build_module, "build", side_effect=fake_build),
+            ):
+                main_module.main()
+
+        self.assertEqual(set(built), {"first.zim", "second.zim"})
 
 
 if __name__ == "__main__":
