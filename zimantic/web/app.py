@@ -46,6 +46,9 @@ _ARTICLE_ERROR_STATUS = {
 GZIP_MIN_SIZE = 512
 ARTICLE_STREAM_THRESHOLD = 512 * 1024
 ARTICLE_STREAM_CHUNK = 64 * 1024
+# Sandboxed article frames have an opaque origin, so in-article fetches need
+# explicit CORS access to the public raw-entry route.
+ARTICLE_CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
 
 
 ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
@@ -852,12 +855,13 @@ def _article_content_response(content: bytes | memoryview, mimetype: str) -> Res
             headers={
                 "Cache-Control": "no-cache",
                 "Content-Length": str(len(content)),
+                **ARTICLE_CORS_HEADERS,
             },
         )
     return Response(
         content=content,
         media_type=mimetype,
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-cache", **ARTICLE_CORS_HEADERS},
     )
 
 

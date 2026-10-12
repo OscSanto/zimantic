@@ -152,6 +152,7 @@ class ServerTests(unittest.TestCase):
         finally:
             del self.search.read_article
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
         self.assertEqual(response.content, bytes(content))
 
     def test_content_route_wraps_articles_and_article_route_serves_raw(self):
@@ -181,6 +182,7 @@ class ServerTests(unittest.TestCase):
         # and no toolbar of its own.
         self.assertEqual(raw.status_code, 200)
         self.assertTrue(raw.headers["content-type"].startswith("text/html"))
+        self.assertEqual(raw.headers["access-control-allow-origin"], "*")
         self.assertIn("Article body", raw.text)
         self.assertIn("data-zimantic-bridge", raw.text)
         self.assertIn("zimantic-external-link", raw.text)
