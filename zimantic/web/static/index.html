@@ -544,7 +544,7 @@
             <div class="status" id="status"></div>
             <div class="debug-stats" id="debugStats" hidden></div>
             <div class="source-filters" id="sourceFilters" hidden>
-                <div class="source-filter-toolbar">
+                <div class="source-filter-toolbar" id="sourceFilterToolbar">
                     <span class="source-filter-heading">Filter by source</span>
                     <input
                         id="sourceFilterSearch"
@@ -613,7 +613,7 @@
                 let PAGE_SIZE = 10; // replaced with the server's page_size at startup
                 let debugMode = false;
                 const AUTO_SUBMIT_DELAY = 250;
-                const STREAM_RENDER_DELAY = 500;
+                const STREAM_RENDER_DELAY = 600;
                 const BUSY_RETRY_BASE_DELAY = 1000;
                 const BUSY_RETRY_MAX_DELAY = 8000;
                 const BUSY_RETRY_LIMIT = 5;
@@ -833,15 +833,16 @@
 
                 function renderSourceFilters() {
                     const panel = $("sourceFilters");
+                    const toolbar = $("sourceFilterToolbar");
                     const options = $("sourceFilterOptions");
                     const status = $("sourceFilterStatus");
                     if (!current) {
                         panel.hidden = true;
+                        toolbar.hidden = true;
                         options.replaceChildren();
                         status.textContent = "";
                         return;
                     }
-                    panel.hidden = false;
                     const outcomes = [...current.outcomes.values()];
                     const nonEmptyOutcomes = outcomes.filter(
                         (outcome) => outcome.error || (current.counts[outcome.source.key] || 0) > 0,
@@ -866,7 +867,6 @@
                         ...topVisible.map((outcome) => outcome.source.key),
                         ...selectedVisible.map((outcome) => outcome.source.key),
                     ]);
-                    const visible = sorted.filter((outcome) => visibleKeys.has(outcome.source.key));
                     const otherOutcomes = !query
                         ? nonEmptyOutcomes.filter(
                               (outcome) =>
@@ -874,6 +874,17 @@
                                   (current.counts[outcome.source.key] || 0) > 0,
                           )
                         : [];
+                    const otherCount = otherOutcomes.reduce(
+                        (total, outcome) => total + (current.counts[outcome.source.key] || 0),
+                        0,
+                    );
+                    if (!query && otherCount === 1) {
+                        otherOutcomes.forEach((outcome) => visibleKeys.add(outcome.source.key));
+                    }
+                    const visible = sorted.filter((outcome) => visibleKeys.has(outcome.source.key));
+                    const showOther = !query && otherCount > 1;
+                    panel.hidden = false;
+                    toolbar.hidden = !query && !showOther;
 
                     const all = document.createElement("button");
                     all.className = "secondary source-filter-option";
@@ -907,12 +918,7 @@
                         button.textContent = label;
                         return button;
                     });
-                    const otherKeys = otherOutcomes.map((outcome) => outcome.source.key);
-                    if (!query && otherKeys.length) {
-                        const otherCount = otherOutcomes.reduce(
-                            (total, outcome) => total + (current.counts[outcome.source.key] || 0),
-                            0,
-                        );
+                    if (showOther) {
                         const other = document.createElement("button");
                         other.className = "source-filter-option ok";
                         other.type = "button";
@@ -1811,7 +1817,9 @@
                             requestAnimationFrame(() => node.classList.remove("result-enter"));
                         });
                     }
-                    loadThumbnails(items);
+                    // Intermediate snapshots only contain provisional ranking data. Defer
+                    // article reads for thumbnails until the final result set is available.
+                    if (!current?.streaming) loadThumbnails(items);
                 }
 
                 function renderPager(total, pageCount) {
@@ -2039,8 +2047,7 @@
                             scheduleStreamRender(sequence);
                         } else if (event.type === "snapshot") {
                             applyPage(event);
-                            renderView();
-                            renderNotice();
+                            scheduleStreamRender(sequence);
                             return true;
                         } else if (event.type === "done") {
                             applyPage(event);
