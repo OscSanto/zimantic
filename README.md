@@ -344,12 +344,14 @@ repeat `--verbose`/`-v` for info and debug output.
 **Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
 model. Title-word and ZIM full-text search still work; run a normal `build` later to add vectors.
 
-Normal builds embed 32 articles at a time by default. Independent ZIMs can be built concurrently
-with `--workers N` or the `build_workers` setting; the default is one. A thread pool shares one
-embedding model between builds, but each worker still needs CPU, temporary memory and storage
-bandwidth. Tune `batch_size`, `build_workers` and `embed_threads` in `config.toml` for different
-hardware. Do not run concurrent builds that target the same ZIM index identity (filename stem and
-source byte size).
+Normal builds embed 32 articles at a time by default. Independent ZIMs can be read and built
+concurrently with `--workers N` or the `build_workers` setting; when unset, the default scales with
+CPU and RAM. Full builds use a bounded shared embedding pipeline: at most `embedding_workers`
+model calls run at once, and each ZIM can have only a small number of batches waiting for embedding.
+When unset, `embedding_workers` also accounts for `embed_threads` so the model is not
+oversubscribed. Tune `batch_size`, `build_workers`, `embedding_workers` and `embed_threads` in
+`config.toml` for different hardware. Do not run concurrent builds that target the same ZIM index
+identity (filename stem and source byte size).
 
 **Hardware profiles.** Without `config.toml`, Zimantic selects mobile, desktop or supercomputer
 defaults from the machine's resources. Copy `config.pi-zero-2w.toml` or `config.pi-5.toml` to pin

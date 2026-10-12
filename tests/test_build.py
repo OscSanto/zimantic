@@ -1,7 +1,10 @@
 import importlib
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -291,6 +294,95 @@ class BuildBatchTests(unittest.TestCase):
         )
         self.assertEqual(embedder.embed_calls, [["passage: A title\nword-safe embedding"]])
         db.close()
+
+
+class EmbeddingPipelineTests(unittest.TestCase):
+    def test_limits_concurrent_embedding_calls(self):
+        active = 0
+        maximum = 0
+        active_lock = threading.Lock()
+
+        class _FakeEmbedder:
+            def truncate(self, text, prefix):
+                return text
+
+            def embed(self, texts):
+                nonlocal active, maximum
+                with active_lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.01)
+                with active_lock:
+                    active -= 1
+                return np.ones((len(texts), 2), dtype=np.float32)
+
+        rows = [
+            (index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
+            for index in range(4)
+        ]
+        pipeline = build_module.EmbeddingPipeline(
+            _FakeEmbedder(),
+            workers=2,
+            queue_size=2,
+        )
+        try:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [
+                    pool.submit(pipeline.submit, [row]).result()
+                    for row in rows
+                ]
+                results = [future.result() for future in futures]
+        finally:
+            pipeline.close()
+
+        self.assertEqual(maximum, 2)
+        self.assertEqual(
+            [list(result) for result in results],
+            [[row[0]] for row in rows],
+        )
+
+    def test_build_commits_pipeline_results_before_writing_faiss(self):
+        class _Archive2(_FakeArchive):
+            entry_count = 2
+
+        class _FakeEmbedder:
+            def truncate(self, text, prefix):
+                return text
+
+            def embed(self, texts):
+                return np.ones((len(texts), 2), dtype=np.float32)
+
+        rows = [
+            (index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
+            for index in range(2)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            pipeline = build_module.EmbeddingPipeline(_FakeEmbedder(), workers=1)
+
+            def write_fake_faiss(db, path):
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM vecs").fetchone()[0], 2)
+                path.write_bytes(b"vectors")
+
+            try:
+                with (
+                    patch.object(build_module, "Archive", _Archive2),
+                    patch.object(build_module, "read_entry", side_effect=rows),
+                    patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
+                ):
+                    build_module.build(
+                        directory / "manual.zim",
+                        directory,
+                        _FakeEmbedder(),
+                        1,
+                        embedding_pipeline=pipeline,
+                    )
+            finally:
+                pipeline.close()
+
+            self.assertEqual(str(_meta(directory / "manual.sqlite")["done"]), "1")
+            self.assertEqual((directory / "manual.faiss").read_bytes(), b"vectors")
 
 
 class FaissTrainingSamplingTests(unittest.TestCase):

@@ -29,8 +29,8 @@ STABLE_POLL_SECONDS = 5
 
 def _add_verbosity_argument(parser: argparse.ArgumentParser, default=argparse.SUPPRESS) -> None:
     parser.add_argument(
-        "-v",
         "--verbose",
+        "-v",
         action="count",
         default=default,
         help="increase logging verbosity (-v for info, -vv for debug)",
@@ -170,7 +170,7 @@ def main() -> None:
         cfg = {}
 
     if args.command == "build":
-        from .build import build as build_zim
+        from .build import EmbeddingPipeline, build as build_zim
         from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
         from .zim import (
             DEFAULT_MAX_ENTRY_BYTES,
@@ -254,6 +254,16 @@ def main() -> None:
                 embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
                 threads=cfg.get("embed_threads"),
             )
+        embedding_pipeline = None
+        if embedder is not None and workers > 1:
+            embedding_workers = int(cfg.get("embedding_workers", 2))
+            if embedding_workers < 1:
+                parser.error("embedding_workers must be at least 1")
+            embedding_pipeline = EmbeddingPipeline(
+                embedder,
+                workers=min(embedding_workers, workers),
+                queue_size=max(2, workers * 2),
+            )
         global_progress = None
         if len(zims) > 1 and sys.stderr.isatty():
             global_progress = tqdm(
@@ -276,6 +286,7 @@ def main() -> None:
                 max_entry_bytes=cfg.get("max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES),
                 max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
                 force=args.force,
+                embedding_pipeline=embedding_pipeline,
             )
 
         try:
@@ -304,6 +315,8 @@ def main() -> None:
                         if global_progress is not None:
                             global_progress.update(zim_sizes[zim])
         finally:
+            if embedding_pipeline is not None:
+                embedding_pipeline.close()
             if global_progress is not None:
                 global_progress.close()
         if failures:

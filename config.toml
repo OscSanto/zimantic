@@ -50,12 +50,16 @@ max_results = 100
 # Articles embedded per batch. Larger batches use more memory; use about 8 on a Pi Zero 2 W.
 batch_size = 32
 
-# Independent ZIMs can be built concurrently. Full builds share one embedding model;
-# increase this only when the machine has enough CPU, RAM and storage bandwidth.
-build_workers = 1
+# Independent ZIMs can be built concurrently. When unset, the default scales with
+# available CPU and RAM; set it explicitly to override the automatic worker count.
+# build_workers = 2
 
 # ONNX Runtime threads for embedding. Unset leaves a core for search and the web server.
 # embed_threads = 3
+
+# Maximum simultaneous embedding calls when multiple ZIMs are being built. When
+# unset, the default accounts for build_workers, CPU threads and available RAM.
+# embedding_workers = 2
 
 # Maximum HTML read per article.
 max_html_bytes = 4_194_304

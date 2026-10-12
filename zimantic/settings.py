@@ -32,6 +32,7 @@ MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     "max_preview_chars": 1_000,
     "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
     "embed_threads": 2,
+    "embedding_workers": 1,
     "min_cosine_similarity": 0.85,
     "long_query": 10,
     "disambiguation_boost": 0.08,
@@ -45,7 +46,7 @@ MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     "cache_bytes": 8 * 1024 * 1024,
 }
 
-DESKTOP = {  # the shipped config.toml values, for typical PCs
+DESKTOP = {  # baseline settings for typical PCs
     "zim_dir": "./zims",
     "model_dir": "./model",
     "index_dir": "./indexes",
@@ -67,6 +68,7 @@ DESKTOP = {  # the shipped config.toml values, for typical PCs
     "max_preview_chars": 1_000,
     "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
     "embed_threads": None,  # let the Embedder pick a sensible budget
+    "embedding_workers": 2,
     "min_cosine_similarity": 0.85,
     "long_query": 10,
     "disambiguation_boost": 0.08,
@@ -102,6 +104,7 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
     "max_preview_chars": 1_000,
     "embedding_tokens": DEFAULT_EMBEDDING_TOKENS,
     "embed_threads": 8,
+    "embedding_workers": 4,
     "min_cosine_similarity": 0.85,
     "long_query": 10,
     "disambiguation_boost": 0.08,
@@ -129,6 +132,31 @@ def _system_memory_gb() -> float:
     except (AttributeError, OSError, ValueError):
         return 0.0
     return (pages * page_size) / (1024 ** 3)
+
+
+def default_build_workers(cores: int | None = None, memory_gb: float | None = None) -> int:
+    """Choose a bounded build pool from the host's CPU and memory budget."""
+    cores = max(1, cores or os.cpu_count() or 1)
+    memory_gb = _system_memory_gb() if memory_gb is None else memory_gb
+    cpu_limit = max(1, cores // 4)
+    memory_limit = max(1, int(memory_gb // 4)) if memory_gb > 0 else cpu_limit
+    return min(8, cpu_limit, memory_limit)
+
+
+def default_embedding_workers(
+    cores: int | None = None,
+    memory_gb: float | None = None,
+    build_workers: int | None = None,
+    embed_threads: int | None = None,
+) -> int:
+    """Choose embedding concurrency without oversubscribing CPU or memory."""
+    cores = max(1, cores or os.cpu_count() or 1)
+    memory_gb = _system_memory_gb() if memory_gb is None else memory_gb
+    build_workers = build_workers or default_build_workers(cores, memory_gb)
+    thread_budget = embed_threads if embed_threads and embed_threads > 0 else max(1, cores - 1)
+    cpu_limit = max(1, cores // thread_budget)
+    memory_limit = max(1, int(memory_gb // 2)) if memory_gb > 0 else 1
+    return min(build_workers, cpu_limit, memory_limit)
 
 
 def profile_for_hardware() -> str:
@@ -166,4 +194,15 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
     for key in sorted(set(user) - KNOWN_KEYS):
         warn(f"zimantic: warning: unknown config key {key!r} in {path} (ignored)")
     cfg.update(user)
+    # Worker counts are intentionally computed at load time so missing config
+    # keys adapt to the machine instead of inheriting fixed profile values.
+    # Apply this after user settings so embed_threads participates in the
+    # automatic embedding concurrency calculation.
+    if "build_workers" not in user:
+        cfg["build_workers"] = default_build_workers()
+    if "embedding_workers" not in user:
+        cfg["embedding_workers"] = default_embedding_workers(
+            build_workers=cfg["build_workers"],
+            embed_threads=cfg.get("embed_threads"),
+        )
     return cfg

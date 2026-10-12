@@ -4,7 +4,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from zimantic import settings
-from zimantic.settings import PROFILES, load_config, profile_for_hardware
+from zimantic.settings import (
+    PROFILES,
+    default_build_workers,
+    default_embedding_workers,
+    load_config,
+    profile_for_hardware,
+)
 
 
 class HardwareProfileTests(unittest.TestCase):
@@ -27,6 +33,17 @@ class HardwareProfileTests(unittest.TestCase):
     def test_many_cores_is_supercomputer(self, _memory):
         with patch("os.cpu_count", return_value=64):
             self.assertEqual(profile_for_hardware(), "supercomputer")
+
+    def test_build_workers_scale_with_cpu_and_memory(self):
+        self.assertEqual(default_build_workers(4, 0.5), 1)
+        self.assertEqual(default_build_workers(8, 8), 2)
+        self.assertEqual(default_build_workers(20, 32), 5)
+        self.assertEqual(default_build_workers(64, 256), 8)
+
+    def test_embedding_workers_respect_thread_budget(self):
+        self.assertEqual(default_embedding_workers(4, 0.5, 1, 2), 1)
+        self.assertEqual(default_embedding_workers(20, 32, 5, None), 1)
+        self.assertEqual(default_embedding_workers(32, 128, 8, 8), 4)
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -69,6 +86,34 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(cfg["cache_size"], 7)
             self.assertEqual(cfg["index_dir"], "./indexes")  # filled from the profile
             self.assertEqual(warnings, [])
+
+    def test_worker_defaults_are_dynamic_but_explicit_values_override(self):
+        with patch.object(settings, "profile_for_hardware", return_value="desktop"):
+            with patch.object(settings, "default_build_workers", return_value=5):
+                with patch.object(settings, "default_embedding_workers", return_value=3):
+                    cfg = load_config("/nonexistent/config.toml", warn=lambda _: None)
+        self.assertEqual(cfg["build_workers"], 5)
+        self.assertEqual(cfg["embedding_workers"], 3)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("build_workers = 7\nembedding_workers = 6\n", encoding="utf-8")
+            with patch.object(settings, "profile_for_hardware", return_value="desktop"):
+                cfg = load_config(path, warn=lambda _: None)
+            self.assertEqual(cfg["build_workers"], 7)
+            self.assertEqual(cfg["embedding_workers"], 6)
+
+    def test_embedding_default_uses_configured_embed_threads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("embed_threads = 3\n", encoding="utf-8")
+            with (
+                patch.object(settings, "profile_for_hardware", return_value="desktop"),
+                patch.object(settings, "default_build_workers", return_value=5),
+                patch.object(settings, "default_embedding_workers", return_value=2) as workers,
+            ):
+                load_config(path, warn=lambda _: None)
+        workers.assert_called_once_with(build_workers=5, embed_threads=3)
 
     def test_unknown_keys_warn_but_known_keys_still_apply(self):
         with tempfile.TemporaryDirectory() as tmp:

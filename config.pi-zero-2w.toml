@@ -37,6 +37,7 @@ embedding_tokens = 256
 
 # Leave CPU for search workers.
 embed_threads = 2
+embedding_workers = 1
 
 # nprobe = 64
 min_cosine_similarity = 0.85

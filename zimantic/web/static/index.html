@@ -41,6 +41,9 @@
             * {
                 box-sizing: border-box;
             }
+            [hidden] {
+                display: none !important;
+            }
             body {
                 background: var(--bg);
                 color: var(--text);
@@ -624,7 +627,6 @@
                 let sources = [];
                 let current = null;
                 let selectedSourceKeys = new Set();
-                let sourceFilterQuery = "";
                 let requestController = null;
                 let pageController = null;
                 let searchSequence = 0;
@@ -847,7 +849,7 @@
                     const nonEmptyOutcomes = outcomes.filter(
                         (outcome) => outcome.error || (current.counts[outcome.source.key] || 0) > 0,
                     );
-                    const query = sourceFilterQuery.trim().toLocaleLowerCase();
+                    const query = $("sourceFilterSearch").value.trim().toLocaleLowerCase();
                     const matching = query
                         ? nonEmptyOutcomes.filter((outcome) => {
                               const source = outcome.source;
@@ -2263,8 +2265,7 @@
                     }
                 }
 
-                $("sourceFilterSearch").addEventListener("input", (event) => {
-                    sourceFilterQuery = event.target.value;
+                $("sourceFilterSearch").addEventListener("input", () => {
                     renderSourceFilters();
                 });
 
@@ -2377,7 +2378,6 @@
                     $("sourceFilters").hidden = true;
                     $("sourceFilterOptions").replaceChildren();
                     $("sourceFilterStatus").textContent = "";
-                    sourceFilterQuery = "";
                     $("sourceFilterSearch").value = "";
                     $("filterLine").innerHTML = "";
                     $("notice").textContent = "";

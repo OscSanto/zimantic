@@ -1,8 +1,12 @@
 """Build a resumable SQLite and optional FAISS index for one ZIM."""
+from concurrent.futures import Future
+from dataclasses import dataclass
 import logging
 import os
+from queue import Queue
 import secrets
 import sqlite3
+from threading import Thread
 from pathlib import Path
 
 import faiss
@@ -30,6 +34,63 @@ _FAISS_MIN_POINTS_PER_CENTROID = 39
 _FAISS_MIN_TRAINING_POINTS = 100_000
 
 
+@dataclass(slots=True)
+class _EmbeddingRequest:
+    rows: list
+    future: Future
+
+
+class EmbeddingPipeline:
+    """Bounded embedding stage shared by concurrent ZIM builds."""
+
+    def __init__(
+        self,
+        embedder,
+        workers: int = 1,
+        queue_size: int = 8,
+        max_pending_per_build: int = 2,
+    ):
+        workers = int(workers)
+        if workers < 1:
+            raise ValueError("embedding workers must be at least 1")
+        self.max_pending_per_build = max(1, int(max_pending_per_build))
+        self._embedder = embedder
+        self._requests: Queue[_EmbeddingRequest | None] = Queue(maxsize=max(1, int(queue_size)))
+        self._threads = [
+            Thread(target=self._run, name=f"zimantic-embed-{index}", daemon=True)
+            for index in range(workers)
+        ]
+        for thread in self._threads:
+            thread.start()
+        self._closed = False
+
+    def submit(self, rows: list) -> Future:
+        if self._closed:
+            raise RuntimeError("embedding pipeline is closed")
+        future = Future()
+        self._requests.put(_EmbeddingRequest(rows, future))
+        return future
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for _ in self._threads:
+            self._requests.put(None)
+        for thread in self._threads:
+            thread.join()
+
+    def _run(self) -> None:
+        while True:
+            request = self._requests.get()
+            if request is None:
+                return
+            try:
+                request.future.set_result(_embed_rows(self._embedder, request.rows))
+            except Exception as error:
+                request.future.set_exception(error)
+
+
 def build(
     zim_path: Path,
     index_dir,
@@ -40,6 +101,7 @@ def build(
     max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     force: bool = False,
+    embedding_pipeline: EmbeddingPipeline | None = None,
 ) -> None:
     """Index a ZIM, optionally without article bodies or vectors."""
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
@@ -49,6 +111,19 @@ def build(
     build_faiss_path = faiss_path
     publish_upgrade = False
     db = None
+    pending_embeddings = []
+
+    def save_batch(rows, next_entry: int) -> None:
+        if embedding_pipeline is None:
+            _save(db, embedder, rows, next_entry)
+            return
+        pending_embeddings.append(
+            (embedding_pipeline.submit(rows), rows, next_entry)
+        )
+        if len(pending_embeddings) >= embedding_pipeline.max_pending_per_build:
+            future, pending_rows, pending_next = pending_embeddings.pop(0)
+            _save_rows(db, pending_rows, pending_next, future.result())
+
     try:
         if force:
             _reset_index(db_path, faiss_path)
@@ -145,9 +220,12 @@ def build(
             # Keep fast builds bounded too: they have no rows with text to
             # embed, so an article-count threshold would never flush.
             if len(batch) >= batch_size:
-                _save(db, embedder, batch, i + 1)
+                save_batch(batch, i + 1)
                 batch = []
-        _save(db, embedder, batch, zim.entry_count)
+        save_batch(batch, zim.entry_count)
+        while pending_embeddings:
+            future, pending_rows, pending_next = pending_embeddings.pop(0)
+            _save_rows(db, pending_rows, pending_next, future.result())
 
         if fast:
             with db:
@@ -258,28 +336,46 @@ def _publish_upgrade(
         raise RuntimeError("full index upgrade is missing its completed SQLite or FAISS file")
 
 
-def _save(db, embedder, rows, next_entry: int) -> None:
-    """Store a batch and the resume point in one transaction.
+def _embed_rows(embedder, rows) -> dict[int, np.ndarray]:
+    """Embed article rows and return vectors keyed by entry id."""
+    if embedder is None:
+        return {}
+    articles = [row for row in rows if row[2]]
+    if not articles:
+        return {}
+    passages = []
+    for row in articles:
+        prefix = f"passage: {row[1]}\n"
+        passages.append(prefix + embedder.truncate(row[2], prefix=prefix))
+    vectors = embedder.embed(passages)
+    return {row[0]: vector for row, vector in zip(articles, vectors)}
+
+
+def _save_rows(db, rows, next_entry: int, vectors: dict[int, np.ndarray]) -> None:
+    """Store a batch, vectors and the resume point in one transaction.
 
     Rows are (id, title, excerpt, path, target). The excerpt is transient:
     it is used for embeddings but is not written to new indexes.
     """
-    article_ids = {row[0] for row in rows if row[2]}
     with db:
         db.executemany(
             "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
             [(row[0], row[1], row[3], row[4]) for row in rows],
         )
-        articles = [row for row in rows if row[0] in article_ids]
-        if articles and embedder is not None:
-            passages = []
-            for row in articles:
-                prefix = f"passage: {row[1]}\n"
-                passages.append(prefix + embedder.truncate(row[2], prefix=prefix))
-            vectors = embedder.embed(passages)
-            db.executemany("INSERT INTO vecs VALUES (?, ?)",
-                           [(row[0], v.astype(np.float16).tobytes()) for row, v in zip(articles, vectors)])
+        db.executemany(
+            "INSERT INTO vecs VALUES (?, ?)",
+            [
+                (row[0], vectors[row[0]].astype(np.float16).tobytes())
+                for row in rows
+                if row[0] in vectors
+            ],
+        )
         db.execute("INSERT OR REPLACE INTO meta VALUES ('next', ?)", (next_entry,))
+
+
+def _save(db, embedder, rows, next_entry: int) -> None:
+    """Embed and store a batch and the resume point in one transaction."""
+    _save_rows(db, rows, next_entry, _embed_rows(embedder, rows))
 
 
 def _load(rows):
