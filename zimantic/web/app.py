@@ -38,6 +38,12 @@ WEB_MANIFEST = ASSET_DIR / "site.webmanifest"
 PID_FILE = Path("zimantic.pid")
 logger = logging.getLogger(__name__)
 
+_ARTICLE_ERROR_STATUS = {
+    ArticleNotFoundError: 404,
+    ArticleTooLargeError: 413,
+    ArticleUnavailableError: 503,
+}
+
 # Result payloads are text-heavy; gzip cuts them several-fold over the network.
 GZIP_MIN_SIZE = 512
 ARTICLE_STREAM_THRESHOLD = 512 * 1024
@@ -580,18 +586,26 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
 </script>"""
 
 
-def _content_url(zim: str, path: str | None = None) -> str:
-    url = f"/content/{quote_path(zim, safe='')}"
+def _route_url(route: str, zim: str, path: str | None = None) -> str:
+    url = f"/{route}/{quote_path(zim, safe='')}"
     if path:
         url += f"/{quote_path(path, safe='/')}"
     return url
+
+
+def _content_url(zim: str, path: str | None = None) -> str:
+    return _route_url("content", zim, path)
 
 
 def _article_url(zim: str, path: str | None = None) -> str:
-    url = f"/article/{quote_path(zim, safe='')}"
-    if path:
-        url += f"/{quote_path(path, safe='/')}"
-    return url
+    return _route_url("article", zim, path)
+
+
+def _article_http_error(error: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=_ARTICLE_ERROR_STATUS[type(error)],
+        detail=str(error),
+    )
 
 
 def _article_toolbar(zim: str, article: dict) -> str:
@@ -889,12 +903,8 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     def source_icon(zim: str):
         try:
             icon = searchClass.read_source_icon(zim)
-        except ArticleNotFoundError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ArticleTooLargeError as error:
-            raise HTTPException(status_code=413, detail=str(error)) from error
-        except ArticleUnavailableError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
+        except (ArticleNotFoundError, ArticleTooLargeError, ArticleUnavailableError) as error:
+            raise _article_http_error(error) from error
         return _article_content_response(icon["content"], icon["mimetype"])
 
     @app.get("/zims")
@@ -931,12 +941,8 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     def raw_article_response(zim: str, path: str | None = None):
         try:
             article = searchClass.read_article(zim, path)
-        except ArticleNotFoundError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ArticleTooLargeError as error:
-            raise HTTPException(status_code=413, detail=str(error)) from error
-        except ArticleUnavailableError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
+        except (ArticleNotFoundError, ArticleTooLargeError, ArticleUnavailableError) as error:
+            raise _article_http_error(error) from error
 
         requested_path = None if path is None else path.strip("/")
         if requested_path != article["path"]:
@@ -975,17 +981,12 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
         fallback_icon = _zim_icon_url(zim)
         try:
             article = searchClass.read_article(zim, path)
-        except ArticleNotFoundError:
+        except (ArticleNotFoundError, ArticleTooLargeError, ArticleUnavailableError) as error:
             return _content_shell(
-                zim, _error_shell_article(requested_path), 404, fallback_icon
-            )
-        except ArticleTooLargeError:
-            return _content_shell(
-                zim, _error_shell_article(requested_path), 413, fallback_icon
-            )
-        except ArticleUnavailableError:
-            return _content_shell(
-                zim, _error_shell_article(requested_path), 503, fallback_icon
+                zim,
+                _error_shell_article(requested_path),
+                _ARTICLE_ERROR_STATUS[type(error)],
+                fallback_icon,
             )
 
         if requested_path != article["path"]:

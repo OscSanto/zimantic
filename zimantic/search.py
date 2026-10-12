@@ -1565,25 +1565,21 @@ class Search:
         if not rowids:
             return {}
         rows: dict[int, tuple[Any, ...]] = {}
-        values = list(rowids)
-        for start in range(0, len(values), 900):
-            batch = values[start:start + 900]
-            placeholders = ",".join("?" for _ in batch)
-            query = (
-                "SELECT rowid, title, path, target FROM docs "
-                f"WHERE rowid IN ({placeholders})"
-            )
-            rows.update({int(row[0]): row for row in db.execute(query, batch)})
+        def fetch(ids) -> None:
+            values = list(ids)
+            for start in range(0, len(values), 900):
+                batch = values[start:start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                query = (
+                    "SELECT rowid, title, path, target FROM docs "
+                    f"WHERE rowid IN ({placeholders})"
+                )
+                rows.update({int(row[0]): row for row in db.execute(query, batch)})
 
+        values = list(rowids)
+        fetch(values)
         target_ids = {int(row[3]) for row in rows.values() if row[3] is not None}
-        for start in range(0, len(target_ids), 900):
-            batch = list(target_ids)[start:start + 900]
-            placeholders = ",".join("?" for _ in batch)
-            query = (
-                "SELECT rowid, title, path, target FROM docs "
-                f"WHERE rowid IN ({placeholders})"
-            )
-            rows.update({int(row[0]): row for row in db.execute(query, batch)})
+        fetch(target_ids)
 
         # kiwix_url is optional: without it results have no article link, so the
         # UI renders the title as plain text instead of building a broken URL.
