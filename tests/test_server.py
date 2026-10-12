@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from zimantic.cache import QueryCache
 from zimantic.search import SearchQueryError
-from zimantic.server import create_app
+from zimantic.web.app import create_app
 
 
 class FakeSearch:
@@ -355,7 +355,7 @@ class ServerTests(unittest.TestCase):
     @patch("zimantic.web.app.sys.argv", ["zimantic", "serve", "--debug"])
     @patch("zimantic.web.app.sys.executable", "/venv/bin/python")
     def test_restart_handler_reexecutes_the_server_command(self, execv):
-        from zimantic.server import _handle_restart_request
+        from zimantic.web.app import _handle_restart_request
 
         _handle_restart_request(1, None)
 

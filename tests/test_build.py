@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from zimantic.content.reader import EntryRecord
 
 build_module = importlib.import_module("zimantic.build")
 
@@ -60,8 +61,8 @@ class BuildUpgradeTests(unittest.TestCase):
             faiss_path = directory / "manual.faiss"
             _create_fast_index(db_path)
             rows = [
-                (1, "New title", "A stored excerpt.", "new", None),
-                (2, "Another title", "Another stored excerpt.", "another", None),
+                EntryRecord(1, "New title", "A stored excerpt.", "new", None),
+                EntryRecord(2, "Another title", "Another stored excerpt.", "another", None),
             ]
 
             with (
@@ -112,8 +113,8 @@ class BuildUpgradeTests(unittest.TestCase):
             _create_done_index(db_path)
             faiss_path.write_bytes(b"existing vectors")
             rows = [
-                (1, "New title", "", "new", None),
-                (2, "Another title", "", "another", None),
+                EntryRecord(1, "New title", "", "new", None),
+                EntryRecord(2, "Another title", "", "another", None),
             ]
 
             with (
@@ -138,8 +139,8 @@ class BuildUpgradeTests(unittest.TestCase):
             _create_done_index(db_path)
             faiss_path.write_bytes(b"old vectors")
             rows = [
-                (1, "New title", "New excerpt", "new", None),
-                (2, "Another title", "Another excerpt", "another", None),
+                EntryRecord(1, "New title", "New excerpt", "new", None),
+                EntryRecord(2, "Another title", "Another excerpt", "another", None),
             ]
 
             def write_fake_faiss(_db, path):
@@ -170,7 +171,7 @@ class BuildUpgradeTests(unittest.TestCase):
             db.commit()
             db.close()
 
-            row = (1, "New title", "New excerpt", "new", None)
+            row = EntryRecord(1, "New title", "New excerpt", "new", None)
 
             def write_fake_faiss(_db, path):
                 path.write_bytes(b"new vectors")
@@ -236,7 +237,7 @@ class BuildBatchTests(unittest.TestCase):
             entry_count = 5
 
         rows = [
-            (index, f"Title {index}", "", f"path-{index}", None)
+            EntryRecord(index, f"Title {index}", "", f"path-{index}", None)
             for index in range(5)
         ]
         saved = []
@@ -276,7 +277,7 @@ class BuildBatchTests(unittest.TestCase):
         build_module._save(
             db,
             embedder,
-            [(1, "A title", "a stored excerpt", "article", None)],
+            [EntryRecord(1, "A title", "a stored excerpt", "article", None)],
             1,
         )
 
@@ -317,7 +318,7 @@ class EmbeddingPipelineTests(unittest.TestCase):
                 return np.ones((len(texts), 2), dtype=np.float32)
 
         rows = [
-            (index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
+            EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
             for index in range(4)
         ]
         pipeline = build_module.EmbeddingPipeline(
@@ -353,7 +354,7 @@ class EmbeddingPipelineTests(unittest.TestCase):
                 return np.ones((len(texts), 2), dtype=np.float32)
 
         rows = [
-            (index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
+            EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
             for index in range(2)
         ]
 
@@ -430,7 +431,7 @@ class BuildInterruptTests(unittest.TestCase):
             entry_count = 8
 
         rows = [
-            (i, f"Title {i}", f"Excerpt {i}", f"path-{i}", None)
+            EntryRecord(i, f"Title {i}", f"Excerpt {i}", f"path-{i}", None)
             for i in range(1, 9)
         ]
 

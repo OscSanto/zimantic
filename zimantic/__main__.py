@@ -190,7 +190,7 @@ def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
 
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     from .build import build as build_zim
-    from .zim import (
+    from .content.reader import (
         DEFAULT_MAX_ENTRY_BYTES,
         DEFAULT_MAX_HTML_BYTES,
         DEFAULT_PREVIEW_CHARS,
@@ -323,7 +323,7 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
 
 def _run_serve(args, cfg: dict) -> None:
     from .search import Search
-    from .server import serve
+    from .web.app import serve
 
     search = Search(cfg, semantic=not args.fast)
     if not search.local_names():

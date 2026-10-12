@@ -51,7 +51,7 @@ from .searching.sources import (
     _source_icon_url,
     _zim_key,
 )
-from .zim import (
+from .content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     read_entry,

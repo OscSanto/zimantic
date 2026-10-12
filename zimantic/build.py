@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from tqdm import tqdm
 from libzim.reader import Archive
-from .zim import (
+from .content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     DEFAULT_MAX_ENTRY_BYTES,
@@ -299,14 +299,6 @@ def _finish_build(state: _BuildState, db_path: Path, faiss_path: Path, fast: boo
         db.execute("VACUUM")
 
 
-def _entry_records(rows) -> list[EntryRecord]:
-    """Normalize legacy tuple rows at the build boundary."""
-    return [
-        row if isinstance(row, EntryRecord) else EntryRecord(*row)
-        for row in rows
-    ]
-
-
 def build(
     zim_path: Path,
     index_dir,
@@ -426,7 +418,6 @@ def _embed_rows(embedder, rows: list[EntryRecord]) -> dict[int, np.ndarray]:
     if embedder is None:
         return {}
 
-    rows = _entry_records(rows)
     articles = [row for row in rows if row.excerpt]
     if not articles:
         return {}
@@ -446,12 +437,10 @@ def _save_rows(
 ) -> None:
     """Store a batch, vectors and the resume point in one transaction.
 
-    Rows are (id, title, excerpt, path, target). The excerpt is transient:
-    it is used for embeddings but is not written to new indexes.
+    EntryRecord excerpts are transient: they are used for embeddings but are
+    not written to new indexes.
     """
     import numpy as np
-
-    rows = _entry_records(rows)
 
     with db:
         db.executemany(

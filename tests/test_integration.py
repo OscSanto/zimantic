@@ -9,7 +9,7 @@ from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic import build as build_module
 from zimantic.search import Search
-from zimantic.server import create_app
+from zimantic.web.app import create_app
 
 
 ALPHA_HTML = (

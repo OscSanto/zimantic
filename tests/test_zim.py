@@ -10,7 +10,7 @@ reader = sys.modules.setdefault("libzim.reader", types.ModuleType("libzim.reader
 reader.Archive = object
 reader.set_cluster_cache_max_size = lambda size: None
 
-from zimantic.zim import (
+from zimantic.content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     disambiguation_title,

@@ -18,7 +18,7 @@ from libzim.reader import Archive
 from libzim.search import Query, Searcher
 from libzim.writer import Creator, Hint, Item, StringProvider
 
-from zimantic.zim import read_entry
+from zimantic.content.reader import read_entry
 
 BODY_ALPHA = (
     "<html><body><p>Alpha is a sufficiently long article about tires and "
