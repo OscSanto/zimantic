@@ -11,6 +11,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, unquote, urlparse
@@ -69,6 +70,9 @@ DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
 DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
 DEFAULT_KIWIX_CATALOG_LIMIT = 50_000
+DEFAULT_KIWIX_CATALOG_ATTEMPTS = 3
+DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF = 1.0
+MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
 class SearchQueryError(ValueError):
     """The requested query cannot be processed."""
@@ -124,6 +128,8 @@ class Search:
         self._inflight: dict[Any, Future] = {}
         self._inflight_lock = threading.Lock()
         self._cache_generation = 0
+        self._catalog_entries_cache: list[dict[str, str]] = []
+        self._catalog_server: str | None = None
         self.cache = QueryCache(
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
@@ -496,7 +502,30 @@ class Search:
         background via ``start_catalog_refresh``.
         """
         server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
-        entries = self._catalog_entries(server) if server else []
+        if not server:
+            with self._state_lock:
+                self._catalog_entries_cache = []
+                self._catalog_server = None
+            entries = []
+        else:
+            fetched = self._catalog_entries(server)
+            if fetched is None:
+                with self._state_lock:
+                    cached_entries = getattr(self, "_catalog_entries_cache", [])
+                    entries = (
+                        list(cached_entries)
+                        if getattr(self, "_catalog_server", None) == server
+                        else []
+                    )
+                logger.warning(
+                    "zimantic: catalog unavailable; preserving %d cached source(s)",
+                    len(entries),
+                )
+            else:
+                with self._state_lock:
+                    self._catalog_entries_cache = [dict(entry) for entry in fetched]
+                    self._catalog_server = server
+                entries = fetched
         return self._rebuild_sources(entries)
 
     def start_catalog_refresh(self) -> None:
@@ -590,7 +619,7 @@ class Search:
                 preview_cache.clear()
         return sources
 
-    def _catalog_entries(self, server: str) -> list[dict[str, str]]:
+    def _catalog_entries(self, server: str) -> list[dict[str, str]] | None:
         path = str(
             self.cfg.get(
                 "kiwix_catalog_path",
@@ -611,12 +640,36 @@ class Search:
             "max_kiwix_response_bytes",
             DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
         )
-        try:
-            request = Request(url, headers={"Accept": "application/atom+xml, application/xml"})
-            with urlopen(request, timeout=self.source_timeout) as response:
-                root = _parse_remote_xml(_read_limited_response(response, response_limit))
-        except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError):
-            return []
+        attempts = DEFAULT_KIWIX_CATALOG_ATTEMPTS
+        for attempt in range(attempts):
+            try:
+                request = Request(
+                    url,
+                    headers={"Accept": "application/atom+xml, application/xml"},
+                )
+                with urlopen(request, timeout=self.source_timeout) as response:
+                    root = _parse_remote_xml(
+                        _read_limited_response(response, response_limit)
+                    )
+                break
+            except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError) as error:
+                if attempt + 1 == attempts:
+                    logger.warning(
+                        "zimantic: catalog request failed after %d attempt(s): %s",
+                        attempts,
+                        error,
+                    )
+                    return None
+                delay = min(
+                    DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF * (2**attempt),
+                    MAX_KIWIX_CATALOG_RETRY_BACKOFF,
+                )
+                logger.info(
+                    "zimantic: catalog request failed (%s); retrying in %.1f seconds",
+                    error,
+                    delay,
+                )
+                time.sleep(delay)
 
         newest: dict[str, dict[str, str]] = {}
         for entry in root.iter():

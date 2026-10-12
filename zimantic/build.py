@@ -1,4 +1,6 @@
 """Build a resumable SQLite and optional FAISS index for one ZIM."""
+from __future__ import annotations
+
 from concurrent.futures import Future
 from dataclasses import dataclass
 import logging
@@ -8,9 +10,8 @@ import secrets
 import sqlite3
 from threading import Thread
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import faiss
-import numpy as np
 from tqdm import tqdm
 from libzim.reader import Archive
 from .zim import (
@@ -21,6 +22,10 @@ from .zim import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    import numpy as np
+
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
@@ -340,6 +345,7 @@ def _embed_rows(embedder, rows) -> dict[int, np.ndarray]:
     """Embed article rows and return vectors keyed by entry id."""
     if embedder is None:
         return {}
+
     articles = [row for row in rows if row[2]]
     if not articles:
         return {}
@@ -357,6 +363,8 @@ def _save_rows(db, rows, next_entry: int, vectors: dict[int, np.ndarray]) -> Non
     Rows are (id, title, excerpt, path, target). The excerpt is transient:
     it is used for embeddings but is not written to new indexes.
     """
+    import numpy as np
+
     with db:
         db.executemany(
             "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
@@ -379,12 +387,21 @@ def _save(db, embedder, rows, next_entry: int) -> None:
 
 
 def _load(rows):
+    import numpy as np
+
     ids = np.array([r[0] for r in rows], dtype=np.int64)
     vectors = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(len(rows), -1)
     return ids, vectors.astype(np.float32)
 
 
+def _load_faiss():
+    import faiss
+    return faiss
+
+
 def _write_faiss(db, path: Path) -> None:
+    faiss = _load_faiss()
+
     n = db.execute("SELECT COUNT(*) FROM vecs").fetchone()[0]
     dim = db.execute("SELECT length(v) / 2 FROM vecs LIMIT 1").fetchone()
     dim = dim[0] if dim else 384

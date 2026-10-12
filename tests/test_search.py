@@ -16,6 +16,17 @@ def _install_optional_dependency_stubs():
     faiss = types.ModuleType("faiss")
     faiss.IO_FLAG_MMAP_IFC = 1
     faiss.IO_FLAG_READ_ONLY = 2
+    faiss.METRIC_INNER_PRODUCT = 0
+
+    class _Index:
+        def train(self, _vectors):
+            pass
+
+        def add_with_ids(self, _vectors, _ids):
+            pass
+
+    faiss.index_factory = lambda *_args: _Index()
+    faiss.write_index = lambda _index, path: Path(path).write_bytes(b"vectors")
 
     libzim = types.ModuleType("libzim")
     libzim.__path__ = []
@@ -909,6 +920,59 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(search.search("new title", limit=1)[0]["title"], "New title")
             search._close_index(search.indexes["manual"])
             search._executor.shutdown(wait=True)
+
+
+class CatalogRefreshTests(unittest.TestCase):
+    def test_failed_catalog_refresh_preserves_last_successful_entries(self):
+        search = _bare_search({"kiwix_server": "http://kiwix"})
+        entries = [{"name": "Remote Manual", "book": "manual"}]
+
+        with patch.object(search, "_catalog_entries", side_effect=[entries, None]):
+            first = search.refresh_sources()
+            second = search.refresh_sources()
+
+        self.assertEqual(first[0]["name"], "Remote Manual")
+        self.assertEqual(second[0]["name"], "Remote Manual")
+
+    def test_catalog_refresh_retries_with_bounded_backoff(self):
+        class _Response:
+            headers = {}
+
+            def __init__(self):
+                self._read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def _payload():
+                return (
+                    b"<feed><entry><title>Remote Manual</title>"
+                    b'<link href="/content/manual" /></entry></feed>'
+                )
+
+            def read(self, _size):
+                if self._read:
+                    return b""
+                self._read = True
+                return self._payload()
+
+        search = _bare_search({})
+        with (
+            patch(
+                "zimantic.search.urlopen",
+                side_effect=[OSError("temporary outage"), _Response()],
+            ) as urlopen,
+            patch("zimantic.search.time.sleep") as sleep,
+        ):
+            entries = search._catalog_entries("http://kiwix")
+
+        self.assertEqual(entries[0]["book"], "manual")
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(1.0)
 
 
 class PaginationTests(unittest.TestCase):

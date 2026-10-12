@@ -170,8 +170,7 @@ def main() -> None:
         cfg = {}
 
     if args.command == "build":
-        from .build import EmbeddingPipeline, build as build_zim
-        from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
+        from .build import build as build_zim
         from .zim import (
             DEFAULT_MAX_ENTRY_BYTES,
             DEFAULT_MAX_HTML_BYTES,
@@ -248,22 +247,25 @@ def main() -> None:
 
         # fast builds never embed: skip loading the model so they start instantly.
         embedder = None
+        embedding_pipeline = None
         if not args.fast:
+            from .build import EmbeddingPipeline
+            from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
+
             embedder = Embedder(
                 cfg["model_dir"],
                 embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
                 threads=cfg.get("embed_threads"),
             )
-        embedding_pipeline = None
-        if embedder is not None and workers > 1:
-            embedding_workers = int(cfg.get("embedding_workers", 2))
-            if embedding_workers < 1:
-                parser.error("embedding_workers must be at least 1")
-            embedding_pipeline = EmbeddingPipeline(
-                embedder,
-                workers=min(embedding_workers, workers),
-                queue_size=max(2, workers * 2),
-            )
+            if workers > 1:
+                embedding_workers = int(cfg.get("embedding_workers", 2))
+                if embedding_workers < 1:
+                    parser.error("embedding_workers must be at least 1")
+                embedding_pipeline = EmbeddingPipeline(
+                    embedder,
+                    workers=min(embedding_workers, workers),
+                    queue_size=max(2, workers * 2),
+                )
         global_progress = None
         if len(zims) > 1 and sys.stderr.isatty():
             global_progress = tqdm(

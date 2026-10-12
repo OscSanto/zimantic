@@ -333,9 +333,9 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(self.client.get("/config").json()["debug"])
         self.assertTrue(self.debug_client.get("/config").json()["debug"])
 
-    @patch("zimantic.server.os.execv")
-    @patch("zimantic.server.sys.argv", ["zimantic", "serve", "--debug"])
-    @patch("zimantic.server.sys.executable", "/venv/bin/python")
+    @patch("zimantic.web.app.os.execv")
+    @patch("zimantic.web.app.sys.argv", ["zimantic", "serve", "--debug"])
+    @patch("zimantic.web.app.sys.executable", "/venv/bin/python")
     def test_restart_handler_reexecutes_the_server_command(self, execv):
         from zimantic.server import _handle_restart_request
 

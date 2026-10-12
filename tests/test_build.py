@@ -405,10 +405,18 @@ class FaissTrainingSamplingTests(unittest.TestCase):
             )
             db.commit()
             index = _FakeIndex()
+            fake_faiss = type(
+                "_FakeFaiss",
+                (),
+                {
+                    "METRIC_INNER_PRODUCT": 0,
+                    "index_factory": staticmethod(lambda *_args: index),
+                    "write_index": staticmethod(lambda *_args: None),
+                },
+            )()
             with (
                 patch.object(build_module, "_faiss_training_step", return_value=2),
-                patch.object(build_module.faiss, "index_factory", return_value=index),
-                patch.object(build_module.faiss, "write_index"),
+                patch.object(build_module, "_load_faiss", return_value=fake_faiss),
             ):
                 build_module._write_faiss(db, directory / "manual.faiss")
             db.close()
