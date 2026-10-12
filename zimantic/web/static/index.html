@@ -69,6 +69,9 @@
                 font-size: 1.4rem;
                 margin: 0 0 4px;
             }
+            h1[role="button"] {
+                cursor: pointer;
+            }
             .subtitle,
             .help,
             .status,
@@ -529,7 +532,7 @@
     </head>
     <body>
         <div class="wrap">
-            <h1>Zimantic</h1>
+            <h1 id="homeHeading" role="button" tabindex="0" aria-label="Clear or restore search">Zimantic</h1>
             <div class="subtitle">
                 Search your offline library by meaning, title, or full text. Results arrive as each source finishes.
             </div>
@@ -626,6 +629,7 @@
                 const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
                 let sources = [];
                 let current = null;
+                let previousHeadingSearch = null;
                 let selectedSourceKeys = new Set();
                 let requestController = null;
                 let pageController = null;
@@ -2406,6 +2410,27 @@
                     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
                 }
 
+                function toggleHeadingSearch() {
+                    if (current) {
+                        previousHeadingSearch = {
+                            question: current.question,
+                            selectedSources: [...selectedSourceKeys],
+                            page: current.page,
+                        };
+                        clearSearch(true);
+                        return;
+                    }
+                    if (!previousHeadingSearch) return;
+                    const previous = previousHeadingSearch;
+                    $("question").value = previous.question;
+                    history.pushState(
+                        null,
+                        "",
+                        makeStateUrl(previous.question, previous.selectedSources, previous.page),
+                    );
+                    runSearch(previous.question, previous.selectedSources, previous.page);
+                }
+
                 function submitSearch(pushHistory) {
                     const question = $("question").value.trim();
                     if (!question) {
@@ -2426,6 +2451,14 @@
                     event.preventDefault();
                     clearTimeout(autoSubmitTimer);
                     submitSearch(true);
+                });
+
+                $("homeHeading").addEventListener("click", toggleHeadingSearch);
+                $("homeHeading").addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleHeadingSearch();
+                    }
                 });
 
                 window.addEventListener("popstate", () => {
