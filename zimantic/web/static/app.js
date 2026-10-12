@@ -549,6 +549,7 @@
                     frame.src = articleUrl;
                 }
                 modal.hidden = false;
+                document.documentElement.classList.add("modal-open");
                 document.body.classList.add("modal-open");
                 frame.focus();
             }
@@ -950,6 +951,7 @@
                     history.replaceState(history.state, "", url.pathname + url.search + url.hash);
                 }
                 modal.hidden = true;
+                document.documentElement.classList.remove("modal-open");
                 document.body.classList.remove("modal-open");
                 activeModalUrl = null;
                 activeSearchResult = null;

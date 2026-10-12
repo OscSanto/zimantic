@@ -452,8 +452,17 @@ ARTICLE_MOBILE_STYLE = """<style data-zimantic-mobile>
    so cap that child and let wide code and tables scroll inside their own box
    rather than stretching the whole document. */
 @media (max-width: 800px) {
-  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-  body { overflow-wrap: break-word; }
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    overflow-x: hidden;
+    overflow-x: clip;
+  }
+  body {
+    overflow-wrap: break-word;
+    overflow-x: hidden;
+    overflow-x: clip;
+  }
   body > * { max-width: 100% !important; min-width: 0 !important; }
   img, video, iframe { max-width: 100% !important; }
   img, video { height: auto !important; }
@@ -802,12 +811,16 @@ def _content_shell(
         + icon_link
         + ARTICLE_TOOLBAR_STYLE
         + """<style data-zimantic-shell>
-html, body { height: 100%; margin: 0; }
+html, body {
+  height: 100%;
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
 body {
   background: #fff;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 nav[data-zimantic-toolbar] {
   flex: 0 0 auto !important;
@@ -820,6 +833,7 @@ iframe[data-zimantic-article] {
   display: block;
   flex: 1 1 auto !important;
   min-height: 0 !important;
+  min-width: 0 !important;
   width: 100% !important;
 }
 </style>

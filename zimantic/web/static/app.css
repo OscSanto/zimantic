@@ -353,14 +353,18 @@ ol.results {
     object-fit: cover;
     width: 100%;
 }
-.modal-open {
+html.modal-open,
+body.modal-open {
     overflow: hidden;
+    overscroll-behavior: none;
 }
 .article-modal[hidden] {
     display: none;
 }
 .article-modal {
     inset: 0;
+    overflow: hidden;
+    overscroll-behavior: contain;
     position: fixed;
     z-index: 1000;
 }
@@ -384,14 +388,17 @@ ol.results {
     margin: 0;
     max-width: none;
     overflow: hidden;
+    overscroll-behavior: contain;
     position: relative;
     width: 100%;
 }
 .article-modal-frame {
     background: #fff;
+    display: block;
     border: 0;
     flex: 1;
     min-height: 0;
+    min-width: 0;
     width: 100%;
 }
 .external-link-notice {
