@@ -6,6 +6,7 @@
             let debugMode = false;
             const AUTO_SUBMIT_DELAY = 250;
             const STREAM_RENDER_DELAY = 600;
+            const STREAM_SEARCH_TIMEOUT = 15000;
             const BUSY_RETRY_BASE_DELAY = 1000;
             const BUSY_RETRY_MAX_DELAY = 8000;
             const BUSY_RETRY_LIMIT = 5;
@@ -1535,9 +1536,24 @@
                     // this page; page size, offset and the display filter are not cached keys.
                     let busyRetries = 0;
                     while (true) {
-                        const response = await fetch("/search/stream?" + params, { signal: controller.signal });
-                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                        const busy = await consumeStream(response, sequence);
+                        const streamController = new AbortController();
+                        const abortStream = () => streamController.abort();
+                        const streamTimeout = setTimeout(
+                            () => streamController.abort(),
+                            STREAM_SEARCH_TIMEOUT,
+                        );
+                        controller.signal.addEventListener("abort", abortStream, { once: true });
+                        let busy;
+                        try {
+                            const response = await fetch("/search/stream?" + params, {
+                                signal: streamController.signal,
+                            });
+                            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                            busy = await consumeStream(response, sequence);
+                        } finally {
+                            clearTimeout(streamTimeout);
+                            controller.signal.removeEventListener("abort", abortStream);
+                        }
                         if (!busy || busyRetries >= BUSY_RETRY_LIMIT || sequence !== searchSequence) break;
                         busyRetries++;
                         const delay = Math.min(
@@ -1548,7 +1564,17 @@
                         await waitForRetry(delay, controller.signal);
                     }
                 } catch (error) {
-                    if (error.name !== "AbortError" && sequence === searchSequence) {
+                    if (
+                        error.name === "AbortError" &&
+                        !controller.signal.aborted &&
+                        sequence === searchSequence
+                    ) {
+                        // Some mobile browsers and proxies do not expose a timely
+                        // readable body for chunked NDJSON. The JSON endpoint avoids
+                        // that transport without changing the search result.
+                        current.streaming = false;
+                        await loadPage(pageIndex);
+                    } else if (error.name !== "AbortError" && sequence === searchSequence) {
                         $("status").textContent = `Search failed: ${error.message}`;
                     }
                 } finally {
