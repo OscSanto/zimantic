@@ -512,8 +512,38 @@ summary {
     }
 }
 @media (max-width: 480px) {
+    .result {
+        display: grid;
+        gap: 0;
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .result-body {
+        display: contents;
+    }
+    .result-title,
+    .result-meta,
+    .result-thumb,
+    .result-snippet,
+    .result-debug {
+        grid-column: 1;
+    }
+    .result-title {
+        grid-row: 1;
+    }
+    .result-meta {
+        grid-row: 2;
+    }
     .result-thumb {
-        flex-basis: 128px;
-        height: 96px;
+        grid-row: 3;
+        height: auto;
+        margin: 8px 0 12px;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+    }
+    .result-snippet {
+        grid-row: 4;
+    }
+    .result-debug {
+        grid-row: 5;
     }
 }
