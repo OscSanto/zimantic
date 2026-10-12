@@ -409,7 +409,13 @@ JSON API examples:
   `http` or `https` site show an in-modal notice identifying the destination as online and offer
   to open it in a new tab, avoiding failures from sites that disallow iframe embedding.
 - Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
-  search endpoints. Debug output is configured for the whole server; it is not a URL parameter.
+  search endpoints. Debug result objects additionally include a `ranking` breakdown with each
+  semantic/title/full-text rank and contribution, title-match signals, intent and
+  disambiguation adjustments. Stream snapshots and `done` events include compact search stats
+  (candidate pool size, source progress, match-method counts, cache status and elapsed time);
+  the non-streaming endpoint exposes the same stats in `X-Debug-Stats`, and the web UI renders
+  them under **Stats for nerds**. Debug output is configured for the whole server; it is not a
+  URL parameter.
   SIGHUP restarts the whole server in debug mode; `serve --dev` is an alias for this mode.
 - `GET /sources`, `/config`, `/zims` and `/health` return source, configuration,
   local-index and health information. Source records include a `homepage` path when the local ZIM

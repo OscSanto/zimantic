@@ -428,6 +428,62 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 </script>"""
 
 
+# Injected into raw HTML articles that predate mobile browsers. A page is
+# treated as mobile-aware the moment it declares a viewport meta, and then it is
+# left completely alone: its own stylesheet knows best. Only captures that never
+# opted in get the reader fallback below.
+ARTICLE_VIEWPORT_META = (
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+)
+
+ARTICLE_MOBILE_STYLE = """<style data-zimantic-mobile>
+/* Conservative reader fallback for desktop-only captures: keep media on
+   screen and let wide code and tables scroll instead of overflowing. */
+@media (max-width: 800px) {
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  body { overflow-wrap: break-word; }
+  img, video, iframe { max-width: 100% !important; }
+  img, video { height: auto !important; }
+  pre {
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+  table {
+    display: block !important;
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+}
+</style>"""
+
+# A few static captures ship a responsive layout that their own JavaScript only
+# enables after it detects a phone (DevDocs' `_mobile` class is the clearest
+# case). A desktop-only capture never names the class, so the desktop layout
+# stays collapsed on a phone. Each hint maps a markup marker to the class that
+# switches the page's own mobile styles on. The class is toggled through a
+# media query, so wide screens keep the layout the capture shipped with.
+MOBILE_LAYOUT_HINTS = (
+    ("<devdocs-navbar", "_mobile"),
+)
+
+MOBILE_LAYOUT_SCRIPT = """<script data-zimantic-mobile>
+(() => {
+  const classes = %s;
+  const narrow = window.matchMedia("(max-width: 800px)");
+  const apply = () => {
+    for (const name of classes) {
+      document.documentElement.classList.toggle(name, narrow.matches);
+    }
+  };
+  apply();
+  if (narrow.addEventListener) narrow.addEventListener("change", apply);
+  else if (narrow.addListener) narrow.addListener(apply);
+})();
+</script>"""
+
+
 # Injected into raw HTML articles served under /article/. The article itself
 # has no toolbar (that lives in the /content/ shell), so this tiny bridge turns
 # in-article link clicks into shell navigations. Without it, following a link
@@ -598,11 +654,12 @@ def _article_toolbar(zim: str, article: dict) -> str:
 
 
 def _decorate_article_bridge(content: bytes | memoryview, zim: str) -> bytes:
-    """Add the shell-navigation bridge to a raw HTML article.
+    """Add the shell-navigation bridge and mobile fallback to a raw article.
 
-    The article keeps its own markup; only a small script is added so link
-    clicks can ask the /content/ shell to navigate. Non-HTML entries and
-    documents that already carry the bridge are returned untouched.
+    The article keeps its own markup; a small script lets link clicks ask the
+    /content/ shell to navigate, and desktop-only captures also get the mobile
+    fallback described above. Non-HTML entries and documents that already carry
+    the bridge are returned untouched.
     """
     try:
         document = bytes(content).decode("utf-8")
@@ -611,15 +668,36 @@ def _decorate_article_bridge(content: bytes | memoryview, zim: str) -> bytes:
     if "data-zimantic-bridge" in document:
         return content
 
+    document, mobile_head = _mobile_article_head(document)
+    additions = mobile_head + ARTICLE_NAV_BRIDGE_SCRIPT
     head_close = re.search(r"</head\s*>", document, re.IGNORECASE)
     if head_close:
         position = head_close.start()
-        document = (
-            document[:position] + ARTICLE_NAV_BRIDGE_SCRIPT + document[position:]
-        )
+        document = document[:position] + additions + document[position:]
     else:
-        document = ARTICLE_NAV_BRIDGE_SCRIPT + document
+        document = additions + document
     return document.encode("utf-8")
+
+
+def _mobile_article_head(document: str) -> tuple[str, str]:
+    """Viewport, stylesheet and layout hints for a desktop-only capture.
+
+    Returns the document plus the markup to inject into its ``<head>``.
+    Documents that already declare a viewport meta are returned unchanged with
+    no extra markup, because they are already mobile-aware.
+    """
+    if re.search(
+        r"<meta\b[^>]*\bname\s*=\s*[\"']?viewport", document, re.IGNORECASE
+    ):
+        return document, ""
+    head = ARTICLE_VIEWPORT_META + ARTICLE_MOBILE_STYLE
+    classes = [
+        class_name for marker, class_name in MOBILE_LAYOUT_HINTS
+        if marker in document
+    ]
+    if classes:
+        head += MOBILE_LAYOUT_SCRIPT % json.dumps(classes)
+    return document, head
 
 
 def _tag_attribute(tag: str, name: str) -> str:
@@ -987,15 +1065,17 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
         # Body stays the plain result list for compatibility; totals travel as
         # headers so clients can page without an envelope.
-        return JSONResponse(
-            content=page["results"],
-            headers={
-                "X-Total-Count": str(page["total"]),
-                "X-Has-More": "true" if page["has_more"] else "false",
-                "X-Offset": str(page["offset"]),
-                "X-Page-Size": str(len(page["results"])),
-            },
-        )
+        headers = {
+            "X-Total-Count": str(page["total"]),
+            "X-Has-More": "true" if page["has_more"] else "false",
+            "X-Offset": str(page["offset"]),
+            "X-Page-Size": str(len(page["results"])),
+        }
+        if debug and page.get("stats") is not None:
+            headers["X-Debug-Stats"] = json.dumps(
+                page["stats"], separators=(",", ":"), ensure_ascii=True
+            )
+        return JSONResponse(content=page["results"], headers=headers)
 
     @app.get("/search/stream")
     def api_search_stream(

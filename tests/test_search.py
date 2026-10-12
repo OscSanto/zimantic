@@ -277,6 +277,11 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual([item["id"] for item in first], ["manual:a-tire", "manual:z-tire"])
         self.assertIn("title 100%", first[0]["explain"])
+        self.assertEqual(first[0]["ranking"]["final_rank"], 1)
+        self.assertEqual(first[0]["ranking"]["rrf"]["semantic"]["rank"], 1)
+        self.assertEqual(first[0]["ranking"]["rrf"]["title"]["rank"], 1)
+        self.assertEqual(first[0]["ranking"]["rrf"]["fulltext"]["rank"], 1)
+        self.assertEqual(first[0]["ranking"]["title"]["matches"], 2)
 
     def test_ranking_deduplicates_repeated_hits_and_preserves_source_rank(self):
         semantic_source = SourceInfo("semantic", "Semantic", "semantic", "local")
@@ -1033,7 +1038,10 @@ class PaginationTests(unittest.TestCase):
 
             self.assertNotIn("explain", plain)
             self.assertNotIn("score", plain)
+            self.assertNotIn("ranking", plain)
             self.assertIn("explain", detailed)
+            self.assertIn("ranking", detailed)
+            self.assertIn("stats", search.search_page("tire change", limit=10, debug=True))
             search._executor.shutdown(wait=True)
 
 

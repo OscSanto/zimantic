@@ -50,6 +50,7 @@ class FakeSearch:
             "has_more": False,
             "offset": offset,
             "counts": {"manual": 1},
+            "stats": {"cache": "miss"},
         }
 
     def search(self, query, zim, limit=None, offset=0, source=None, debug=False):
@@ -71,6 +72,7 @@ class FakeSearch:
             "offset": offset,
             "limit": limit or 10,
             "counts": {"manual": 1},
+            "stats": {"cache": "miss"},
         }
 
 
@@ -167,6 +169,50 @@ class ServerTests(unittest.TestCase):
         self.assertIn("data-zimantic-bridge", raw.text)
         self.assertIn("zimantic-external-link", raw.text)
         self.assertNotIn("data-zimantic-toolbar", raw.text)
+
+    def _raw_article(self, body: bytes):
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda zim, path: {
+                "path": path,
+                "title": "Page",
+                "mimetype": "text/html",
+                "content": body,
+            },
+            create=True,
+        ):
+            return self.client.get("/article/manual/page")
+
+    def test_raw_article_gains_mobile_fallback_without_viewport(self):
+        raw = self._raw_article(b"<html><head></head><body>Desktop</body></html>")
+        self.assertIn('name="viewport"', raw.text)
+        self.assertIn("data-zimantic-mobile", raw.text)
+        self.assertIn("max-width: 800px", raw.text)
+        self.assertIn("data-zimantic-bridge", raw.text)
+
+    def test_raw_article_leaves_mobile_aware_pages_alone(self):
+        body = (
+            b"<html><head>"
+            b'<meta name="viewport" content="width=device-width">'
+            b"</head><body>Already mobile</body></html>"
+        )
+        raw = self._raw_article(body)
+        self.assertNotIn("data-zimantic-mobile", raw.text)
+        self.assertNotIn('content="width=device-width, initial-scale=1"', raw.text)
+        # The navigation bridge is still added.
+        self.assertIn("data-zimantic-bridge", raw.text)
+
+    def test_raw_article_enables_known_mobile_layout_only_when_narrow(self):
+        hint = self._raw_article(
+            b'<html class="_theme-default"><head></head>'
+            b"<body><devdocs-navbar></devdocs-navbar></body></html>"
+        )
+        self.assertIn('["_mobile"]', hint.text)
+        self.assertIn("(max-width: 800px)", hint.text)
+
+        plain = self._raw_article(b"<html><head></head><body>Other</body></html>")
+        self.assertNotIn("_mobile", plain.text)
 
     def test_content_shell_uses_article_title_and_icon(self):
         body = (
@@ -269,10 +315,12 @@ class ServerTests(unittest.TestCase):
         response = self.debug_client.get("/search?q=page")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["explain"], "debug")
+        self.assertEqual(response.headers["x-debug-stats"], '{"cache":"miss"}')
 
         stream = self.debug_client.get("/search/stream?q=page")
         events = [json.loads(line) for line in stream.text.splitlines()]
         self.assertEqual(events[-1]["results"][0]["score"], 1.0)
+        self.assertEqual(events[-1]["stats"]["cache"], "miss")
         self.assertTrue(self.debug_search.stream_calls[-1][-1])
 
     def test_config_reports_debug_mode(self):

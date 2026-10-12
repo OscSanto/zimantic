@@ -11,6 +11,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlsplit, urlunsplit
@@ -1296,7 +1297,49 @@ class Search:
         """A response copy. Ranking metadata is only shipped in debug mode."""
         if debug:
             return dict(doc)
-        return {key: value for key, value in doc.items() if key not in ("explain", "score")}
+        return {
+            key: value
+            for key, value in doc.items()
+            if key not in ("explain", "ranking", "score")
+        }
+
+    @staticmethod
+    def _debug_stats(
+        query: str,
+        pool: list[dict[str, Any]],
+        pool_target: int,
+        total_sources: int,
+        completed_sources: int,
+        result_count: int,
+        *,
+        cache_hit: bool,
+        elapsed_ms: float | None,
+    ) -> dict[str, Any]:
+        method_counts = {"semantic": 0, "title": 0, "fulltext": 0}
+        source_counts: dict[str, int] = {}
+        for doc in pool:
+            source_key = str(doc.get("source_key", ""))
+            source_counts[source_key] = source_counts.get(source_key, 0) + 1
+            matches = doc.get("ranking", {}).get("rrf", {})
+            for method in method_counts:
+                if matches.get(method, {}).get("rank") is not None:
+                    method_counts[method] += 1
+        stats: dict[str, Any] = {
+            "query_terms": _query_terms(query),
+            "candidate_limit": pool_target,
+            "ranked_pool_size": len(pool),
+            "result_count": result_count,
+            "sources": {
+                "completed": completed_sources,
+                "total": total_sources,
+            },
+            "matched_by": method_counts,
+            "source_counts": source_counts,
+            "cache": "hit" if cache_hit else "miss",
+        }
+        if elapsed_ms is not None:
+            stats["elapsed_ms"] = round(max(0.0, elapsed_ms), 2)
+        return stats
 
     def _page_state(
         self,
@@ -1378,6 +1421,7 @@ class Search:
             "has_more": final.get("has_more", False),
             "offset": final.get("offset", max(0, int(offset))),
             "counts": final.get("counts", {}),
+            "stats": final.get("stats"),
         }
 
     def search(
@@ -1408,6 +1452,20 @@ class Search:
         state = self._page_state(pool, source, offset, page_size, debug)
         self._hydrate_results(state["results"])
         total_sources = len(sources)
+        stats = (
+            self._debug_stats(
+                query,
+                pool,
+                int(cached.get("pool_target", max(self.candidate_count, len(pool)))),
+                total_sources,
+                total_sources,
+                state["total"],
+                cache_hit=True,
+                elapsed_ms=0.0,
+            )
+            if debug
+            else None
+        )
         yield {
             "type": "started",
             "query": query,
@@ -1433,6 +1491,8 @@ class Search:
             "limit": page_size,
             "counts": state["counts"],
         }
+        if stats is not None:
+            snapshot["stats"] = stats
         yield {"type": "snapshot", **snapshot}
         yield {"type": "done", **snapshot}
 
@@ -1511,6 +1571,7 @@ class Search:
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
         cache_value: Any = None
+        started_at = time.monotonic()
         try:
             if not acquired:
                 yield {
@@ -1533,7 +1594,7 @@ class Search:
                     current_generation = getattr(self, "_cache_generation", 0)
                 if current_generation == generation:
                     self.cache.put(cache_key, cache_value)
-                yield {
+                done = {
                     "type": "done",
                     "results": [],
                     "completed": 0,
@@ -1544,6 +1605,18 @@ class Search:
                     "limit": page_size,
                     "counts": {},
                 }
+                if debug:
+                    done["stats"] = self._debug_stats(
+                        query,
+                        [],
+                        self._pool_target(),
+                        0,
+                        0,
+                        0,
+                        cache_hit=False,
+                        elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    )
+                yield done
                 return
 
             query_vector = self._query_vector(sources, query)
@@ -1607,7 +1680,7 @@ class Search:
                 }
                 if should_rank:
                     state = self._page_state(pool, source, offset, page_size, debug)
-                    yield {
+                    snapshot = {
                         "type": "snapshot",
                         "results": state["results"],
                         "completed": len(completed),
@@ -1618,6 +1691,18 @@ class Search:
                         "limit": page_size,
                         "counts": state["counts"],
                     }
+                    if debug:
+                        snapshot["stats"] = self._debug_stats(
+                            query,
+                            pool,
+                            pool_target,
+                            total_sources,
+                            len(completed),
+                            state["total"],
+                            cache_hit=False,
+                            elapsed_ms=(time.monotonic() - started_at) * 1000,
+                        )
+                    yield snapshot
 
             if len(completed) != total_sources:
                 pool = self._rank_results(completed, query, pool_target)
@@ -1630,6 +1715,20 @@ class Search:
             for doc in pool:
                 if doc["id"] in hydrated:
                     doc["lead"] = hydrated[doc["id"]]
+            stats = (
+                self._debug_stats(
+                    query,
+                    pool,
+                    pool_target,
+                    total_sources,
+                    len(completed),
+                    state["total"],
+                    cache_hit=False,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                )
+                if debug
+                else None
+            )
             # The cache holds only the deduplicated ranked pool plus compact
             # source outcomes, never a copy of every source's item list.
             cache_value = {
@@ -1639,12 +1738,13 @@ class Search:
                     result.to_event(counts.get(result.source.key, 0))
                     for result in completed
                 ],
+                "pool_target": pool_target,
             }
             with self._state_lock:
                 current_generation = getattr(self, "_cache_generation", 0)
             if current_generation == generation:
                 self.cache.put(cache_key, cache_value)
-            yield {
+            done = {
                 "type": "done",
                 "results": state["results"],
                 "completed": len(completed),
@@ -1655,6 +1755,9 @@ class Search:
                 "limit": page_size,
                 "counts": state["counts"],
             }
+            if stats is not None:
+                done["stats"] = stats
+            yield done
         finally:
             for future in futures:
                 future.cancel()
@@ -2136,13 +2239,29 @@ class Search:
         fulltext = deduplicate(fulltext)
 
         scores: dict[str, float] = {}
-        for ranked, weight in (
-            (semantic, 1.0),
-            (keyword, 1.0),
-            (fulltext, 2.0 if len(re.findall(r"\w+", query, re.UNICODE)) >= _int_config(self.cfg, "long_query", 10) else 1.0),
+        fulltext_weight = (
+            2.0
+            if len(re.findall(r"\w+", query, re.UNICODE))
+            >= _int_config(self.cfg, "long_query", 10)
+            else 1.0
+        )
+        rrf_details: dict[str, dict[str, dict[str, Any]]] = {}
+        for ranked, method, weight in (
+            (semantic, "semantic", 1.0),
+            (keyword, "title", 1.0),
+            (fulltext, "fulltext", fulltext_weight),
         ):
-            for rank, (_, _, doc) in enumerate(ranked[: max(self.candidate_count, limit)]):
-                scores[doc["id"]] = scores.get(doc["id"], 0.0) + weight / (60 + rank)
+            for rank, (raw_score, _, doc) in enumerate(
+                ranked[: max(self.candidate_count, limit)]
+            ):
+                contribution = weight / (60 + rank)
+                scores[doc["id"]] = scores.get(doc["id"], 0.0) + contribution
+                rrf_details.setdefault(doc["id"], {})[method] = {
+                    "rank": rank + 1,
+                    "score": round(raw_score, 6),
+                    "weight": weight,
+                    "contribution": round(contribution, 6),
+                }
 
         disambig_boost = _float_config(
             self.cfg, "disambiguation_boost", DEFAULT_DISAMBIGUATION_BOOST, -1.0, 1.0
@@ -2169,28 +2288,75 @@ class Search:
                 + intent
             ) / 8.0
             source_rank = int(doc.get("source_rank", 100000))
-            total = scores.get(identity, 0.0) + 0.02 * lexical
-            disambig = ""
+            rrf_score = scores.get(identity, 0.0)
+            base_score = rrf_score + 0.02 * lexical
+            total = base_score
+            disambig = {
+                "action": "none",
+                "factor": 1.0,
+                "adjustment": 0.0,
+            }
             if DISAMBIGUATION_TITLE.search(doc["title"]):
                 if _disambiguation_intent(query, query_words, doc["title"]):
                     total += disambig_boost
-                    disambig = ", disambiguation exact"
+                    disambig = {
+                        "action": "boost",
+                        "factor": 1.0,
+                        "adjustment": round(disambig_boost, 6),
+                    }
                 else:
                     total *= disambig_penalty
-                    disambig = ", disambiguation demoted"
+                    disambig = {
+                        "action": "demote",
+                        "factor": disambig_penalty,
+                        "adjustment": round(total - base_score, 6),
+                    }
             explanation = (
                 f"title {round(title_coverage * 100)}% "
                 f"({title_matches}/{len(query_words) if query_words else 0}, "
                 f"density {round(title_density * 100)}%), "
                 f"phrase {'yes' if phrase_hit else 'no'}, "
                 f"intent {'yes' if intent else 'no'}"
-                f"{disambig}"
+                f"{', disambiguation ' + disambig['action'] if disambig['action'] != 'none' else ''}"
             )
             output = dict(doc)
             output.update({
                 "score": total,
                 "explain": explanation,
                 "rank": source_rank,
+                "ranking": {
+                    "final_score": round(total, 6),
+                    "rrf_score": round(rrf_score, 6),
+                    "rrf": {
+                        method: rrf_details.get(identity, {}).get(
+                            method,
+                            {
+                                "rank": None,
+                                "score": None,
+                                "weight": weight,
+                                "contribution": 0.0,
+                            },
+                        )
+                        for method, weight in (
+                            ("semantic", 1.0),
+                            ("title", 1.0),
+                            ("fulltext", fulltext_weight),
+                        )
+                    },
+                    "title": {
+                        "query_terms": query_words,
+                        "matches": title_matches,
+                        "term_count": len(query_words),
+                        "coverage": round(title_coverage, 6),
+                        "density": round(title_density, 6),
+                        "quality": round(title_quality, 6),
+                    },
+                    "phrase": bool(phrase_hit),
+                    "intent": bool(intent),
+                    "lexical_score": round(lexical, 6),
+                    "disambiguation": disambig,
+                    "source_rank": source_rank,
+                },
             })
             scored.append((
                 total,
@@ -2203,4 +2369,9 @@ class Search:
             ))
 
         scored.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3], item[4], item[5]))
-        return [item[-1] for item in scored[:limit]]
+        ranked = []
+        for final_rank, item in enumerate(scored[:limit], 1):
+            output = item[-1]
+            output["ranking"]["final_rank"] = final_rank
+            ranked.append(output)
+        return ranked

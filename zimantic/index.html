@@ -76,13 +76,19 @@
       cursor: pointer;
     }
     button:disabled { cursor: default; opacity: .6; }
-    button.secondary, button.source-filter-option {
+    button.secondary, a.secondary, button.source-filter-option {
       background: transparent;
       border: 1px solid var(--border);
       color: var(--muted);
       font-weight: 400;
     }
-    button.secondary { padding: 6px 12px; font-size: .85rem; }
+    button.secondary, a.secondary {
+      border-radius: 8px;
+      display: inline-block;
+      font-size: .85rem;
+      padding: 6px 12px;
+      text-decoration: none;
+    }
     .status { min-height: 1.4em; margin: 12px 0 6px; font-size: .85rem; }
     .query-used { color: var(--accent); font-family: var(--mono); }
     .source-filters { margin-bottom: 8px; }
@@ -195,6 +201,46 @@
       font-style: italic;
     }
     .result-snippet.none { color: var(--muted); font-style: italic; }
+    .result-debug {
+      border-top: 1px solid var(--border);
+      margin-top: 10px;
+      padding-top: 8px;
+    }
+    .result-debug summary {
+      color: var(--muted);
+      cursor: pointer;
+      font: .75rem var(--mono);
+    }
+    .result-debug-grid {
+      display: grid;
+      gap: 3px 12px;
+      grid-template-columns: max-content 1fr;
+      margin: 8px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .result-debug-grid dt { color: var(--muted); }
+    .result-debug-grid dd { margin: 0; }
+    .debug-stats {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin: 10px 0 14px;
+      padding: 8px 12px;
+    }
+    .debug-stats summary {
+      color: var(--muted);
+      cursor: pointer;
+      font-size: .82rem;
+    }
+    .debug-stats-grid {
+      display: grid;
+      gap: 3px 14px;
+      grid-template-columns: max-content 1fr;
+      margin: 8px 0 0;
+      font: .75rem var(--mono);
+      overflow-wrap: anywhere;
+    }
+    .debug-stats-grid dt { color: var(--muted); }
+    .debug-stats-grid dd { margin: 0; }
     .result-thumb {
       background: var(--mark-bg);
       border-radius: 6px;
@@ -241,27 +287,52 @@
       width: 100%;
     }
     .external-link-notice {
-      align-items: flex-start;
-      background: var(--panel);
+      align-items: center;
+      background: rgba(255, 255, 255, .7);
       display: flex;
       flex: 1;
       flex-direction: column;
+      inset: 0;
       justify-content: center;
-      margin: 0 auto;
+      padding: 24px;
+      position: absolute;
+      z-index: 1;
+      width: 100%;
+    }
+    .external-link-notice[hidden] { display: none; }
+    .external-link-notice-panel {
+      background: #fff;
+      border: 1px solid #dde1e7;
+      border-radius: 8px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, .24);
+      color: #1b1f24;
+      display: flex;
+      flex-direction: column;
       max-width: 680px;
       padding: 32px;
       width: 100%;
     }
-    .external-link-notice[hidden] { display: none; }
-    .external-link-notice h2 { margin: 0 0 8px; }
-    .external-link-notice p { margin: 0 0 16px; }
-    .external-link-notice .external-link-url {
-      color: var(--muted);
+    .external-link-notice-panel > :not(.external-link-url) {
+      margin-left: auto;
+      margin-right: auto;
+      max-width: 680px;
+      width: 100%;
+    }
+    .external-link-notice-panel h2 { margin-bottom: 8px; }
+    .external-link-notice-panel p { margin-bottom: 16px; }
+    .external-link-notice-panel .external-link-url {
+      color: #5d6673;
       font: .85rem var(--mono);
-      max-width: 100%;
       overflow-wrap: anywhere;
     }
-    .external-link-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .external-link-notice-panel .external-link-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .external-link-notice { background: rgba(15, 17, 21, .7); }
+    }
     .empty { color: var(--muted); padding: 16px 0; }
     .source-list { display: grid; gap: 4px; }
     .source-list label { align-items: flex-start; display: flex; gap: 8px; padding: 4px; }
@@ -298,6 +369,10 @@
   </form>
 
   <div class="status" id="status"></div>
+  <details class="debug-stats" id="debugStats" hidden>
+    <summary>Stats for nerds</summary>
+    <dl class="debug-stats-grid" id="debugStatsGrid"></dl>
+  </details>
   <div class="source-filters" id="sourceFilters" hidden>
     <div class="source-filter-toolbar">
       <span class="source-filter-heading">Filter by source</span>
@@ -320,14 +395,16 @@
     <iframe id="articleModalFrame" class="article-modal-frame" title="Article" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
     <div id="externalLinkNotice" class="external-link-notice" hidden tabindex="-1"
       aria-labelledby="externalLinkTitle">
-      <h2 id="externalLinkTitle">Online link</h2>
-      <p>This link points to an online site. It is not cached in your offline library,
-        so opening it may require an internet connection.</p>
-      <p id="externalLinkUrl" class="external-link-url"></p>
-      <div class="external-link-actions">
-        <a id="externalLinkOpen" class="linklike" target="_blank"
-          rel="noopener noreferrer">Open online site</a>
-        <button id="externalLinkBack" class="secondary" type="button">Return to article</button>
+      <div class="external-link-notice-panel">
+        <h2 id="externalLinkTitle">Online link</h2>
+        <p id="externalLinkUrl" class="external-link-url"></p>
+        <p>This link points to an online site. It is not cached in your offline library,
+          so opening it may require an internet connection.</p>
+        <div class="external-link-actions">
+          <button id="externalLinkBack" class="secondary" type="button">↩️ Return to article</button>
+          <a id="externalLinkOpen" class="secondary" target="_blank"
+            rel="noopener noreferrer"><span aria-hidden="true">↗</span> Open online site</a>
+        </div>
       </div>
     </div>
   </section>
@@ -339,6 +416,7 @@
 
   const $ = id => document.getElementById(id);
   let PAGE_SIZE = 10;  // replaced with the server's page_size at startup
+  let debugMode = false;
   const AUTO_SUBMIT_DELAY = 250;
   const STREAM_RENDER_DELAY = 500;
   const BUSY_RETRY_BASE_DELAY = 1000;
@@ -781,10 +859,7 @@
     const notice = $("externalLinkNotice");
     const frame = $("articleModalFrame");
     if (notice) notice.hidden = true;
-    if (frame) {
-      frame.hidden = false;
-      frame.focus();
-    }
+    if (frame) frame.focus();
   }
 
   function showExternalLinkNotice(value) {
@@ -797,7 +872,6 @@
     if (!url || !modal || !notice || !frame || !link || !urlLabel) return;
     link.href = url.href;
     urlLabel.textContent = url.href;
-    frame.hidden = true;
     notice.hidden = false;
     notice.focus();
   }
@@ -1131,6 +1205,121 @@
     }, "*");
   }
 
+  function debugNumber(value, digits = 6) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "") : "—";
+  }
+
+  function appendDebugField(list, label, value) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    list.append(term, description);
+  }
+
+  function setResultDebug(node, item) {
+    let details = node.querySelector(".result-debug");
+    const ranking = item.ranking;
+    if (!debugMode || !ranking || typeof ranking !== "object") {
+      if (details) details.remove();
+      return;
+    }
+    const wasOpen = Boolean(details?.open);
+    if (!details) {
+      details = document.createElement("details");
+      details.className = "result-debug";
+      node.querySelector(".result-body").appendChild(details);
+    }
+    details.replaceChildren();
+    details.open = wasOpen;
+    const summary = document.createElement("summary");
+    summary.textContent =
+      `Rank #${ranking.final_rank ?? "—"} · score ${debugNumber(item.score)}`;
+    details.appendChild(summary);
+
+    const grid = document.createElement("dl");
+    grid.className = "result-debug-grid";
+    appendDebugField(grid, "source rank", String(ranking.source_rank ?? item.rank ?? "—"));
+    appendDebugField(grid, "RRF total", debugNumber(ranking.rrf_score));
+    const rrf = ranking.rrf && typeof ranking.rrf === "object" ? ranking.rrf : {};
+    const methods = Object.entries(rrf)
+      .filter(([, value]) => value && value.rank != null)
+      .map(([name, value]) =>
+        `${name} #${value.rank} (${debugNumber(value.score)} × ${value.weight} → ${debugNumber(value.contribution)})`
+      );
+    appendDebugField(grid, "matches", methods.join(", ") || "none");
+    const title = ranking.title && typeof ranking.title === "object" ? ranking.title : {};
+    appendDebugField(
+      grid,
+      "title",
+      `${title.matches ?? 0}/${title.term_count ?? 0} terms, ` +
+      `${Math.round(Number(title.coverage || 0) * 100)}% coverage, ` +
+      `${Math.round(Number(title.density || 0) * 100)}% density`
+    );
+    appendDebugField(
+      grid,
+      "signals",
+      `lexical ${debugNumber(ranking.lexical_score)}, ` +
+      `phrase ${ranking.phrase ? "yes" : "no"}, ` +
+      `intent ${ranking.intent ? "yes" : "no"}`
+    );
+    const disambiguation = ranking.disambiguation;
+    if (disambiguation?.action && disambiguation.action !== "none") {
+      appendDebugField(
+        grid,
+        "disambiguation",
+        `${disambiguation.action} (${debugNumber(disambiguation.adjustment)})`
+      );
+    }
+    details.appendChild(grid);
+  }
+
+  function renderDebugStats() {
+    const panel = $("debugStats");
+    const grid = $("debugStatsGrid");
+    if (!panel || !grid) return;
+    if (!debugMode || !current?.stats) {
+      panel.hidden = true;
+      grid.replaceChildren();
+      return;
+    }
+    const stats = current.stats;
+    const sources = stats.sources || {};
+    const matched = stats.matched_by || {};
+    grid.replaceChildren();
+    appendDebugField(grid, "query terms", (stats.query_terms || []).join(", ") || "none");
+    appendDebugField(
+      grid,
+      "sources",
+      `${sources.completed ?? 0}/${sources.total ?? 0} complete`
+    );
+    appendDebugField(
+      grid,
+      "ranked pool",
+      `${stats.ranked_pool_size ?? 0} / ${stats.candidate_limit ?? "—"} candidates`
+    );
+    appendDebugField(grid, "displayed results", String(stats.result_count ?? 0));
+    appendDebugField(
+      grid,
+      "matched by",
+      `semantic ${matched.semantic ?? 0}, title ${matched.title ?? 0}, ` +
+      `full text ${matched.fulltext ?? 0}`
+    );
+    const sourceCounts = stats.source_counts || {};
+    appendDebugField(
+      grid,
+      "pool by source",
+      Object.entries(sourceCounts).map(([source, count]) => `${source} ${count}`).join(", ") || "none"
+    );
+    appendDebugField(
+      grid,
+      "cache",
+      `${stats.cache || "—"}${stats.elapsed_ms != null ? ` · ${stats.elapsed_ms} ms` : ""}`
+    );
+    panel.hidden = false;
+  }
+
   function closeArticleModal({navigateHistory = true} = {}) {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
@@ -1285,6 +1474,7 @@
       snippet.className = "result-snippet none";
       snippet.textContent = "No preview available for this result.";
     }
+    setResultDebug(node, item);
     let thumb = node.querySelector(".result-thumb");
     if (item.url) {
       if (!thumb) {
@@ -1429,6 +1619,7 @@
     renderFilterLine(current.total);
     renderPager(current.total, pageCount);
     renderResults(current.pageItems);
+    renderDebugStats();
     const articleUrl = readModalUrl(activeModalUrl);
     if (
       articleUrl &&
@@ -1581,6 +1772,7 @@
       current.total = event.total || 0;
       current.hasMore = Boolean(event.has_more);
       if (event.counts) current.counts = event.counts;
+      if (event.stats) current.stats = event.stats;
     };
     const consumeLine = line => {
       if (!line.trim() || sequence !== searchSequence) return;
@@ -1655,6 +1847,7 @@
       outcomes: new Map(),
       counts: {},
       pageItems: [],
+      stats: null,
       total: 0,
       hasMore: false,
       completed: 0,
@@ -1737,6 +1930,16 @@
       current.pageItems = items;
       current.total = Number(response.headers.get("X-Total-Count") || items.length);
       current.hasMore = response.headers.get("X-Has-More") === "true";
+      if (debugMode) {
+        const debugStats = response.headers.get("X-Debug-Stats");
+        if (debugStats) {
+          try {
+            current.stats = JSON.parse(debugStats);
+          } catch (_) {
+            current.stats = null;
+          }
+        }
+      }
       const from = current.total ? pageIndex * PAGE_SIZE + 1 : 0;
       const to = Math.min((pageIndex + 1) * PAGE_SIZE, current.total);
       $("status").textContent = current.total
@@ -1880,6 +2083,9 @@
     }
   });
   $("externalLinkBack").addEventListener("click", hideExternalLinkNotice);
+  $("externalLinkNotice").addEventListener("click", event => {
+    if (event.target === event.currentTarget) hideExternalLinkNotice();
+  });
   window.addEventListener("keydown", event => {
     if (event.key === "Escape" && !$("articleModal").hidden) {
       event.preventDefault();
@@ -1906,6 +2112,7 @@
     resultList = null;
     document.body.classList.remove("search-active");
     $("status").textContent = "";
+    renderDebugStats();
     $("sourceFilters").hidden = true;
     $("sourceFilterOptions").replaceChildren();
     $("sourceFilterStatus").textContent = "";
@@ -1989,6 +2196,7 @@
       ]);
       if (configResponse.ok) {
         const config = await configResponse.json();
+        debugMode = Boolean(config.debug);
         if (Number.isInteger(config.page_size) && config.page_size > 0) {
           PAGE_SIZE = config.page_size;
         }
