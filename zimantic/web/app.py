@@ -26,6 +26,8 @@ from ..searching.sources import _html_attribute
 
 ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"
+APP_CSS = ASSET_DIR / "app.css"
+APP_JS = ASSET_DIR / "app.js"
 FAVICON = ASSET_DIR / "favicon.ico"
 FAVICON_16 = ASSET_DIR / "favicon-16x16.png"
 FAVICON_32 = ASSET_DIR / "favicon-32x32.png"
@@ -868,6 +870,8 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
 
     # Static browser chrome: each route only differs in path, file and media type.
     static_routes = (
+        ("/app.css", APP_CSS, "text/css"),
+        ("/app.js", APP_JS, "application/javascript"),
         ("/favicon.ico", FAVICON, "image/x-icon"),
         ("/favicon-16x16.png", FAVICON_16, "image/png"),
         ("/favicon-32x32.png", FAVICON_32, "image/png"),

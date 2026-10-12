@@ -92,6 +92,22 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.headers["x-total-count"], "1")
         self.assertEqual(response.headers["x-has-more"], "false")
 
+    def test_page_assets_are_served(self):
+        page = self.client.get("/")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('href="/app.css"', page.text)
+        self.assertIn('src="/app.js"', page.text)
+
+        css = self.client.get("/app.css")
+        self.assertEqual(css.status_code, 200)
+        self.assertTrue(css.headers["content-type"].startswith("text/css"))
+        self.assertIn(":root", css.text)
+
+        javascript = self.client.get("/app.js")
+        self.assertEqual(javascript.status_code, 200)
+        self.assertTrue(javascript.headers["content-type"].startswith("application/javascript"))
+        self.assertIn("initialize();", javascript.text)
+
     def test_favicon_is_served(self):
         response = self.client.get("/favicon.ico")
         self.assertEqual(response.status_code, 200)
