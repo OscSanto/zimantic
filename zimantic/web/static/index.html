@@ -1355,6 +1355,9 @@
                     const parentParts = articleRouteParts(rawParentUrl);
                     if (!parentParts) return null;
                     const zim = parentParts[1];
+                    const parentContentUrl = contentUrlFromRaw(rawParentUrl);
+                    if (!parentContentUrl) return null;
+                    const parentValue = articleUrlValue(parentContentUrl);
                     const links = [];
                     const seen = new Set();
                     for (const link of document.querySelectorAll("a[href]")) {
@@ -1374,6 +1377,7 @@
                         const contentUrl = contentUrlFromRaw(linkUrl);
                         if (!contentUrl) continue;
                         const value = articleUrlValue(contentUrl);
+                        if (value === parentValue) continue;
                         if (seen.has(value)) continue;
                         seen.add(value);
                         links.push(contentUrl);
