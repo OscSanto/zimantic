@@ -59,6 +59,7 @@ h1 {
     margin: 0 0 4px;
 }
 h1[role="button"] {
+    display: inline-block;
     cursor: pointer;
 }
 .subtitle,

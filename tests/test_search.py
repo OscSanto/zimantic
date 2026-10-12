@@ -370,42 +370,6 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in ranked], ["manual:compact", "manual:long"])
         self.assertIn("density 100%", ranked[0]["explain"])
 
-    def test_exact_content_phrase_beats_an_earlier_unrelated_fulltext_hit(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
-        unrelated = {
-            "id": "manual:unrelated",
-            "source_key": "manual",
-            "source": "Manual",
-            "title": "Unrelated result",
-            "lead": "",
-            "path": "unrelated",
-            "source_rank": 1,
-        }
-        exact = {
-            "id": "manual:exact",
-            "source_key": "manual",
-            "source": "Manual",
-            "title": "Product announcement",
-            "lead": "",
-            "path": "exact",
-            "source_rank": 2,
-            "_content_phrase": True,
-        }
-        result = SourceResult(
-            source=source,
-            items=[unrelated, exact],
-            fulltext=[(0, unrelated), (1, exact)],
-        )
-        search = object.__new__(Search)
-        search.cfg = {"candidate_count": 16}
-        search.candidate_count = 16
-
-        ranked = search._rank_results([result], "Tokyo banana", 10)
-
-        self.assertEqual([item["id"] for item in ranked], ["manual:exact", "manual:unrelated"])
-        self.assertTrue(ranked[0]["ranking"]["content_phrase"])
-        self.assertNotIn("_content_phrase", ranked[0])
-
     def test_stream_emits_source_snapshots_and_final_results(self):
         sources = [
             SourceInfo("one", "One", "one", "local"),
@@ -744,6 +708,55 @@ class DisambiguationRankingTests(unittest.TestCase):
             with self.subTest(query=query):
                 ranked = self._search()._rank_results([self._result()], query, 10)
                 self.assertEqual(ranked[0]["id"], "manual:air")
+
+
+class UserPageRankingTests(unittest.TestCase):
+    def _search(self):
+        search = object.__new__(Search)
+        search.cfg = {"candidate_count": 16}
+        search.candidate_count = 16
+        return search
+
+    def _result(self):
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        user = {
+            "id": "manual:user",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "User Lockjaw",
+            "lead": "Member since July 2017.",
+            "path": "users/123/lockjaw",
+            "source_rank": 1,
+        }
+        article = {
+            "id": "manual:article",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Lockjaw",
+            "lead": "Lockjaw is another name for trismus.",
+            "path": "Lockjaw",
+            "source_rank": 2,
+        }
+        return SourceResult(
+            source=source,
+            items=[user, article],
+            keyword=[(-1.0, user), (-2.0, article)],
+            fulltext=[(0, user), (1, article)],
+        )
+
+    def test_user_pages_are_demoted_for_normal_queries(self):
+        ranked = self._search()._rank_results([self._result()], "lockjaw", 10)
+
+        self.assertEqual(ranked[0]["id"], "manual:article")
+        user = next(item for item in ranked if item["id"] == "manual:user")
+        self.assertEqual(user["ranking"]["user_page"]["action"], "demote")
+
+    def test_explicit_user_queries_keep_user_pages_eligible(self):
+        ranked = self._search()._rank_results([self._result()], "user lockjaw", 10)
+
+        self.assertEqual(ranked[0]["id"], "manual:user")
+        self.assertEqual(ranked[0]["ranking"]["user_page"]["action"], "none")
+
 
 def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
     db = sqlite3.connect(index_dir / f"{name}.sqlite")

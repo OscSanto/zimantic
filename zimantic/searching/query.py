@@ -20,8 +20,10 @@ INTENT_RULES = (
     ),
 )
 DISAMBIGUATION_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
+USER_PAGE_PATH = re.compile(r"(?:^|/)users(?:/|$)", re.I)
 DEFAULT_DISAMBIGUATION_BOOST = 0.08
 DEFAULT_DISAMBIGUATION_PENALTY = 0.5
+DEFAULT_USER_PAGE_PENALTY = 0.25
 
 
 def _exact_title_intent(query_words: list[str], title: str) -> bool:
@@ -38,6 +40,11 @@ def _disambiguation_intent(query: str, query_words: list[str], title: str) -> bo
         return False
     base_title = DISAMBIGUATION_TITLE.sub("", title)
     return _exact_title_intent(query_words, base_title)
+
+
+def _user_page_intent(query_words: list[str]) -> bool:
+    """True when the query explicitly asks for a user or profile page."""
+    return bool({"user", "profile"} & set(query_words))
 
 
 def _stem(word: str) -> str:

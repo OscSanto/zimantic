@@ -28,8 +28,10 @@ from .searching.index import _LocalIndex, _nprobe
 from .searching.query import (
     DEFAULT_DISAMBIGUATION_BOOST,
     DEFAULT_DISAMBIGUATION_PENALTY,
+    DEFAULT_USER_PAGE_PENALTY,
     DISAMBIGUATION_TITLE,
     MAX_QUERY_LENGTH,
+    USER_PAGE_PATH,
     _content_terms,
     _density,
     _disambiguation_intent,
@@ -37,7 +39,7 @@ from .searching.query import (
     _intent_match,
     _phrase,
     _query_terms,
-    _query_words,
+    _user_page_intent,
     _title_prefix_query,
     _title_query,
 )
@@ -76,30 +78,6 @@ DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF = 1.0
 MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
 DEFAULT_LONG_QUERY = 10
-MAX_PHRASE_CANDIDATES = 16
-
-
-def _entry_contains_phrase(
-    archive: Archive,
-    path: str,
-    query_words: list[str],
-    max_html_bytes: int,
-) -> bool:
-    """Check a full-text candidate for the query's exact readable-text phrase."""
-    if len(query_words) < 2:
-        return False
-    try:
-        item = archive.get_entry_by_path(path).get_item()
-        mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
-        raw = bytes(item.content[:max_html_bytes])
-    except (KeyError, RuntimeError, TypeError, ValueError):
-        return False
-    if mimetype not in {"text/plain", "text/html", "application/xhtml+xml"}:
-        return False
-    text = raw.decode("utf-8", "ignore").casefold()
-    separator = r"(?:\s|&(?:nbsp|#160|#x[a-f0-9]+);|<[^>]*>)+"
-    pattern = separator.join(re.escape(word) for word in query_words)
-    return bool(re.search(pattern, text, re.IGNORECASE))
 
 
 class SearchQueryError(ValueError):
@@ -230,9 +208,7 @@ def _score_ranked_document(
     # Coverage is primary; density rewards concise titles among equally
     # complete matches without letting a short partial match win.
     title_quality = title_coverage * (1.0 + title_density) / 2.0
-    title_phrase_hit = _phrase(query_words, title_tokens)
-    content_phrase_hit = bool(doc.get("_content_phrase"))
-    phrase_hit = max(title_phrase_hit, content_phrase_hit)
+    phrase_hit = _phrase(query_words, title_tokens)
     source = source_by_key.get(doc["source_key"])
     intent = _intent_match(source, query) if source is not None else 0.0
     lexical = (5.0 * title_quality + 2.0 * phrase_hit + intent) / 8.0
@@ -260,6 +236,16 @@ def _score_ranked_document(
                 "factor": DEFAULT_DISAMBIGUATION_PENALTY,
                 "adjustment": round(total - base_score, 6),
             }
+    user_page = bool(USER_PAGE_PATH.search(str(doc.get("path", ""))))
+    user_page_action = "none"
+    user_page_factor = 1.0
+    user_page_adjustment = 0.0
+    if user_page and not _user_page_intent(query_words):
+        before_user_page = total
+        total *= DEFAULT_USER_PAGE_PENALTY
+        user_page_action = "demote"
+        user_page_factor = DEFAULT_USER_PAGE_PENALTY
+        user_page_adjustment = total - before_user_page
     explanation = (
         f"title {round(title_coverage * 100)}% "
         f"({title_matches}/{len(query_words) if query_words else 0}, "
@@ -267,9 +253,9 @@ def _score_ranked_document(
         f"phrase {'yes' if phrase_hit else 'no'}, "
         f"intent {'yes' if intent else 'no'}"
         f"{', disambiguation ' + disambig['action'] if disambig['action'] != 'none' else ''}"
+        f"{', user page demote' if user_page_action == 'demote' else ''}"
     )
     output = dict(doc)
-    output.pop("_content_phrase", None)
     output.update({
         "score": total,
         "explain": explanation,
@@ -302,10 +288,14 @@ def _score_ranked_document(
                 "quality": round(title_quality, 6),
             },
             "phrase": bool(phrase_hit),
-            "content_phrase": content_phrase_hit,
             "intent": bool(intent),
             "lexical_score": round(lexical, 6),
             "disambiguation": disambig,
+            "user_page": {
+                "action": user_page_action,
+                "factor": user_page_factor,
+                "adjustment": round(user_page_adjustment, 6),
+            },
             "source_rank": source_rank,
         },
     })
@@ -1637,7 +1627,6 @@ class Search:
             if len(completed) != total_sources:
                 pool = self._rank_results(completed, query, pool_target)
                 counts = self._source_counts(pool)
-            pool = self._apply_content_phrase_boost(completed, query, pool, pool_target)
             self._populate_result_mimetypes(pool)
             counts = self._source_counts(pool)
             state = self._page_state(pool, source, offset, page_size, debug)
@@ -2129,89 +2118,23 @@ class Search:
             query,
             max(self.candidate_count, limit),
         )
-
-        def score_documents():
-            scored = [
-                _score_ranked_document(
-                    identity,
-                    doc,
-                    query_words,
-                    query,
-                    source_by_key,
-                    scores,
-                    rrf_details,
-                    fulltext_weight,
-                )
-                for identity, doc in docs.items()
-            ]
-            scored.sort(
-                key=lambda item: (
-                    -item[0],
-                    -item[1],
-                    -item[2],
-                    item[3],
-                    item[4],
-                    item[5],
-                )
+        scored = [
+            _score_ranked_document(
+                identity,
+                doc,
+                query_words,
+                query,
+                source_by_key,
+                scores,
+                rrf_details,
+                fulltext_weight,
             )
-            return scored
-
-        scored = score_documents()
+            for identity, doc in docs.items()
+        ]
+        scored.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3], item[4], item[5]))
         ranked = []
         for final_rank, item in enumerate(scored[:limit], 1):
             output = item[-1]
             output["ranking"]["final_rank"] = final_rank
             ranked.append(output)
         return ranked
-
-    def _apply_content_phrase_boost(
-        self,
-        source_results: list[SourceResult],
-        query: str,
-        pool: list[dict[str, Any]],
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        """Inspect only top final candidates for an exact readable-text phrase."""
-        phrase_words = _query_words(query)
-        if len(phrase_words) < 2 or not pool:
-            return pool
-
-        _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
-        max_html_bytes = _int_config(
-            self.cfg,
-            "max_html_bytes",
-            DEFAULT_MAX_HTML_BYTES,
-        )
-        checked = 0
-        found = False
-        for result in pool:
-            if checked >= MAX_PHRASE_CANDIDATES:
-                break
-            if result["ranking"]["rrf"]["fulltext"]["rank"] is None:
-                continue
-            doc = docs.get(result["id"])
-            if doc is None:
-                continue
-            source = source_by_key.get(doc["source_key"])
-            if source is None or not source.local_name:
-                continue
-            index = getattr(self, "indexes", {}).get(source.local_name)
-            if index is None or index.archive is None:
-                continue
-            checked += 1
-            try:
-                self._acquire_index(index)
-            except RuntimeError:
-                continue
-            try:
-                with index.lock:
-                    doc["_content_phrase"] = _entry_contains_phrase(
-                        index.archive,
-                        doc["path"],
-                        phrase_words,
-                        max_html_bytes,
-                    )
-                    found = found or doc["_content_phrase"]
-            finally:
-                self._release_index(index)
-        return self._rank_results(source_results, query, limit) if found else pool
