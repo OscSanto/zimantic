@@ -435,11 +435,17 @@ def _intent_match(source: SourceInfo, question: str) -> float:
 
 
 class Search:
-    def __init__(self, cfg: dict, embedder=None, semantic: bool = True):
+    def __init__(
+        self,
+        cfg: dict,
+        embedder=None,
+        semantic: bool = True,
+    ):
         self.cfg = cfg
         self.embedder = embedder
         # Fast mode skips FAISS and the model.
         self.semantic = bool(semantic)
+        self._defer_faiss = self.semantic
         self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
         self._state_lock = threading.RLock()
@@ -532,7 +538,13 @@ class Search:
 
             faiss_index = None
             faiss_path = db_path.with_suffix(".faiss")
-            if self.semantic and done_value == "1" and faiss_path.exists():
+            defer_faiss = getattr(self, "_defer_faiss", False)
+            if (
+                self.semantic
+                and not defer_faiss
+                and done_value == "1"
+                and faiss_path.exists()
+            ):
                 try:
                     # Fast mode does not need the FAISS import.
                     import faiss
@@ -578,7 +590,11 @@ class Search:
                 threading.Lock(),
                 db_path=uri,
                 db_signature=_file_signature(db_path),
-                faiss_signature=_file_signature(faiss_path),
+                faiss_signature=(
+                    _file_signature(faiss_path)
+                    if self.semantic and not defer_faiss
+                    else None
+                ),
                 done=done_value,
                 source_size=source_size,
                 zim_path=str(zim_path) if zim_path is not None else None,
@@ -619,6 +635,42 @@ class Search:
 
         threading.Thread(target=_load, name="zimantic-embedder", daemon=True).start()
 
+    def start_faiss(self) -> None:
+        """Load FAISS and vector indexes off the server startup path."""
+        if not self.semantic or not getattr(self, "_defer_faiss", False):
+            return
+
+        def _load() -> None:
+            try:
+                import faiss  # noqa: F401 - load the native module on this worker
+            except Exception as error:
+                logger.warning(
+                    "zimantic: FAISS unavailable (%s); using title and full-text search",
+                    error,
+                )
+                return
+
+            self._defer_faiss = False
+            try:
+                self.reload()
+            except Exception as error:
+                logger.warning(
+                    "zimantic: FAISS indexes unavailable (%s); "
+                    "using title and full-text search",
+                    error,
+                )
+                return
+            with self._state_lock:
+                semantic_indexes = sum(
+                    index.semantic for index in self.indexes.values()
+                )
+            logger.info(
+                "zimantic: FAISS ready; semantic search enabled for %d index(es)",
+                semantic_indexes,
+            )
+
+        threading.Thread(target=_load, name="zimantic-faiss", daemon=True).start()
+
     def reload(self) -> dict[str, Any]:
         """Rescan index_dir without restarting. Picks up new finished indexes,
         forgets removed ones, upgrades fast indexes that gained vectors, and
@@ -646,9 +698,10 @@ class Search:
                 with self._state_lock:
                     current = self.indexes.get(name)
                 db_signature = _file_signature(db_path)
+                defer_faiss = getattr(self, "_defer_faiss", False)
                 faiss_signature = (
                     _file_signature(db_path.with_suffix(".faiss"))
-                    if self.semantic
+                    if self.semantic and not defer_faiss
                     else None
                 )
                 changed = (
@@ -657,6 +710,7 @@ class Search:
                         current.db_signature != db_signature
                         or (
                             self.semantic
+                            and not defer_faiss
                             and current.faiss_signature != faiss_signature
                         )
                         or (

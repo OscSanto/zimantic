@@ -1,5 +1,6 @@
 import hashlib
 from html import escape as html_escape
+from html import unescape as html_unescape
 import json
 import logging
 from pathlib import Path
@@ -8,6 +9,7 @@ import re
 import signal
 import threading
 from urllib.parse import quote as quote_path
+from urllib.parse import urljoin, urlsplit
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
@@ -39,7 +41,7 @@ ARTICLE_STREAM_CHUNK = 64 * 1024
 
 
 ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
-[data-zimantic-toolbar] {
+nav[data-zimantic-toolbar] {
   align-items: center !important;
   background: #171a21 !important;
   border-bottom: 1px solid #2a2f3a !important;
@@ -57,6 +59,9 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
   width: 100% !important;
   z-index: 2147483647 !important;
 }
+/* The <script>/<style> markers carry the same attribute; never let the layout
+   rule above turn the injected script source into visible page text. */
+script[data-zimantic-toolbar] { display: none !important; }
 [data-zimantic-toolbar],
 [data-zimantic-toolbar] * { box-sizing: border-box !important; }
 [data-zimantic-toolbar] a,
@@ -168,7 +173,7 @@ ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
   width: 1px !important;
 }
 @media (prefers-color-scheme: light) {
-  [data-zimantic-toolbar] {
+  nav[data-zimantic-toolbar] {
     background: #fff !important;
     border-color: #dde1e7 !important;
     box-shadow: 0 1px 5px rgba(0, 0, 0, .12) !important;
@@ -247,6 +252,14 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       if (event.data?.type === "zimantic-modal-navigation") {
         setContextNavigation(event.data);
       }
+    });
+    // The raw article iframe cannot see or update this toolbar, so its bridge
+    // asks us to navigate the whole shell. Reloading keeps breadcrumbs, the
+    // permalink and the modal URL in sync, exactly like a normal page load.
+    window.addEventListener("message", event => {
+      if (event.data?.type !== "zimantic-shell-navigate") return;
+      const url = String(event.data.url || "");
+      if (url.startsWith("/content/")) location.href = url;
     });
     const fitToolbarLabels = () => {
       if (!actions) return;
@@ -344,9 +357,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       new ResizeObserver(fitToolbarLabels).observe(toolbar);
     }
     if (window.parent !== window) {
+      const iconLink = document.querySelector("link[data-zimantic-article-icon]");
       window.parent.postMessage({
         type: "zimantic-article-ready",
         url: location.href,
+        title: document.title,
+        icon: iconLink ? iconLink.href : null,
       }, "*");
     }
   };
@@ -359,18 +375,99 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 </script>"""
 
 
+# Injected into raw HTML articles served under /article/. The article itself
+# has no toolbar (that lives in the /content/ shell), so this tiny bridge turns
+# in-article link clicks into shell navigations. Without it, following a link
+# would leave the shell's breadcrumbs and modal URL pointing at the old article.
+ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
+(() => {
+  const initialize = () => {
+    const context = new URL(location.href);
+    const parts = context.pathname.split("/").filter(Boolean);
+    let zim = parts[1] || "";
+    try {
+      zim = decodeURIComponent(zim);
+    } catch (_) {}
+    const contentHome = `/content/${zim}`;
+    const articleHome = `/article/${zim}`;
+    const contentPrefix = `${contentHome}/`;
+    const articlePrefix = `${articleHome}/`;
+    document.addEventListener("click", event => {
+      if (event.defaultPrevented) return;
+      const anchor = event.target && event.target.closest
+        ? event.target.closest("a[href]")
+        : null;
+      if (!anchor || !anchor.href) return;
+      if (
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const target = String(anchor.target || "").toLowerCase();
+      if (target && target !== "_self" && target !== "_top") return;
+      if (anchor.hasAttribute("download")) return;
+      let url;
+      try {
+        url = new URL(anchor.href, context);
+      } catch (_) {
+        return;
+      }
+      if (url.origin !== context.origin) return;
+      if (url.protocol !== "http:" && url.protocol !== "https:") return;
+      const path = url.pathname;
+      let contentPath = null;
+      if (path === contentHome || path.startsWith(contentPrefix)) {
+        contentPath = path;
+      } else if (path === articleHome || path.startsWith(articlePrefix)) {
+        contentPath = "/content" + path.slice("/article".length);
+      }
+      // Anything else (external hosts, app pages, assets) is left to the iframe.
+      if (!contentPath) return;
+      // Same-document fragment links must scroll in place, not reload the shell.
+      if (url.pathname === context.pathname && url.search === context.search) {
+        return;
+      }
+      event.preventDefault();
+      window.parent.postMessage({
+        type: "zimantic-shell-navigate",
+        url: contentPath + url.search,
+      }, "*");
+    });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initialize, {once: true});
+  } else {
+    initialize();
+  }
+})();
+</script>"""
+
+
+def _content_url(zim: str, path: str | None = None) -> str:
+    url = f"/content/{quote_path(zim, safe='')}"
+    if path:
+        url += f"/{quote_path(path, safe='/')}"
+    return url
+
+
+def _article_url(zim: str, path: str | None = None) -> str:
+    url = f"/article/{quote_path(zim, safe='')}"
+    if path:
+        url += f"/{quote_path(path, safe='/')}"
+    return url
+
+
 def _article_toolbar(zim: str, article: dict) -> str:
-    zim_url = f"/content/{quote_path(zim, safe='')}"
+    zim_url = _content_url(zim)
     random_url = f"/random?zim={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
     article_path = str(article.get("path") or "").strip("/")
     path_parts = [part for part in article_path.split("/") if part]
-    permalink_url = (
-        f"/content/{quote_path(zim, safe='')}/"
-        f"{quote_path(article_path, safe='/')}"
-        if article_path
-        else zim_url
-    )
+    permalink_url = _content_url(zim, article_path) if article_path else zim_url
     article_title = html_escape(
         str(article.get("title") or article_path or "Permalink"),
         quote=False,
@@ -378,10 +475,7 @@ def _article_toolbar(zim: str, article: dict) -> str:
     breadcrumbs = []
     for depth in range(1, len(path_parts)):
         parent_path = "/".join(path_parts[:depth])
-        parent_url = (
-            f"/content/{quote_path(zim, safe='')}/"
-            f"{quote_path(parent_path, safe='/')}"
-        )
+        parent_url = _content_url(zim, parent_path)
         breadcrumbs.append(
             f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
             f'<a class="zimantic-toolbar-breadcrumb" href="{parent_url}" '
@@ -433,35 +527,159 @@ def _article_toolbar(zim: str, article: dict) -> str:
 </nav>"""
 
 
-def _decorate_html_article(content: bytes | memoryview, zim: str, article: dict) -> bytes:
-    """Add navigation controls without changing non-HTML archive entries."""
+def _decorate_article_bridge(content: bytes | memoryview, zim: str) -> bytes:
+    """Add the shell-navigation bridge to a raw HTML article.
+
+    The article keeps its own markup; only a small script is added so link
+    clicks can ask the /content/ shell to navigate. Non-HTML entries and
+    documents that already carry the bridge are returned untouched.
+    """
     try:
         document = bytes(content).decode("utf-8")
     except UnicodeDecodeError:
         return content
-    if "data-zimantic-toolbar" in document:
+    if "data-zimantic-bridge" in document:
         return content
 
-    toolbar = _article_toolbar(zim, article)
     head_close = re.search(r"</head\s*>", document, re.IGNORECASE)
     if head_close:
         position = head_close.start()
         document = (
-            document[:position]
-            + ARTICLE_TOOLBAR_STYLE
-            + ARTICLE_TOOLBAR_SCRIPT
-            + document[position:]
+            document[:position] + ARTICLE_NAV_BRIDGE_SCRIPT + document[position:]
         )
     else:
-        document = ARTICLE_TOOLBAR_STYLE + ARTICLE_TOOLBAR_SCRIPT + document
-
-    body_open = re.search(r"<body\b[^>]*>", document, re.IGNORECASE)
-    if body_open:
-        position = body_open.end()
-        document = document[:position] + toolbar + document[position:]
-    else:
-        document = toolbar + document
+        document = ARTICLE_NAV_BRIDGE_SCRIPT + document
     return document.encode("utf-8")
+
+
+def _tag_attribute(tag: str, name: str) -> str:
+    match = re.search(
+        rf"\b{re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+        tag,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return next((value for value in match.groups() if value is not None), "")
+
+
+def _article_head_meta(
+    content: bytes | memoryview, zim: str, path: str | None
+) -> tuple[str | None, str | None]:
+    """Title and favicon declared by a raw article's ``<head>``.
+
+    Relative icon hrefs are resolved against the article's own /article/ URL so
+    the browser keeps loading them through the raw route. External, data: and
+    non-/article/ icons are ignored, letting the caller fall back to the ZIM's
+    source icon instead.
+    """
+    try:
+        document = bytes(content).decode("utf-8", errors="replace")
+    except (TypeError, ValueError):
+        return None, None
+    head_close = re.search(r"</head\s*>", document, re.IGNORECASE)
+    head = document[: head_close.start()] if head_close else document[:65536]
+
+    title = None
+    title_match = re.search(
+        r"<title[^>]*>(.*?)</title>", head, re.IGNORECASE | re.DOTALL
+    )
+    if title_match:
+        title = html_unescape(re.sub(r"\s+", " ", title_match.group(1))).strip() or None
+
+    base = _article_url(zim, path) if path else _article_url(zim) + "/"
+    icon = None
+    for tag in re.findall(r"<link\b[^>]*>", head, re.IGNORECASE):
+        if "icon" not in _tag_attribute(tag, "rel").casefold():
+            continue
+        href = _tag_attribute(tag, "href").strip()
+        if not href:
+            continue
+        parsed = urlsplit(urljoin(base, href))
+        if parsed.scheme or parsed.netloc or not parsed.path.startswith("/article/"):
+            continue
+        icon = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        break
+    return title, icon
+
+
+def _content_shell(
+    zim: str,
+    article: dict,
+    status_code: int = 200,
+    fallback_icon: str | None = None,
+) -> Response:
+    """Toolbar shell page whose iframe loads the raw article from /article/.
+
+    Keeping the toolbar in this outer document means it survives any
+    navigation inside the iframe, including 404s and other error bodies. The
+    shell also mirrors the article's title and favicon: directly loaded shells
+    use them for the browser tab, and embedded shells forward them to the host
+    so the modal's tab follows the article too.
+    """
+    article_path = str(article.get("path") or "").strip("/")
+    iframe_url = _article_url(zim, article_path) if article_path else _article_url(zim)
+    toolbar = _article_toolbar(zim, article)
+    entry_title = str(article.get("title") or article_path or zim)
+    parsed_title = None
+    icon = fallback_icon
+    if article.get("mimetype") == "text/html" and article.get("content") is not None:
+        parsed_title, parsed_icon = _article_head_meta(
+            article["content"], zim, article_path or None
+        )
+        icon = parsed_icon or fallback_icon
+    title = html_escape(parsed_title or entry_title, quote=False)
+    icon_link = (
+        f'<link rel="icon" data-zimantic-article-icon href="{html_escape(icon, quote=True)}">\n'
+        if icon
+        else ""
+    )
+    html = (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{title}</title>\n"
+        + icon_link
+        + ARTICLE_TOOLBAR_STYLE
+        + """<style data-zimantic-shell>
+html, body { height: 100%; margin: 0; }
+body {
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+nav[data-zimantic-toolbar] {
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+  position: static !important;
+}
+iframe[data-zimantic-article] {
+  background: #fff;
+  border: 0;
+  display: block;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  width: 100% !important;
+}
+</style>
+</head>
+<body>
+"""
+        + toolbar
+        + f'\n<iframe data-zimantic-article title="{title}" '
+        f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
+        + ARTICLE_TOOLBAR_SCRIPT
+        + "\n</body>\n</html>"
+    )
+    return Response(
+        content=html.encode("utf-8"),
+        media_type="text/html",
+        status_code=status_code,
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 def _article_content_response(content: bytes | memoryview, mimetype: str) -> Response:
@@ -578,7 +796,7 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
             "cache": searchClass.cache.stats(),
         }
 
-    def article_response(zim: str, path: str | None = None):
+    def raw_article_response(zim: str, path: str | None = None):
         try:
             article = searchClass.read_article(zim, path)
         except ArticleNotFoundError as error:
@@ -590,23 +808,76 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
 
         requested_path = None if path is None else path.strip("/")
         if requested_path != article["path"]:
-            location = (
-                f"/content/{quote_path(zim, safe='')}/"
-                f"{quote_path(article['path'], safe='/')}"
+            return Response(
+                status_code=307,
+                headers={"Location": _article_url(zim, article["path"])},
             )
-            return Response(status_code=307, headers={"Location": location})
         content = article["content"]
         if article["mimetype"] == "text/html":
-            content = _decorate_html_article(content, zim, article)
+            content = _decorate_article_bridge(content, zim)
         return _article_content_response(content, article["mimetype"])
 
+    def _error_shell_article(requested_path: str | None) -> dict:
+        safe_path = "/".join(
+            part for part in (requested_path or "").split("/")
+            if part and part not in {".", ".."}
+        )
+        return {"path": safe_path, "title": safe_path or "Article"}
+
+    def _zim_icon_url(zim: str) -> str | None:
+        """The ZIM's own favicon, used when an article declares none."""
+        try:
+            sources = searchClass.source_dicts()
+        except Exception:  # never let icon discovery break article serving
+            return None
+        for source in sources:
+            if not isinstance(source, dict) or source.get("local_name") != zim:
+                continue
+            icon_url = source.get("icon_url")
+            if isinstance(icon_url, str) and icon_url:
+                return icon_url
+        return None
+
+    def content_shell_response(zim: str, path: str | None = None):
+        requested_path = None if path is None else path.strip("/")
+        fallback_icon = _zim_icon_url(zim)
+        try:
+            article = searchClass.read_article(zim, path)
+        except ArticleNotFoundError:
+            return _content_shell(
+                zim, _error_shell_article(requested_path), 404, fallback_icon
+            )
+        except ArticleTooLargeError:
+            return _content_shell(
+                zim, _error_shell_article(requested_path), 413, fallback_icon
+            )
+        except ArticleUnavailableError:
+            return _content_shell(
+                zim, _error_shell_article(requested_path), 503, fallback_icon
+            )
+
+        if requested_path != article["path"]:
+            return Response(
+                status_code=307,
+                headers={"Location": _content_url(zim, article["path"])},
+            )
+        return _content_shell(zim, article, fallback_icon=fallback_icon)
+
     @app.get("/content/{zim}")
-    def article_homepage(zim: str):
-        return article_response(zim)
+    def content_homepage(zim: str):
+        return content_shell_response(zim)
 
     @app.get("/content/{zim}/{path:path}")
+    def content_article(zim: str, path: str):
+        return content_shell_response(zim, path)
+
+    @app.get("/article/{zim}")
+    def article_homepage(zim: str):
+        return raw_article_response(zim)
+
+    @app.get("/article/{zim}/{path:path}")
     def article(zim: str, path: str):
-        return article_response(zim, path)
+        return raw_article_response(zim, path)
 
     @app.get("/random")
     def random_article(zim: str = Query(..., min_length=1)):
@@ -619,13 +890,12 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ArticleUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
-        location = (
-            f"/content/{quote_path(zim, safe='')}/"
-            f"{quote_path(path, safe='/')}"
-        )
         return Response(
             status_code=307,
-            headers={"Location": location, "Cache-Control": "no-store"},
+            headers={
+                "Location": _content_url(zim, path),
+                "Cache-Control": "no-store",
+            },
         )
 
     @app.get("/search")
@@ -740,6 +1010,9 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
         f"zimantic: server loaded at http://localhost:{port}\n"
         f"zimantic: PID {os.getpid()}; reload with `zimantic reload` "
     )
+    start_faiss = getattr(searchClass, "start_faiss", None)
+    if callable(start_faiss):
+        start_faiss()
     try:
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
     finally:

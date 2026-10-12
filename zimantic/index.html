@@ -339,6 +339,12 @@
   let activeParentNavigation = null;
   let activeParentUrl = null;
   let parentNavigationSequence = 0;
+  const defaultDocumentTitle = document.title;
+  const defaultIconLinks = [
+    ...document.querySelectorAll("link[rel~='icon'], link[rel='apple-touch-icon']"),
+  ];
+  let articleIconLink = null;
+  let articleIconsHidden = false;
 
   function cancelStreamRender() {
     if (streamRenderTimer !== null) {
@@ -613,7 +619,10 @@
     try {
       const parsed = new URL(rawUrl, location.href);
       const path = segments(parsed.pathname);
-      if (parsed.origin === location.origin && path[0] === "article") {
+      if (
+        parsed.origin === location.origin &&
+        (path[0] === "article" || path[0] === "content")
+      ) {
         return segments(rawPath || path.slice(2).join("/")).join(" › ");
       }
       return [`${parsed.protocol}//${parsed.host}`, ...path].join(" › ");
@@ -679,6 +688,44 @@
     } catch (_) {
       return null;
     }
+  }
+
+  // The modal loads a /content/ shell in a sandboxed iframe, so the shell
+  // cannot touch this document. It reports the viewed article's title and
+  // favicon through postMessage and we mirror them on the browser tab.
+  function applyArticleDocumentMeta(title, icon) {
+    const articleTitle = String(title || "").trim();
+    if (articleTitle) document.title = articleTitle;
+    if (!icon) {
+      restoreDefaultIcons();
+      return;
+    }
+    if (!articleIconsHidden) {
+      defaultIconLinks.forEach(link => link.remove());
+      articleIconsHidden = true;
+    }
+    if (!articleIconLink) {
+      articleIconLink = document.createElement("link");
+      articleIconLink.rel = "icon";
+    }
+    articleIconLink.href = icon;
+    document.head.appendChild(articleIconLink);
+  }
+
+  function restoreDefaultIcons() {
+    if (articleIconLink) {
+      articleIconLink.remove();
+      articleIconLink = null;
+    }
+    if (articleIconsHidden) {
+      defaultIconLinks.forEach(link => document.head.appendChild(link));
+      articleIconsHidden = false;
+    }
+  }
+
+  function resetArticleDocumentMeta() {
+    document.title = defaultDocumentTitle;
+    restoreDefaultIcons();
   }
 
   function showArticleModal(articleUrl, navigationKind = "manual") {
@@ -852,27 +899,55 @@
     return parts[0] === "article" && parts.length >= 3 ? parts : null;
   }
 
+  // The modal frame loads a /content/ toolbar shell; its inner iframe loads the
+  // raw entry from /article/. These helpers convert between the two so parent
+  // navigation and thumbnails can read the raw article while the UI keeps using
+  // the shell (toolbar-bearing) URLs.
+  function rawArticleUrl(articleUrl) {
+    try {
+      const url = new URL(articleUrl?.href || String(articleUrl), location.href);
+      if (url.origin !== location.origin || !url.pathname.startsWith("/content/")) {
+        return null;
+      }
+      const raw = new URL(url.href);
+      raw.pathname = "/article" + url.pathname.slice("/content".length);
+      return raw;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function contentUrlFromRaw(rawUrl) {
+    try {
+      const url = new URL(rawUrl, location.href);
+      if (url.origin !== location.origin || !url.pathname.startsWith("/article/")) {
+        return null;
+      }
+      const content = new URL(url.href);
+      content.pathname = "/content" + url.pathname.slice("/article".length);
+      return content;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function parentArticleUrl(articleUrl) {
-    const parts = articleRouteParts(articleUrl);
-    if (!parts || parts.length < 4) return null;
-    return new URL(
-      articleUrl.pathname.slice(0, articleUrl.pathname.lastIndexOf("/")),
-      location.origin
-    );
+    const parts = articleUrl.pathname.split("/").filter(Boolean);
+    if (parts[0] !== "content" || parts.length < 3) return null;
+    const lastSlash = articleUrl.pathname.lastIndexOf("/");
+    if (lastSlash <= 0) return null;
+    return new URL(articleUrl.pathname.slice(0, lastSlash), location.origin);
   }
 
   function articleRouteValue(articleUrl) {
     return articleUrl.pathname + articleUrl.search;
   }
 
-  function readParentArticleNavigation(
-    html,
-    parentUrl,
-    articleUrl,
-  ) {
+  function readParentArticleNavigation(html, rawParentUrl, articleUrl) {
     const document = new DOMParser().parseFromString(html, "text/html");
-    const articleParts = articleRouteParts(articleUrl);
-    if (!articleParts) return null;
+    const parentParts = articleRouteParts(rawParentUrl);
+    if (!parentParts) return null;
+    const zim = parentParts[1];
     const links = [];
     const seen = new Set();
     for (const link of document.querySelectorAll("a[href]")) {
@@ -881,7 +956,7 @@
       if (!href || href.startsWith("#")) continue;
       let linkUrl;
       try {
-        linkUrl = new URL(href, parentUrl);
+        linkUrl = new URL(href, rawParentUrl);
       } catch (_) {
         continue;
       }
@@ -889,17 +964,19 @@
       if (
         linkUrl.origin !== location.origin ||
         !linkParts ||
-        linkParts[1] !== articleParts[1]
+        linkParts[1] !== zim
       ) {
         continue;
       }
-      const value = articleRouteValue(linkUrl);
+      const contentUrl = contentUrlFromRaw(linkUrl);
+      if (!contentUrl) continue;
+      const value = articleUrlValue(contentUrl);
       if (seen.has(value)) continue;
       seen.add(value);
-      links.push(linkUrl);
+      links.push(contentUrl);
     }
-    const currentValue = articleRouteValue(articleUrl);
-    const index = links.findIndex(link => articleRouteValue(link) === currentValue);
+    const currentValue = articleUrlValue(articleUrl);
+    const index = links.findIndex(link => articleUrlValue(link) === currentValue);
     if (index < 0) return null;
     if (!links[index - 1] && !links[index + 1]) return null;
     const urlAt = offset => {
@@ -928,6 +1005,7 @@
       : fromManualLink && previousUrl
       ? [previousUrl, actualParentUrl]
       : [actualParentUrl];
+    const rawArticle = rawArticleUrl(articleUrl);
     const seenParents = new Set();
     for (const candidateParentUrl of parentUrls) {
       if (!candidateParentUrl) continue;
@@ -935,12 +1013,15 @@
       if (seenParents.has(parentValue)) continue;
       seenParents.add(parentValue);
       let navigation = null;
+      const rawParentUrl = rawArticleUrl(candidateParentUrl);
+      if (!rawParentUrl) continue;
       try {
-        const response = await fetch(candidateParentUrl);
+        const response = await fetch(rawParentUrl);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         if (
           response.url &&
-          articleRouteValue(new URL(response.url)) === articleRouteValue(articleUrl)
+          rawArticle &&
+          articleRouteValue(new URL(response.url)) === articleRouteValue(rawArticle)
         ) {
           continue;
         }
@@ -951,7 +1032,7 @@
         ) {
           return;
         }
-        navigation = readParentArticleNavigation(html, candidateParentUrl, articleUrl);
+        navigation = readParentArticleNavigation(html, rawParentUrl, articleUrl);
       } catch (_) {
         if (request !== parentNavigationSequence) return;
       }
@@ -995,6 +1076,7 @@
     activeParentNavigation = null;
     activeParentUrl = null;
     parentNavigationSequence++;
+    resetArticleDocumentMeta();
     if (frame) frame.src = "about:blank";
     if (modalPreviousFocus instanceof HTMLElement && document.contains(modalPreviousFocus)) {
       modalPreviousFocus.focus();
@@ -1037,6 +1119,7 @@
     if (event.data?.type === "zimantic-article-ready") {
       const articleUrl = readModalUrl(event.data.url);
       if (articleUrl) {
+        applyArticleDocumentMeta(event.data.title, event.data.icon);
         const activeArticleUrl = readModalUrl(activeModalUrl);
         const pendingArticleUrl = readModalUrl(pendingModalArticleUrl);
         const pendingNavigation = pendingModalNavigation;
@@ -1340,12 +1423,16 @@
   }
 
   async function fetchThumbnail(url) {
+    // item.url points at the /content/ shell, which has no article media;
+    // pull the raw article so the thumbnail picks the real image.
+    const rawUrl = rawArticleUrl(url);
+    const requestUrl = rawUrl ? rawUrl.href : url;
     const controller = new AbortController();
     thumbnailControllers.add(controller);
     try {
-      const response = await fetch(url, { signal: controller.signal });
+      const response = await fetch(requestUrl, { signal: controller.signal });
       if (!response.ok) return null;
-      return pickThumbnail(await readStart(response, THUMB_LIMIT), url);
+      return pickThumbnail(await readStart(response, THUMB_LIMIT), requestUrl);
     } catch (_) {
       return null;
     } finally {

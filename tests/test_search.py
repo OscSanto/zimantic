@@ -738,6 +738,34 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(results[0]["path"], "tire-change")
             search._executor.shutdown(wait=True)
 
+    def test_deferred_faiss_loads_vectors_after_indexes_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
+            (tmp / "manual.faiss").write_bytes(b"vectors")
+            search = Search(self._cfg(tmp), semantic=True)
+            self.addCleanup(search._executor.shutdown, wait=True)
+
+            self.assertFalse(search.indexes["manual"].semantic)
+
+            reloaded = threading.Event()
+            original_reload = search.reload
+
+            def reload():
+                try:
+                    return original_reload()
+                finally:
+                    reloaded.set()
+
+            with (
+                patch.object(sys.modules["faiss"], "read_index", return_value=object(), create=True),
+                patch.object(search, "reload", side_effect=reload),
+            ):
+                search.start_faiss()
+                self.assertTrue(reloaded.wait(2))
+
+            self.assertTrue(search.indexes["manual"].semantic)
+
     def test_archive_lookup_allows_nested_moves_but_rejects_size_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

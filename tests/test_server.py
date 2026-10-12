@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -129,11 +130,123 @@ class ServerTests(unittest.TestCase):
             "content": content,
         }
         try:
-            response = self.client.get("/content/manual/large")
+            response = self.client.get("/article/manual/large")
         finally:
             del self.search.read_article
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, bytes(content))
+
+    def test_content_route_wraps_articles_and_article_route_serves_raw(self):
+        body = b"<html><head></head><body>Article body</body></html>"
+        self.search.read_article = lambda zim, path: {
+            "path": path,
+            "title": "Page",
+            "mimetype": "text/html",
+            "content": body,
+        }
+        try:
+            shell = self.client.get("/content/manual/page")
+            raw = self.client.get("/article/manual/page")
+        finally:
+            del self.search.read_article
+
+        # /content/ is the toolbar shell: static toolbar plus an iframe that
+        # points at the raw article, never the article HTML inline.
+        self.assertEqual(shell.status_code, 200)
+        self.assertTrue(shell.headers["content-type"].startswith("text/html"))
+        self.assertIn("data-zimantic-toolbar", shell.text)
+        self.assertIn('src="/article/manual/page"', shell.text)
+        self.assertNotIn("Article body", shell.text)
+
+        # /article/ serves the raw article with the shell-navigation bridge
+        # and no toolbar of its own.
+        self.assertEqual(raw.status_code, 200)
+        self.assertTrue(raw.headers["content-type"].startswith("text/html"))
+        self.assertIn("Article body", raw.text)
+        self.assertIn("data-zimantic-bridge", raw.text)
+        self.assertNotIn("data-zimantic-toolbar", raw.text)
+
+    def test_content_shell_uses_article_title_and_icon(self):
+        body = (
+            b"<html><head><title>Deep &amp; Nice</title>"
+            b'<link rel="shortcut icon" href="./favicon.ico"></head>'
+            b"<body>Article body</body></html>"
+        )
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda zim, path: {
+                "path": path,
+                "title": "Entry title",
+                "mimetype": "text/html",
+                "content": body,
+            },
+            create=True,
+        ):
+            shell = self.client.get("/content/manual/docs/page")
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn("<title>Deep &amp; Nice</title>", shell.text)
+        # The article's relative icon resolves through the raw /article/ route.
+        self.assertIn(
+            '<link rel="icon" data-zimantic-article-icon '
+            'href="/article/manual/docs/favicon.ico">',
+            shell.text,
+        )
+        # The shell forwards its title/icon so the modal can mirror them.
+        self.assertIn('title: document.title', shell.text)
+        self.assertIn('link[data-zimantic-article-icon]', shell.text)
+
+    def test_content_shell_falls_back_to_zim_source_icon(self):
+        body = b"<html><head></head><body>No icon declared</body></html>"
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda zim, path: {
+                "path": path,
+                "title": "Page",
+                "mimetype": "text/html",
+                "content": body,
+            },
+            create=True,
+        ), patch.object(
+            self.search,
+            "source_dicts",
+            lambda: [{"local_name": "manual", "icon_url": "/source-icon/manual"}],
+        ):
+            shell = self.client.get("/content/manual/page")
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn("<title>Page</title>", shell.text)
+        self.assertIn(
+            '<link rel="icon" data-zimantic-article-icon href="/source-icon/manual">',
+            shell.text,
+        )
+
+    def test_content_shell_hides_its_own_marker_script(self):
+        # The toolbar style, script and nav all carry data-zimantic-toolbar.
+        # The layout rule must target the nav only, and the script must stay
+        # display:none so its source never shows up as visible page text.
+        body = b"<html><head></head><body>Article</body></html>"
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda zim, path: {
+                "path": path,
+                "title": "Page",
+                "mimetype": "text/html",
+                "content": body,
+            },
+            create=True,
+        ):
+            shell = self.client.get("/content/manual/page")
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn("nav[data-zimantic-toolbar] {", shell.text)
+        self.assertIn(
+            "script[data-zimantic-toolbar] { display: none !important; }",
+            shell.text,
+        )
+        self.assertNotIn("\n[data-zimantic-toolbar] {", shell.text)
 
     def test_search_accepts_page_and_filter_parameters(self):
         response = self.client.get("/search?q=page&offset=10&source=manual&limit=5")

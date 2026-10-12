@@ -167,48 +167,66 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(result["mimetype"], "text/html")
             self.assertEqual(response.headers["x-total-count"], "1")
 
-            article = client.get("/content/manual/Beta")
-            self.assertEqual(article.status_code, 200)
-            self.assertTrue(article.headers["content-type"].startswith("text/html"))
-            self.assertIn(b"brakes and rotors", article.content)
-            self.assertIn(b'data-zimantic-toolbar', article.content)
-            self.assertIn(b"min-height: 0 !important", article.content)
-            self.assertIn(b'data-zimantic-action="close"', article.content)
-            self.assertIn(b'data-zimantic-action="home"', article.content)
-            self.assertIn(b'data-zimantic-action="previous"', article.content)
-            self.assertIn(b'data-zimantic-action="next"', article.content)
-            self.assertIn(b'data-zimantic-action="parent-previous"', article.content)
-            self.assertIn(b'data-zimantic-action="parent-next"', article.content)
-            self.assertIn(b"zimantic-modal-navigation", article.content)
-            self.assertIn(b"zimantic-article-ready", article.content)
-            self.assertIn(b"zimantic-article-navigate", article.content)
-            self.assertIn(b"zimantic-parent-article-navigate", article.content)
-            self.assertIn(b"/random?zim=manual", article.content)
+            # /content/ is the toolbar shell: it embeds the raw article in an
+            # iframe so the toolbar survives every in-frame navigation.
+            shell = client.get("/content/manual/Beta")
+            self.assertEqual(shell.status_code, 200)
+            self.assertTrue(shell.headers["content-type"].startswith("text/html"))
+            self.assertIn(b'data-zimantic-toolbar', shell.content)
+            self.assertIn(b"min-height: 0 !important", shell.content)
+            self.assertIn(b'data-zimantic-action="close"', shell.content)
+            self.assertIn(b'data-zimantic-action="home"', shell.content)
+            self.assertIn(b'data-zimantic-action="previous"', shell.content)
+            self.assertIn(b'data-zimantic-action="next"', shell.content)
+            self.assertIn(b'data-zimantic-action="parent-previous"', shell.content)
+            self.assertIn(b'data-zimantic-action="parent-next"', shell.content)
+            self.assertIn(b"zimantic-modal-navigation", shell.content)
+            self.assertIn(b"zimantic-shell-navigate", shell.content)
+            self.assertIn(b"zimantic-article-ready", shell.content)
+            self.assertIn(b"zimantic-article-navigate", shell.content)
+            self.assertIn(b"zimantic-parent-article-navigate", shell.content)
+            self.assertIn(b"/random?zim=manual", shell.content)
+            self.assertIn(b"<iframe data-zimantic-article", shell.content)
+            self.assertIn(b'src="/article/manual/Beta"', shell.content)
             self.assertLess(
-                article.content.index(b'data-zimantic-action="close"'),
-                article.content.index(b'data-zimantic-action="previous"'),
+                shell.content.index(b'data-zimantic-action="close"'),
+                shell.content.index(b'data-zimantic-action="previous"'),
             )
             self.assertLess(
-                article.content.index(b'data-zimantic-action="previous"'),
-                article.content.index(b'>Random</a>'),
+                shell.content.index(b'data-zimantic-action="previous"'),
+                shell.content.index(b'>Random</a>'),
             )
             self.assertLess(
-                article.content.index(b'data-zimantic-action="print"'),
-                article.content.index(b'data-zimantic-action="parent-previous"'),
+                shell.content.index(b'data-zimantic-action="print"'),
+                shell.content.index(b'data-zimantic-action="parent-previous"'),
             )
             self.assertLess(
-                article.content.index(b'data-zimantic-action="parent-previous"'),
-                article.content.index(b'data-zimantic-action="home"'),
+                shell.content.index(b'data-zimantic-action="parent-previous"'),
+                shell.content.index(b'data-zimantic-action="home"'),
             )
-            self.assertNotIn(b"zimantic-toolbar-brand", article.content)
-            self.assertNotIn(b'>Search</a>', article.content)
+            self.assertNotIn(b"zimantic-toolbar-brand", shell.content)
+            self.assertNotIn(b'>Search</a>', shell.content)
             toolbar_script = b"<script data-zimantic-toolbar>"
-            self.assertIn(toolbar_script, article.content)
+            self.assertIn(toolbar_script, shell.content)
             self.assertLess(
-                article.content.index(toolbar_script),
-                article.content.index(b"<body>"),
+                shell.content.index(b"<body>"),
+                shell.content.index(b'data-zimantic-action="close"'),
             )
-            self.assertNotIn(b"&lt;script data-zimantic-toolbar", article.content)
+            self.assertLess(
+                shell.content.index(toolbar_script),
+                shell.content.index(b"</body>"),
+            )
+            self.assertNotIn(b"&lt;script data-zimantic-toolbar", shell.content)
+
+            # The raw article keeps its own markup and gains only the
+            # navigation bridge; the toolbar is never duplicated into it.
+            raw_article = client.get("/article/manual/Beta")
+            self.assertEqual(raw_article.status_code, 200)
+            self.assertTrue(raw_article.headers["content-type"].startswith("text/html"))
+            self.assertIn(b"brakes and rotors", raw_article.content)
+            self.assertIn(b"data-zimantic-bridge", raw_article.content)
+            self.assertNotIn(b'data-zimantic-toolbar', raw_article.content)
+            self.assertNotIn(b'data-zimantic-action="close"', raw_article.content)
 
             random_article = client.get(
                 "/random",
@@ -226,9 +244,19 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn("/content/manual/", homepage.headers["location"])
             homepage_article = client.get(homepage.headers["location"])
             self.assertEqual(homepage_article.status_code, 200)
+            raw_homepage = client.get("/article/manual", follow_redirects=False)
+            self.assertEqual(raw_homepage.status_code, 307)
+            self.assertIn("/article/manual/", raw_homepage.headers["location"])
 
+            # A missing article still gets a toolbar shell so the modal's
+            # navigation never disappears; only /article/ returns the JSON 404.
             missing = client.get("/content/manual/missing")
             self.assertEqual(missing.status_code, 404)
+            self.assertIn(b'data-zimantic-toolbar', missing.content)
+            self.assertIn(b'src="/article/manual/missing"', missing.content)
+            missing_raw = client.get("/article/manual/missing")
+            self.assertEqual(missing_raw.status_code, 404)
+            self.assertEqual(missing_raw.json(), {"detail": "article not found"})
 
             health = client.get("/health").json()
             self.assertEqual(health["status"], "ok")
@@ -395,6 +423,15 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 redirect_article.headers["location"],
                 "/content/manual/Air",
+            )
+            redirect_raw_article = client.get(
+                "/article/manual/Breeze",
+                follow_redirects=False,
+            )
+            self.assertEqual(redirect_raw_article.status_code, 307)
+            self.assertEqual(
+                redirect_raw_article.headers["location"],
+                "/article/manual/Air",
             )
 
             ordinary_results = search.search("air", limit=10)

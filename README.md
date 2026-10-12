@@ -31,7 +31,7 @@ Zero 2 W.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
 - **Built-in article serving**: local result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
 - **Web page and JSON API**: search from any browser on the network or use your own programs.
-  Routes use short paths such as `/search`, `/content/<zim>/<path>` and `/health`.
+  Routes use short paths such as `/search`, `/content/<zim>/<path>`, `/article/<zim>/<path>` and `/health`.
 
 Zimantic can search and serve articles from its local ZIM archives. An optional
 [kiwix-serve](https://kiwix.org/en/applications/) remains useful for sources that are only
@@ -130,6 +130,8 @@ on-demand preview extraction was introduced.
 ### 2. Starting the server
 
 At startup Zimantic opens every **finished** index and keeps it open; nothing is reloaded per search.
+FAISS and vector files are loaded in the background after startup is announced, so title-word and
+full-text searches are available while semantic search initializes.
 The page automatically lists local indexes. With `kiwix_server`, it also discovers catalog sources and
 can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries and
 remote XML responses are capped at 64 MiB by default; both limits are configurable.
@@ -384,18 +386,23 @@ JSON API examples:
   Totals are in `X-Total-Count`, `X-Has-More`, `X-Offset` and `X-Page-Size` headers.
 - `GET /search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
   events and result snapshots.
-- `GET /content/<zim>/<path>` serves a local ZIM entry directly; `GET /content/<zim>` serves
-  the resolved ZIM homepage. Redirects are followed, article links and assets remain under the same
-  route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` only limits
-  HTML read during indexing; `max_article_bytes` limits the uncompressed response body because
-  Zimantic reads each requested entry into memory, including binary assets. HTML articles include a small
-  navigation bar with Back, Home, Random, Search, Copy link and Print controls. Modal articles
-  also expose icon-only navigation through visible search results and, for nested articles, the
-  adjacent article links listed on the article's parent page. When an article was reached from
-  another modal article, that preceding article can also provide the navigation context. Back
-  uses browser history when available, otherwise it attempts to close the tab and falls back to
-  the search page if the browser disallows scripted tab closing. `GET /random?zim=<name>` redirects to a random indexed
-  article.
+- `GET /content/<zim>/<path>` serves a toolbar shell for a local ZIM entry; `GET /content/<zim>`
+  serves the resolved ZIM homepage. The shell keeps the navigation bar in the page and loads the
+  article itself from an inner iframe pointed at `/article/<zim>/<path>`, so the toolbar stays
+  visible even when the article is missing or fails. `GET /article/<zim>/<path>` serves the raw
+  entry: redirects are followed, article links and assets resolve under the same route, and entries
+  larger than `max_article_bytes` return `413`. `max_html_bytes` only limits HTML read during
+  indexing; `max_article_bytes` limits the uncompressed response body because Zimantic reads each
+  requested entry into memory, including binary assets. The toolbar shell also replaces the browser
+  tab title and favicon with the viewed article's own `<title>` and declared icon (falling back to the
+  ZIM's source icon); when the shell is embedded in the modal, the outer page mirrors them and restores
+  its own title and favicon when the modal closes. HTML articles include a small navigation bar
+  with Close, Home, Random, Print, Copy link and Search controls. Modal articles also expose
+  icon-only navigation through visible search results and, for nested articles, the adjacent article
+  links listed on the article's parent page. When an article was reached from another modal article,
+  that preceding article can also provide the navigation context. Back navigation uses browser
+  history when available, otherwise the Close control attempts to close the tab. `GET /random?zim=<name>`
+  redirects to a random indexed article's shell.
 - Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
   search endpoints. Debug output is configured for the whole server; it is not a URL parameter.
 - `GET /sources`, `/config`, `/zims` and `/health` return source, configuration,
