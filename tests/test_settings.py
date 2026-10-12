@@ -123,6 +123,7 @@ class LoadConfigTests(unittest.TestCase):
             cfg = load_config(path, warn=warnings.append)
             self.assertEqual(cfg["port"], 9999)
             self.assertTrue(any("bath_size" in message for message in warnings))
+            self.assertNotIn("bath_size", cfg)
 
 
 if __name__ == "__main__":

@@ -153,7 +153,7 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
         warn(f"zimantic: warning: {path} is empty; using {profile} defaults")
     for key in sorted(set(user) - KNOWN_KEYS):
         warn(f"zimantic: warning: unknown config key {key!r} in {path} (ignored)")
-    cfg.update(user)
+    cfg.update({key: value for key, value in user.items() if key in KNOWN_KEYS})
     # Worker counts are intentionally computed at load time so missing config
     # keys adapt to the machine instead of inheriting fixed profile values.
     # Apply this after user settings so embed_threads participates in the
