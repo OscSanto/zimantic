@@ -353,10 +353,12 @@ ol.results {
     object-fit: cover;
     width: 100%;
 }
-html.modal-open,
+html.modal-open {
+    overflow-x: auto;
+    overflow-y: hidden;
+}
 body.modal-open {
     overflow: hidden;
-    overscroll-behavior: none;
 }
 .article-modal[hidden] {
     display: none;
@@ -364,7 +366,6 @@ body.modal-open {
 .article-modal {
     inset: 0;
     overflow: hidden;
-    overscroll-behavior: contain;
     position: fixed;
     z-index: 1000;
 }
@@ -388,7 +389,6 @@ body.modal-open {
     margin: 0;
     max-width: none;
     overflow: hidden;
-    overscroll-behavior: contain;
     position: relative;
     width: 100%;
 }

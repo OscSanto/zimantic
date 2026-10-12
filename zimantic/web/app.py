@@ -455,27 +455,25 @@ ARTICLE_MOBILE_STYLE = """<style data-zimantic-mobile>
   html {
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
-    overflow-x: hidden;
-    overflow-x: clip;
+    -webkit-overflow-scrolling: touch;
+    overflow-x: auto !important;
+    overflow-y: auto !important;
   }
   body {
     overflow-wrap: break-word;
-    overflow-x: hidden;
-    overflow-x: clip;
+    overflow-x: visible !important;
   }
   body > * { max-width: 100% !important; min-width: 0 !important; }
   img, video, iframe { max-width: 100% !important; }
   img, video { height: auto !important; }
   pre {
     max-width: 100% !important;
-    overflow-x: auto !important;
-    -webkit-overflow-scrolling: touch !important;
+    overflow-x: visible !important;
   }
   table {
     display: block !important;
     max-width: 100% !important;
-    overflow-x: auto !important;
-    -webkit-overflow-scrolling: touch !important;
+    overflow-x: visible !important;
   }
 }
 </style>"""
