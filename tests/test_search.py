@@ -51,11 +51,13 @@ from zimantic.search import (
     SearchBusyError,
     _LocalIndex,
     _bounded_catalog_url,
+    _entry_contains_phrase,
     _fulltext_query,
     _find_archive_icon_path,
     _nprobe,
     _parse_remote_xml,
     _query_terms,
+    _phrase_words,
     _read_limited_response,
     _title_prefix_query,
     _title_query,
@@ -142,6 +144,105 @@ def _title_search(rows, query, limit=1):
 
 
 class SearchContractTests(unittest.TestCase):
+    def test_content_phrase_matching_keeps_stopwords_and_ignores_markup(self):
+        class _Item:
+            mimetype = "text/html"
+            content = (
+                b"<p>Ampiroxicam (INN) is a non-steroidal "
+                b"anti-inflammatory drug (NSAID).</p>"
+            )
+
+        class _Entry:
+            def get_item(self):
+                return _Item()
+
+        class _Archive:
+            def get_entry_by_path(self, path):
+                return _Entry()
+
+        query = "INN is a non-steroidal anti-inflammatory drug (NSAID"
+        self.assertTrue(
+            _entry_contains_phrase(
+                _Archive(),
+                "Ampiroxicam",
+                _phrase_words(query),
+                4096,
+            )
+        )
+
+    def test_phrase_read_supplies_mimetype_and_preview_to_later_stages(self):
+        class _Item:
+            mimetype = "text/html"
+            content = (
+                b"<p>Ampiroxicam (INN) is a non-steroidal "
+                b"anti-inflammatory drug (NSAID).</p>"
+            )
+
+        class _Entry:
+            def get_item(self):
+                return _Item()
+
+        class _Archive:
+            def __init__(self):
+                self.calls = 0
+
+            def get_entry_by_path(self, _path):
+                self.calls += 1
+                return _Entry()
+
+        source = SourceInfo(
+            "manual",
+            "Manual",
+            "manual",
+            "local",
+            local_name="manual",
+        )
+        unrelated = {
+            "id": "manual:unrelated",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Nonsteroidal anti-inflammatory drug",
+            "lead": "",
+            "path": "unrelated",
+            "source_rank": 1,
+            "mimetype": "text/html",
+        }
+        exact = {
+            "id": "manual:exact",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Ampiroxicam",
+            "lead": "",
+            "path": "Ampiroxicam",
+            "source_rank": 2,
+        }
+        result = SourceResult(
+            source=source,
+            items=[unrelated, exact],
+            semantic=[(0.99, unrelated)],
+            fulltext=[(0, exact)],
+        )
+        archive = _Archive()
+        search = object.__new__(Search)
+        search.cfg = {"candidate_count": 16, "max_preview_chars": 1000}
+        search.candidate_count = 16
+        search.preview_chars = 1000
+        search.sources = {"manual": source}
+        search.indexes = {
+            "manual": _LocalIndex(None, None, archive, None, threading.Lock())
+        }
+        search._state_lock = threading.RLock()
+        query = "INN is a non-steroidal anti-inflammatory drug (NSAID"
+
+        pool = search._rank_results([result], query, 10)
+        pool = search._apply_content_phrase_boost([result], query, pool, 10)
+        search._populate_result_mimetypes(pool)
+
+        self.assertEqual(pool[0]["id"], "manual:exact")
+        self.assertTrue(pool[0]["lead"])
+        self.assertEqual(pool[0]["mimetype"], "text/html")
+        self.assertEqual(archive.calls, 1)
+
     def test_source_icon_prefers_zim_metadata(self):
         homepage = _IconEntry(
             "Main_Page",
@@ -369,6 +470,43 @@ class SearchContractTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in ranked], ["manual:compact", "manual:long"])
         self.assertIn("density 100%", ranked[0]["explain"])
+
+    def test_exact_content_phrase_beats_an_earlier_unrelated_fulltext_hit(self):
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        unrelated = {
+            "id": "manual:unrelated",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Unrelated result",
+            "lead": "",
+            "path": "unrelated",
+            "source_rank": 1,
+        }
+        exact = {
+            "id": "manual:exact",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Product announcement",
+            "lead": "",
+            "path": "exact",
+            "source_rank": 2,
+            "_content_phrase": True,
+        }
+        result = SourceResult(
+            source=source,
+            items=[unrelated, exact],
+            semantic=[(0.99, unrelated)],
+            fulltext=[(0, exact)],
+        )
+        search = object.__new__(Search)
+        search.cfg = {"candidate_count": 16}
+        search.candidate_count = 16
+
+        ranked = search._rank_results([result], "Tokyo banana", 10)
+
+        self.assertEqual([item["id"] for item in ranked], ["manual:exact", "manual:unrelated"])
+        self.assertTrue(ranked[0]["ranking"]["content_phrase"])
+        self.assertNotIn("_content_phrase", ranked[0])
 
     def test_stream_emits_source_snapshots_and_final_results(self):
         sources = [

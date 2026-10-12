@@ -79,6 +79,11 @@ def _query_words(query: str) -> list[str]:
     return kept or words
 
 
+def _phrase_words(query: str) -> list[str]:
+    """Return every query word, including stopwords, for phrase matching."""
+    return re.findall(r"[^\W_]+", query.casefold(), re.UNICODE)
+
+
 def _title_query(query: str) -> str:
     """FTS5 MATCH expression: every word must appear as an exact title token."""
     return " AND ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in _query_words(query))
