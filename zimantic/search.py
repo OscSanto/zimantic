@@ -83,6 +83,38 @@ DEFAULT_LONG_QUERY = 10
 MAX_PHRASE_CANDIDATES = 16
 
 
+_HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
+
+
+def _readable_words(text: str) -> Iterator[str]:
+    """Yield words from text while treating tags and entities as separators."""
+    position = 0
+    length = len(text)
+    tags_possible = True
+    while position < length:
+        if tags_possible and text[position] == "<":
+            end = text.find(">", position + 1)
+            if end >= 0:
+                position = end + 1
+                continue
+            tags_possible = False
+        if text[position] == "&":
+            entity = _HTML_ENTITY.match(text, position)
+            if entity is not None:
+                position = entity.end()
+                continue
+        if text[position] == "_" or text[position].isalnum():
+            start = position
+            position += 1
+            while position < length and (
+                text[position] == "_" or text[position].isalnum()
+            ):
+                position += 1
+            yield text[start:position]
+            continue
+        position += 1
+
+
 def _entry_phrase_match(
     archive: Archive,
     path: str,
@@ -101,11 +133,9 @@ def _entry_phrase_match(
     if mimetype not in {"text/plain", "text/html", "application/xhtml+xml"}:
         return False, mimetype, None
     text = raw.decode("utf-8", "ignore").casefold()
-    separator = (
-        r"(?:\s|<[^>]*>|&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);|[^\w])+"
-    )
-    pattern = separator.join(r"\b" + re.escape(word) + r"\b" for word in phrase_words)
-    matched = bool(re.search(pattern, text, re.IGNORECASE))
+    phrase = " ".join(phrase_words)
+    words = " ".join(_readable_words(text))
+    matched = f" {phrase} " in f" {words} "
     return matched, mimetype, raw if matched else None
 
 

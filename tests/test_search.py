@@ -170,6 +170,28 @@ class SearchContractTests(unittest.TestCase):
             )
         )
 
+    def test_content_phrase_matching_does_not_backtrack_on_long_separators(self):
+        class _Item:
+            mimetype = "text/html"
+            content = b"<p>tokyo " + (b" " * 128) + b"x</p>"
+
+        class _Entry:
+            def get_item(self):
+                return _Item()
+
+        class _Archive:
+            def get_entry_by_path(self, path):
+                return _Entry()
+
+        self.assertFalse(
+            _entry_contains_phrase(
+                _Archive(),
+                "article",
+                _phrase_words("tokyo banana"),
+                4096,
+            )
+        )
+
     def test_phrase_read_supplies_mimetype_and_preview_to_later_stages(self):
         class _Item:
             mimetype = "text/html"
