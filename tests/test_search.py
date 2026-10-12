@@ -370,6 +370,42 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in ranked], ["manual:compact", "manual:long"])
         self.assertIn("density 100%", ranked[0]["explain"])
 
+    def test_exact_content_phrase_beats_an_earlier_unrelated_fulltext_hit(self):
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        unrelated = {
+            "id": "manual:unrelated",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Unrelated result",
+            "lead": "",
+            "path": "unrelated",
+            "source_rank": 1,
+        }
+        exact = {
+            "id": "manual:exact",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Product announcement",
+            "lead": "",
+            "path": "exact",
+            "source_rank": 2,
+            "_content_phrase": True,
+        }
+        result = SourceResult(
+            source=source,
+            items=[unrelated, exact],
+            fulltext=[(0, unrelated), (1, exact)],
+        )
+        search = object.__new__(Search)
+        search.cfg = {"candidate_count": 16}
+        search.candidate_count = 16
+
+        ranked = search._rank_results([result], "Tokyo banana", 10)
+
+        self.assertEqual([item["id"] for item in ranked], ["manual:exact", "manual:unrelated"])
+        self.assertTrue(ranked[0]["ranking"]["content_phrase"])
+        self.assertNotIn("_content_phrase", ranked[0])
+
     def test_stream_emits_source_snapshots_and_final_results(self):
         sources = [
             SourceInfo("one", "One", "one", "local"),
