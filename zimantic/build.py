@@ -18,6 +18,7 @@ from .zim import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     DEFAULT_MAX_ENTRY_BYTES,
+    EntryRecord,
     read_entry,
 )
 
@@ -31,8 +32,10 @@ SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
     title, path UNINDEXED, target UNINDEXED,
     tokenize='unicode61 remove_diacritics 2');
-CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dropped once .faiss is written
-CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);     -- next: entry to resume from; done: 'fast' | 1
+CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);
+-- vecs stores float16 vectors and is dropped once .faiss is written.
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
+-- meta.next is the resume entry; meta.done is 'fast' or 1.
 """
 
 _FAISS_MIN_POINTS_PER_CENTROID = 39
@@ -96,6 +99,214 @@ class EmbeddingPipeline:
                 request.future.set_exception(error)
 
 
+@dataclass
+class _BuildState:
+    db: sqlite3.Connection | None
+    build_db_path: Path
+    build_faiss_path: Path
+    publish_upgrade: bool
+    filesize: int
+    meta: dict[str, str]
+
+
+def _open_database(path: Path) -> sqlite3.Connection:
+    db = sqlite3.connect(path)
+    db.executescript(SCHEMA)
+    return db
+
+
+def _source_filesize(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _prepare_build_state(
+    zim_path: Path,
+    db_path: Path,
+    faiss_path: Path,
+    fast: bool,
+    force: bool,
+) -> _BuildState | None:
+    if force:
+        _reset_index(db_path, faiss_path)
+
+    filesize = _source_filesize(zim_path)
+    db = _open_database(db_path)
+    try:
+        meta = dict(db.execute("SELECT key, value FROM meta"))
+        done = str(meta.get("done", ""))
+        # A ZIM replaced under the same name must not keep its old index: rebuild
+        # when the source file's size no longer matches the recorded size.
+        recorded_size = meta.get("filesize")
+        if (
+            done in {"1", "fast"}
+            and recorded_size is not None
+            and str(filesize) != recorded_size
+        ):
+            logger.warning(
+                "%s: source ZIM changed size (%s -> %s bytes); rebuilding",
+                zim_path.stem,
+                recorded_size,
+                filesize,
+            )
+            db.close()
+            _reset_index(db_path, faiss_path)
+            db = _open_database(db_path)
+            meta = {}
+            done = ""
+
+        if done == "1":
+            if faiss_path.exists():
+                logger.info("%s: already built (use --force to rebuild)", zim_path.stem)
+                db.close()
+                return None
+            raise RuntimeError(
+                f"{zim_path.stem}: index is marked done but {faiss_path} is missing; "
+                "use --force to rebuild"
+            )
+
+        publish_upgrade = False
+        build_db_path = db_path
+        build_faiss_path = faiss_path
+        if done == "fast":
+            if fast:
+                logger.info(
+                    f"{zim_path.stem}: already indexed for title/full-text search "
+                    "(use --force to rebuild)"
+                )
+                db.close()
+                return None
+            logger.info(
+                "%s: upgrading title-only index to full "
+                "(re-reading entries beside current index)",
+                zim_path.stem,
+            )
+            db.close()
+            build_db_path, build_faiss_path = _upgrade_paths(db_path, faiss_path)
+            db = _open_database(build_db_path)
+            meta = dict(db.execute("SELECT key, value FROM meta"))
+            staged_done = str(meta.get("done", ""))
+            if staged_done == "1":
+                db.close()
+                _publish_upgrade(build_db_path, build_faiss_path, db_path, faiss_path)
+                logger.debug("%s: full index ready", zim_path.stem)
+                return None
+            if staged_done == "fast":
+                raise RuntimeError(
+                    f"{zim_path.stem}: upgrade staging file is marked fast; "
+                    "delete it and retry"
+                )
+            publish_upgrade = True
+
+        return _BuildState(
+            db=db,
+            build_db_path=build_db_path,
+            build_faiss_path=build_faiss_path,
+            publish_upgrade=publish_upgrade,
+            filesize=filesize,
+            meta=meta,
+        )
+    except Exception:
+        db.close()
+        raise
+
+
+def _index_entries(
+    zim: Archive,
+    zim_name: str,
+    db: sqlite3.Connection,
+    start: int,
+    batch_size: int,
+    embedder,
+    fast: bool,
+    max_html_bytes: int,
+    max_entry_bytes: int,
+    max_preview_chars: int,
+    embedding_pipeline: EmbeddingPipeline | None,
+) -> None:
+    pending_embeddings = []
+
+    def save_batch(rows: list[EntryRecord], next_entry: int) -> None:
+        if embedding_pipeline is None:
+            _save(db, embedder, rows, next_entry)
+            return
+        pending_embeddings.append(
+            (embedding_pipeline.submit(rows), rows, next_entry)
+        )
+        if len(pending_embeddings) >= embedding_pipeline.max_pending_per_build:
+            future, pending_rows, pending_next = pending_embeddings.pop(0)
+            _save_rows(db, pending_rows, pending_next, future.result())
+
+    batch: list[EntryRecord] = []
+    for i in tqdm(
+        range(start, zim.entry_count),
+        initial=start,
+        total=zim.entry_count,
+        desc=zim_name,
+        delay=5,
+    ):
+        row = read_entry(
+            zim,
+            i,
+            fast=fast,
+            max_html_bytes=max_html_bytes,
+            max_entry_bytes=max_entry_bytes,
+            max_preview_chars=max_preview_chars,
+        )
+        if row:
+            batch.append(row)
+        # Keep fast builds bounded too: they have no rows with text to embed,
+        # so an article-count threshold would never flush.
+        if len(batch) >= batch_size:
+            save_batch(batch, i + 1)
+            batch = []
+    save_batch(batch, zim.entry_count)
+    while pending_embeddings:
+        future, pending_rows, pending_next = pending_embeddings.pop(0)
+        _save_rows(db, pending_rows, pending_next, future.result())
+
+
+def _finish_build(state: _BuildState, db_path: Path, faiss_path: Path, fast: bool) -> None:
+    db = state.db
+    if db is None:
+        raise RuntimeError("build database is already closed")
+    if fast:
+        with db:
+            db.execute("DROP TABLE IF EXISTS vecs")
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
+        logger.debug(f"{db_path.stem}: title + full-text index ready")
+        return
+
+    _write_faiss(db, state.build_faiss_path)
+    with db:
+        db.execute("DROP TABLE vecs")
+        db.execute("DELETE FROM meta WHERE key = 'next'")
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
+    if state.publish_upgrade:
+        db.close()
+        state.db = None
+        _publish_upgrade(
+            state.build_db_path,
+            state.build_faiss_path,
+            db_path,
+            faiss_path,
+        )
+    else:
+        db.execute("VACUUM")
+
+
+def _entry_records(rows) -> list[EntryRecord]:
+    """Normalize legacy tuple rows at the build boundary."""
+    return [
+        row if isinstance(row, EntryRecord) else EntryRecord(*row)
+        for row in rows
+    ]
+
+
 def build(
     zim_path: Path,
     index_dir,
@@ -112,149 +323,30 @@ def build(
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    build_db_path = db_path
-    build_faiss_path = faiss_path
-    publish_upgrade = False
-    db = None
-    pending_embeddings = []
-
-    def save_batch(rows, next_entry: int) -> None:
-        if embedding_pipeline is None:
-            _save(db, embedder, rows, next_entry)
-            return
-        pending_embeddings.append(
-            (embedding_pipeline.submit(rows), rows, next_entry)
-        )
-        if len(pending_embeddings) >= embedding_pipeline.max_pending_per_build:
-            future, pending_rows, pending_next = pending_embeddings.pop(0)
-            _save_rows(db, pending_rows, pending_next, future.result())
-
+    state = _prepare_build_state(zim_path, db_path, faiss_path, fast, force)
+    if state is None:
+        return
     try:
-        if force:
-            _reset_index(db_path, faiss_path)
-        try:
-            filesize = zim_path.stat().st_size
-        except OSError:
-            filesize = 0
-        db = sqlite3.connect(build_db_path)
-        db.executescript(SCHEMA)
-        meta = dict(db.execute("SELECT key, value FROM meta"))
-        done = str(meta.get("done", ""))
-        # A ZIM replaced under the same name must not keep its old index: rebuild
-        # when the source file's size no longer matches the size recorded when the
-        # index was finished. Both fast and full indexes record it.
-        recorded_size = meta.get("filesize")
-        if (
-            done in {"1", "fast"}
-            and recorded_size is not None
-            and str(filesize) != recorded_size
-        ):
-            logger.warning(
-                "%s: source ZIM changed size (%s -> %s bytes); rebuilding",
-                zim_path.stem,
-                recorded_size,
-                filesize,
-            )
-            db.close()
-            db = None
-            _reset_index(db_path, faiss_path)
-            build_db_path = db_path
-            build_faiss_path = faiss_path
-            publish_upgrade = False
-            db = sqlite3.connect(build_db_path)
-            db.executescript(SCHEMA)
-            meta = {}
-            done = ""
-        if done == "1":
-            if faiss_path.exists():
-                logger.info("%s: already built (use --force to rebuild)", zim_path.stem)
-                return
-            raise RuntimeError(
-                f"{zim_path.stem}: index is marked done but {faiss_path} is missing; "
-                "use --force to rebuild"
-            )
-        if done == "fast":
-            if fast:
-                logger.info(
-                    f"{zim_path.stem}: already indexed for title/full-text search "
-                    "(use --force to rebuild)"
-                )
-                return
-            logger.info(
-                "%s: upgrading title-only index to full "
-                "(re-reading entries beside current index)",
-                zim_path.stem,
-            )
-            db.close()
-            db = None
-            build_db_path, build_faiss_path = _upgrade_paths(db_path, faiss_path)
-            db = sqlite3.connect(build_db_path)
-            db.executescript(SCHEMA)
-            meta = dict(db.execute("SELECT key, value FROM meta"))
-            staged_done = str(meta.get("done", ""))
-            if staged_done == "1":
-                db.close()
-                db = None
-                _publish_upgrade(build_db_path, build_faiss_path, db_path, faiss_path)
-                logger.debug("%s: full index ready", zim_path.stem)
-                return
-            if staged_done == "fast":
-                raise RuntimeError(f"{zim_path.stem}: upgrade staging file is marked fast; delete it and retry")
-            publish_upgrade = True
-
         zim = Archive(str(zim_path))
-        start = int(meta.get("next", 0))
-        batch = []
-        for i in tqdm(
-            range(start, zim.entry_count),
-            initial=start,
-            total=zim.entry_count,
-            desc=zim_path.stem,
-            delay=5,
-        ):
-            row = read_entry(
-                zim,
-                i,
-                fast=fast,
-                max_html_bytes=max_html_bytes,
-                max_entry_bytes=max_entry_bytes,
-                max_preview_chars=max_preview_chars,
-            )
-            if row:
-                batch.append(row)
-            # Keep fast builds bounded too: they have no rows with text to
-            # embed, so an article-count threshold would never flush.
-            if len(batch) >= batch_size:
-                save_batch(batch, i + 1)
-                batch = []
-        save_batch(batch, zim.entry_count)
-        while pending_embeddings:
-            future, pending_rows, pending_next = pending_embeddings.pop(0)
-            _save_rows(db, pending_rows, pending_next, future.result())
-
-        if fast:
-            with db:
-                db.execute("DROP TABLE IF EXISTS vecs")
-                db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
-                db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(filesize),))
-            logger.debug(f"{zim_path.stem}: title + full-text index ready")
-            return
-
-        _write_faiss(db, build_faiss_path)
-        with db:
-            db.execute("DROP TABLE vecs")
-            db.execute("DELETE FROM meta WHERE key = 'next'")
-            db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
-            db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(filesize),))
-        if publish_upgrade:
-            db.close()
-            db = None
-            _publish_upgrade(build_db_path, build_faiss_path, db_path, faiss_path)
-        else:
-            db.execute("VACUUM")
+        if state.db is None:
+            raise RuntimeError("build database is unavailable")
+        _index_entries(
+            zim,
+            zim_path.stem,
+            state.db,
+            int(state.meta.get("next", 0)),
+            batch_size,
+            embedder,
+            fast,
+            max_html_bytes,
+            max_entry_bytes,
+            max_preview_chars,
+            embedding_pipeline,
+        )
+        _finish_build(state, db_path, faiss_path, fast)
     finally:
-        if db is not None:
-            db.close()
+        if state.db is not None:
+            state.db.close()
 
 
 def _create_temp_path(path: Path) -> Path:
@@ -329,23 +421,29 @@ def _publish_upgrade(
         raise RuntimeError("full index upgrade is missing its completed SQLite or FAISS file")
 
 
-def _embed_rows(embedder, rows) -> dict[int, np.ndarray]:
+def _embed_rows(embedder, rows: list[EntryRecord]) -> dict[int, np.ndarray]:
     """Embed article rows and return vectors keyed by entry id."""
     if embedder is None:
         return {}
 
-    articles = [row for row in rows if row[2]]
+    rows = _entry_records(rows)
+    articles = [row for row in rows if row.excerpt]
     if not articles:
         return {}
     passages = []
     for row in articles:
-        prefix = f"passage: {row[1]}\n"
-        passages.append(prefix + embedder.truncate(row[2], prefix=prefix))
+        prefix = f"passage: {row.title}\n"
+        passages.append(prefix + embedder.truncate(row.excerpt, prefix=prefix))
     vectors = embedder.embed(passages)
-    return {row[0]: vector for row, vector in zip(articles, vectors)}
+    return {row.id: vector for row, vector in zip(articles, vectors)}
 
 
-def _save_rows(db, rows, next_entry: int, vectors: dict[int, np.ndarray]) -> None:
+def _save_rows(
+    db,
+    rows: list[EntryRecord],
+    next_entry: int,
+    vectors: dict[int, np.ndarray],
+) -> None:
     """Store a batch, vectors and the resume point in one transaction.
 
     Rows are (id, title, excerpt, path, target). The excerpt is transient:
@@ -353,23 +451,25 @@ def _save_rows(db, rows, next_entry: int, vectors: dict[int, np.ndarray]) -> Non
     """
     import numpy as np
 
+    rows = _entry_records(rows)
+
     with db:
         db.executemany(
             "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
-            [(row[0], row[1], row[3], row[4]) for row in rows],
+            [(row.id, row.title, row.path, row.target_id) for row in rows],
         )
         db.executemany(
             "INSERT INTO vecs VALUES (?, ?)",
             [
-                (row[0], vectors[row[0]].astype(np.float16).tobytes())
+                (row.id, vectors[row.id].astype(np.float16).tobytes())
                 for row in rows
-                if row[0] in vectors
+                if row.id in vectors
             ],
         )
         db.execute("INSERT OR REPLACE INTO meta VALUES ('next', ?)", (next_entry,))
 
 
-def _save(db, embedder, rows, next_entry: int) -> None:
+def _save(db, embedder, rows: list[EntryRecord], next_entry: int) -> None:
     """Embed and store a batch and the resume point in one transaction."""
     _save_rows(db, rows, next_entry, _embed_rows(embedder, rows))
 
@@ -377,8 +477,11 @@ def _save(db, embedder, rows, next_entry: int) -> None:
 def _load(rows):
     import numpy as np
 
-    ids = np.array([r[0] for r in rows], dtype=np.int64)
-    vectors = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(len(rows), -1)
+    ids = np.array([row[0] for row in rows], dtype=np.int64)
+    vectors = np.frombuffer(
+        b"".join(row[1] for row in rows),
+        dtype=np.float16,
+    ).reshape(len(rows), -1)
     return ids, vectors.astype(np.float32)
 
 
@@ -400,10 +503,16 @@ def _write_faiss(db, path: Path) -> None:
 
     else: # ~4*sqrt(n) clusters (capped for small n) ALSO 1 byte per number (int-8)
         # Large ZIM: vectors grouped into lists, 1 byte per number (384 bytes per article). 
-        # Squeezing to 48 bytes (PQ48) lost ~25% of top hits in testing; this 8-bit form was nearly exact. 
-        # The file is memorymapped at search time, so only the lists a query probes are read from disk.
+        # Squeezing to 48 bytes (PQ48) lost ~25% of top hits in testing; this
+        # 8-bit form was nearly exact.
+        # The file is memorymapped at search time, so only the lists a query
+        # probes are read from disk.
         cluster_centre_count = _faiss_cluster_count(n)
-        index = faiss.index_factory(dim, f"IVF{cluster_centre_count},SQ8", faiss.METRIC_INNER_PRODUCT)
+        index = faiss.index_factory(
+            dim,
+            f"IVF{cluster_centre_count},SQ8",
+            faiss.METRIC_INNER_PRODUCT,
+        )
 
         step = _faiss_training_step(n, cluster_centre_count)
         training_rows = db.execute(
@@ -415,7 +524,10 @@ def _write_faiss(db, path: Path) -> None:
         ).fetchall()
         index.train(_load(training_rows)[1])
     last = -1
-    while rows := db.execute("SELECT id, v FROM vecs WHERE id > ? ORDER BY id LIMIT 50000", (last,)).fetchall():
+    while rows := db.execute(
+        "SELECT id, v FROM vecs WHERE id > ? ORDER BY id LIMIT 50000",
+        (last,),
+    ).fetchall():
         ids, vectors = _load(rows)
         index.add_with_ids(vectors, ids)
         last = int(ids[-1])

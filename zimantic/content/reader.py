@@ -4,11 +4,22 @@ import posixpath
 import re
 from html.parser import HTMLParser
 from urllib.parse import unquote
-from typing import Iterator
+from typing import Iterator, NamedTuple
 from libzim.reader import Archive, set_cluster_cache_max_size
 
-# libzim undercounts this cache: its 16 MB default really used ~170 MB. 1 MB used ~4 MB and wasn't slower.
+# libzim undercounts this cache: its 16 MB default really used ~170 MB.
+# 1 MB used ~4 MB and was not slower.
 set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
+
+
+class EntryRecord(NamedTuple):
+    """Indexable fields extracted from one ZIM entry."""
+
+    id: int
+    title: str
+    excerpt: str
+    path: str
+    target_id: int | None
 
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
 DEFAULT_PREVIEW_CHARS = 1000
@@ -725,6 +736,132 @@ def extract_pdf_excerpt(
     return truncate_at_word_boundary(" ".join(pieces), max_chars)
 
 
+def _read_pdf_entry(
+    entry,
+    entry_id: int,
+    raw: bytes,
+    max_preview_chars: int,
+) -> EntryRecord | None:
+    excerpt = extract_pdf_excerpt(raw, max_preview_chars)
+    if len(excerpt) < MIN_BLOCK_CHARS:
+        # No text layer (a scan), password-protected, or malformed: skip it
+        # rather than store a title-only entry with no searchable body.
+        return None
+    return EntryRecord(entry_id, entry.title, excerpt, entry.path, None)
+
+
+def _read_plain_text_entry(
+    entry,
+    entry_id: int,
+    raw: bytes,
+    max_preview_chars: int,
+) -> EntryRecord | None:
+    # Bundled licenses, dotfiles and configs are text/plain too; only real
+    # article text should become a search result.
+    if _PLAIN_TEXT_ASSET.search(entry.path) or _PLAIN_TEXT_ASSET.search(entry.title):
+        return None
+    excerpt = _plain_text_excerpt(raw, max_preview_chars)
+    # Require real prose: a two-byte .gitignore or a stray asset is not an
+    # article, but a text ZIM entry is.
+    if len(excerpt) < MIN_BLOCK_CHARS or is_javascript_shell(raw, excerpt):
+        return None
+    title = (
+        disambiguation_title(entry.title)
+        if is_disambiguation(entry.title, excerpt, raw)
+        else entry.title
+    )
+    return EntryRecord(entry_id, title, excerpt, entry.path, None)
+
+
+def _read_html_entry(
+    zim: Archive,
+    entry,
+    entry_id: int,
+    html: bytes,
+    max_preview_chars: int,
+) -> EntryRecord | None:
+    if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(html):
+        # A script/data file served as HTML (zimit crawls do this for <site>.js)
+        # has no markup. A real page that merely ends in .js — a cheatsheet
+        # about Commander.js — does contain HTML tags, so keep it.
+        return None
+    refresh_url = _refresh_url(html)
+
+    if refresh_url:
+        url = unquote(refresh_url)
+        base, _, fragment = url.partition("#")
+        path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), base))
+        if not zim.has_entry_by_path(path):
+            return None
+        companion = _companion(zim, entry, fragment) if fragment else None
+        if companion is not None:
+            kind, body = companion
+            if kind == "markdown":
+                excerpt, md_title = _markdown_excerpt(body, max_preview_chars)
+                if excerpt and not is_javascript_shell(body, excerpt):
+                    return EntryRecord(
+                        entry_id,
+                        entry.title or md_title,
+                        excerpt,
+                        entry.path,
+                        None,
+                    )
+            else:
+                # Keep this page's own title and path: it is a deep link into the
+                # app route, and its body is real text. Storing the shell target
+                # instead would collapse every article onto "index.html".
+                excerpt = extract_excerpt(body, max_preview_chars=max_preview_chars)
+                if not excerpt and not _HTML_TAG.search(body):
+                    # Plain-text companions (video/playlist descriptions) have no
+                    # HTML blocks, so normalize them directly. An HTML body with no
+                    # visible text stays empty instead of leaking its markup.
+                    excerpt = _plain_text_excerpt(body, max_preview_chars)
+                if excerpt and not is_javascript_shell(body, excerpt):
+                    title = (
+                        disambiguation_title(entry.title)
+                        if is_disambiguation(entry.title, excerpt, body)
+                        else entry.title
+                    )
+                    return EntryRecord(
+                        entry_id,
+                        title,
+                        excerpt,
+                        entry.path,
+                        None,
+                    )
+        target = zim.get_entry_by_path(path)
+        return EntryRecord(
+            entry_id,
+            entry.title,
+            "",
+            target.path,
+            target._index,
+        )
+
+    excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars)
+    if is_javascript_shell(html, excerpt):
+        # An app shell with no article text: nothing useful to index.
+        return None
+    if not excerpt:
+        # No visible blocks. An app shell has nothing to index even if its head
+        # carries a title/description; otherwise a meta description is better
+        # than a title-only entry.
+        if any(marker in html for marker in JS_SHELL_MARKERS):
+            return None
+        if _is_loader_shell(html):
+            # A JS app that renders content it does not ship: keep the page as
+            # title-only, without a shared meta description that would collapse
+            # every article onto the shell.
+            return EntryRecord(entry_id, entry.title, "", entry.path, None)
+        excerpt = truncate_at_word_boundary(_meta_description(html), max_preview_chars)
+    title = (
+        disambiguation_title(entry.title)
+        if is_disambiguation(entry.title, excerpt, html)
+        else entry.title
+    )
+    return EntryRecord(entry_id, title, excerpt, entry.path, None)
+
+
 def read_entry(
     zim: Archive,
     i: int,
@@ -732,7 +869,7 @@ def read_entry(
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
     max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
-):
+) -> EntryRecord | None:
     """Return (id, title, excerpt, path, target_id), or None.
 
     Redirects (real ones, and small meta refresh pages) get empty excerpts and the
@@ -745,7 +882,7 @@ def read_entry(
     entry = zim._get_entry_by_id(i)
     if entry.is_redirect:
         target = entry.get_redirect_entry()
-        return i, entry.title, "", target.path, target._index
+        return EntryRecord(i, entry.title, "", target.path, target._index)
 
     item = entry.get_item()
     mimetype = item.mimetype.split(";", 1)[0].strip().lower()
@@ -753,7 +890,7 @@ def read_entry(
         return None
 
     if fast:
-        return i, entry.title, "", entry.path, None
+        return EntryRecord(i, entry.title, "", entry.path, None)
 
     try:
         entry_limit = max(1, int(max_entry_bytes))
@@ -774,80 +911,7 @@ def read_entry(
     del content, item
 
     if mimetype == "application/pdf":
-        excerpt = extract_pdf_excerpt(raw, max_preview_chars)
-        if len(excerpt) < MIN_BLOCK_CHARS:
-            # No text layer (a scan), password-protected, or malformed: skip it
-            # rather than store a title-only entry with no searchable body.
-            return None
-        return i, entry.title, excerpt, entry.path, None
-
+        return _read_pdf_entry(entry, i, raw, max_preview_chars)
     if mimetype == "text/plain":
-        # Bundled licenses, dotfiles and configs are text/plain too; only real
-        # article text should become a search result.
-        if _PLAIN_TEXT_ASSET.search(entry.path) or _PLAIN_TEXT_ASSET.search(entry.title):
-            return None
-        excerpt = _plain_text_excerpt(raw, max_preview_chars)
-        # Require real prose: a two-byte .gitignore or a stray asset is not an
-        # article, but a text ZIM entry is.
-        if len(excerpt) < MIN_BLOCK_CHARS or is_javascript_shell(raw, excerpt):
-            return None
-        title = disambiguation_title(entry.title) if is_disambiguation(entry.title, excerpt, raw) else entry.title
-        return i, title, excerpt, entry.path, None
-
-    html = raw
-    if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(html):
-        # A script/data file served as HTML (zimit crawls do this for <site>.js)
-        # has no markup. A real page that merely ends in .js — a cheatsheet
-        # about Commander.js — does contain HTML tags, so keep it.
-        return None
-    refresh_url = _refresh_url(html)
-
-    if refresh_url:
-        url = unquote(refresh_url)
-        base, _, fragment = url.partition("#")
-        path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), base))
-        if not zim.has_entry_by_path(path):
-            return None
-        companion = _companion(zim, entry, fragment) if fragment else None
-        if companion is not None:
-            kind, body = companion
-            if kind == "markdown":
-                excerpt, md_title = _markdown_excerpt(body, max_preview_chars)
-                if excerpt and not is_javascript_shell(body, excerpt):
-                    return i, entry.title or md_title, excerpt, entry.path, None
-            else:
-                # Keep this page's own title and path: it is a deep link into the
-                # app route, and its body is real text. Storing the shell target
-                # instead would collapse every article onto "index.html".
-                excerpt = extract_excerpt(body, max_preview_chars=max_preview_chars)
-                if not excerpt and not _HTML_TAG.search(body):
-                    # Plain-text companions (video/playlist descriptions) have no
-                    # HTML blocks, so normalize them directly. An HTML body with no
-                    # visible text stays empty instead of leaking its markup.
-                    excerpt = _plain_text_excerpt(body, max_preview_chars)
-                if excerpt and not is_javascript_shell(body, excerpt):
-                    title = disambiguation_title(entry.title) if is_disambiguation(
-                        entry.title, excerpt, body
-                    ) else entry.title
-                    return i, title, excerpt, entry.path, None
-        target = zim.get_entry_by_path(path)
-        return i, entry.title, "", target.path, target._index
-
-    excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars)
-    if is_javascript_shell(html, excerpt):
-        # An app shell with no article text: nothing useful to index.
-        return None
-    if not excerpt:
-        # No visible blocks. An app shell has nothing to index even if its head
-        # carries a title/description; otherwise a meta description is better
-        # than a title-only entry.
-        if any(marker in html for marker in JS_SHELL_MARKERS):
-            return None
-        if _is_loader_shell(html):
-            # A JS app that renders content it does not ship: keep the page as
-            # title-only, without a shared meta description that would collapse
-            # every article onto the shell.
-            return i, entry.title, "", entry.path, None
-        excerpt = truncate_at_word_boundary(_meta_description(html), max_preview_chars)
-    title = disambiguation_title(entry.title) if is_disambiguation(entry.title, excerpt, html) else entry.title
-    return i, title, excerpt, entry.path, None
+        return _read_plain_text_entry(entry, i, raw, max_preview_chars)
+    return _read_html_entry(zim, entry, i, raw, max_preview_chars)

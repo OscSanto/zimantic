@@ -97,6 +97,200 @@ class ArticleTooLargeError(ArticleUnavailableError):
     """The requested entry exceeds the configured serving limit."""
 
 
+def _deduplicate_ranked(ranked):
+    seen: set[str] = set()
+    unique = []
+    for item in ranked:
+        identity = item[2]["id"]
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(item)
+    return unique
+
+
+def _collect_ranked_candidates(source_results: list[SourceResult]):
+    semantic: list[tuple[float, str, dict[str, Any]]] = []
+    keyword: list[tuple[float, str, dict[str, Any]]] = []
+    fulltext: list[tuple[int, str, dict[str, Any]]] = []
+    docs: dict[str, dict[str, Any]] = {}
+    source_by_key = {
+        result.source.key: result.source for result in source_results
+    }
+
+    for result in source_results:
+        for doc in result.items:
+            docs[doc["id"]] = doc
+        for score, doc in result.semantic:
+            semantic.append((score, result.source.key, doc))
+        for score, doc in result.keyword:
+            keyword.append((score, result.source.key, doc))
+        for rank, doc in result.fulltext:
+            fulltext.append((rank, result.source.key, doc))
+
+    semantic.sort(
+        key=lambda item: (
+            -item[0],
+            source_by_key[item[1]].name.casefold(),
+            item[2]["path"],
+        )
+    )
+    keyword.sort(
+        key=lambda item: (
+            item[0],
+            source_by_key[item[1]].name.casefold(),
+            item[2]["path"],
+        )
+    )
+    fulltext.sort(
+        key=lambda item: (
+            item[0],
+            source_by_key[item[1]].name.casefold(),
+            item[2]["path"],
+        )
+    )
+    return (
+        _deduplicate_ranked(semantic),
+        _deduplicate_ranked(keyword),
+        _deduplicate_ranked(fulltext),
+        docs,
+        source_by_key,
+    )
+
+
+def _rrf_scores(
+    ranked_lists,
+    query: str,
+    candidate_limit: int,
+) -> tuple[dict[str, float], dict[str, dict[str, dict[str, Any]]], float]:
+    scores: dict[str, float] = {}
+    fulltext_weight = (
+        2.0
+        if len(re.findall(r"\w+", query, re.UNICODE)) >= DEFAULT_LONG_QUERY
+        else 1.0
+    )
+    details: dict[str, dict[str, dict[str, Any]]] = {}
+    for ranked, method, weight in (
+        (ranked_lists[0], "semantic", 1.0),
+        (ranked_lists[1], "title", 1.0),
+        (ranked_lists[2], "fulltext", fulltext_weight),
+    ):
+        for rank, (raw_score, _, doc) in enumerate(ranked[:candidate_limit]):
+            contribution = weight / (60 + rank)
+            scores[doc["id"]] = scores.get(doc["id"], 0.0) + contribution
+            details.setdefault(doc["id"], {})[method] = {
+                "rank": rank + 1,
+                "score": round(raw_score, 6),
+                "weight": weight,
+                "contribution": round(contribution, 6),
+            }
+    return scores, details, fulltext_weight
+
+
+def _score_ranked_document(
+    identity: str,
+    doc: dict[str, Any],
+    query_words: list[str],
+    query: str,
+    source_by_key: dict[str, SourceInfo],
+    scores: dict[str, float],
+    rrf_details: dict[str, dict[str, dict[str, Any]]],
+    fulltext_weight: float,
+):
+    title_tokens = _content_terms(doc["title"])
+    title_token_set = set(title_tokens)
+    title_matches = sum(term in title_token_set for term in query_words)
+    title_coverage = title_matches / len(query_words) if query_words else 0.0
+    title_density = _density(query_words, title_tokens)
+    # Coverage is primary; density rewards concise titles among equally
+    # complete matches without letting a short partial match win.
+    title_quality = title_coverage * (1.0 + title_density) / 2.0
+    phrase_hit = _phrase(query_words, title_tokens)
+    source = source_by_key.get(doc["source_key"])
+    intent = _intent_match(source, query) if source is not None else 0.0
+    lexical = (5.0 * title_quality + 2.0 * phrase_hit + intent) / 8.0
+    source_rank = int(doc.get("source_rank", 100000))
+    rrf_score = scores.get(identity, 0.0)
+    base_score = rrf_score + 0.02 * lexical
+    total = base_score
+    disambig = {
+        "action": "none",
+        "factor": 1.0,
+        "adjustment": 0.0,
+    }
+    if DISAMBIGUATION_TITLE.search(doc["title"]):
+        if _disambiguation_intent(query, query_words, doc["title"]):
+            total += DEFAULT_DISAMBIGUATION_BOOST
+            disambig = {
+                "action": "boost",
+                "factor": 1.0,
+                "adjustment": round(DEFAULT_DISAMBIGUATION_BOOST, 6),
+            }
+        else:
+            total *= DEFAULT_DISAMBIGUATION_PENALTY
+            disambig = {
+                "action": "demote",
+                "factor": DEFAULT_DISAMBIGUATION_PENALTY,
+                "adjustment": round(total - base_score, 6),
+            }
+    explanation = (
+        f"title {round(title_coverage * 100)}% "
+        f"({title_matches}/{len(query_words) if query_words else 0}, "
+        f"density {round(title_density * 100)}%), "
+        f"phrase {'yes' if phrase_hit else 'no'}, "
+        f"intent {'yes' if intent else 'no'}"
+        f"{', disambiguation ' + disambig['action'] if disambig['action'] != 'none' else ''}"
+    )
+    output = dict(doc)
+    output.update({
+        "score": total,
+        "explain": explanation,
+        "rank": source_rank,
+        "ranking": {
+            "final_score": round(total, 6),
+            "rrf_score": round(rrf_score, 6),
+            "rrf": {
+                method: rrf_details.get(identity, {}).get(
+                    method,
+                    {
+                        "rank": None,
+                        "score": None,
+                        "weight": weight,
+                        "contribution": 0.0,
+                    },
+                )
+                for method, weight in (
+                    ("semantic", 1.0),
+                    ("title", 1.0),
+                    ("fulltext", fulltext_weight),
+                )
+            },
+            "title": {
+                "query_terms": query_words,
+                "matches": title_matches,
+                "term_count": len(query_words),
+                "coverage": round(title_coverage, 6),
+                "density": round(title_density, 6),
+                "quality": round(title_quality, 6),
+            },
+            "phrase": bool(phrase_hit),
+            "intent": bool(intent),
+            "lexical_score": round(lexical, 6),
+            "disambiguation": disambig,
+            "source_rank": source_rank,
+        },
+    })
+    return (
+        total,
+        lexical,
+        title_quality,
+        source_rank,
+        doc["source"].casefold(),
+        doc["path"],
+        output,
+    )
+
+
 class Search:
     def __init__(
         self,
@@ -126,7 +320,10 @@ class Search:
             cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
-        self._executor = ThreadPoolExecutor(max_workers=self.source_workers, thread_name_prefix="zimantic-search")
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.source_workers,
+            thread_name_prefix="zimantic-search",
+        )
         # Identical in-flight queries share one computation.
         self._inflight: dict[Any, Future] = {}
         self._inflight_lock = threading.Lock()
@@ -885,7 +1082,11 @@ class Search:
                 if index.zim_path
                 else self._find_zim_path(name, index.source_size)
             )
-            archive_current = archive_path is not None and archive_path.exists() and index.archive is not None
+            archive_current = (
+                archive_path is not None
+                and archive_path.exists()
+                and index.archive is not None
+            )
             if not archive_current:
                 reasons.append("ZIM archive unavailable")
 
@@ -1191,6 +1392,44 @@ class Search:
         if not pending.done():
             pending.set_result(value)
 
+    def _cached_for_generation(self, key: Any, generation: int) -> Any | None:
+        cached = self.cache.get(key)
+        if (
+            cached is not None
+            and isinstance(cached, dict)
+            and cached.get("generation") == generation
+        ):
+            return cached
+        return None
+
+    def _claim_search(
+        self,
+        cache_key: Any,
+        inflight_key: Any,
+        generation: int,
+    ) -> tuple[Any | None, Future | None]:
+        """Return a cached result or claim ownership of an in-flight query."""
+        while True:
+            cached = self._cached_for_generation(cache_key, generation)
+            if cached is not None:
+                return cached, None
+            with self._inflight_lock:
+                existing = self._inflight.get(inflight_key)
+                if existing is None:
+                    pending = Future()
+                    self._inflight[inflight_key] = pending
+                    return None, pending
+            try:
+                cached = existing.result(timeout=self.source_timeout * 4)
+            except Exception:
+                cached = None
+            if (
+                cached is not None
+                and isinstance(cached, dict)
+                and cached.get("generation") == generation
+            ):
+                return cached, None
+
     def stream_search(
         self,
         query: str,
@@ -1216,44 +1455,41 @@ class Search:
             generation = getattr(self, "_cache_generation", 0)
         inflight_key = (generation, cache_key)
         sources = self._selected_sources(zim)
+        cached, pending = self._claim_search(cache_key, inflight_key, generation)
+        if cached is not None:
+            yield from self._cached_events(
+                cached, query, sources, source, offset, page_size, debug
+            )
+            return
+        if pending is None:
+            raise RuntimeError("search ownership was not claimed")
+        yield from self._run_search_owner(
+            query,
+            cache_key,
+            generation,
+            pending,
+            sources,
+            source,
+            offset,
+            page_size,
+            debug,
+        )
+
+    def _run_search_owner(
+        self,
+        query: str,
+        cache_key: Any,
+        generation: int,
+        pending: Future,
+        sources: list[SourceInfo],
+        source: str | list[str] | None,
+        offset: int,
+        page_size: int,
+        debug: bool,
+    ) -> Iterator[dict[str, Any]]:
+        """Run one uncached search and publish progress to waiting callers."""
         total_sources = len(sources)
-
-        # Coalesce identical in-flight searches: wait for the owner, or become
-        # the owner and compute once.
-        pending: Future | None = None
-        while True:
-            cached = self.cache.get(cache_key)
-            if (
-                cached is not None
-                and isinstance(cached, dict)
-                and cached.get("generation") == generation
-            ):
-                yield from self._cached_events(
-                    cached, query, sources, source, offset, page_size, debug
-                )
-                return
-            with self._inflight_lock:
-                existing = self._inflight.get(inflight_key)
-                if existing is None:
-                    pending = Future()
-                    self._inflight[inflight_key] = pending
-                    break
-            # Reuse another request's result when it finishes.
-            try:
-                cached = existing.result(timeout=self.source_timeout * 4)
-            except Exception:
-                cached = None
-            if (
-                cached is not None
-                and isinstance(cached, dict)
-                and cached.get("generation") == generation
-            ):
-                yield from self._cached_events(
-                    cached, query, sources, source, offset, page_size, debug
-                )
-                return
-            # Owner failed or was cancelled; loop to claim or read a newer result.
-
+        inflight_key = (generation, cache_key)
         # Fail fast when all search slots are occupied.
         acquired = self._search_slots.acquire(blocking=False)
         futures: list[Future[SourceResult]] = []
@@ -1424,7 +1660,11 @@ class Search:
         if source.mode == "kiwix":
             return self._search_kiwix(source, fulltext_query, limit)
         if not source.local_name:
-            return SourceResult(source=replace(source, available=False), error="source is not indexed", status="error")
+            return SourceResult(
+                source=replace(source, available=False),
+                error="source is not indexed",
+                status="error",
+            )
         return self._search_local(source, query, title_query, fulltext_query, query_vector, limit)
 
     def _search_local(
@@ -1522,7 +1762,9 @@ class Search:
             # libzim's Searcher is not documented as thread-safe: serialise it.
             with index.lock:
                 try:
-                    paths = index.searcher.search(Query().set_query(fulltext_query or query)).getResults(0, count)
+                    paths = index.searcher.search(
+                        Query().set_query(fulltext_query or query)
+                    ).getResults(0, count)
                     for rank, path in enumerate(paths):
                         try:
                             rowid = index.archive.get_entry_by_path(path)._index
@@ -1663,7 +1905,11 @@ class Search:
                         )
                         previews[doc["id"]] = ""
                         continue
-                    previews[doc["id"]] = self._preview(row[2] if row else "")
+                    if row:
+                        excerpt = getattr(row, "excerpt", row[2])
+                    else:
+                        excerpt = ""
+                    previews[doc["id"]] = self._preview(excerpt)
         finally:
             self._release_index(index)
         return previews
@@ -1802,7 +2048,11 @@ class Search:
             with urlopen(request, timeout=self.source_timeout) as response:
                 root = _parse_remote_xml(_read_limited_response(response, response_limit))
         except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError) as error:
-            return SourceResult(source=source, error=f"Kiwix search failed: {error}", status="error")
+            return SourceResult(
+                source=source,
+                error=f"Kiwix search failed: {error}",
+                status="error",
+            )
 
         docs: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -1842,167 +2092,26 @@ class Search:
         limit: int,
     ) -> list[dict[str, Any]]:
         query_words = _query_terms(query)
-        semantic: list[tuple[float, str, dict[str, Any]]] = []
-        keyword: list[tuple[float, str, dict[str, Any]]] = []
-        fulltext: list[tuple[int, str, dict[str, Any]]] = []
-        docs: dict[str, dict[str, Any]] = {}
-        source_by_key = {result.source.key: result.source for result in source_results}
-
-        for result in source_results:
-            for doc in result.items:
-                docs[doc["id"]] = doc
-            for score, doc in result.semantic:
-                semantic.append((score, result.source.key, doc))
-            for score, doc in result.keyword:
-                keyword.append((score, result.source.key, doc))
-            for rank, doc in result.fulltext:
-                fulltext.append((rank, result.source.key, doc))
-
-        semantic.sort(key=lambda item: (-item[0], source_by_key[item[1]].name.casefold(), item[2]["path"]))
-        keyword.sort(key=lambda item: (item[0], source_by_key[item[1]].name.casefold(), item[2]["path"]))
-        fulltext.sort(key=lambda item: (item[0], source_by_key[item[1]].name.casefold(), item[2]["path"]))
-
-        def deduplicate(ranked):
-            seen: set[str] = set()
-            unique = []
-            for item in ranked:
-                identity = item[2]["id"]
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                unique.append(item)
-            return unique
-
-        semantic = deduplicate(semantic)
-        keyword = deduplicate(keyword)
-        fulltext = deduplicate(fulltext)
-
-        scores: dict[str, float] = {}
-        fulltext_weight = (
-            2.0
-            if len(re.findall(r"\w+", query, re.UNICODE))
-            >= DEFAULT_LONG_QUERY
-            else 1.0
+        ranked_lists = _collect_ranked_candidates(source_results)
+        semantic, keyword, fulltext, docs, source_by_key = ranked_lists
+        scores, rrf_details, fulltext_weight = _rrf_scores(
+            (semantic, keyword, fulltext),
+            query,
+            max(self.candidate_count, limit),
         )
-        rrf_details: dict[str, dict[str, dict[str, Any]]] = {}
-        for ranked, method, weight in (
-            (semantic, "semantic", 1.0),
-            (keyword, "title", 1.0),
-            (fulltext, "fulltext", fulltext_weight),
-        ):
-            for rank, (raw_score, _, doc) in enumerate(
-                ranked[: max(self.candidate_count, limit)]
-            ):
-                contribution = weight / (60 + rank)
-                scores[doc["id"]] = scores.get(doc["id"], 0.0) + contribution
-                rrf_details.setdefault(doc["id"], {})[method] = {
-                    "rank": rank + 1,
-                    "score": round(raw_score, 6),
-                    "weight": weight,
-                    "contribution": round(contribution, 6),
-                }
-
-        disambig_boost = DEFAULT_DISAMBIGUATION_BOOST
-        disambig_penalty = DEFAULT_DISAMBIGUATION_PENALTY
-        scored: list[tuple[float, float, float, int, str, str, dict[str, Any]]] = []
-        for identity, doc in docs.items():
-            title_tokens = _content_terms(doc["title"])
-            title_token_set = set(title_tokens)
-            title_matches = sum(term in title_token_set for term in query_words)
-            title_coverage = title_matches / len(query_words) if query_words else 0.0
-            title_density = _density(query_words, title_tokens)
-            # Coverage is primary; density rewards concise titles among equally
-            # complete matches without letting a short partial match win.
-            title_quality = title_coverage * (1.0 + title_density) / 2.0
-            phrase_hit = _phrase(query_words, title_tokens)
-            source = source_by_key.get(doc["source_key"])
-            intent = _intent_match(source, query) if source is not None else 0.0
-            lexical = (
-                5.0 * title_quality
-                + 2.0 * phrase_hit
-                + intent
-            ) / 8.0
-            source_rank = int(doc.get("source_rank", 100000))
-            rrf_score = scores.get(identity, 0.0)
-            base_score = rrf_score + 0.02 * lexical
-            total = base_score
-            disambig = {
-                "action": "none",
-                "factor": 1.0,
-                "adjustment": 0.0,
-            }
-            if DISAMBIGUATION_TITLE.search(doc["title"]):
-                if _disambiguation_intent(query, query_words, doc["title"]):
-                    total += disambig_boost
-                    disambig = {
-                        "action": "boost",
-                        "factor": 1.0,
-                        "adjustment": round(disambig_boost, 6),
-                    }
-                else:
-                    total *= disambig_penalty
-                    disambig = {
-                        "action": "demote",
-                        "factor": disambig_penalty,
-                        "adjustment": round(total - base_score, 6),
-                    }
-            explanation = (
-                f"title {round(title_coverage * 100)}% "
-                f"({title_matches}/{len(query_words) if query_words else 0}, "
-                f"density {round(title_density * 100)}%), "
-                f"phrase {'yes' if phrase_hit else 'no'}, "
-                f"intent {'yes' if intent else 'no'}"
-                f"{', disambiguation ' + disambig['action'] if disambig['action'] != 'none' else ''}"
+        scored = [
+            _score_ranked_document(
+                identity,
+                doc,
+                query_words,
+                query,
+                source_by_key,
+                scores,
+                rrf_details,
+                fulltext_weight,
             )
-            output = dict(doc)
-            output.update({
-                "score": total,
-                "explain": explanation,
-                "rank": source_rank,
-                "ranking": {
-                    "final_score": round(total, 6),
-                    "rrf_score": round(rrf_score, 6),
-                    "rrf": {
-                        method: rrf_details.get(identity, {}).get(
-                            method,
-                            {
-                                "rank": None,
-                                "score": None,
-                                "weight": weight,
-                                "contribution": 0.0,
-                            },
-                        )
-                        for method, weight in (
-                            ("semantic", 1.0),
-                            ("title", 1.0),
-                            ("fulltext", fulltext_weight),
-                        )
-                    },
-                    "title": {
-                        "query_terms": query_words,
-                        "matches": title_matches,
-                        "term_count": len(query_words),
-                        "coverage": round(title_coverage, 6),
-                        "density": round(title_density, 6),
-                        "quality": round(title_quality, 6),
-                    },
-                    "phrase": bool(phrase_hit),
-                    "intent": bool(intent),
-                    "lexical_score": round(lexical, 6),
-                    "disambiguation": disambig,
-                    "source_rank": source_rank,
-                },
-            })
-            scored.append((
-                total,
-                lexical,
-                title_quality,
-                source_rank,
-                doc["source"].casefold(),
-                doc["path"],
-                output,
-            ))
-
+            for identity, doc in docs.items()
+        ]
         scored.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3], item[4], item[5]))
         ranked = []
         for final_rank, item in enumerate(scored[:limit], 1):

@@ -95,10 +95,11 @@ def _find_downloading_sizes(zim_sizes: dict[Path, int]) -> set[Path]:
             downloading.add(path)
     return downloading
 
-def main() -> None:
+
+def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="zimantic")
     _add_verbosity_argument(parser, default=0)
-    
+
     # subcommands: build (files/folders, default zim_dir), serve, reload
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -107,7 +108,10 @@ def main() -> None:
     serve_cmd.add_argument(
         "--fast",
         action="store_true",
-        help="start immediately without the model or FAISS vectors (title and ZIM full-text results only)",
+        help=(
+            "start immediately without the model or FAISS vectors "
+            "(title and ZIM full-text results only)"
+        ),
     )
     serve_cmd.add_argument(
         "--debug",
@@ -124,7 +128,10 @@ def main() -> None:
         nargs="*",
         type=Path,
         metavar="PATH",
-        help="ZIM files or folders containing *.zim; a folder means every .zim under it (recursively). Default: zim_dir",
+        help=(
+            "ZIM files or folders containing *.zim; a folder means every .zim "
+            "under it (recursively). Default: zim_dir"
+        ),
     )
     build.add_argument(
         "--fast",
@@ -147,7 +154,10 @@ def main() -> None:
 
     reload_cmd = commands.add_parser(
         "reload",
-        help="ask a running serve process to rescan index_dir (sends SIGHUP; suitable for systemd.path or cron)",
+        help=(
+            "ask a running serve process to rescan index_dir (sends SIGHUP; "
+            "suitable for systemd.path or cron)"
+        ),
     )
     _add_verbosity_argument(reload_cmd)
     reload_cmd.add_argument(
@@ -156,6 +166,218 @@ def main() -> None:
         default=Path("zimantic.pid"),
         help="file holding the server's PID (default: ./zimantic.pid)",
     )
+    return parser
+
+
+def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
+    """Expand CLI files and folders into unique ZIM paths."""
+    zims: list[Path] = []
+    seen: set[Path] = set()
+    for source in (paths or [Path(default_dir)]):
+        if source.is_dir():
+            matches = sorted(source.rglob("*.zim"))
+        elif source.is_file():
+            matches = [source]
+        else:
+            sys.exit(f"zimantic: path not found: {source}")
+        for zim in matches:
+            resolved = zim.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                zims.append(zim)
+    return zims
+
+
+def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
+    from .build import build as build_zim
+    from .zim import (
+        DEFAULT_MAX_ENTRY_BYTES,
+        DEFAULT_MAX_HTML_BYTES,
+        DEFAULT_PREVIEW_CHARS,
+    )
+    from tqdm import tqdm
+
+    sigterm = getattr(signal, "SIGTERM", None)
+    if sigterm is not None:
+        signal.signal(sigterm, _graceful_interrupt)
+
+    zims = _collect_zims(args.paths, cfg["zim_dir"])
+    if not zims:
+        logger.info("zimantic: no .zim files to index")
+        return
+
+    workers = args.workers
+    if workers is None:
+        workers = cfg.get("build_workers", 1)
+    if workers < 1:
+        parser.error("--workers must be at least 1")
+
+    zim_sizes = {zim: zim.stat().st_size for zim in zims}
+    downloading = _find_downloading_sizes(zim_sizes)
+
+    by_stem: dict[str, list[Path]] = {}
+    for zim in zims:
+        by_stem.setdefault(zim.stem, []).append(zim)
+    accepted: list[Path] = []
+    for stem, paths in sorted(by_stem.items()):
+        sizes = {zim_sizes[path] for path in paths}
+        if len(sizes) > 1:
+            logger.warning(
+                "zimantic: ignoring ZIM files with conflicting index identity %r: %s",
+                stem,
+                ", ".join(f"{path} ({zim_sizes[path]} bytes)" for path in paths),
+            )
+            continue
+        if len(paths) > 1:
+            logger.warning(
+                "zimantic: ignoring duplicate ZIM files with index identity %r: %s",
+                stem,
+                ", ".join(str(path) for path in paths[1:]),
+            )
+        accepted.append(paths[0])
+    zims = sorted(accepted, key=zim_sizes.__getitem__)
+    if not zims:
+        logger.info("zimantic: no non-conflicting .zim files to index")
+        return
+
+    if downloading:
+        _wait_for_stable_sizes(downloading)
+
+    embedder = None
+    embedding_pipeline = None
+    if not args.fast:
+        from .build import EmbeddingPipeline
+        from .embed import Embedder
+
+        embedder = Embedder(
+            cfg["model_dir"],
+            threads=cfg.get("embed_threads"),
+        )
+        if workers > 1:
+            embedding_workers = int(cfg.get("embedding_workers", 2))
+            if embedding_workers < 1:
+                parser.error("embedding_workers must be at least 1")
+            embedding_pipeline = EmbeddingPipeline(
+                embedder,
+                workers=min(embedding_workers, workers),
+                queue_size=max(2, workers * 2),
+            )
+    global_progress = None
+    if len(zims) > 1 and sys.stderr.isatty():
+        global_progress = tqdm(
+            total=sum(zim_sizes.values()),
+            desc="all ZIMs",
+            unit="B",
+            unit_scale=True,
+            file=sys.stderr,
+        )
+    failures: list[tuple[Path, BaseException]] = []
+
+    def run_build(zim: Path) -> None:
+        build_zim(
+            zim,
+            cfg["index_dir"],
+            embedder,
+            cfg["batch_size"],
+            fast=args.fast,
+            max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
+            max_entry_bytes=cfg.get("max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES),
+            max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
+            force=args.force,
+            embedding_pipeline=embedding_pipeline,
+        )
+
+    try:
+        if workers == 1 or len(zims) == 1:
+            for zim in zims:
+                try:
+                    run_build(zim)
+                except Exception as error:
+                    logger.error("zimantic: failed to index %s: %s", zim, error)
+                    failures.append((zim, error))
+                if global_progress is not None:
+                    global_progress.update(zim_sizes[zim])
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(workers, len(zims)),
+                thread_name_prefix="zimantic-build",
+            ) as pool:
+                futures = {pool.submit(run_build, zim): zim for zim in zims}
+                for future in as_completed(futures):
+                    zim = futures[future]
+                    try:
+                        future.result()
+                    except Exception as error:
+                        logger.error("zimantic: failed to index %s: %s", zim, error)
+                        failures.append((zim, error))
+                    if global_progress is not None:
+                        global_progress.update(zim_sizes[zim])
+    finally:
+        if embedding_pipeline is not None:
+            embedding_pipeline.close()
+        if global_progress is not None:
+            global_progress.close()
+    if failures:
+        sys.exit(1)
+
+
+def _run_serve(args, cfg: dict) -> None:
+    from .search import Search
+    from .server import serve
+
+    search = Search(cfg, semantic=not args.fast)
+    if not search.local_names():
+        logger.warning(
+            "zimantic: no sources are indexed yet; "
+            "run `zimantic build --fast` before serving searches"
+        )
+    if not args.fast:
+        # Load the model off the critical path: the server answers title and
+        # full-text searches immediately and gains meaning search once the
+        # ONNX model and vocabulary finish loading in the background.
+        def _make_embedder():
+            from .embed import Embedder
+
+            return Embedder(
+                cfg["model_dir"],
+                threads=cfg.get("embed_threads"),
+            )
+
+        search.start_embedder(_make_embedder)
+
+    if args.fast:
+        logger.info("zimantic: fast mode: title and ZIM full-text search only")
+    serve(search, cfg["port"], debug=args.debug)
+
+
+def _run_reload(pid_file: Path) -> None:
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        sys.exit(
+            f"zimantic: no server PID in {pid_file}; "
+            f"Is `zimantic serve` running from this folder (or pass --pid)?"
+        )
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is None:
+        sys.exit("zimantic: reload via signals is not supported on this platform")
+    try:
+        os.kill(pid, sighup)
+    except ProcessLookupError:
+        sys.exit(
+            f"zimantic: no running process with PID {pid}; "
+            f"is the PID file {pid_file} stale?"
+        )
+    except PermissionError:
+        sys.exit(
+            f"zimantic: permission denied signalling PID {pid}; "
+            "run the reload command as the same user as the server"
+        )
+    logger.info("zimantic: reload signal (SIGHUP) sent to PID %s", pid)
+
+
+def main() -> None:
+    parser = _make_parser()
 
     args = parser.parse_args()
     log_level = _get_log_level(args.command, args.verbose)
@@ -170,213 +392,12 @@ def main() -> None:
         cfg = {}
 
     if args.command == "build":
-        from .build import build as build_zim
-        from .zim import (
-            DEFAULT_MAX_ENTRY_BYTES,
-            DEFAULT_MAX_HTML_BYTES,
-            DEFAULT_PREVIEW_CHARS,
-        )
-        from tqdm import tqdm
-
-        # systemd stops units with SIGTERM; treat it like Ctrl-C so a stopped
-        # build unwinds cleanly and can be resumed by the next run.
-        sigterm = getattr(signal, "SIGTERM", None)
-        if sigterm is not None:
-            signal.signal(sigterm, _graceful_interrupt)
-
-        # Expand the positional paths: files are used directly, folders mean
-        # their *.zim, and no argument at all means the configured zim_dir.
-        zims: list[Path] = []
-        seen: set[Path] = set()
-        for source in (args.paths or [Path(cfg["zim_dir"])]):
-            if source.is_dir():
-                # Recurse: a corpus is often laid out as <collection>/<file>.zim.
-                matches = sorted(source.rglob("*.zim"))
-            elif source.is_file():
-                matches = [source]
-            else:
-                sys.exit(f"zimantic: path not found: {source}")
-            for zim in matches:
-                resolved = zim.resolve()
-                if resolved not in seen:
-                    seen.add(resolved)
-                    zims.append(zim)
-
-        if not zims:
-            logger.info("zimantic: no .zim files to index")
-            return
-
-        workers = args.workers
-        if workers is None:
-            workers = cfg.get("build_workers", 1)
-        if workers < 1:
-            parser.error("--workers must be at least 1")
-
-        zim_sizes = {zim: zim.stat().st_size for zim in zims}
-        downloading = _find_downloading_sizes(zim_sizes)
-
-        by_stem: dict[str, list[Path]] = {}
-        for zim in zims:
-            by_stem.setdefault(zim.stem, []).append(zim)
-        accepted: list[Path] = []
-        for stem, paths in sorted(by_stem.items()):
-            sizes = {zim_sizes[path] for path in paths}
-            if len(sizes) > 1:
-                logger.warning(
-                    "zimantic: ignoring ZIM files with conflicting index identity %r: %s",
-                    stem,
-                    ", ".join(f"{path} ({zim_sizes[path]} bytes)" for path in paths),
-                )
-                continue
-            if len(paths) > 1:
-                logger.warning(
-                    "zimantic: ignoring duplicate ZIM files with index identity %r: %s",
-                    stem,
-                    ", ".join(str(path) for path in paths[1:]),
-                )
-            accepted.append(paths[0])
-        zims = sorted(accepted, key=zim_sizes.__getitem__)
-        if not zims:
-            logger.info("zimantic: no non-conflicting .zim files to index")
-            return
-
-        # Do not submit a file while it is still being downloaded. Waiting for
-        # the whole batch also makes the worker pool independent of file order.
-        if downloading:
-            _wait_for_stable_sizes(downloading)
-
-        # fast builds never embed: skip loading the model so they start instantly.
-        embedder = None
-        embedding_pipeline = None
-        if not args.fast:
-            from .build import EmbeddingPipeline
-            from .embed import Embedder
-
-            embedder = Embedder(
-                cfg["model_dir"],
-                threads=cfg.get("embed_threads"),
-            )
-            if workers > 1:
-                embedding_workers = int(cfg.get("embedding_workers", 2))
-                if embedding_workers < 1:
-                    parser.error("embedding_workers must be at least 1")
-                embedding_pipeline = EmbeddingPipeline(
-                    embedder,
-                    workers=min(embedding_workers, workers),
-                    queue_size=max(2, workers * 2),
-                )
-        global_progress = None
-        if len(zims) > 1 and sys.stderr.isatty():
-            global_progress = tqdm(
-                total=sum(zim_sizes.values()),
-                desc="all ZIMs",
-                unit="B",
-                unit_scale=True,
-                file=sys.stderr,
-            )
-        failures: list[tuple[Path, BaseException]] = []
-
-        def run_build(zim: Path) -> None:
-            build_zim(
-                zim,
-                cfg["index_dir"],
-                embedder,
-                cfg["batch_size"],
-                fast=args.fast,
-                max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
-                max_entry_bytes=cfg.get("max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES),
-                max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
-                force=args.force,
-                embedding_pipeline=embedding_pipeline,
-            )
-
-        try:
-            if workers == 1 or len(zims) == 1:
-                for zim in zims:
-                    try:
-                        run_build(zim)
-                    except Exception as error:
-                        logger.error("zimantic: failed to index %s: %s", zim, error)
-                        failures.append((zim, error))
-                    if global_progress is not None:
-                        global_progress.update(zim_sizes[zim])
-            else:
-                with ThreadPoolExecutor(
-                    max_workers=min(workers, len(zims)),
-                    thread_name_prefix="zimantic-build",
-                ) as pool:
-                    futures = {pool.submit(run_build, zim): zim for zim in zims}
-                    for future in as_completed(futures):
-                        zim = futures[future]
-                        try:
-                            future.result()
-                        except Exception as error:
-                            logger.error("zimantic: failed to index %s: %s", zim, error)
-                            failures.append((zim, error))
-                        if global_progress is not None:
-                            global_progress.update(zim_sizes[zim])
-        finally:
-            if embedding_pipeline is not None:
-                embedding_pipeline.close()
-            if global_progress is not None:
-                global_progress.close()
-        if failures:
-            sys.exit(1)
-
+        _run_build(args, cfg, parser)
     elif args.command == "serve":
-        from .search import Search
-
-        search = Search(cfg, semantic=not args.fast)
-        if not search.local_names():
-            logger.warning(
-                "zimantic: no sources are indexed yet; "
-                "run `zimantic build --fast` before serving searches"
-            )
-        if not args.fast:
-            # Load the model off the critical path: the server answers title and
-            # full-text searches immediately and gains meaning search once the
-            # ONNX model and vocabulary finish loading in the background.
-            def _make_embedder():
-                from .embed import Embedder
-
-                return Embedder(
-                    cfg["model_dir"],
-                    threads=cfg.get("embed_threads"),
-                )
-
-            search.start_embedder(_make_embedder)
-
-        from .server import serve
-
-        if args.fast:
-            logger.info("zimantic: fast mode: title and ZIM full-text search only")
-        serve(search, cfg["port"], debug=args.debug)
-
+        _run_serve(args, cfg)
     elif args.command == "reload":
-        pid_file = args.pid
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            sys.exit(
-                f"zimantic: no server PID in {pid_file}; "
-                f"Is `zimantic serve` running from this folder (or pass --pid)?"
-            )
-        sighup = getattr(signal, "SIGHUP", None)
-        if sighup is None:
-            sys.exit("zimantic: reload via signals is not supported on this platform")
-        try:
-            os.kill(pid, sighup)
-        except ProcessLookupError:
-            sys.exit(
-                f"zimantic: no running process with PID {pid}; "
-                f"is the PID file {pid_file} stale?"
-            )
-        except PermissionError:
-            sys.exit(
-                f"zimantic: permission denied signalling PID {pid}; "
-                "run the reload command as the same user as the server"
-            )
-        logger.info("zimantic: reload signal (SIGHUP) sent to PID %s", pid)
+        _run_reload(args.pid)
+
 
 if __name__ == "__main__":
     main()
