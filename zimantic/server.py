@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 import re
 import signal
+import sys
 import threading
 from urllib.parse import quote as quote_path
 from urllib.parse import urljoin, urlsplit
@@ -188,6 +189,42 @@ script[data-zimantic-toolbar] { display: none !important; }
   [data-zimantic-toolbar] button:hover { background: #eef5ff !important; }
   [data-zimantic-toolbar] .zimantic-toolbar-separator { color: #5d6673 !important; }
 }
+/* Phones: a wrapped toolbar eats a big slice of an already short viewport.
+   Keep it to one line that scrolls sideways instead, with finger-sized
+   targets and the short labels. */
+@media (max-width: 640px) {
+  nav[data-zimantic-toolbar] {
+    -webkit-overflow-scrolling: touch !important;
+    flex-wrap: nowrap !important;
+    gap: 4px !important;
+    overflow-x: auto !important;
+    padding:
+      6px max(8px, env(safe-area-inset-right))
+      6px max(8px, env(safe-area-inset-left)) !important;
+    scrollbar-width: none !important;
+  }
+  nav[data-zimantic-toolbar]::-webkit-scrollbar { display: none !important; }
+  [data-zimantic-toolbar] a,
+  [data-zimantic-toolbar] button {
+    min-height: 40px !important;
+    padding: 8px 12px !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-nav,
+  [data-zimantic-toolbar] .zimantic-toolbar-actions {
+    flex: 0 0 auto !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-actions {
+    margin-left: 8px !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-home-full,
+  [data-zimantic-toolbar] .zimantic-toolbar-article-full {
+    display: none !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-home-short,
+  [data-zimantic-toolbar] .zimantic-toolbar-article-short {
+    display: inline !important;
+  }
+}
 </style>"""
 
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
@@ -260,6 +297,24 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       if (event.data?.type !== "zimantic-shell-navigate") return;
       const url = String(event.data.url || "");
       if (url.startsWith("/content/")) location.href = url;
+    });
+    window.addEventListener("message", event => {
+      if (event.data?.type !== "zimantic-external-link") return;
+      let url;
+      try {
+        url = new URL(String(event.data.url || ""), location.href);
+      } catch (_) {
+        return;
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") return;
+      if (window.parent !== window) {
+        window.parent.postMessage({
+          type: "zimantic-external-link",
+          url: url.href,
+        }, "*");
+      } else {
+        location.href = url.href;
+      }
     });
     const fitToolbarLabels = () => {
       if (!actions) return;
@@ -347,8 +402,6 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
             () => announce("Copy unavailable")
           );
         }
-      } else if (action === "print") {
-        window.print();
       }
     });
     fitToolbarLabels();
@@ -393,7 +446,6 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
     const contentPrefix = `${contentHome}/`;
     const articlePrefix = `${articleHome}/`;
     document.addEventListener("click", event => {
-      if (event.defaultPrevented) return;
       const anchor = event.target && event.target.closest
         ? event.target.closest("a[href]")
         : null;
@@ -407,17 +459,36 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
       ) {
         return;
       }
-      const target = String(anchor.target || "").toLowerCase();
-      if (target && target !== "_self" && target !== "_top") return;
-      if (anchor.hasAttribute("download")) return;
       let url;
       try {
         url = new URL(anchor.href, context);
       } catch (_) {
         return;
       }
-      if (url.origin !== context.origin) return;
       if (url.protocol !== "http:" && url.protocol !== "https:") return;
+      if (anchor.hasAttribute("download")) return;
+      if (url.origin !== context.origin) {
+        event.preventDefault();
+        if (window.parent !== window) {
+          window.parent.postMessage({
+            type: "zimantic-external-link",
+            url: url.href,
+          }, "*");
+        } else {
+          location.href = url.href;
+        }
+        return;
+      }
+      const target = String(anchor.target || "").toLowerCase();
+      if (
+        target &&
+        target !== "_self" &&
+        target !== "_top" &&
+        !(target === "_blank" && url.origin !== context.origin)
+      ) {
+        return;
+      }
+      if (event.defaultPrevented) return;
       const path = url.pathname;
       let contentPath = null;
       if (path === contentHome || path.startsWith(contentPrefix)) {
@@ -425,7 +496,7 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
       } else if (path === articleHome || path.startsWith(articlePrefix)) {
         contentPath = "/content" + path.slice("/article".length);
       }
-      // Anything else (external hosts, app pages, assets) is left to the iframe.
+      // Same-origin app pages and assets are left to the iframe.
       if (!contentPath) return;
       // Same-document fragment links must scroll in place, not reload the shell.
       if (url.pathname === context.pathname && url.search === context.search) {
@@ -436,7 +507,7 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
         type: "zimantic-shell-navigate",
         url: contentPath + url.search,
       }, "*");
-    });
+    }, true);
   };
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initialize, {once: true});
@@ -488,7 +559,7 @@ def _article_toolbar(zim: str, article: dict) -> str:
         f'data-zimantic-action="copy" href="{permalink_url}" '
         f'title="Open or copy this article\'s permalink">'
         f'<span class="zimantic-toolbar-article-full">{article_title}</span>'
-        '<span class="zimantic-toolbar-article-short" aria-hidden="true">'
+        '<span class="zimantic-toolbar-article-short">'
         "Permalink</span></a>"
     )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
@@ -505,12 +576,11 @@ def _article_toolbar(zim: str, article: dict) -> str:
     <a href="{random_url}" title="Open a random article">Random</a>
     <a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" title="Open this ZIM's homepage">
       <span class="zimantic-toolbar-home-full">{zim_name}</span>
-      <span class="zimantic-toolbar-home-short" aria-hidden="true">Home</span>
+      <span class="zimantic-toolbar-home-short">Home</span>
     </a>
     <span class="zimantic-toolbar-breadcrumbs">{breadcrumb_html}</span>
   </div>
   <div class="zimantic-toolbar-actions">
-    <button type="button" data-zimantic-action="print" title="Print this article">Print</button>
     <span class="zimantic-toolbar-parent-nav-group" aria-label="Adjacent links in parent page">
       <button type="button" class="zimantic-toolbar-parent-nav"
         data-zimantic-action="parent-previous" data-zimantic-parent-previous
@@ -988,6 +1058,15 @@ def _handle_reload_request(searchClass, guard: threading.Lock) -> None:
     threading.Thread(target=_reload, name="zimantic-reload", daemon=True).start()
 
 
+def _handle_restart_request(_signum, _frame) -> None:
+    """Replace the process so development changes and all server state reload."""
+    logger.info("zimantic: restarting server after SIGHUP")
+    os.execv(
+        sys.executable,
+        [sys.executable, "-m", "zimantic", *sys.argv[1:]],
+    )
+
+
 def serve(searchClass, port: int, debug: bool = False) -> None:
     app = create_app(searchClass, debug=debug)
     try:
@@ -1003,8 +1082,14 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
 
     sighup = getattr(signal, "SIGHUP", None)
     if sighup is not None:
-        guard = threading.Lock()
-        signal.signal(sighup, lambda _signum, _frame: _handle_reload_request(searchClass, guard))
+        if debug:
+            signal.signal(sighup, _handle_restart_request)
+        else:
+            guard = threading.Lock()
+            signal.signal(
+                sighup,
+                lambda _signum, _frame: _handle_reload_request(searchClass, guard),
+            )
 
     logger.info(
         f"zimantic: server loaded at http://localhost:{port}\n"

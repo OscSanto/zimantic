@@ -240,6 +240,28 @@
       min-height: 0;
       width: 100%;
     }
+    .external-link-notice {
+      align-items: flex-start;
+      background: var(--panel);
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      justify-content: center;
+      margin: 0 auto;
+      max-width: 680px;
+      padding: 32px;
+      width: 100%;
+    }
+    .external-link-notice[hidden] { display: none; }
+    .external-link-notice h2 { margin: 0 0 8px; }
+    .external-link-notice p { margin: 0 0 16px; }
+    .external-link-notice .external-link-url {
+      color: var(--muted);
+      font: .85rem var(--mono);
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+    .external-link-actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .empty { color: var(--muted); padding: 16px 0; }
     .source-list { display: grid; gap: 4px; }
     .source-list label { align-items: flex-start; display: flex; gap: 8px; padding: 4px; }
@@ -296,6 +318,18 @@
   <button class="article-modal-backdrop" type="button" tabindex="-1" aria-label="Close article"></button>
   <section class="article-modal-dialog" role="dialog" aria-modal="true" aria-label="Article">
     <iframe id="articleModalFrame" class="article-modal-frame" title="Article" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+    <div id="externalLinkNotice" class="external-link-notice" hidden tabindex="-1"
+      aria-labelledby="externalLinkTitle">
+      <h2 id="externalLinkTitle">Online link</h2>
+      <p>This link points to an online site. It is not cached in your offline library,
+        so opening it may require an internet connection.</p>
+      <p id="externalLinkUrl" class="external-link-url"></p>
+      <div class="external-link-actions">
+        <a id="externalLinkOpen" class="linklike" target="_blank"
+          rel="noopener noreferrer">Open online site</a>
+        <button id="externalLinkBack" class="secondary" type="button">Return to article</button>
+      </div>
+    </div>
   </section>
 </div>
 
@@ -306,7 +340,7 @@
   const $ = id => document.getElementById(id);
   let PAGE_SIZE = 10;  // replaced with the server's page_size at startup
   const AUTO_SUBMIT_DELAY = 250;
-  const STREAM_RENDER_DELAY = 75;
+  const STREAM_RENDER_DELAY = 500;
   const BUSY_RETRY_BASE_DELAY = 1000;
   const BUSY_RETRY_MAX_DELAY = 8000;
   const BUSY_RETRY_LIMIT = 5;
@@ -728,10 +762,51 @@
     restoreDefaultIcons();
   }
 
+  function readExternalUrl(value) {
+    try {
+      const url = new URL(value, location.href);
+      if (
+        (url.protocol !== "http:" && url.protocol !== "https:") ||
+        url.origin === location.origin
+      ) {
+        return null;
+      }
+      return url;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function hideExternalLinkNotice() {
+    const notice = $("externalLinkNotice");
+    const frame = $("articleModalFrame");
+    if (notice) notice.hidden = true;
+    if (frame) {
+      frame.hidden = false;
+      frame.focus();
+    }
+  }
+
+  function showExternalLinkNotice(value) {
+    const url = readExternalUrl(value);
+    const modal = $("articleModal");
+    const notice = $("externalLinkNotice");
+    const frame = $("articleModalFrame");
+    const link = $("externalLinkOpen");
+    const urlLabel = $("externalLinkUrl");
+    if (!url || !modal || !notice || !frame || !link || !urlLabel) return;
+    link.href = url.href;
+    urlLabel.textContent = url.href;
+    frame.hidden = true;
+    notice.hidden = false;
+    notice.focus();
+  }
+
   function showArticleModal(articleUrl, navigationKind = "manual") {
     const modal = $("articleModal");
     const frame = $("articleModalFrame");
     if (!modal || !frame) return;
+    hideExternalLinkNotice();
     if (modal.hidden) modalPreviousFocus = document.activeElement;
     const previousActiveArticleUrl = readModalUrl(activeModalUrl);
     const shouldLoad = activeModalUrl !== articleUrl;
@@ -1073,6 +1148,7 @@
     pendingModalArticleUrl = null;
     pendingModalNavigation = null;
     modalRootPending = false;
+    hideExternalLinkNotice();
     activeParentNavigation = null;
     activeParentUrl = null;
     parentNavigationSequence++;
@@ -1113,6 +1189,10 @@
       closeArticleModal({navigateHistory: false});
       $("question").value = question;
       submitSearch(false);
+      return;
+    }
+    if (event.data?.type === "zimantic-external-link") {
+      showExternalLinkNotice(event.data.url);
       return;
     }
     if (event.data?.type === "zimantic-article-close") closeArticleModal();
@@ -1799,6 +1879,7 @@
       closeArticleModal();
     }
   });
+  $("externalLinkBack").addEventListener("click", hideExternalLinkNotice);
   window.addEventListener("keydown", event => {
     if (event.key === "Escape" && !$("articleModal").hidden) {
       event.preventDefault();

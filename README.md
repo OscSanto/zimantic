@@ -142,8 +142,10 @@ search**. `serve --fast` also skips the model and all vectors.
 FastAPI serves a lightweight HTML page that is accessible from any browser at
 `http://<host>:8090` (the `port` in `config.toml`).
 
-**Picking up indexes without a restart.** `zimantic reload` sends `SIGHUP` to the server,
+**Picking up indexes without a restart.** `zimantic reload` sends `SIGHUP` to a normal server,
 which rescans `index_dir` for added, removed or upgraded indexes. `kill -HUP <pid>` also works.
+In `serve --debug` mode (also available as the `serve --dev` alias), SIGHUP instead restarts the
+whole server process so development changes and all in-memory state are reloaded.
 
 ### 3. Each search
 
@@ -328,7 +330,8 @@ zimantic build --fast                 # quick title-word + full-text index (no v
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
 zimantic serve                        # web page on http://<host>:8090 after a build
 zimantic serve --fast                 # start now: no model, no vectors
-zimantic serve --debug                # include ranking scores and explanations in results
+zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
+zimantic serve --dev                  # alias for --debug
 zimantic reload                       # ask a running server to rescan index_dir
 ```
 
@@ -397,14 +400,17 @@ JSON API examples:
   tab title and favicon with the viewed article's own `<title>` and declared icon (falling back to the
   ZIM's source icon); when the shell is embedded in the modal, the outer page mirrors them and restores
   its own title and favicon when the modal closes. HTML articles include a small navigation bar
-  with Close, Home, Random, Print, Copy link and Search controls. Modal articles also expose
+  with Close, Home, Random, Copy link and Search controls. Modal articles also expose
   icon-only navigation through visible search results and, for nested articles, the adjacent article
   links listed on the article's parent page. When an article was reached from another modal article,
   that preceding article can also provide the navigation context. Back navigation uses browser
   history when available, otherwise the Close control attempts to close the tab. `GET /random?zim=<name>`
-  redirects to a random indexed article's shell.
+  redirects to a random indexed article's shell. Links from an offline article to an external
+  `http` or `https` site show an in-modal notice identifying the destination as online and offer
+  to open it in a new tab, avoiding failures from sites that disallow iframe embedding.
 - Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
   search endpoints. Debug output is configured for the whole server; it is not a URL parameter.
+  SIGHUP restarts the whole server in debug mode; `serve --dev` is an alias for this mode.
 - `GET /sources`, `/config`, `/zims` and `/health` return source, configuration,
   local-index and health information. Source records include a `homepage` path when the local ZIM
   exposes one. Health is read-only and reports index/archive capabilities, entry counts, homepage

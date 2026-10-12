@@ -110,8 +110,10 @@ def main() -> None:
     )
     serve_cmd.add_argument(
         "--debug",
+        "--dev",
+        dest="debug",
         action="store_true",
-        help="include ranking scores and explanations in search results",
+        help="include ranking scores and explanations; --dev is an alias and SIGHUP restarts",
     )
 
     build = commands.add_parser("build", help="index ZIM files")

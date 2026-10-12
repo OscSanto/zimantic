@@ -196,10 +196,7 @@ class LocalIntegrationTests(unittest.TestCase):
                 shell.content.index(b'data-zimantic-action="previous"'),
                 shell.content.index(b'>Random</a>'),
             )
-            self.assertLess(
-                shell.content.index(b'data-zimantic-action="print"'),
-                shell.content.index(b'data-zimantic-action="parent-previous"'),
-            )
+            self.assertNotIn(b'data-zimantic-action="print"', shell.content)
             self.assertLess(
                 shell.content.index(b'data-zimantic-action="parent-previous"'),
                 shell.content.index(b'data-zimantic-action="home"'),

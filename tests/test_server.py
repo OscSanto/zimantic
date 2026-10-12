@@ -156,6 +156,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(shell.headers["content-type"].startswith("text/html"))
         self.assertIn("data-zimantic-toolbar", shell.text)
         self.assertIn('src="/article/manual/page"', shell.text)
+        self.assertIn("zimantic-external-link", shell.text)
         self.assertNotIn("Article body", shell.text)
 
         # /article/ serves the raw article with the shell-navigation bridge
@@ -164,6 +165,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(raw.headers["content-type"].startswith("text/html"))
         self.assertIn("Article body", raw.text)
         self.assertIn("data-zimantic-bridge", raw.text)
+        self.assertIn("zimantic-external-link", raw.text)
         self.assertNotIn("data-zimantic-toolbar", raw.text)
 
     def test_content_shell_uses_article_title_and_icon(self):
@@ -276,6 +278,19 @@ class ServerTests(unittest.TestCase):
     def test_config_reports_debug_mode(self):
         self.assertFalse(self.client.get("/config").json()["debug"])
         self.assertTrue(self.debug_client.get("/config").json()["debug"])
+
+    @patch("zimantic.server.os.execv")
+    @patch("zimantic.server.sys.argv", ["zimantic", "serve", "--debug"])
+    @patch("zimantic.server.sys.executable", "/venv/bin/python")
+    def test_restart_handler_reexecutes_the_server_command(self, execv):
+        from zimantic.server import _handle_restart_request
+
+        _handle_restart_request(1, None)
+
+        execv.assert_called_once_with(
+            "/venv/bin/python",
+            ["/venv/bin/python", "-m", "zimantic", "serve", "--debug"],
+        )
 
     def test_sources_ignores_client_refresh_parameter(self):
         # Clients cannot force a source refresh: any refresh parameter is ignored.
