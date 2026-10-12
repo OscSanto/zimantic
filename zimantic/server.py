@@ -437,11 +437,14 @@ ARTICLE_VIEWPORT_META = (
 )
 
 ARTICLE_MOBILE_STYLE = """<style data-zimantic-mobile>
-/* Conservative reader fallback for desktop-only captures: keep media on
-   screen and let wide code and tables scroll instead of overflowing. */
+/* Conservative reader fallback for desktop-only captures. Most desktop pages
+   anchor their layout in a fixed-width child of <body> (a 900px wrapper, say),
+   so cap that child and let wide code and tables scroll inside their own box
+   rather than stretching the whole document. */
 @media (max-width: 800px) {
   html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   body { overflow-wrap: break-word; }
+  body > * { max-width: 100% !important; min-width: 0 !important; }
   img, video, iframe { max-width: 100% !important; }
   img, video { height: auto !important; }
   pre {
