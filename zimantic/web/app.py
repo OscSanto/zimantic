@@ -1151,8 +1151,9 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
                 lambda _signum, _frame: _handle_reload_request(searchClass, guard),
             )
 
+    server_mode = " (debug)" if debug else ""
     logger.info(
-        f"zimantic: server loaded at http://localhost:{port}\n"
+        f"zimantic: server{server_mode} loaded at http://localhost:{port}\n"
         f"zimantic: PID {os.getpid()}; reload with `zimantic reload` "
     )
     start_faiss = getattr(searchClass, "start_faiss", None)

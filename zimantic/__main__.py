@@ -350,8 +350,6 @@ def main() -> None:
 
         if args.fast:
             logger.info("zimantic: fast mode: title and ZIM full-text search only")
-        if args.debug:
-            logger.info("zimantic: debug mode: ranking scores and explanations enabled")
         serve(search, cfg["port"], debug=args.debug)
 
     elif args.command == "reload":
