@@ -273,22 +273,10 @@ def _create_temp_path(path: Path) -> Path:
     raise RuntimeError(f"could not create a temporary file beside {path}")
 
 
-def _fsync_file(path: Path) -> None:
+def _fsync_path(path: Path) -> None:
+    """Flush a file or directory to permanent storage, best-effort."""
     try:
         fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
-
-
-def _fsync_dir(directory: Path) -> None:
-    try:
-        fd = os.open(directory, os.O_RDONLY)
     except OSError:
         return
     try:
@@ -327,13 +315,13 @@ def _publish_upgrade(
         # the new one.
         os.replace(staging_faiss_path, faiss_path)
         os.replace(staging_db_path, db_path)
-        _fsync_dir(db_path.parent)
+        _fsync_path(db_path.parent)
         return
     if staging_db_path.exists() and faiss_path.exists():
         # Recover if the process stopped after publishing FAISS but before
         # publishing SQLite.
         os.replace(staging_db_path, db_path)
-        _fsync_dir(db_path.parent)
+        _fsync_path(db_path.parent)
         return
     if db_path.exists() and faiss_path.exists() and not staging_db_path.exists():
         return
@@ -435,9 +423,9 @@ def _write_faiss(db, path: Path) -> None:
     try:
         faiss.write_index(index, str(temp_path))
         # Flush before rename so a partial file is never published.
-        _fsync_file(temp_path)
+        _fsync_path(temp_path)
         os.replace(temp_path, path)
-        _fsync_dir(path.parent)
+        _fsync_path(path.parent)
     finally:
         temp_path.unlink(missing_ok=True)
 

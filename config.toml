@@ -32,9 +32,7 @@ port = 8090
 # with the standard local setup this is often http://localhost:8085.
 kiwix_server = ""
 kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=50000"
-kiwix_search_path = "/kiwix/search"
 kiwix_catalog_limit = 50000
-kiwix_result_limit = 1000
 max_kiwix_response_bytes = 67108864
 
 # TUNING
@@ -75,9 +73,6 @@ max_article_bytes = 33_554_432
 # Maximum preview characters extracted for displayed results; build-time extraction is transient.
 max_preview_chars = 1_000
 
-# Embedding sequence length, including two special tokens. Excerpts longer than this are truncated.
-embedding_tokens = 256
-
 # Large ZIMs only (10,000+ articles): how many groups of vectors each search scans.
 # By default, searches scan about 6% of the groups, scaling automatically with ZIM size.
 # Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
@@ -86,21 +81,6 @@ embedding_tokens = 256
 # Meaning matches below this cosine similarity are discarded.
 min_cosine_similarity = 0.85
 
-# A naive approach to determining if query requires a deeper search (e.g. pasted sentences from article)
-# Searches with 'long_query' words or more will double kiwix's full-text result weights.
-# Rule of thumb: long searchs are usually pasted sentence or remembered text.  
-# Set very high (e.g. 1000) to turn the doubling off.
-long_query = 10
-
-# Disambiguation pages (titles detected from the "(disambiguation)" suffix,
-# rendered footer, or category). A query that names the full title exactly,
-# including "air disambiguation" without parentheses, is navigation. A question
-# that names the base title and ends in "?" is also treated as navigation. Such
-# pages are promoted above the normal score range; other matches are demoted.
-# Set disambiguation_penalty = 1 to disable.
-disambiguation_boost = 0.08
-disambiguation_penalty = 0.5
-
 # Search workers. More workers reduce wall-clock time when many ZIMs are on
 # separate storage, but increase concurrent I/O and SQLite connections.
 search_workers = 8
@@ -108,6 +88,7 @@ search_workers = 8
 # this many; each search may still use all source workers. Lower it on a Pi.
 max_concurrent_searches = 4
 # Number of candidates requested from each retrieval backend before fusion.
+# Only takes effect when raised above max_results; the pool target is the larger of the two.
 candidate_count = 16
 # Maximum intermediate ranking passes during a streamed search. The final
 # ranking always includes every source; lower this on slow CPUs.
@@ -116,4 +97,5 @@ max_stream_ranks = 16
 source_timeout = 12
 # Exact-query LRU cache. Set cache_size to 0 to disable.
 cache_size = 256
-cache_bytes = 33_554_432  # 32 MiB
+# The byte budget applies independently to the search and preview caches.
+cache_bytes = 33_554_432  # 32 MiB per cache

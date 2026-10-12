@@ -250,11 +250,10 @@ def main() -> None:
         embedding_pipeline = None
         if not args.fast:
             from .build import EmbeddingPipeline
-            from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
+            from .embed import Embedder
 
             embedder = Embedder(
                 cfg["model_dir"],
-                embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
                 threads=cfg.get("embed_threads"),
             )
             if workers > 1:
@@ -338,11 +337,10 @@ def main() -> None:
             # full-text searches immediately and gains meaning search once the
             # ONNX model and vocabulary finish loading in the background.
             def _make_embedder():
-                from .embed import DEFAULT_EMBEDDING_TOKENS, Embedder
+                from .embed import Embedder
 
                 return Embedder(
                     cfg["model_dir"],
-                    embedding_tokens=cfg.get("embedding_tokens", DEFAULT_EMBEDDING_TOKENS),
                     threads=cfg.get("embed_threads"),
                 )
 

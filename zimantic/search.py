@@ -74,6 +74,9 @@ DEFAULT_KIWIX_CATALOG_ATTEMPTS = 3
 DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF = 1.0
 MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
+DEFAULT_LONG_QUERY = 10
+
+
 class SearchQueryError(ValueError):
     """The requested query cannot be processed."""
 
@@ -1048,6 +1051,32 @@ class Search:
         }
 
     @staticmethod
+    def _event(
+        event_type: str,
+        state: dict[str, Any],
+        completed: int,
+        total_sources: int,
+        offset: int,
+        limit: int,
+        matched_by: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """One streamed snapshot/done event shaped from a page state."""
+        event: dict[str, Any] = {
+            "type": event_type,
+            "results": state["results"],
+            "completed": completed,
+            "total_sources": total_sources,
+            "total": state["total"],
+            "has_more": state["has_more"],
+            "offset": offset,
+            "limit": limit,
+            "counts": state["counts"],
+        }
+        if matched_by is not None:
+            event["matched_by"] = matched_by
+        return event
+
+    @staticmethod
     def _unpack_cache(cached: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         return list(cached.get("pool", [])), list(cached.get("sources", []))
 
@@ -1132,7 +1161,6 @@ class Search:
         state = self._page_state(pool, source, offset, page_size, debug)
         self._hydrate_results(state["results"])
         total_sources = len(sources)
-        matched_by = self._matched_by(pool) if debug else None
         yield {
             "type": "started",
             "query": query,
@@ -1148,20 +1176,13 @@ class Search:
                 "completed": completed,
                 "total_sources": total_sources,
             }
-        snapshot = {
-            "results": state["results"],
-            "completed": total_sources,
-            "total_sources": total_sources,
-            "total": state["total"],
-            "has_more": state["has_more"],
-            "offset": offset,
-            "limit": page_size,
-            "counts": state["counts"],
-        }
-        if matched_by is not None:
-            snapshot["matched_by"] = matched_by
-        yield {"type": "snapshot", **snapshot}
-        yield {"type": "done", **snapshot}
+        matched_by = self._matched_by(pool) if debug else None
+        yield self._event(
+            "snapshot", state, total_sources, total_sources, offset, page_size, matched_by
+        )
+        yield self._event(
+            "done", state, total_sources, total_sources, offset, page_size, matched_by
+        )
 
     def _finish_inflight(self, key: Any, pending: Future, value: Any) -> None:
         with self._inflight_lock:
@@ -1260,20 +1281,21 @@ class Search:
                     current_generation = getattr(self, "_cache_generation", 0)
                 if current_generation == generation:
                     self.cache.put(cache_key, cache_value)
-                done = {
-                    "type": "done",
+                empty_state = {
                     "results": [],
-                    "completed": 0,
-                    "total_sources": 0,
                     "total": 0,
                     "has_more": False,
-                    "offset": offset,
-                    "limit": page_size,
                     "counts": {},
                 }
-                if debug:
-                    done["matched_by"] = {}
-                yield done
+                yield self._event(
+                    "done",
+                    empty_state,
+                    0,
+                    0,
+                    offset,
+                    page_size,
+                    {} if debug else None,
+                )
                 return
 
             query_vector = self._query_vector(sources, query)
@@ -1337,20 +1359,15 @@ class Search:
                 }
                 if should_rank:
                     state = self._page_state(pool, source, offset, page_size, debug)
-                    snapshot = {
-                        "type": "snapshot",
-                        "results": state["results"],
-                        "completed": len(completed),
-                        "total_sources": total_sources,
-                        "total": state["total"],
-                        "has_more": state["has_more"],
-                        "offset": offset,
-                        "limit": page_size,
-                        "counts": state["counts"],
-                    }
-                    if debug:
-                        snapshot["matched_by"] = self._matched_by(pool)
-                    yield snapshot
+                    yield self._event(
+                        "snapshot",
+                        state,
+                        len(completed),
+                        total_sources,
+                        offset,
+                        page_size,
+                        self._matched_by(pool) if debug else None,
+                    )
 
             if len(completed) != total_sources:
                 pool = self._rank_results(completed, query, pool_target)
@@ -1379,20 +1396,15 @@ class Search:
                 current_generation = getattr(self, "_cache_generation", 0)
             if current_generation == generation:
                 self.cache.put(cache_key, cache_value)
-            done = {
-                "type": "done",
-                "results": state["results"],
-                "completed": len(completed),
-                "total_sources": total_sources,
-                "total": state["total"],
-                "has_more": state["has_more"],
-                "offset": offset,
-                "limit": page_size,
-                "counts": state["counts"],
-            }
-            if matched_by is not None:
-                done["matched_by"] = matched_by
-            yield done
+            yield self._event(
+                "done",
+                state,
+                len(completed),
+                total_sources,
+                offset,
+                page_size,
+                matched_by,
+            )
         finally:
             for future in futures:
                 future.cancel()
@@ -1772,15 +1784,11 @@ class Search:
 
     def _search_kiwix(self, source: SourceInfo, query: str, limit: int) -> SourceResult:
         server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
-        path = str(self.cfg.get("kiwix_search_path", "/kiwix/search"))
-        endpoint = server + (path if path.startswith("/") else "/" + path)
+        # The search endpoint is fixed by kiwix-serve itself, not per-install.
+        endpoint = server + "/kiwix/search"
         result_limit = min(
             max(self.candidate_count, limit),
-            _int_config(
-                self.cfg,
-                "kiwix_result_limit",
-                DEFAULT_KIWIX_RESULT_LIMIT,
-            ),
+            DEFAULT_KIWIX_RESULT_LIMIT,
         )
         params = urlencode({
             "pattern": query,
@@ -1877,7 +1885,7 @@ class Search:
         fulltext_weight = (
             2.0
             if len(re.findall(r"\w+", query, re.UNICODE))
-            >= _int_config(self.cfg, "long_query", 10)
+            >= DEFAULT_LONG_QUERY
             else 1.0
         )
         rrf_details: dict[str, dict[str, dict[str, Any]]] = {}
@@ -1898,12 +1906,8 @@ class Search:
                     "contribution": round(contribution, 6),
                 }
 
-        disambig_boost = _float_config(
-            self.cfg, "disambiguation_boost", DEFAULT_DISAMBIGUATION_BOOST, -1.0, 1.0
-        )
-        disambig_penalty = _float_config(
-            self.cfg, "disambiguation_penalty", DEFAULT_DISAMBIGUATION_PENALTY, 0.0, 1.0
-        )
+        disambig_boost = DEFAULT_DISAMBIGUATION_BOOST
+        disambig_penalty = DEFAULT_DISAMBIGUATION_PENALTY
         scored: list[tuple[float, float, float, int, str, str, dict[str, Any]]] = []
         for identity, doc in docs.items():
             title_tokens = _content_terms(doc["title"])

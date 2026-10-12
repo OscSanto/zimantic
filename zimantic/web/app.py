@@ -22,6 +22,7 @@ from ..search import (
     SearchBusyError,
     SearchQueryError,
 )
+from ..searching.sources import _html_attribute
 
 ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"
@@ -703,17 +704,6 @@ def _mobile_article_head(document: str) -> tuple[str, str]:
     return document, head
 
 
-def _tag_attribute(tag: str, name: str) -> str:
-    match = re.search(
-        rf"\b{re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
-        tag,
-        re.IGNORECASE,
-    )
-    if not match:
-        return ""
-    return next((value for value in match.groups() if value is not None), "")
-
-
 def _article_head_meta(
     content: bytes | memoryview, zim: str, path: str | None
 ) -> tuple[str | None, str | None]:
@@ -741,9 +731,9 @@ def _article_head_meta(
     base = _article_url(zim, path) if path else _article_url(zim) + "/"
     icon = None
     for tag in re.findall(r"<link\b[^>]*>", head, re.IGNORECASE):
-        if "icon" not in _tag_attribute(tag, "rel").casefold():
+        if "icon" not in _html_attribute(tag, "rel").casefold():
             continue
-        href = _tag_attribute(tag, "href").strip()
+        href = _html_attribute(tag, "href").strip()
         if not href:
             continue
         parsed = urlsplit(urljoin(base, href))
@@ -876,33 +866,20 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
     def page():
         return FileResponse(PAGE)
 
-    @app.get("/favicon.ico", include_in_schema=False)
-    def favicon():
-        return FileResponse(FAVICON, media_type="image/x-icon")
-
-    @app.get("/favicon-16x16.png", include_in_schema=False)
-    def favicon_16():
-        return FileResponse(FAVICON_16, media_type="image/png")
-
-    @app.get("/favicon-32x32.png", include_in_schema=False)
-    def favicon_32():
-        return FileResponse(FAVICON_32, media_type="image/png")
-
-    @app.get("/apple-touch-icon.png", include_in_schema=False)
-    def apple_touch_icon():
-        return FileResponse(APPLE_TOUCH_ICON, media_type="image/png")
-
-    @app.get("/android-chrome-192x192.png", include_in_schema=False)
-    def android_chrome_192():
-        return FileResponse(ANDROID_CHROME_192, media_type="image/png")
-
-    @app.get("/android-chrome-512x512.png", include_in_schema=False)
-    def android_chrome_512():
-        return FileResponse(ANDROID_CHROME_512, media_type="image/png")
-
-    @app.get("/site.webmanifest", include_in_schema=False)
-    def web_manifest():
-        return FileResponse(WEB_MANIFEST, media_type="application/manifest+json")
+    # Static browser chrome: each route only differs in path, file and media type.
+    static_routes = (
+        ("/favicon.ico", FAVICON, "image/x-icon"),
+        ("/favicon-16x16.png", FAVICON_16, "image/png"),
+        ("/favicon-32x32.png", FAVICON_32, "image/png"),
+        ("/apple-touch-icon.png", APPLE_TOUCH_ICON, "image/png"),
+        ("/android-chrome-192x192.png", ANDROID_CHROME_192, "image/png"),
+        ("/android-chrome-512x512.png", ANDROID_CHROME_512, "image/png"),
+        ("/site.webmanifest", WEB_MANIFEST, "application/manifest+json"),
+    )
+    for _route, _file, _mime in static_routes:
+        app.get(_route, include_in_schema=False)(
+            lambda _file=_file, _mime=_mime: FileResponse(_file, media_type=_mime)
+        )
 
     @app.get("/source-icon/{zim}", include_in_schema=False)
     def source_icon(zim: str):

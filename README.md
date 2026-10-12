@@ -101,7 +101,7 @@ documents without one are skipped.
 
 **Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-The model receives at most `embedding_tokens`. Search previews are generated independently from
+The model receives a fixed 256-token budget. Search previews are generated independently from
 the local ZIM only for the final displayed page.
 
 **Storage.** Each ZIM gets two files in `index_dir`:
@@ -432,7 +432,7 @@ JSON API examples:
 Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
 `kill -HUP <pid>`.
 
-Exact queries use a small LRU cache controlled by `cache_size` and `cache_bytes` (32 MiB by default).
+Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` (32 MiB per cache by default).
 The ranked pool is shared across pages and display filters, and invalidated when searchable sources
 change. For large libraries, `search_workers` controls how many ZIM indexes are searched in
 parallel. `max_stream_ranks` limits intermediate progress-ranking passes; the final result still

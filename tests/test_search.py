@@ -129,7 +129,7 @@ def _title_search(rows, query, limit=1):
         rows,
     )
     source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
-    search = _bare_search({"long_query": 10, "candidate_count": 2, "kiwix_url": "http://example/content"})
+    search = _bare_search({"candidate_count": 2, "kiwix_url": "http://example/content"})
     search.semantic = False
     search.sources = {"manual": source}
     search.indexes = {"manual": _LocalIndex(db, None, None, None, threading.Lock())}
@@ -281,7 +281,7 @@ class SearchContractTests(unittest.TestCase):
             fulltext=[(0, doc), (0, tie)],
         )
         search = object.__new__(Search)
-        search.cfg = {"long_query": 10, "candidate_count": 16}
+        search.cfg = {"candidate_count": 16}
         search.candidate_count = 16
         first = search._rank_results([result], "how to change tires", 10)
         second = search._rank_results([result], "how to change tires", 10)
@@ -327,7 +327,7 @@ class SearchContractTests(unittest.TestCase):
             fulltext=[(0, exact)],
         )
         search = object.__new__(Search)
-        search.cfg = {"long_query": 10, "candidate_count": 16}
+        search.cfg = {"candidate_count": 16}
         search.candidate_count = 16
 
         ranked = search._rank_results([result, result_with_title], "intuition", 10)
@@ -362,7 +362,7 @@ class SearchContractTests(unittest.TestCase):
             keyword=[(-2.0, long), (-3.0, compact)],
         )
         search = object.__new__(Search)
-        search.cfg = {"long_query": 10, "candidate_count": 16}
+        search.cfg = {"candidate_count": 16}
         search.candidate_count = 16
 
         ranked = search._rank_results([result], "change tire", 10)
@@ -376,7 +376,7 @@ class SearchContractTests(unittest.TestCase):
             SourceInfo("two", "Two", "two", "local"),
         ]
         search = object.__new__(Search)
-        search.cfg = {"long_query": 10, "candidate_count": 16}
+        search.cfg = {"candidate_count": 16}
         search.candidate_count = 16
         search.semantic = False
         search.indexes = {}
@@ -420,7 +420,6 @@ class SearchContractTests(unittest.TestCase):
         ]
         search = _bare_search(
             {
-                "long_query": 10,
                 "candidate_count": 2,
                 "max_stream_ranks": 4,
             }
@@ -483,7 +482,7 @@ class SearchContractTests(unittest.TestCase):
 
         source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
         search = object.__new__(Search)
-        search.cfg = {"long_query": 10, "candidate_count": 2, "kiwix_url": "http://example/content"}
+        search.cfg = {"candidate_count": 2, "kiwix_url": "http://example/content"}
         search.candidate_count = 2
         search.semantic = True
         search.sources = {"manual": source}
@@ -660,7 +659,7 @@ class SearchContractTests(unittest.TestCase):
 class DisambiguationRankingTests(unittest.TestCase):
     def _search(self):
         search = object.__new__(Search)
-        search.cfg = {"long_query": 10, "candidate_count": 16}
+        search.cfg = {"candidate_count": 16}
         search.candidate_count = 16
         return search
 
@@ -734,7 +733,6 @@ class GracefulDegradationTests(unittest.TestCase):
             "index_dir": str(tmp),
             "zim_dir": str(tmp),
             "kiwix_url": "http://example/content",
-            "long_query": 10,
             "candidate_count": 16,
         }
 
@@ -981,7 +979,6 @@ class PaginationTests(unittest.TestCase):
             "index_dir": str(tmp),
             "zim_dir": str(tmp),
             "kiwix_url": "http://example/content",
-            "long_query": 10,
             "candidate_count": 16,
             "page_size": 2,
             "max_results": 5,
@@ -1137,51 +1134,6 @@ class ProductionHardeningTests(unittest.TestCase):
             db.close()
         self.assertEqual(doc["url"], "/content/manual/tire-change")
         self.assertEqual(doc["path"], "tire-change")
-
-    def test_malformed_disambiguation_tuning_falls_back_to_defaults(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
-        hub = {
-            "id": "manual:hub",
-            "source_key": "manual",
-            "source": "Manual",
-            "title": "Air (disambiguation)",
-            "lead": "Air may refer to several things.",
-            "path": "Air_(disambiguation)",
-            "source_rank": 1,
-        }
-        article = {
-            "id": "manual:air",
-            "source_key": "manual",
-            "source": "Manual",
-            "title": "Air",
-            "lead": "Air is a mixture of gases.",
-            "path": "Air",
-            "source_rank": 1,
-        }
-        result = SourceResult(
-            source=source,
-            items=[hub, article],
-            keyword=[(-1.0, article)],
-            fulltext=[(0, article)],
-        )
-
-        malformed = object.__new__(Search)
-        malformed.cfg = {
-            "disambiguation_boost": "high",
-            "disambiguation_penalty": "nope",
-        }
-        malformed.candidate_count = 16
-        defaults = object.__new__(Search)
-        defaults.cfg = {}
-        defaults.candidate_count = 16
-
-        ranked = malformed._rank_results([result], "air", 10)
-        expected = defaults._rank_results([result], "air", 10)
-        self.assertEqual([item["id"] for item in ranked], [item["id"] for item in expected])
-        self.assertEqual(
-            [item["score"] for item in ranked],
-            [item["score"] for item in expected],
-        )
 
     def test_exhausted_search_slots_report_busy_without_blocking(self):
         search = _bare_search({"kiwix_url": "http://example/content"})
