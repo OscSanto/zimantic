@@ -1071,9 +1071,9 @@ def create_app(searchClass, debug: bool = False) -> FastAPI:
             "X-Offset": str(page["offset"]),
             "X-Page-Size": str(len(page["results"])),
         }
-        if debug and page.get("stats") is not None:
-            headers["X-Debug-Stats"] = json.dumps(
-                page["stats"], separators=(",", ":"), ensure_ascii=True
+        if debug and page.get("matched_by") is not None:
+            headers["X-Matched-By"] = json.dumps(
+                page["matched_by"], separators=(",", ":"), ensure_ascii=True
             )
         return JSONResponse(content=page["results"], headers=headers)
 

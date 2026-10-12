@@ -340,29 +340,10 @@
                 margin: 0;
             }
             .debug-stats {
-                border: 1px solid var(--border);
-                border-radius: 8px;
-                margin: 10px 0 14px;
-                padding: 8px 12px;
-            }
-            .debug-stats summary {
                 color: var(--muted);
-                cursor: pointer;
-                font-size: 0.82rem;
-            }
-            .debug-stats-grid {
-                display: grid;
-                gap: 3px 14px;
-                grid-template-columns: max-content 1fr;
-                margin: 8px 0 0;
                 font: 0.75rem var(--mono);
+                margin: 10px 0 14px;
                 overflow-wrap: anywhere;
-            }
-            .debug-stats-grid dt {
-                color: var(--muted);
-            }
-            .debug-stats-grid dd {
-                margin: 0;
             }
             .result-thumb {
                 background: var(--mark-bg);
@@ -561,10 +542,7 @@
             </form>
 
             <div class="status" id="status"></div>
-            <details class="debug-stats" id="debugStats" hidden>
-                <summary>Stats for nerds</summary>
-                <dl class="debug-stats-grid" id="debugStatsGrid"></dl>
-            </details>
+            <div class="debug-stats" id="debugStats" hidden></div>
             <div class="source-filters" id="sourceFilters" hidden>
                 <div class="source-filter-toolbar">
                     <span class="source-filter-heading">Filter by source</span>
@@ -1545,47 +1523,19 @@
                     details.appendChild(grid);
                 }
 
-                function renderDebugStats() {
-                    const panel = $("debugStats");
-                    const grid = $("debugStatsGrid");
-                    if (!panel || !grid) return;
-                    if (!debugMode || !current?.stats) {
-                        panel.hidden = true;
-                        grid.replaceChildren();
+                function renderMatchedBy() {
+                    const line = $("debugStats");
+                    if (!line) return;
+                    if (!debugMode || !current?.matchedBy) {
+                        line.hidden = true;
+                        line.textContent = "";
                         return;
                     }
-                    const stats = current.stats;
-                    const sources = stats.sources || {};
-                    const matched = stats.matched_by || {};
-                    grid.replaceChildren();
-                    appendDebugField(grid, "query terms", (stats.query_terms || []).join(", ") || "none");
-                    appendDebugField(grid, "sources", `${sources.completed ?? 0}/${sources.total ?? 0} complete`);
-                    appendDebugField(
-                        grid,
-                        "ranked pool",
-                        `${stats.ranked_pool_size ?? 0} / ${stats.candidate_limit ?? "—"} candidates`,
-                    );
-                    appendDebugField(grid, "displayed results", String(stats.result_count ?? 0));
-                    appendDebugField(
-                        grid,
-                        "matched by",
-                        `semantic ${matched.semantic ?? 0}, title ${matched.title ?? 0}, ` +
-                            `full text ${matched.fulltext ?? 0}`,
-                    );
-                    const sourceCounts = stats.source_counts || {};
-                    appendDebugField(
-                        grid,
-                        "pool by source",
-                        Object.entries(sourceCounts)
-                            .map(([source, count]) => `${source} ${count}`)
-                            .join(", ") || "none",
-                    );
-                    appendDebugField(
-                        grid,
-                        "cache",
-                        `${stats.cache || "—"}${stats.elapsed_ms != null ? ` · ${stats.elapsed_ms} ms` : ""}`,
-                    );
-                    panel.hidden = false;
+                    const matched = current.matchedBy;
+                    line.textContent =
+                        `Matched by: semantic ${matched.semantic ?? 0}, title ${matched.title ?? 0}, ` +
+                        `full text ${matched.fulltext ?? 0}`;
+                    line.hidden = false;
                 }
 
                 function closeArticleModal({ navigateHistory = true } = {}) {
@@ -1904,7 +1854,7 @@
                     renderFilterLine(current.total);
                     renderPager(current.total, pageCount);
                     renderResults(current.pageItems);
-                    renderDebugStats();
+                    renderMatchedBy();
                     const articleUrl = readModalUrl(activeModalUrl);
                     if (
                         articleUrl &&
@@ -2071,7 +2021,7 @@
                         current.total = event.total || 0;
                         current.hasMore = Boolean(event.has_more);
                         if (event.counts) current.counts = event.counts;
-                        if (event.stats) current.stats = event.stats;
+                        if (event.matched_by) current.matchedBy = event.matched_by;
                     };
                     const consumeLine = (line) => {
                         if (!line.trim() || sequence !== searchSequence) return;
@@ -2147,7 +2097,7 @@
                         outcomes: new Map(),
                         counts: {},
                         pageItems: [],
-                        stats: null,
+                        matchedBy: null,
                         total: 0,
                         hasMore: false,
                         completed: 0,
@@ -2232,12 +2182,12 @@
                         current.total = Number(response.headers.get("X-Total-Count") || items.length);
                         current.hasMore = response.headers.get("X-Has-More") === "true";
                         if (debugMode) {
-                            const debugStats = response.headers.get("X-Debug-Stats");
-                            if (debugStats) {
+                            const matchedBy = response.headers.get("X-Matched-By");
+                            if (matchedBy) {
                                 try {
-                                    current.stats = JSON.parse(debugStats);
+                                    current.matchedBy = JSON.parse(matchedBy);
                                 } catch (_) {
-                                    current.stats = null;
+                                    current.matchedBy = null;
                                 }
                             }
                         }
@@ -2416,7 +2366,7 @@
                     resultList = null;
                     document.body.classList.remove("search-active");
                     $("status").textContent = "";
-                    renderDebugStats();
+                    renderMatchedBy();
                     $("sourceFilters").hidden = true;
                     $("sourceFilterOptions").replaceChildren();
                     $("sourceFilterStatus").textContent = "";

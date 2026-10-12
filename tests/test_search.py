@@ -1041,7 +1041,10 @@ class PaginationTests(unittest.TestCase):
             self.assertNotIn("ranking", plain)
             self.assertIn("explain", detailed)
             self.assertIn("ranking", detailed)
-            self.assertIn("stats", search.search_page("tire change", limit=10, debug=True))
+            self.assertEqual(
+                search.search_page("tire change", limit=10, debug=True)["matched_by"],
+                {"semantic": 0, "title": 1, "fulltext": 0},
+            )
             search._executor.shutdown(wait=True)
 
 

@@ -11,7 +11,6 @@ import re
 import secrets
 import sqlite3
 import threading
-import time
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlencode, unquote, urlparse, urlsplit, urlunsplit
@@ -1304,42 +1303,14 @@ class Search:
         }
 
     @staticmethod
-    def _debug_stats(
-        query: str,
-        pool: list[dict[str, Any]],
-        pool_target: int,
-        total_sources: int,
-        completed_sources: int,
-        result_count: int,
-        *,
-        cache_hit: bool,
-        elapsed_ms: float | None,
-    ) -> dict[str, Any]:
+    def _matched_by(pool: list[dict[str, Any]]) -> dict[str, int]:
         method_counts = {"semantic": 0, "title": 0, "fulltext": 0}
-        source_counts: dict[str, int] = {}
         for doc in pool:
-            source_key = str(doc.get("source_key", ""))
-            source_counts[source_key] = source_counts.get(source_key, 0) + 1
             matches = doc.get("ranking", {}).get("rrf", {})
             for method in method_counts:
                 if matches.get(method, {}).get("rank") is not None:
                     method_counts[method] += 1
-        stats: dict[str, Any] = {
-            "query_terms": _query_terms(query),
-            "candidate_limit": pool_target,
-            "ranked_pool_size": len(pool),
-            "result_count": result_count,
-            "sources": {
-                "completed": completed_sources,
-                "total": total_sources,
-            },
-            "matched_by": method_counts,
-            "source_counts": source_counts,
-            "cache": "hit" if cache_hit else "miss",
-        }
-        if elapsed_ms is not None:
-            stats["elapsed_ms"] = round(max(0.0, elapsed_ms), 2)
-        return stats
+        return method_counts
 
     def _page_state(
         self,
@@ -1421,7 +1392,7 @@ class Search:
             "has_more": final.get("has_more", False),
             "offset": final.get("offset", max(0, int(offset))),
             "counts": final.get("counts", {}),
-            "stats": final.get("stats"),
+            "matched_by": final.get("matched_by"),
         }
 
     def search(
@@ -1452,20 +1423,7 @@ class Search:
         state = self._page_state(pool, source, offset, page_size, debug)
         self._hydrate_results(state["results"])
         total_sources = len(sources)
-        stats = (
-            self._debug_stats(
-                query,
-                pool,
-                int(cached.get("pool_target", max(self.candidate_count, len(pool)))),
-                total_sources,
-                total_sources,
-                state["total"],
-                cache_hit=True,
-                elapsed_ms=0.0,
-            )
-            if debug
-            else None
-        )
+        matched_by = self._matched_by(pool) if debug else None
         yield {
             "type": "started",
             "query": query,
@@ -1491,8 +1449,8 @@ class Search:
             "limit": page_size,
             "counts": state["counts"],
         }
-        if stats is not None:
-            snapshot["stats"] = stats
+        if matched_by is not None:
+            snapshot["matched_by"] = matched_by
         yield {"type": "snapshot", **snapshot}
         yield {"type": "done", **snapshot}
 
@@ -1571,7 +1529,6 @@ class Search:
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
         cache_value: Any = None
-        started_at = time.monotonic()
         try:
             if not acquired:
                 yield {
@@ -1606,16 +1563,7 @@ class Search:
                     "counts": {},
                 }
                 if debug:
-                    done["stats"] = self._debug_stats(
-                        query,
-                        [],
-                        self._pool_target(),
-                        0,
-                        0,
-                        0,
-                        cache_hit=False,
-                        elapsed_ms=(time.monotonic() - started_at) * 1000,
-                    )
+                    done["matched_by"] = {}
                 yield done
                 return
 
@@ -1692,16 +1640,7 @@ class Search:
                         "counts": state["counts"],
                     }
                     if debug:
-                        snapshot["stats"] = self._debug_stats(
-                            query,
-                            pool,
-                            pool_target,
-                            total_sources,
-                            len(completed),
-                            state["total"],
-                            cache_hit=False,
-                            elapsed_ms=(time.monotonic() - started_at) * 1000,
-                        )
+                        snapshot["matched_by"] = self._matched_by(pool)
                     yield snapshot
 
             if len(completed) != total_sources:
@@ -1715,20 +1654,7 @@ class Search:
             for doc in pool:
                 if doc["id"] in hydrated:
                     doc["lead"] = hydrated[doc["id"]]
-            stats = (
-                self._debug_stats(
-                    query,
-                    pool,
-                    pool_target,
-                    total_sources,
-                    len(completed),
-                    state["total"],
-                    cache_hit=False,
-                    elapsed_ms=(time.monotonic() - started_at) * 1000,
-                )
-                if debug
-                else None
-            )
+            matched_by = self._matched_by(pool) if debug else None
             # The cache holds only the deduplicated ranked pool plus compact
             # source outcomes, never a copy of every source's item list.
             cache_value = {
@@ -1755,8 +1681,8 @@ class Search:
                 "limit": page_size,
                 "counts": state["counts"],
             }
-            if stats is not None:
-                done["stats"] = stats
+            if matched_by is not None:
+                done["matched_by"] = matched_by
             yield done
         finally:
             for future in futures:

@@ -50,7 +50,7 @@ class FakeSearch:
             "has_more": False,
             "offset": offset,
             "counts": {"manual": 1},
-            "stats": {"cache": "miss"},
+            "matched_by": {"semantic": 1, "title": 2, "fulltext": 3},
         }
 
     def search(self, query, zim, limit=None, offset=0, source=None, debug=False):
@@ -72,7 +72,7 @@ class FakeSearch:
             "offset": offset,
             "limit": limit or 10,
             "counts": {"manual": 1},
-            "stats": {"cache": "miss"},
+            "matched_by": {"semantic": 1, "title": 2, "fulltext": 3},
         }
 
 
@@ -315,12 +315,18 @@ class ServerTests(unittest.TestCase):
         response = self.debug_client.get("/search?q=page")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["explain"], "debug")
-        self.assertEqual(response.headers["x-debug-stats"], '{"cache":"miss"}')
+        self.assertEqual(
+            response.headers["x-matched-by"],
+            '{"semantic":1,"title":2,"fulltext":3}',
+        )
 
         stream = self.debug_client.get("/search/stream?q=page")
         events = [json.loads(line) for line in stream.text.splitlines()]
         self.assertEqual(events[-1]["results"][0]["score"], 1.0)
-        self.assertEqual(events[-1]["stats"]["cache"], "miss")
+        self.assertEqual(
+            events[-1]["matched_by"],
+            {"semantic": 1, "title": 2, "fulltext": 3},
+        )
         self.assertTrue(self.debug_search.stream_calls[-1][-1])
 
     def test_config_reports_debug_mode(self):
