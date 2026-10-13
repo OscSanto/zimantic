@@ -300,7 +300,13 @@ def _assess_ranked_document(
     rrf_details: dict[str, dict[str, dict[str, Any]]],
     fulltext_weight: float,
 ) -> _RankedAssessment:
-    title_tokens = _content_terms(doc["title"])
+    # A document is re-assessed on every intermediate ranking pass, but its
+    # title never changes; tokenizing once per document instead of once per
+    # pass removes most of the ranking cost on large pools.
+    title_tokens = doc.get("_title_tokens")
+    if title_tokens is None:
+        title_tokens = _content_terms(doc["title"])
+        doc["_title_tokens"] = title_tokens
     title_token_set = set(title_tokens)
     title_matches = sum(term in title_token_set for term in query_words)
     title_coverage = title_matches / len(query_words) if query_words else 0.0
@@ -398,6 +404,7 @@ def _render_ranked_document(assessment: _RankedAssessment) -> dict[str, Any]:
     )
     output = dict(a.doc)
     output.pop("_content_phrase", None)
+    output.pop("_title_tokens", None)
     output.update({
         "score": a.total,
         "explain": explanation,
@@ -1392,6 +1399,22 @@ class Search:
             getattr(self, "max_results", DEFAULT_MAX_RESULTS),
         )
 
+    def _source_limit(self, total_sources: int) -> int:
+        """Candidates to request from each source before fusion.
+
+        The ranked pool is global, so a source only needs enough candidates to
+        fill its share of that pool. Asking every one of hundreds of sources for
+        the full pool size multiplies retrieval, fusion and ranking work for
+        candidates that cannot survive the global cut. At least
+        ``candidate_count`` is kept so a lone or lightly filtered source still
+        returns a full page, and a single source returns the whole pool.
+        """
+        pool_target = self._pool_target()
+        if total_sources <= 1:
+            return pool_target
+        share = math.ceil(pool_target / total_sources)
+        return min(pool_target, max(self.candidate_count, share))
+
     @staticmethod
     def _source_counts(pool: list[dict[str, Any]]) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -1752,6 +1775,7 @@ class Search:
                 ),
             )
             rank_interval = max(1, math.ceil(total_sources / max_stream_ranks))
+            source_limit = self._source_limit(total_sources)
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
             for src in sources:
@@ -1763,7 +1787,7 @@ class Search:
                         title_query,
                         fulltext_query,
                         query_vector,
-                        pool_target,
+                        source_limit,
                     )
                 )
 

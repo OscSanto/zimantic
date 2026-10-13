@@ -87,12 +87,14 @@ search_workers = 8
 # Maximum simultaneous user searches. Several people can search at once up to
 # this many; each search may still use all source workers. Lower it on a Pi.
 max_concurrent_searches = 4
-# Number of candidates requested from each retrieval backend before fusion.
-# Only takes effect when raised above max_results; the pool target is the larger of the two.
+# Minimum candidates requested from each source before fusion. The actual
+# per-source count scales with the number of sources searched, so a single
+# source still returns the whole pool while hundreds of sources each fetch only
+# their share. Raise it to trade speed for recall.
 candidate_count = 16
 # Maximum intermediate ranking passes during a streamed search. The final
 # ranking always includes every source; lower this on slow CPUs.
-max_stream_ranks = 16
+max_stream_ranks = 8
 # Timeout for catalog and Kiwix fallback requests, in seconds.
 source_timeout = 12
 # Exact-query LRU cache. Set cache_size to 0 to disable.
