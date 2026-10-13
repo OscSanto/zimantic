@@ -1227,10 +1227,9 @@ class Search:
                 try:
                     # A COUNT(*) scan plus an OFFSET walk is O(n) on the FTS5
                     # table; for large ZIMs that is the whole cost of /random.
-                    # Sample rowids directly instead: rowids are dense entry
-                    # ids, so a bounded number of ranged lookups lands on a
-                    # random article in O(1) each. Redirect rows (target not
-                    # NULL) are skipped by the same predicate.
+                    # Sample entry rowids directly instead and reject gaps,
+                    # unindexed entries, and redirects. Each eligible row is
+                    # then equally likely without scanning the table.
                     if not db.execute(
                         "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
                     ).fetchone():
@@ -1241,8 +1240,7 @@ class Search:
                         point = secrets.randbelow(upper)
                         row = db.execute(
                             "SELECT path FROM docs "
-                            "WHERE rowid >= ? AND target IS NULL "
-                            "ORDER BY rowid LIMIT 1",
+                            "WHERE rowid = ? AND target IS NULL",
                             (point,),
                         ).fetchone()
                         if row and row[0]:
