@@ -60,6 +60,7 @@ from .content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PARSE_TIMEOUT,
     DEFAULT_PREVIEW_CHARS,
+    _READABLE_MIMETYPES,
     extract_excerpt,
     read_entry,
     truncate_at_word_boundary,
@@ -83,6 +84,14 @@ MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
 DEFAULT_LONG_QUERY = 10
 MAX_PHRASE_CANDIDATES = 16
+# Random article selection samples entry ids and rejects gaps, redirects and
+# non-articles. Asset-heavy archives can have far more media entries than
+# articles (e.g. only ~7.5% of a Wikipedia mini's entry ids are readable
+# articles), so the budget must be high enough that rejection sampling rarely
+# comes up empty: 128 probes put the failure chance near zero even at 7.5%,
+# while each probe is cheap (an id lookup, at most a mimetype read, ~0.3ms
+# worst case) and stays O(1).
+RANDOM_ARTICLE_ATTEMPTS = 128
 # How long an owner waits for a search slot before reporting busy. Absorbing a
 # short burst of retries this way lets an in-flight search finish and the
 # query be answered (or served from cache) instead of failing with 503.
@@ -693,10 +702,21 @@ class Search:
             return None
 
     def _open_zim_index(self, zim_path: Path) -> _LocalIndex | None:
-        """Open an unindexed ZIM using only its native full-text index."""
+        """Open an unindexed ZIM using only its native full-text index.
+
+        A ZIM with no native full-text index has nothing to offer a search
+        source (no SQLite title index either), so it is skipped rather than
+        advertised as an available-but-empty source.
+        """
         try:
             archive = Archive(str(zim_path))
-            searcher = Searcher(archive) if archive.has_fulltext_index else None
+            if not archive.has_fulltext_index:
+                logger.debug(
+                    "%s: no SQLite or native full-text index; skipping",
+                    zim_path.stem,
+                )
+                return None
+            searcher = Searcher(archive)
             source_size = zim_path.stat().st_size
         except Exception as error:  # a corrupt archive must not abort discovery
             logger.warning(
@@ -1342,6 +1362,26 @@ class Search:
             raise ArticleNotFoundError("source icon not found")
         return self.read_article(zim_name, source.icon_path)
 
+    @staticmethod
+    def _is_random_article_entry(entry: Any) -> bool:
+        """True when an archive entry is a readable, non-redirect article.
+
+        The SQLite path only samples rows in ``docs`` (entries ``read_entry``
+        accepted), so the filesystem fallback must reject redirects and
+        non-article assets (images, stylesheets, scripts) to avoid redirecting
+        /random to a binary file. Content-level checks (JS shells, block length)
+        that ``read_entry`` also applies are not replicated here because they
+        would require reading the article.
+        """
+        if entry.is_redirect or not entry.path:
+            return False
+        try:
+            item = entry.get_item()
+        except (KeyError, RuntimeError, ValueError):
+            return False
+        mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
+        return mimetype in _READABLE_MIMETYPES
+
     def random_article_path(self, zim_name: str) -> str:
         """Return a random indexed article path without changing search state."""
         with self._state_lock:
@@ -1366,13 +1406,13 @@ class Search:
                             1, int(getattr(index.archive, "entry_count", 0) or 0)
                         )
                         row = None
-                        for _ in range(12):
+                        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
                             point = secrets.randbelow(upper)
                             try:
                                 entry = index.archive._get_entry_by_id(point)
                             except (KeyError, RuntimeError, ValueError, IndexError):
                                 continue
-                            if not entry.is_redirect and entry.path:
+                            if self._is_random_article_entry(entry):
                                 row = (entry.path,)
                                 break
                         if not row:
@@ -1393,7 +1433,7 @@ class Search:
                             1, int(getattr(index.archive, "entry_count", 0) or 0)
                         )
                         row = None
-                        for _ in range(12):
+                        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
                             point = secrets.randbelow(upper)
                             row = db.execute(
                                 "SELECT path FROM docs "

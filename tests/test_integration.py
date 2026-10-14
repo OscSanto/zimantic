@@ -1,3 +1,4 @@
+import itertools
 import json
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic import build as build_module
-from zimantic.search import Search
+from zimantic.search import ArticleNotFoundError, Search
 from zimantic.web.app import create_app
 
 
@@ -34,11 +35,12 @@ AIR_DISAMBIGUATION_HTML = (
 
 
 class _Page(Item):
-    def __init__(self, path: str, title: str, html: str):
+    def __init__(self, path: str, title: str, html, mimetype: str = "text/html"):
         super().__init__()
         self._path = path
         self._title = title
-        self._html = html.encode("utf-8")
+        self._html = html.encode("utf-8") if isinstance(html, str) else html
+        self._mimetype = mimetype
 
     def get_path(self):
         return self._path
@@ -47,7 +49,7 @@ class _Page(Item):
         return self._title
 
     def get_mimetype(self):
-        return "text/html"
+        return self._mimetype
 
     def get_contentprovider(self):
         return StringProvider(self._html)
@@ -296,6 +298,75 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertFalse(report["index_file"])
             self.assertFalse(report["capabilities"]["title"])
             self.assertTrue(report["capabilities"]["fulltext"])
+
+    def test_unindexed_zim_random_only_returns_articles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            creator = Creator(str(zims / "manual.zim"))
+            creator.config_indexing(True, "eng")
+            creator.set_mainpath("Alpha")
+            with creator:
+                creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+                creator.add_item(
+                    _Page(
+                        "I/logo.png",
+                        "Logo",
+                        b"\x89PNG\r\n\x1a\n",
+                        mimetype="image/png",
+                    )
+                )
+                creator.add_item(
+                    _Page("style.css", "Stylesheet", b"body {}", mimetype="text/css")
+                )
+
+            search = self._open_search(root)
+            archive = search.indexes["manual"].archive
+            article_id = None
+            asset_ids: list[int] = []
+            for i in range(archive.entry_count):
+                entry = archive._get_entry_by_id(i)
+                if entry.path == "Alpha":
+                    article_id = i
+                elif not entry.is_redirect:
+                    asset_ids.append(i)
+            self.assertIsNotNone(article_id)
+            self.assertTrue(asset_ids)
+
+            # Media entries must be rejected the same way the SQLite path
+            # rejects rows outside the docs table.
+            with patch(
+                "zimantic.search.secrets.randbelow",
+                side_effect=itertools.cycle(asset_ids),
+            ):
+                with self.assertRaises(ArticleNotFoundError):
+                    search.random_article_path("manual")
+            with patch(
+                "zimantic.search.secrets.randbelow",
+                side_effect=itertools.cycle([*asset_ids, article_id]),
+            ):
+                self.assertEqual(search.random_article_path("manual"), "Alpha")
+
+    def test_zim_without_native_fulltext_is_not_a_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            creator = Creator(str(zims / "raw.zim"))
+            creator.set_mainpath("Alpha")
+            with creator:
+                creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+
+            search = self._open_search(root)
+
+            # No SQLite index and no native full-text index means there is
+            # nothing to search, so it must not be advertised as a source.
+            self.assertEqual(search.local_names(), [])
 
     def test_pdf_entries_are_indexed_end_to_end(self):
         import pymupdf
