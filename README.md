@@ -129,14 +129,19 @@ excerpt settings and removes excerpts stored in existing indexes.
 ### 2. Starting the server
 
 At startup Zimantic opens every **finished** index and keeps it open; nothing is reloaded per search.
-FAISS and vector files load in the background during startup, so title-word and
-full-text searches are available while semantic search initializes.
-The page automatically lists local indexes. With `kiwix_server`, it also discovers catalog sources and
+It also discovers ZIM files in `zim_dir` that do not yet have a SQLite index and
+uses each archive's native Xapian full-text index as a graceful fallback. A
+SQLite stem takes precedence, so a partially built index is never duplicated by
+its filesystem fallback. FAISS and vector files load in the background during
+startup, so title-word and full-text searches are available while semantic search initializes.
+The page automatically lists local ZIM sources. With `kiwix_server`, it also discovers catalog sources and
 can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries and
 remote XML responses are capped at 64 MiB by default; both limits are configurable.
 
-An index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
-search**. `serve --fast` also skips the model and all vectors.
+A finished index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
+search**. A ZIM without a SQLite index is also searchable through its native full-text index,
+but has no SQLite title-word or semantic search until it is built. `serve --fast` also skips the
+model and all vectors.
 
 FastAPI serves a lightweight HTML page that is accessible from any browser at
 `http://<host>:8090` (the `port` in `config.toml`).
@@ -328,11 +333,11 @@ zimantic build /media/usb             # every .zim in a folder
 zimantic build zims/a.zim /media/usb  # mix files and folders
 zimantic build --fast                 # quick title-word + full-text index (no vectors)
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
-zimantic serve                        # web page on http://<host>:8090 after a build
+zimantic serve                        # web page; unindexed ZIMs use native full-text search
 zimantic serve --fast                 # start without a model or vectors
 zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
 zimantic serve --dev                  # alias for --debug
-zimantic reload                       # ask a running server to rescan index_dir
+zimantic reload                       # ask a running server to rescan indexes and ZIMs
 ```
 
 `build` accepts files or folders; a folder means all its `*.zim` files, and no arguments uses `zim_dir`.

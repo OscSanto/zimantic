@@ -274,6 +274,29 @@ class LocalIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(stream.text.splitlines()[-1])["results"][0]["title"], "Beta")
 
+    def test_unindexed_zim_uses_native_fulltext_before_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            _create_zim(
+                zims / "manual.zim",
+                [("Beta", "Beta", BETA_HTML)],
+            )
+
+            search = self._open_search(root)
+
+            self.assertEqual(search.local_names(), ["manual"])
+            result = search.search("rotors", limit=1)[0]
+            self.assertEqual(result["title"], "Beta")
+            self.assertEqual(result["url"], "/content/manual/Beta")
+            report = search.health()["indexes"][0]
+            self.assertFalse(report["index_file"])
+            self.assertFalse(report["capabilities"]["title"])
+            self.assertTrue(report["capabilities"]["fulltext"])
+
     def test_pdf_entries_are_indexed_end_to_end(self):
         import pymupdf
 

@@ -1162,6 +1162,32 @@ class GracefulDegradationTests(unittest.TestCase):
             search._close_index(search.indexes["manual"])
             search._executor.shutdown(wait=True)
 
+    def test_incomplete_index_keeps_the_zim_fulltext_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            # A filesystem fallback is discoverable even while a build is in
+            # progress (the schema exists but no 'done' marker is written yet).
+            (tmp / "manual.zim").write_bytes(b"zim")
+            db = sqlite3.connect(tmp / "manual.sqlite")
+            db.executescript(
+                "CREATE VIRTUAL TABLE docs USING fts5("
+                "title, path UNINDEXED, target UNINDEXED, "
+                "tokenize='unicode61 remove_diacritics 2');"
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value);"
+            )
+            db.close()
+
+            search = _bare_search(self._cfg(tmp))
+            self.assertEqual(search._discover_local_indexes()["manual"][0], "zim")
+
+            # Once the build finishes, the SQLite index becomes authoritative.
+            db = sqlite3.connect(tmp / "manual.sqlite")
+            db.execute("INSERT INTO meta VALUES ('done', '1')")
+            db.commit()
+            db.close()
+            self.assertEqual(search._discover_local_indexes()["manual"][0], "sqlite")
+            search._executor.shutdown(wait=True)
+
 
 class CatalogRefreshTests(unittest.TestCase):
     def test_failed_catalog_refresh_preserves_last_successful_entries(self):

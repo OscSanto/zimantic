@@ -5,6 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 import logging
 import math
+import os
 import posixpath
 from pathlib import Path
 import re
@@ -533,6 +534,73 @@ class Search:
                 return None
         return matching[0] if matching else None
 
+    def _scan_zim_paths(self) -> dict[str, Path]:
+        """Find local archives without requiring a SQLite index.
+
+        ``os.scandir`` keeps this startup probe cheap, while the recursive walk
+        preserves the same nested-directory behavior as ``build``.
+        """
+        zim_dir = self.cfg.get("zim_dir")
+        if not zim_dir:
+            return {}
+
+        found: dict[str, Path] = {}
+
+        def scan(directory: str) -> None:
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in sorted(entries, key=lambda item: item.name):
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                scan(entry.path)
+                            elif entry.is_file() and entry.name.endswith(".zim"):
+                                found.setdefault(Path(entry.name).stem, Path(entry.path))
+                        except OSError:
+                            continue
+            except OSError:
+                return
+
+        scan(str(zim_dir))
+        return found
+
+    def _index_is_done(self, db_path: Path) -> bool:
+        """True when a SQLite index is marked finished (``done`` is '1' or 'fast').
+
+        An index still being written, or one that cannot be opened, is treated
+        as not done so its archive's native full-text index keeps the source
+        searchable until the database is ready.
+        """
+        try:
+            db = sqlite3.connect(self._index_uri(db_path), uri=True, check_same_thread=False)
+        except sqlite3.Error:
+            return False
+        try:
+            done = db.execute("SELECT value FROM meta WHERE key = 'done'").fetchone()
+        except sqlite3.Error:
+            return False
+        finally:
+            db.close()
+        return done is not None and str(done[0]) in {"1", "fast"}
+
+    def _discover_local_indexes(self) -> dict[str, tuple[str, Path]]:
+        """Return finished SQLite indexes plus filesystem-only ZIM fallbacks.
+
+        A SQLite stem is authoritative only once its build is finished; an
+        in-progress build is ignored so the archive's native full-text index
+        keeps the source searchable until the database is ready.
+        """
+        db_paths = sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))
+        done_names = {path.stem for path in db_paths if self._index_is_done(path)}
+        found = {path.stem: ("sqlite", path) for path in db_paths if path.stem in done_names}
+        found.update(
+            {
+                stem: ("zim", path)
+                for stem, path in self._scan_zim_paths().items()
+                if stem not in done_names
+            }
+        )
+        return found
+
     def _open_index(self, db_path: Path) -> _LocalIndex | None:
         """Open one finished index. Missing or unreadable vectors degrade the
         index to title + full-text only instead of failing the whole server."""
@@ -624,11 +692,56 @@ class Search:
             db.close()
             return None
 
+    def _open_zim_index(self, zim_path: Path) -> _LocalIndex | None:
+        """Open an unindexed ZIM using only its native full-text index."""
+        try:
+            archive = Archive(str(zim_path))
+            searcher = Searcher(archive) if archive.has_fulltext_index else None
+            source_size = zim_path.stat().st_size
+        except Exception as error:  # a corrupt archive must not abort discovery
+            logger.warning(
+                "%s: ZIM fallback unavailable (%s)",
+                zim_path.stem,
+                error,
+            )
+            return None
+        return _LocalIndex(
+            None,
+            None,
+            archive,
+            searcher,
+            threading.Lock(),
+            done="filesystem",
+            source_size=source_size,
+            zim_path=str(zim_path),
+            zim_signature=_file_signature(zim_path),
+        )
+
     def _load_indexes(self) -> None:
-        for db_path in sorted(Path(self.cfg["index_dir"]).glob("*.sqlite")):
-            index = self._open_index(db_path)
-            if index:
-                self.indexes[db_path.stem] = index
+        found = self._discover_local_indexes()
+        if not found:
+            return
+        workers = min(8, len(found))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            opened = executor.map(
+                lambda item: (
+                    item[0],
+                    item[1],
+                    self._open_index(item[2])
+                    if item[1] == "sqlite"
+                    else self._open_zim_index(item[2]),
+                ),
+                sorted(
+                    (
+                        (stem, kind, path)
+                        for stem, (kind, path) in found.items()
+                    ),
+                    key=lambda item: item[0],
+                ),
+            )
+            for stem, _kind, index in opened:
+                if index:
+                    self.indexes[stem] = index
 
     def start_embedder(self, factory) -> None:
         """Build the embedding model on a background thread.
@@ -692,14 +805,14 @@ class Search:
         threading.Thread(target=_load, name="zimantic-faiss", daemon=True).start()
 
     def reload(self) -> dict[str, Any]:
-        """Rescan index_dir without restarting. Picks up new finished indexes,
-        forgets removed ones, upgrades fast indexes that gained vectors, and
-        refreshes the Kiwix catalog. Cheap enough for systemd.path to trigger."""
+        """Rescan local indexes and ZIM files without restarting.
+
+        Picks up new finished indexes and unindexed archives, forgets removed
+        sources, upgrades fast indexes that gained vectors, and refreshes the
+        Kiwix catalog. Cheap enough for systemd.path to trigger.
+        """
         with self._reload_lock:
-            found = {
-                path.stem: path
-                for path in sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))
-            }
+            found = self._discover_local_indexes()
             with self._state_lock:
                 current_names = set(self.indexes)
             removed = sorted(current_names - set(found))
@@ -714,39 +827,62 @@ class Search:
                     self._close_index(current)
                     any_changed = True
 
-            for name, db_path in found.items():
+            for name, (kind, path) in found.items():
                 with self._state_lock:
                     current = self.indexes.get(name)
-                db_signature = _file_signature(db_path)
+                db_signature = _file_signature(path) if kind == "sqlite" else None
                 defer_faiss = getattr(self, "_defer_faiss", False)
                 faiss_signature = (
-                    _file_signature(db_path.with_suffix(".faiss"))
-                    if self.semantic and not defer_faiss
+                    _file_signature(path.with_suffix(".faiss"))
+                    if kind == "sqlite" and self.semantic and not defer_faiss
                     else None
+                )
+                zim_signature = (
+                    _file_signature(path)
+                    if kind == "zim"
+                    else None
+                )
+                expected_db_path = (
+                    self._index_uri(path) if kind == "sqlite" else None
+                )
+                matching_zim = (
+                    self._find_zim_path(name, current.source_size)
+                    if kind == "sqlite" and current is not None
+                    else None
+                )
+                expected_zim_path = (
+                    str(path)
+                    if kind == "zim"
+                    else str(matching_zim) if matching_zim is not None else None
                 )
                 changed = (
                     current is not None
                     and (
-                        current.db_signature != db_signature
+                        current.db_path != expected_db_path
+                        or current.db_signature != db_signature
                         or (
                             self.semantic
+                            and kind == "sqlite"
                             and not defer_faiss
                             and current.faiss_signature != faiss_signature
                         )
                         or (
-                            current.zim_path
-                            != (
-                                str(self._find_zim_path(name, current.source_size))
-                                if current.source_size is not None
-                                else current.zim_path
-                            )
+                            current.zim_path != expected_zim_path
+                        )
+                        or (
+                            kind == "zim"
+                            and current.zim_signature != zim_signature
                         )
                     )
                 )
                 if current is not None and not changed:
                     continue
 
-                fresh = self._open_index(db_path)
+                fresh = (
+                    self._open_index(path)
+                    if kind == "sqlite"
+                    else self._open_zim_index(path)
+                )
                 if fresh is None:
                     continue
 
@@ -834,7 +970,7 @@ class Search:
         if connections:
             Search._close_connections(connections)
 
-    def _db_for(self, index: _LocalIndex) -> sqlite3.Connection:
+    def _db_for(self, index: _LocalIndex) -> sqlite3.Connection | None:
         """A read-only SQLite connection per worker thread, so concurrent
         searches on the same index do not share one connection."""
         if index.db_path is None:
@@ -1225,29 +1361,50 @@ class Search:
             db = self._db_for(index)
             with index.read_lock:
                 try:
-                    # A COUNT(*) scan plus an OFFSET walk is O(n) on the FTS5
-                    # table; for large ZIMs that is the whole cost of /random.
-                    # Sample entry rowids directly instead and reject gaps,
-                    # unindexed entries, and redirects. Each eligible row is
-                    # then equally likely without scanning the table.
-                    if not db.execute(
-                        "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
-                    ).fetchone():
-                        raise ArticleNotFoundError("ZIM has no indexed articles")
-                    upper = max(1, int(getattr(index.archive, "entry_count", 0) or 0))
-                    row = None
-                    for _ in range(12):
-                        point = secrets.randbelow(upper)
-                        row = db.execute(
-                            "SELECT path FROM docs "
-                            "WHERE rowid = ? AND target IS NULL",
-                            (point,),
-                        ).fetchone()
-                        if row and row[0]:
-                            break
+                    if db is None:
+                        upper = max(
+                            1, int(getattr(index.archive, "entry_count", 0) or 0)
+                        )
+                        row = None
+                        for _ in range(12):
+                            point = secrets.randbelow(upper)
+                            try:
+                                entry = index.archive._get_entry_by_id(point)
+                            except (KeyError, RuntimeError, ValueError, IndexError):
+                                continue
+                            if not entry.is_redirect and entry.path:
+                                row = (entry.path,)
+                                break
+                        if not row:
+                            raise ArticleNotFoundError(
+                                "ZIM has no available articles"
+                            )
+                    else:
+                        # A COUNT(*) scan plus an OFFSET walk is O(n) on the FTS5
+                        # table; for large ZIMs that is the whole cost of /random.
+                        # Sample entry rowids directly instead and reject gaps,
+                        # unindexed entries, and redirects. Each eligible row is
+                        # then equally likely without scanning the table.
+                        if not db.execute(
+                            "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
+                        ).fetchone():
+                            raise ArticleNotFoundError("ZIM has no indexed articles")
+                        upper = max(
+                            1, int(getattr(index.archive, "entry_count", 0) or 0)
+                        )
+                        row = None
+                        for _ in range(12):
+                            point = secrets.randbelow(upper)
+                            row = db.execute(
+                                "SELECT path FROM docs "
+                                "WHERE rowid = ? AND target IS NULL",
+                                (point,),
+                            ).fetchone()
+                            if row and row[0]:
+                                break
                 except ArticleNotFoundError:
                     raise
-                except (sqlite3.Error, TypeError, ValueError) as error:
+                except (sqlite3.Error, KeyError, RuntimeError, TypeError, ValueError, IndexError) as error:
                     raise ArticleUnavailableError(
                         "random article selection is unavailable"
                     ) from error
@@ -1299,10 +1456,10 @@ class Search:
             report: dict[str, Any] = {
                 "name": name,
                 "status": "ok" if not reasons else "degraded",
-                "index_file": db_current,
+                "index_file": index.db_path is not None and db_current,
                 "archive": archive_current,
                 "capabilities": {
-                    "title": True,
+                    "title": index.db_path is not None,
                     "fulltext": index.searcher is not None,
                     "semantic": vectors_loaded,
                     "article": archive_current,
@@ -1965,6 +2122,7 @@ class Search:
         keyword: list[tuple[float, dict[str, Any]]] = []
         fulltext: list[tuple[int, dict[str, Any]]] = []
         rowids: set[int] = set()
+        archive_entries: dict[int, Any] = {}
         errors: list[str] = []
 
         # FAISS search is read-only and thread-safe; skip it when this index has
@@ -1991,7 +2149,7 @@ class Search:
         else:
             semantic_ids = []
 
-        if title_query:
+        if title_query and db is not None:
             title_search = (
                 "SELECT rowid, bm25(docs) FROM docs "
                 "WHERE docs MATCH ? ORDER BY rank LIMIT ?"
@@ -2018,15 +2176,21 @@ class Search:
                     ).getResults(0, count)
                     for rank, path in enumerate(paths):
                         try:
-                            rowid = index.archive.get_entry_by_path(path)._index
+                            entry = index.archive.get_entry_by_path(path)
+                            rowid = entry._index
                             rowids.add(rowid)
+                            archive_entries[rowid] = entry
                             fulltext_rows.append((rank, rowid))
                         except (KeyError, RuntimeError, ValueError):
                             continue
                 except (RuntimeError, ValueError) as error:
                     errors.append(f"full-text search unavailable: {error}")
 
-        docs = self._fetch_docs(source, db, rowids)
+        docs = (
+            self._fetch_docs(source, db, rowids)
+            if db is not None
+            else self._fetch_archive_docs(source, index.archive, archive_entries)
+        )
         for score, rowid in semantic_ids:
             doc = docs.get(rowid)
             if doc:
@@ -2048,6 +2212,39 @@ class Search:
             error="; ".join(errors) or None,
             status="partial" if errors else "ok",
         )
+
+    def _fetch_archive_docs(
+        self,
+        source: SourceInfo,
+        archive: Archive | None,
+        entries: dict[int, Any],
+    ) -> dict[int, dict[str, Any]]:
+        """Build result documents directly from native ZIM search hits."""
+        if archive is None:
+            return {}
+        docs: dict[int, dict[str, Any]] = {}
+        for rowid, entry in entries.items():
+            try:
+                target = self._resolve_article_entry(archive, entry.path)
+            except (ArticleNotFoundError, ArticleUnavailableError):
+                continue
+            path = target.path
+            title = getattr(target, "title", None) or path
+            docs[rowid] = {
+                "id": f"{source.key}:{path}",
+                "source_key": source.key,
+                "source": source.name,
+                "source_icon": source.icon_url,
+                "title": title,
+                "lead": "",
+                "path": path,
+                "mimetype": None,
+                "url": (
+                    f"/content/{quote(source.local_name or source.book, safe='')}/"
+                    f"{quote(path, safe='/')}"
+                ),
+            }
+        return docs
 
     def _fetch_docs(
         self,
@@ -2447,4 +2644,3 @@ class Search:
             output["ranking"]["final_rank"] = final_rank
             ranked.append(output)
         return ranked
-

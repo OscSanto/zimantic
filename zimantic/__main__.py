@@ -155,7 +155,7 @@ def _make_parser() -> argparse.ArgumentParser:
     reload_cmd = commands.add_parser(
         "reload",
         help=(
-            "ask a running serve process to rescan index_dir (sends SIGHUP; "
+            "ask a running serve process to rescan indexes and ZIMs (sends SIGHUP; "
             "suitable for systemd.path or cron)"
         ),
     )
@@ -333,8 +333,8 @@ def _run_serve(args, cfg: dict) -> None:
     search = Search(cfg, semantic=not args.fast)
     if not search.local_names():
         logger.warning(
-            "zimantic: no sources are indexed yet; "
-            "run `zimantic build --fast` before serving searches"
+            "zimantic: no local ZIM sources are available; "
+            "add a .zim to zim_dir or run `zimantic build --fast`"
         )
     if not args.fast:
         # Load the model off the critical path: the server answers title and
