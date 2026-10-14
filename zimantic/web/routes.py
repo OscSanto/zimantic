@@ -65,10 +65,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             1 if debug else 0,
             lambda: {
                 "page_size": getattr(search_class, "page_size", 10),
-                "max_results": getattr(search_class, "max_results", 100),
-                "max_article_bytes": getattr(search_class, "cfg", {}).get(
-                    "max_article_bytes", 33_554_432
-                ),
                 "debug": debug,
             },
             memos,

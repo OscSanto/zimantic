@@ -265,7 +265,7 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     global_progress = None
     if len(zims) > 1 and sys.stderr.isatty():
         global_progress = tqdm(
-            total=sum(zim_sizes.values()),
+            total=sum(zim_sizes[zim] for zim in zims),
             desc="all ZIMs",
             unit="B",
             unit_scale=True,

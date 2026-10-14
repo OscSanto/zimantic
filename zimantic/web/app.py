@@ -793,7 +793,9 @@ def _content_shell(
             article["content"], zim, article_path or None
         )
         icon = parsed_icon or fallback_icon
-    title = html_escape(parsed_title or entry_title, quote=False)
+    # quote=True so an article title containing a quote cannot break out of the
+    # iframe's title="..." attribute; entities remain valid in <title> too.
+    title = html_escape(parsed_title or entry_title, quote=True)
     icon_link = (
         f'<link rel="icon" data-zimantic-article-icon href="{html_escape(icon, quote=True)}">\n'
         if icon

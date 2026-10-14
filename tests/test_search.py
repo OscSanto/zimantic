@@ -165,6 +165,16 @@ class SearchContractTests(unittest.TestCase):
             _phrase_in_word_stream(text.casefold(), _phrase_words("tokyo banana"))
         )
 
+    def test_content_phrase_matching_handles_repeated_words(self):
+        # A naive rolling window drops the match when the phrase repeats a word.
+        text = "<p>very very very good results</p>"
+        self.assertTrue(
+            _phrase_in_word_stream(text.casefold(), _phrase_words("very very good"))
+        )
+        self.assertFalse(
+            _phrase_in_word_stream(text.casefold(), _phrase_words("very good very"))
+        )
+
     def test_phrase_read_supplies_mimetype_and_preview_to_later_stages(self):
         class _Item:
             mimetype = "text/html"
@@ -996,7 +1006,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
             self.assertTrue(search.indexes["manual"].semantic)
 
-    def test_archive_lookup_allows_nested_moves_but_rejects_size_conflicts(self):
+    def test_archive_lookup_prefers_the_matching_size_and_tolerates_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             nested = root / "collection" / "nested"
@@ -1008,7 +1018,31 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(search._find_zim_path("manual", 10), moved)
             (root / "other").mkdir()
             (root / "other" / "manual.zim").write_bytes(b"x" * 11)
-            self.assertIsNone(search._find_zim_path("manual", 10))
+            # A same-stem file of a different size is a different identity; the
+            # archive that matches the recorded size is still found.
+            self.assertEqual(search._find_zim_path("manual", 10), moved)
+            # No candidate carries the recorded size: no archive to attach.
+            self.assertIsNone(search._find_zim_path("manual", 12))
+
+    def test_scan_zim_paths_drops_only_conflicting_stems(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a").mkdir()
+            (root / "a" / "solo.zim").write_bytes(b"x" * 10)
+            # Same-size duplicates keep the first path (build drops the rest).
+            (root / "a" / "twin.zim").write_bytes(b"y" * 4)
+            (root / "b").mkdir()
+            (root / "b" / "twin.zim").write_bytes(b"z" * 4)
+            # Conflicting sizes drop the whole stem.
+            (root / "a" / "clash.zim").write_bytes(b"x" * 5)
+            (root / "b" / "clash.zim").write_bytes(b"x" * 6)
+
+            search = _bare_search({"zim_dir": str(root)})
+            found = search._scan_zim_paths()
+
+            self.assertEqual(found["solo"], root / "a" / "solo.zim")
+            self.assertEqual(found["twin"], root / "a" / "twin.zim")
+            self.assertNotIn("clash", found)
 
     def test_finished_stream_is_cached_for_search_method(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1076,6 +1110,90 @@ class GracefulDegradationTests(unittest.TestCase):
             ]
             self.assertEqual(live_counts, [1])
             self.assertEqual(cached_counts, live_counts)
+
+    def test_source_event_omits_count_until_its_source_is_ranked(self):
+        # With more sources than max_stream_ranks a source can finish between
+        # rank passes. It must not report a misleading 0; the following snapshot
+        # carries the full counts map instead, and a cache replay matches.
+        from concurrent.futures import Future
+
+        import zimantic.search as search_module
+
+        sources = [
+            SourceInfo(key=key, name=key.upper(), book=key, mode="local", local_name=key)
+            for key in ("a", "b", "c")
+        ]
+        cfg = self._cfg(Path("/tmp/does-not-exist"))
+        cfg["max_stream_ranks"] = 1  # rank_interval = ceil(3 / 1) = 3
+
+        search = _bare_search(cfg)
+        search.sources = {source.key: source for source in sources}
+        search._enrich_pool = lambda results, query, pool, limit: pool
+        search._hydrate_results = lambda docs: None
+
+        def result_for(source):
+            doc = {
+                "id": f"{source.key}:{source.key}-path",
+                "source_key": source.key,
+                "source": source.name,
+                "source_icon": None,
+                "title": source.name,
+                "lead": "",
+                "path": f"{source.key}-path",
+                "mimetype": None,
+                "url": None,
+            }
+            return SourceResult(
+                source=source,
+                items=[doc],
+                semantic=[],
+                keyword=[(1.0, doc)],
+                fulltext=[],
+            )
+
+        order = []
+        by_source = {}
+        for source in sources:
+            future = Future()
+            future.set_result(result_for(source))
+            by_source[source.key] = future
+            order.append(future)
+
+        def submit(_fn, source, *_args, **_kwargs):
+            return by_source[source.key]
+
+        try:
+            with (
+                patch.object(search, "_executor") as executor,
+                patch.object(search_module, "as_completed", return_value=iter(order)),
+            ):
+                executor.submit.side_effect = submit
+                events = list(search.stream_search("hello", limit=10))
+            cached = list(search.stream_search("hello", limit=10))
+        finally:
+            search._executor.shutdown(wait=True)
+
+        def counts_of(stream):
+            return {
+                event["source"]["key"]: event.get("count")
+                for event in stream
+                if event["type"] == "source"
+            }
+
+        live = counts_of(events)
+        self.assertEqual(live["a"], 1)
+        self.assertEqual(live["c"], 1)
+        middle = next(
+            event
+            for event in events
+            if event["type"] == "source" and event["source"]["key"] == "b"
+        )
+        self.assertNotIn("count", middle)
+        # The final snapshot still accounts for every source, b included.
+        done = [event for event in events if event["type"] == "done"][-1]
+        self.assertEqual(done["counts"].get("b"), 1)
+        # A cache replay reproduces exactly what the live stream reported.
+        self.assertEqual(counts_of(cached), live)
 
     def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:

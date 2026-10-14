@@ -12,8 +12,8 @@ DEFAULT_EMBEDDING_TOKENS = 256
 # fall back to the profile that matches the machine running zimantic.
 # Keys that do not differ per machine live in _COMMON; each profile only
 # overrides the tuning keys that vary (memory, parallelism, cache and result
-# pool sizes). build_workers is informational: load_config recomputes it from
-# the host unless the user sets it explicitly.
+# pool sizes). build_workers and embedding_workers are deliberately not profile
+# keys: load_config computes them from the host unless the user sets them.
 _COMMON = {
     "zim_dir": "./zims",
     "model_dir": "./model",
@@ -25,7 +25,6 @@ _COMMON = {
     "kiwix_catalog_limit": 50_000,
     "max_kiwix_response_bytes": 64 * 1024 * 1024,
     "page_size": 10,
-    "build_workers": 1,
     "max_html_bytes": 4_194_304,
     "max_article_bytes": 33_554_432,
     "max_preview_chars": 1_000,
@@ -39,7 +38,6 @@ MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     "batch_size": 8,
     "max_entry_bytes": 256 * 1024 * 1024,
     "embed_threads": 2,
-    "embedding_workers": 1,
     "search_workers": 2,
     "max_concurrent_searches": 2,
     "candidate_count": 16,
@@ -54,7 +52,6 @@ DESKTOP = {  # baseline settings for typical PCs
     "batch_size": 32,
     "max_entry_bytes": 1 * 1024 * 1024 * 1024,
     "embed_threads": None,  # let the Embedder pick a sensible budget
-    "embedding_workers": 2,
     "search_workers": 8,
     "max_concurrent_searches": 4,
     "candidate_count": 16,
@@ -69,7 +66,6 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
     "batch_size": 128,
     "max_entry_bytes": 4 * 1024 * 1024 * 1024,
     "embed_threads": 8,
-    "embedding_workers": 4,
     "search_workers": 16,
     "max_concurrent_searches": 8,
     "candidate_count": 32,
@@ -80,8 +76,13 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
 
 PROFILES = {"mobile": MOBILE, "desktop": DESKTOP, "supercomputer": SUPERCOMPUTER}
 
-# Every key zimantic reads, including optional ones not present in the profiles
-KNOWN_KEYS = frozenset(key for profile in PROFILES.values() for key in profile) | {"nprobe"}
+# Every key zimantic reads, including optional ones not present in the profiles.
+# build_workers and embedding_workers are computed from the host by load_config
+# but remain user-settable, so they must stay known.
+KNOWN_KEYS = (
+    frozenset(key for profile in PROFILES.values() for key in profile)
+    | {"nprobe", "build_workers", "embedding_workers"}
+)
 
 
 def _system_memory_gb() -> float:

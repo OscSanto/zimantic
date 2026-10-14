@@ -63,7 +63,6 @@ h1[role="button"] {
     cursor: pointer;
 }
 .subtitle,
-.help,
 .status,
 .filter-line,
 .result-meta {
@@ -204,13 +203,6 @@ button.source-filter-option[aria-pressed="true"] {
 }
 .pager .disabled {
     color: var(--muted);
-}
-.linklike {
-    background: none;
-    border: 0;
-    color: var(--accent);
-    padding: 0;
-    text-decoration: underline;
 }
 .notice {
     background: var(--panel);
@@ -461,23 +453,6 @@ body.modal-open {
     color: var(--muted);
     padding: 16px 0;
 }
-.source-list {
-    display: grid;
-    gap: 4px;
-}
-.source-list label {
-    align-items: flex-start;
-    display: flex;
-    gap: 8px;
-    padding: 4px;
-}
-.source-list label.unavailable {
-    opacity: 0.55;
-}
-.source-list code {
-    color: var(--muted);
-    font: 0.75rem var(--mono);
-}
 details {
     border-top: 1px solid var(--border);
     margin-top: 28px;
@@ -487,20 +462,6 @@ summary {
     color: var(--muted);
     cursor: pointer;
     font-size: 0.88rem;
-}
-.help {
-    font-size: 0.85rem;
-    margin: 10px 0;
-}
-.settings-actions {
-    align-items: center;
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-}
-.settings-status {
-    color: var(--muted);
-    font-size: 0.82rem;
 }
 .result-enter {
     opacity: 0;

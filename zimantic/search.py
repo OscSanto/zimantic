@@ -135,23 +135,33 @@ def _readable_words(text: str) -> Iterator[str]:
 def _phrase_in_word_stream(text: str, phrase_words: list[str]) -> bool:
     """True when ``phrase_words`` appears as a contiguous run of readable words.
 
-    Streams ``_readable_words`` and matches a rolling window against the phrase
-    in one linear pass, so no joined copy of the whole article's words is ever
-    materialized (a few MB per candidate on large pages).
+    Streams ``_readable_words`` and matches with a KMP failure table in one
+    linear pass, so no joined copy of the whole article's words is ever
+    materialized (a few MB per candidate on large pages) and overlapping repeats
+    such as ``"very very very good"`` still match ``"very very good"``.
     """
     width = len(phrase_words)
     if width == 0:
         return True
-    window: list[str] = []
+    # KMP prefix table: on a mismatch, fall back to the longest phrase prefix
+    # that is also a suffix of what has matched so far. A naive rolling window
+    # would drop a valid match when the phrase itself repeats a word.
+    failure = [0] * width
+    overlap = 0
+    for index in range(1, width):
+        while overlap and phrase_words[index] != phrase_words[overlap]:
+            overlap = failure[overlap - 1]
+        if phrase_words[index] == phrase_words[overlap]:
+            overlap += 1
+        failure[index] = overlap
+    matched = 0
     for word in _readable_words(text):
-        if word == phrase_words[len(window)]:
-            window.append(word)
-            if len(window) == width:
+        while matched and word != phrase_words[matched]:
+            matched = failure[matched - 1]
+        if word == phrase_words[matched]:
+            matched += 1
+            if matched == width:
                 return True
-        elif word == phrase_words[0]:
-            window = [word]
-        else:
-            window = []
     return False
 
 
@@ -514,7 +524,14 @@ class Search:
         return db_path.resolve().as_uri() + "?mode=ro"
 
     def _find_zim_path(self, stem: str, source_size: int | None) -> Path | None:
-        """Find a matching archive anywhere below the configured ZIM directory."""
+        """Find the archive matching ``(stem, source_size)`` below ``zim_dir``.
+
+        A same-stem file with a different size is a different index identity,
+        so it is skipped rather than treated as fatal: another candidate with
+        the recorded size is still the right archive (for example a stray copy
+        of the same-named ZIM elsewhere in the tree). Returns ``None`` only when
+        no candidate matches.
+        """
         zim_dir = self.cfg.get("zim_dir")
         if not zim_dir:
             return None
@@ -526,31 +543,55 @@ class Search:
         except OSError:
             return None
 
-        matching: list[Path] = []
         for path in candidates:
             try:
                 size = path.stat().st_size
             except OSError:
                 continue
             if source_size is None or size == source_size:
-                matching.append(path)
-            elif source_size is not None:
-                # A stem with a different size is a conflicting identity, not
-                # a valid archive for this index.
-                return None
-        return matching[0] if matching else None
+                return path
+        return None
 
     def _scan_zim_paths(self) -> dict[str, Path]:
         """Find local archives without requiring a SQLite index.
 
         ``os.scandir`` keeps this startup probe cheap, while the recursive walk
-        preserves the same nested-directory behavior as ``build``.
+        preserves the same nested-directory behavior as ``build``. File sizes are
+        read only when a stem repeats, so a normal library never pays for a
+        ``stat``. A repeated stem whose sizes differ is a conflicting index
+        identity, so it is dropped (with a warning) just as ``build`` does;
+        same-size duplicates keep the first path.
         """
         zim_dir = self.cfg.get("zim_dir")
         if not zim_dir:
             return {}
 
         found: dict[str, Path] = {}
+        conflicts: set[str] = set()
+
+        def record(path: Path) -> None:
+            stem = path.stem
+            if stem in conflicts:
+                return
+            existing = found.get(stem)
+            if existing is None:
+                found[stem] = path
+                return
+            # Duplicate stem: only now is a size comparison needed.
+            try:
+                same_size = existing.stat().st_size == path.stat().st_size
+            except OSError:
+                same_size = False
+            if same_size:
+                return
+            found.pop(stem, None)
+            conflicts.add(stem)
+            logger.warning(
+                "zimantic: ignoring ZIM files with conflicting index identity %r: %s, %s",
+                stem,
+                existing,
+                path,
+            )
 
         def scan(directory: str) -> None:
             try:
@@ -560,7 +601,7 @@ class Search:
                             if entry.is_dir(follow_symlinks=False):
                                 scan(entry.path)
                             elif entry.is_file() and entry.name.endswith(".zim"):
-                                found.setdefault(Path(entry.name).stem, Path(entry.path))
+                                record(Path(entry.path))
                         except OSError:
                             continue
             except OSError:
@@ -1937,7 +1978,7 @@ class Search:
         acquired = False
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
-        reported_counts: dict[str, int] = {}
+        reported_counts: dict[str, int | None] = {}
         cache_value: Any = None
         try:
             # Wait briefly for a slot so a burst of retries can be absorbed;
@@ -2036,7 +2077,14 @@ class Search:
                 if should_rank:
                     pool = self._rank_results(completed, query, pool_target)
                     counts = self._source_counts(pool)
-                reported_count = counts.get(src.key, 0)
+                    # This source is part of the pool that was just ranked, so
+                    # its count is current. Between rank passes a newly finished
+                    # source is not in `counts` yet; omit its count instead of
+                    # reporting a misleading 0. The snapshot that follows a rank
+                    # pass always carries the full, current map.
+                    reported_count = counts.get(src.key, 0)
+                else:
+                    reported_count = None
                 reported_counts[src.key] = reported_count
                 yield {
                     "type": "source",
@@ -2068,14 +2116,15 @@ class Search:
             matched_by = self._matched_by(pool) if debug else None
             # The cache holds only the deduplicated ranked pool plus compact
             # source outcomes, never a copy of every source's item list. Source
-            # counts are the ones the live `source` events reported, so a cached
+            # counts are the ones the live `source` events reported (a source
+            # that finished between rank passes reported none), so a cached
             # replay shows the same per-source numbers as the original stream
             # (`_enrich_pool` can reorder or drop docs, changing a fresh count).
             cache_value = {
                 "generation": generation,
                 "pool": pool,
                 "sources": [
-                    result.to_event(reported_counts.get(result.source.key, 0))
+                    result.to_event(reported_counts.get(result.source.key))
                     for result in completed
                 ],
                 "pool_target": pool_target,

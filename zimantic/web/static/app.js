@@ -35,7 +35,6 @@
             let previousModalArticleUrl = null;
             let pendingModalArticleUrl = null;
             let pendingModalNavigation = null;
-            let modalRootPending = false;
             let activeParentNavigation = null;
             let activeParentUrl = null;
             let parentNavigationSequence = 0;
@@ -224,21 +223,15 @@
                 selectedSourceKeys.forEach((source) => params.append("source", source));
             }
 
-            function renderSourceFilters() {
-                const panel = $("sourceFilters");
-                const toolbar = $("sourceFilterToolbar");
-                const options = $("sourceFilterOptions");
-                const status = $("sourceFilterStatus");
-                if (!current) {
-                    panel.hidden = true;
-                    toolbar.hidden = true;
-                    options.replaceChildren();
-                    status.textContent = "";
-                    return;
-                }
+            function sourceFilterLayout() {
                 const outcomes = [...current.outcomes.values()];
+                const outcomeCount = (outcome) => current.counts[outcome.source.key] || 0;
+                // A source is a hard failure only when it reported status
+                // "error". A "partial" source returned results, so it must stay
+                // selectable and show its count rather than an error label.
+                const failed = (outcome) => outcome.status === "error";
                 const nonEmptyOutcomes = outcomes.filter(
-                    (outcome) => outcome.error || (current.counts[outcome.source.key] || 0) > 0,
+                    (outcome) => failed(outcome) || outcomeCount(outcome) > 0,
                 );
                 const query = $("sourceFilterSearch").value.trim().toLocaleLowerCase();
                 const matching = query
@@ -248,8 +241,7 @@
                       })
                     : nonEmptyOutcomes;
                 const sorted = matching.sort((left, right) => {
-                    const countDifference =
-                        (current.counts[right.source.key] || 0) - (current.counts[left.source.key] || 0);
+                    const countDifference = outcomeCount(right) - outcomeCount(left);
                     return countDifference || left.source.name.localeCompare(right.source.name);
                 });
                 const topVisible = sorted.slice(0, SOURCE_FILTER_LIMIT);
@@ -263,21 +255,45 @@
                 const otherOutcomes = !query
                     ? nonEmptyOutcomes.filter(
                           (outcome) =>
-                              !visibleKeys.has(outcome.source.key) &&
-                              (current.counts[outcome.source.key] || 0) > 0,
+                              !visibleKeys.has(outcome.source.key) && outcomeCount(outcome) > 0,
                       )
                     : [];
                 const otherCount = otherOutcomes.reduce(
-                    (total, outcome) => total + (current.counts[outcome.source.key] || 0),
+                    (total, outcome) => total + outcomeCount(outcome),
                     0,
                 );
+                // A lone "other" source is cheaper to show than a one-item button.
                 if (!query && otherCount === 1) {
                     otherOutcomes.forEach((outcome) => visibleKeys.add(outcome.source.key));
                 }
-                const visible = sorted.filter((outcome) => visibleKeys.has(outcome.source.key));
-                const showOther = !query && otherCount > 1;
+                return {
+                    outcomes,
+                    query,
+                    matching,
+                    visible: sorted.filter((outcome) => visibleKeys.has(outcome.source.key)),
+                    otherOutcomes: otherCount > 1 ? otherOutcomes : [],
+                    otherCount,
+                    showOther: !query && otherCount > 1,
+                    failed,
+                    outcomeCount,
+                };
+            }
+
+            function renderSourceFilters() {
+                const panel = $("sourceFilters");
+                const toolbar = $("sourceFilterToolbar");
+                const options = $("sourceFilterOptions");
+                const status = $("sourceFilterStatus");
+                if (!current) {
+                    panel.hidden = true;
+                    toolbar.hidden = true;
+                    options.replaceChildren();
+                    status.textContent = "";
+                    return;
+                }
+                const layout = sourceFilterLayout();
                 panel.hidden = false;
-                toolbar.hidden = !query && !showOther;
+                toolbar.hidden = !layout.query && !layout.showOther;
 
                 const all = document.createElement("button");
                 all.className = "secondary source-filter-option";
@@ -287,45 +303,44 @@
                 all.setAttribute("aria-pressed", selectedSourceKeys.size ? "false" : "true");
                 all.textContent = "All Sources";
 
-                const entries = visible.map((outcome) => {
+                const entries = layout.visible.map((outcome) => {
                     // Counts come from the ranked pool (server-reported), not per-source
                     // candidate lists, so they match what the filtered view actually shows.
-                    const count = current.counts[outcome.source.key] || 0;
-                    const cls = outcome.error
+                    const count = layout.outcomeCount(outcome);
+                    const isFailed = layout.failed(outcome);
+                    const button = document.createElement("button");
+                    button.className = isFailed
                         ? "source-filter-option err"
                         : count > 0
                           ? "source-filter-option ok"
                           : "source-filter-option";
-                    const label = outcome.error
-                        ? `${outcome.source.name}: ${outcome.error}`
-                        : `${outcome.source.name}: ${count}`;
-                    const button = document.createElement("button");
-                    button.className = cls;
                     button.type = "button";
                     button.dataset.source = outcome.source.key;
-                    button.disabled = Boolean(outcome.error);
+                    button.textContent = isFailed
+                        ? `${outcome.source.name}: ${outcome.error}`
+                        : `${outcome.source.name}: ${count}`;
+                    button.disabled = isFailed;
                     button.setAttribute(
                         "aria-pressed",
                         selectedSourceKeys.has(outcome.source.key) ? "true" : "false",
                     );
-                    button.textContent = label;
                     return button;
                 });
-                if (showOther) {
+                if (layout.showOther) {
                     const other = document.createElement("button");
                     other.className = "source-filter-option ok";
                     other.type = "button";
                     other.dataset.sourceAction = "other";
                     other.setAttribute("aria-pressed", "false");
-                    other.textContent = `Other: ${otherCount}`;
+                    other.textContent = `Other: ${layout.otherCount}`;
                     entries.push(other);
                 }
                 options.replaceChildren(all, ...entries);
 
-                if (!matching.length) {
-                    status.textContent = query
+                if (!layout.matching.length) {
+                    status.textContent = layout.query
                         ? "No matching sources."
-                        : outcomes.length
+                        : layout.outcomes.length
                           ? "No sources have results."
                           : "No sources have reported yet.";
                 } else {
@@ -333,9 +348,10 @@
                 }
             }
 
-            function renderFilterLine() {
-                $("filterLine").innerHTML =
-                    '<hr class="source-results-break" aria-hidden="true">';
+            function renderFilterLine(total) {
+                $("filterLine").innerHTML = total > 0
+                    ? '<hr class="source-results-break" aria-hidden="true">'
+                    : "";
             }
 
             function setSourceMeta(node, item) {
@@ -390,7 +406,9 @@
                     const parsed = new URL(rawUrl, location.href);
                     const path = segments(parsed.pathname);
                     if (parsed.origin === location.origin && (path[0] === "article" || path[0] === "content")) {
-                        return segments(rawPath || path.slice(2).join("/")).join(" › ");
+                        // Both sides are decoded exactly once: rawPath by
+                        // segments(), otherwise the already-decoded URL path.
+                        return (rawPath ? segments(rawPath) : path.slice(2)).join(" › ");
                     }
                     return [`${parsed.protocol}//${parsed.host}`, ...path].join(" › ");
                 } catch (_) {
@@ -533,7 +551,6 @@
                 const previousActiveArticleUrl = readModalUrl(activeModalUrl);
                 const shouldLoad = activeModalUrl !== articleUrl;
                 activeModalUrl = articleUrl;
-                modalRootPending = shouldLoad;
                 if (shouldLoad) {
                     previousModalArticleUrl = previousActiveArticleUrl?.href || null;
                     pendingModalArticleUrl = articleUrl;
@@ -958,7 +975,6 @@
                 previousModalArticleUrl = null;
                 pendingModalArticleUrl = null;
                 pendingModalNavigation = null;
-                modalRootPending = false;
                 hideExternalLinkNotice();
                 activeParentNavigation = null;
                 activeParentUrl = null;
@@ -976,11 +992,6 @@
                 const frame = $("articleModalFrame");
                 if (modal.hidden || !frame.src || frame.src === "about:blank") {
                     return;
-                }
-                if (modalRootPending) {
-                    modalRootPending = false;
-                    // Sandboxed documents have an opaque origin, so only "*" can target them.
-                    frame.contentWindow.postMessage({ type: "zimantic-modal-root" }, "*");
                 }
                 postArticleModalNavigation();
             });
@@ -1305,7 +1316,9 @@
                     return;
                 }
                 const outcomes = [...current.outcomes.values()];
-                const errors = outcomes.filter((outcome) => outcome.error);
+                // Only a hard "error" status counts as a failure; a "partial"
+                // source still returned results, so it must not trip this banner.
+                const errors = outcomes.filter((outcome) => outcome.status === "error");
                 $("notice").innerHTML =
                     current.completed === current.sourcesTotal &&
                     outcomes.length > 0 &&
@@ -1335,7 +1348,12 @@
             }
 
             async function readStart(response, maxBytes) {
-                if (!response.body || !response.body.getReader) return (await response.text()).slice(0, maxBytes);
+                // Both paths cap at maxBytes *bytes* of UTF-8, so a page with
+                // multibyte characters yields the same amount of text either way.
+                if (!response.body || !response.body.getReader) {
+                    const buffer = new Uint8Array(await response.arrayBuffer());
+                    return new TextDecoder().decode(buffer.subarray(0, maxBytes));
+                }
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let text = "";
@@ -1344,9 +1362,7 @@
                     while (bytes < maxBytes) {
                         const part = await reader.read();
                         if (part.done) break;
-                        // Stop before a chunk that would cross the cap so the
-                        // streamed path never returns more than the non-reader
-                        // fallback above (which slices to maxBytes).
+                        // Stop before a chunk that would cross the cap.
                         if (bytes + part.value.byteLength > maxBytes) break;
                         bytes += part.value.byteLength;
                         text += decoder.decode(part.value, { stream: true });
@@ -1455,13 +1471,19 @@
                     current.completed = event.completed;
                     current.pageItems = event.results || [];
                     current.total = event.total || 0;
-                    current.hasMore = Boolean(event.has_more);
                     if (event.counts) current.counts = event.counts;
                     if (event.matched_by) current.matchedBy = event.matched_by;
                 };
                 const consumeLine = (line) => {
                     if (!line.trim() || sequence !== searchSequence) return;
-                    const event = JSON.parse(line);
+                    let event;
+                    try {
+                        event = JSON.parse(line);
+                    } catch (_) {
+                        // A truncated line from a dropped stream is ignored; the
+                        // caller degrades to the last snapshot instead of failing.
+                        return;
+                    }
                     if (event.type === "started") {
                         current.sourcesTotal = event.total_sources || 0;
                         current.completed = 0;
@@ -1532,7 +1554,6 @@
                     pageItems: [],
                     matchedBy: null,
                     total: 0,
-                    hasMore: false,
                     completed: 0,
                     sourcesTotal: 0,
                     streaming: true,
@@ -1644,7 +1665,6 @@
                     current.page = pageIndex;
                     current.pageItems = items;
                     current.total = Number(response.headers.get("X-Total-Count") || items.length);
-                    current.hasMore = response.headers.get("X-Has-More") === "true";
                     if (debugMode) {
                         const matchedBy = response.headers.get("X-Matched-By");
                         if (matchedBy) {
@@ -1727,29 +1747,10 @@
                 if (button.dataset.sourceAction === "all") {
                     selectedSourceKeys.clear();
                 } else if (button.dataset.sourceAction === "other") {
-                    const outcomes = [...current.outcomes.values()];
-                    const nonEmptyOutcomes = outcomes.filter(
-                        (outcome) => outcome.error || (current.counts[outcome.source.key] || 0) > 0,
-                    );
-                    const visibleKeys = new Set(
-                        nonEmptyOutcomes
-                            .sort((left, right) => {
-                                const countDifference =
-                                    (current.counts[right.source.key] || 0) -
-                                    (current.counts[left.source.key] || 0);
-                                return countDifference || left.source.name.localeCompare(right.source.name);
-                            })
-                            .slice(0, SOURCE_FILTER_LIMIT)
-                            .map((outcome) => outcome.source.key),
-                    );
+                    // Use the same layout the visible "Other" button was rendered
+                    // from, so selecting it matches the number it displayed.
                     setSelectedSources(
-                        nonEmptyOutcomes
-                            .filter(
-                                (outcome) =>
-                                    !visibleKeys.has(outcome.source.key) &&
-                                    (current.counts[outcome.source.key] || 0) > 0,
-                            )
-                            .map((outcome) => outcome.source.key),
+                        sourceFilterLayout().otherOutcomes.map((outcome) => outcome.source.key),
                     );
                 } else if (selectedSourceKeys.has(key)) {
                     selectedSourceKeys.delete(key);
