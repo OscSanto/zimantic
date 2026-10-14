@@ -39,6 +39,13 @@ class _LocalIndex:
     _retired: bool = False
     _closed: bool = False
     done: str = "1"
+    # Entry ids that /random accepts for an unindexed ZIM, built lazily on the
+    # first request. Without a docs table there is no rowid set to sample, so a
+    # sparse archive needs this one-time scan to remain both random and
+    # reliable. Guarded by read_lock; reset whenever the index is reopened.
+    random_article_ids: list[int] | None = field(
+        default=None, repr=False, compare=False
+    )
     source_size: int | None = None
     zim_path: str | None = None
     zim_signature: tuple[int, int, int, int] | None = None

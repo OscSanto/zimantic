@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic import build as build_module
-from zimantic.search import ArticleNotFoundError, Search
+from zimantic.search import Search
 from zimantic.web.app import create_app
 
 
@@ -94,6 +94,21 @@ def _create_zim(
             creator.add_item(_Page(page_path, title, html))
         for title, page_path, target in redirects:
             creator.add_redirection(title, page_path, target, {})
+
+
+def _create_sparse_zim(path: Path) -> None:
+    """A ZIM that is mostly non-articles, like an OSM tile archive."""
+    creator = Creator(str(path))
+    creator.config_indexing(True, "eng")
+    creator.set_mainpath("Alpha")
+    with creator:
+        creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+        creator.add_item(
+            _Page("I/logo.png", "Logo", b"\x89PNG\r\n\x1a\n", mimetype="image/png")
+        )
+        creator.add_item(
+            _Page("style.css", "Stylesheet", b"body {}", mimetype="text/css")
+        )
 
 
 def _config(root: Path, *, max_results: int = 100) -> dict:
@@ -306,25 +321,11 @@ class LocalIntegrationTests(unittest.TestCase):
             indexes = root / "indexes"
             zims.mkdir()
             indexes.mkdir()
-            creator = Creator(str(zims / "manual.zim"))
-            creator.config_indexing(True, "eng")
-            creator.set_mainpath("Alpha")
-            with creator:
-                creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
-                creator.add_item(
-                    _Page(
-                        "I/logo.png",
-                        "Logo",
-                        b"\x89PNG\r\n\x1a\n",
-                        mimetype="image/png",
-                    )
-                )
-                creator.add_item(
-                    _Page("style.css", "Stylesheet", b"body {}", mimetype="text/css")
-                )
+            _create_sparse_zim(zims / "manual.zim")
 
             search = self._open_search(root)
-            archive = search.indexes["manual"].archive
+            index = search.indexes["manual"]
+            archive = index.archive
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
@@ -336,17 +337,57 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIsNotNone(article_id)
             self.assertTrue(asset_ids)
 
-            # Media entries must be rejected the same way the SQLite path
-            # rejects rows outside the docs table.
-            with patch(
-                "zimantic.search.secrets.randbelow",
-                side_effect=itertools.cycle(asset_ids),
-            ):
-                with self.assertRaises(ArticleNotFoundError):
-                    search.random_article_path("manual")
+            # Media entries must be rejected so a probe that lands on one is
+            # retried and the article is still returned.
             with patch(
                 "zimantic.search.secrets.randbelow",
                 side_effect=itertools.cycle([*asset_ids, article_id]),
+            ):
+                self.assertEqual(search.random_article_path("manual"), "Alpha")
+
+            # Every probe landing on an asset (a sparse archive) must still
+            # resolve: the scan fallback picks from the collected article ids.
+            # The final uniform pick draws from that list, whose bound differs
+            # from the entry-id space, so return a valid index for it.
+            index.random_article_ids = None
+            with patch(
+                "zimantic.search.secrets.randbelow",
+                side_effect=lambda upper: asset_ids[0] if upper > 1 else 0,
+            ):
+                self.assertEqual(search.random_article_path("manual"), "Alpha")
+            self.assertEqual(index.random_article_ids, [article_id])
+
+    def test_indexed_random_uses_uniform_fallback_when_sparse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "manual.zim"
+            _create_sparse_zim(zim_path)
+            build_module.build(zim_path, indexes, embedder=None, batch_size=1)
+
+            search = self._open_search(root)
+            index = search.indexes["manual"]
+            self.assertIsNotNone(search._db_for(index))
+            archive = index.archive
+            article_id = None
+            asset_ids: list[int] = []
+            for i in range(archive.entry_count):
+                entry = archive._get_entry_by_id(i)
+                if entry.path == "Alpha":
+                    article_id = i
+                elif not entry.is_redirect:
+                    asset_ids.append(i)
+            self.assertIsNotNone(article_id)
+            self.assertTrue(asset_ids)
+
+            # Every probe lands on an asset, forcing the COUNT/OFFSET fallback;
+            # it must still return the only eligible article, not fail.
+            with patch(
+                "zimantic.search.secrets.randbelow",
+                side_effect=lambda upper: asset_ids[0] if upper > 1 else 0,
             ):
                 self.assertEqual(search.random_article_path("manual"), "Alpha")
 

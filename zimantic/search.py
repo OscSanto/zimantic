@@ -84,13 +84,10 @@ MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
 DEFAULT_LONG_QUERY = 10
 MAX_PHRASE_CANDIDATES = 16
-# Random article selection samples entry ids and rejects gaps, redirects and
-# non-articles. Asset-heavy archives can have far more media entries than
-# articles (e.g. only ~7.5% of a Wikipedia mini's entry ids are readable
-# articles), so the budget must be high enough that rejection sampling rarely
-# comes up empty: 128 probes put the failure chance near zero even at 7.5%,
-# while each probe is cheap (an id lookup, at most a mimetype read, ~0.3ms
-# worst case) and stays O(1).
+# How many uniform rowid/entry-id probes /random tries before falling back to a
+# guaranteed pick. Probes give every eligible article equal weight and usually
+# succeed on the first try; the budget only matters for a moderately sparse
+# index, where a larger value keeps the slower fallback off the common path.
 RANDOM_ARTICLE_ATTEMPTS = 128
 # How long an owner waits for a search slot before reporting busy. Absorbing a
 # short burst of retries this way lets an in-flight search finish and the
@@ -1382,6 +1379,78 @@ class Search:
         mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
         return mimetype in _READABLE_MIMETYPES
 
+    def _random_indexed_article(self, index: _LocalIndex, db: sqlite3.Connection) -> str | None:
+        """Pick a uniformly random indexed article, or None when there are none."""
+        if not db.execute(
+            "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
+        ).fetchone():
+            return None
+        upper = max(1, int(getattr(index.archive, "entry_count", 0) or 0))
+        # Entry rowids are dense entry ids, so sampling one and rejecting gaps,
+        # unindexed entries and redirects gives every eligible row equal weight
+        # in O(1) per probe. This is fine for normal indexes, but an archive can
+        # be extremely sparse: an OSM ZIM has a few hundred articles among
+        # ~800k tile entries, so a bounded probe budget would almost always miss.
+        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
+            point = secrets.randbelow(upper)
+            row = db.execute(
+                "SELECT path FROM docs WHERE rowid = ? AND target IS NULL",
+                (point,),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+        # Sparse index: fall back to a uniform COUNT/OFFSET pick. The O(n) count
+        # is only paid here, where the probe budget already showed the eligible
+        # set is small relative to the index.
+        count = int(
+            db.execute(
+                "SELECT COUNT(*) FROM docs WHERE target IS NULL"
+            ).fetchone()[0]
+        )
+        if count <= 0:
+            return None
+        row = db.execute(
+            "SELECT path FROM docs WHERE target IS NULL "
+            "ORDER BY rowid LIMIT 1 OFFSET ?",
+            (secrets.randbelow(count),),
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+
+    def _random_fallback_article(self, index: _LocalIndex) -> str | None:
+        """Pick a uniformly random readable entry from an unindexed archive."""
+        archive = index.archive
+        upper = max(1, int(getattr(archive, "entry_count", 0) or 0))
+        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
+            point = secrets.randbelow(upper)
+            try:
+                entry = archive._get_entry_by_id(point)
+            except (KeyError, RuntimeError, ValueError, IndexError):
+                continue
+            if self._is_random_article_entry(entry):
+                return entry.path
+        # Sparse archive (e.g. an OSM ZIM): probes miss, and there is no docs
+        # table to COUNT/OFFSET against, so scan the readable entry ids once and
+        # reuse the list. The scan is O(entry_count) and happens at most once per
+        # open index; storing ids keeps it far smaller than storing paths.
+        ids = index.random_article_ids
+        if ids is None:
+            ids = []
+            for point in range(upper):
+                try:
+                    entry = archive._get_entry_by_id(point)
+                except (KeyError, RuntimeError, ValueError, IndexError):
+                    continue
+                if self._is_random_article_entry(entry):
+                    ids.append(point)
+            index.random_article_ids = ids
+        if not ids:
+            return None
+        try:
+            entry = archive._get_entry_by_id(ids[secrets.randbelow(len(ids))])
+        except (KeyError, RuntimeError, ValueError, IndexError):
+            return None
+        return entry.path
+
     def random_article_path(self, zim_name: str) -> str:
         """Return a random indexed article path without changing search state."""
         with self._state_lock:
@@ -1402,55 +1471,16 @@ class Search:
             with index.read_lock:
                 try:
                     if db is None:
-                        upper = max(
-                            1, int(getattr(index.archive, "entry_count", 0) or 0)
-                        )
-                        row = None
-                        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
-                            point = secrets.randbelow(upper)
-                            try:
-                                entry = index.archive._get_entry_by_id(point)
-                            except (KeyError, RuntimeError, ValueError, IndexError):
-                                continue
-                            if self._is_random_article_entry(entry):
-                                row = (entry.path,)
-                                break
-                        if not row:
-                            raise ArticleNotFoundError(
-                                "ZIM has no available articles"
-                            )
+                        path = self._random_fallback_article(index)
                     else:
-                        # A COUNT(*) scan plus an OFFSET walk is O(n) on the FTS5
-                        # table; for large ZIMs that is the whole cost of /random.
-                        # Sample entry rowids directly instead and reject gaps,
-                        # unindexed entries, and redirects. Each eligible row is
-                        # then equally likely without scanning the table.
-                        if not db.execute(
-                            "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
-                        ).fetchone():
-                            raise ArticleNotFoundError("ZIM has no indexed articles")
-                        upper = max(
-                            1, int(getattr(index.archive, "entry_count", 0) or 0)
-                        )
-                        row = None
-                        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
-                            point = secrets.randbelow(upper)
-                            row = db.execute(
-                                "SELECT path FROM docs "
-                                "WHERE rowid = ? AND target IS NULL",
-                                (point,),
-                            ).fetchone()
-                            if row and row[0]:
-                                break
-                except ArticleNotFoundError:
-                    raise
+                        path = self._random_indexed_article(index, db)
                 except (sqlite3.Error, KeyError, RuntimeError, TypeError, ValueError, IndexError) as error:
                     raise ArticleUnavailableError(
                         "random article selection is unavailable"
                     ) from error
-            if not row or not row[0]:
-                raise ArticleUnavailableError("random article selection is unavailable")
-            return self._article_path(str(row[0]))
+            if not path:
+                raise ArticleNotFoundError("ZIM has no available articles")
+            return self._article_path(path)
         finally:
             if acquired:
                 self._release_index(index)
