@@ -128,12 +128,15 @@ excerpt settings and removes excerpts stored in existing indexes.
 
 ### 2. Starting the server
 
-At startup Zimantic opens every **finished** index and keeps it open; nothing is reloaded per search.
-It also discovers ZIM files in `zim_dir` that do not yet have a SQLite index and
-uses each archive's native Xapian full-text index as a graceful fallback. A
-SQLite stem takes precedence, so a partially built index is never duplicated by
-its filesystem fallback. FAISS and vector files load in the background during
-startup, so title-word and full-text searches are available while semantic search initializes.
+At startup Zimantic opens every **finished** index whose archive is still present and matches the size
+recorded at build time, and keeps it open; nothing is reloaded per search. It also discovers ZIM files
+in `zim_dir` that do not have a usable SQLite index and uses each archive's native full-text index as
+a graceful fallback. An index whose ZIM is missing, or whose archive has changed size, is set aside:
+the archive is served unindexed instead (re-run `build` to restore the index), so a partial or stale
+index never masks the ZIM that is actually available. A SQLite stem takes precedence, so a partially
+built index is never duplicated by its filesystem fallback. FAISS and vector files load in the
+background during startup, so title-word and full-text searches are available while semantic search
+initializes.
 The page automatically lists local ZIM sources. With `kiwix_server`, it also discovers catalog sources and
 can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries and
 remote XML responses are capped at 64 MiB by default; both limits are configurable.

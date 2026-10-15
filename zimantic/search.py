@@ -523,34 +523,46 @@ class Search:
     def _index_uri(db_path: Path) -> str:
         return db_path.resolve().as_uri() + "?mode=ro"
 
-    def _find_zim_path(self, stem: str, source_size: int | None) -> Path | None:
-        """Find the archive matching ``(stem, source_size)`` below ``zim_dir``.
+    def _match_zim_path(
+        self, stem: str, source_size: int | None
+    ) -> tuple[Path | None, bool]:
+        """Return ``(archive, exact)`` for ``stem`` below ``zim_dir``.
 
-        A same-stem file with a different size is a different index identity,
-        so it is skipped rather than treated as fatal: another candidate with
-        the recorded size is still the right archive (for example a stray copy
-        of the same-named ZIM elsewhere in the tree). Returns ``None`` only when
-        no candidate matches.
+        An archive whose size equals the recorded ``source_size`` is an exact
+        identity match and wins outright. When no candidate has that size the
+        largest same-stem file is returned with ``exact=False``, so callers can
+        decide whether a changed archive should replace a stale index. With no
+        recorded size there is nothing to compare, so the largest candidate is
+        reported as exact.
         """
         zim_dir = self.cfg.get("zim_dir")
         if not zim_dir:
-            return None
+            return None, False
         try:
             candidates = sorted(
                 path for path in Path(zim_dir).rglob("*.zim")
                 if path.stem == stem
             )
         except OSError:
-            return None
+            return None, False
 
+        largest: Path | None = None
+        largest_size = -1
         for path in candidates:
             try:
                 size = path.stat().st_size
             except OSError:
                 continue
-            if source_size is None or size == source_size:
-                return path
-        return None
+            if source_size is not None and size == source_size:
+                return path, True
+            if size > largest_size:
+                largest_size = size
+                largest = path
+        return largest, source_size is None
+
+    def _find_zim_path(self, stem: str, source_size: int | None) -> Path | None:
+        """Best archive for ``stem``: an exact-size match, else the largest."""
+        return self._match_zim_path(stem, source_size)[0]
 
     def _scan_zim_paths(self) -> dict[str, Path]:
         """Find local archives without requiring a SQLite index.
@@ -558,40 +570,42 @@ class Search:
         ``os.scandir`` keeps this startup probe cheap, while the recursive walk
         preserves the same nested-directory behavior as ``build``. File sizes are
         read only when a stem repeats, so a normal library never pays for a
-        ``stat``. A repeated stem whose sizes differ is a conflicting index
-        identity, so it is dropped (with a warning) just as ``build`` does;
-        same-size duplicates keep the first path.
+        ``stat``. When a stem repeats with different sizes (for example a
+        truncated download beside the complete file), the larger file is kept
+        rather than discarding the stem.
         """
         zim_dir = self.cfg.get("zim_dir")
         if not zim_dir:
             return {}
 
         found: dict[str, Path] = {}
-        conflicts: set[str] = set()
+        # Sizes of stems seen more than once; absent for unique stems so they are
+        # never stat'ed.
+        sizes: dict[str, int] = {}
+        contested: set[str] = set()
 
         def record(path: Path) -> None:
             stem = path.stem
-            if stem in conflicts:
-                return
             existing = found.get(stem)
             if existing is None:
                 found[stem] = path
                 return
-            # Duplicate stem: only now is a size comparison needed.
+            # A repeated stem needs a size comparison; this is lazy so a unique
+            # library never pays for a stat.
             try:
-                same_size = existing.stat().st_size == path.stat().st_size
+                kept_size = sizes.get(stem)
+                if kept_size is None:
+                    kept_size = existing.stat().st_size
+                incoming_size = path.stat().st_size
             except OSError:
-                same_size = False
-            if same_size:
                 return
-            found.pop(stem, None)
-            conflicts.add(stem)
-            logger.warning(
-                "zimantic: ignoring ZIM files with conflicting index identity %r: %s, %s",
-                stem,
-                existing,
-                path,
-            )
+            if incoming_size > kept_size:
+                found[stem] = path
+                sizes[stem] = incoming_size
+            else:
+                sizes[stem] = kept_size
+            if incoming_size != kept_size:
+                contested.add(stem)
 
         def scan(directory: str) -> None:
             try:
@@ -608,44 +622,114 @@ class Search:
                 return
 
         scan(str(zim_dir))
+        for stem in sorted(contested):
+            logger.warning(
+                "zimantic: %r has ZIM files of different sizes; using the largest %s",
+                stem,
+                found[stem],
+            )
         return found
 
-    def _index_is_done(self, db_path: Path) -> bool:
-        """True when a SQLite index is marked finished (``done`` is '1' or 'fast').
+    @staticmethod
+    def _read_index_state(db_path: Path) -> tuple[bool, int | None]:
+        """Return ``(finished, recorded_source_size)`` for one SQLite index.
 
-        An index still being written, or one that cannot be opened, is treated
-        as not done so its archive's native full-text index keeps the source
-        searchable until the database is ready.
+        An index still being written, or one that cannot be opened, reports
+        ``False`` so its archive's native full-text index keeps the source
+        searchable until the database is ready. The recorded source size is
+        ``None`` when absent or unparsable.
         """
         try:
-            db = sqlite3.connect(self._index_uri(db_path), uri=True, check_same_thread=False)
+            db = sqlite3.connect(
+                Search._index_uri(db_path), uri=True, check_same_thread=False
+            )
         except sqlite3.Error:
-            return False
+            return False, None
         try:
             done = db.execute("SELECT value FROM meta WHERE key = 'done'").fetchone()
+            size_row = db.execute(
+                "SELECT value FROM meta WHERE key = 'filesize'"
+            ).fetchone()
         except sqlite3.Error:
-            return False
+            return False, None
         finally:
             db.close()
-        return done is not None and str(done[0]) in {"1", "fast"}
+        finished = done is not None and str(done[0]) in {"1", "fast"}
+        try:
+            source_size = int(size_row[0]) if size_row else None
+        except (TypeError, ValueError):
+            source_size = None
+        return finished, source_size
+
+    def _stale_zim_archive(
+        self, stem: str, source_size: int | None, scanned: Path
+    ) -> Path | None:
+        """Archive to serve unindexed when an index is stale, else ``None``.
+
+        ``scanned`` is the scan's chosen (largest) same-stem archive. A size
+        match there, or a missing recorded size, means the index still matches.
+        Only a mismatch triggers the extra walk that checks the stem's other
+        files, so a valid library pays no extra directory scan.
+        """
+        if source_size is None:
+            return None
+        try:
+            if scanned.stat().st_size == source_size:
+                return None
+        except OSError:
+            pass  # unreadable now; fall through and check the alternatives
+        archive, exact = self._match_zim_path(stem, source_size)
+        if archive is None or exact:
+            return None
+        return archive
 
     def _discover_local_indexes(self) -> dict[str, tuple[str, Path]]:
         """Return finished SQLite indexes plus filesystem-only ZIM fallbacks.
 
-        A SQLite stem is authoritative only once its build is finished; an
-        in-progress build is ignored so the archive's native full-text index
-        keeps the source searchable until the database is ready.
+        A SQLite stem is authoritative only once its build is finished and its
+        recorded source size still matches a same-stem archive. An in-progress
+        build, one whose ZIM is gone, or one whose ZIM was replaced (size
+        changed) is ignored so the archive's native full-text index keeps the
+        source searchable instead of a stale or unopenable index.
         """
         db_paths = sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))
-        done_names = {path.stem for path in db_paths if self._index_is_done(path)}
-        found = {path.stem: ("sqlite", path) for path in db_paths if path.stem in done_names}
-        found.update(
-            {
-                stem: ("zim", path)
-                for stem, path in self._scan_zim_paths().items()
-                if stem not in done_names
-            }
-        )
+        finished: dict[str, Path] = {}
+        recorded_sizes: dict[str, int | None] = {}
+        for path in db_paths:
+            done, source_size = self._read_index_state(path)
+            if done:
+                finished[path.stem] = path
+                recorded_sizes[path.stem] = source_size
+
+        zim_paths = self._scan_zim_paths()
+        found: dict[str, tuple[str, Path]] = {}
+        for stem, db_path in finished.items():
+            scanned = zim_paths.get(stem)
+            if scanned is None:
+                # The archive this index was built from is gone. Without a local
+                # ZIM the index cannot serve articles, so ignore it. A book that
+                # is only available remotely is discovered separately as a
+                # kiwix source by the catalog refresh.
+                logger.info(
+                    "zimantic: %s index has no local ZIM; ignoring it",
+                    stem,
+                )
+                continue
+            stale = self._stale_zim_archive(stem, recorded_sizes[stem], scanned)
+            if stale is None:
+                found[stem] = ("sqlite", db_path)
+                continue
+            logger.warning(
+                "zimantic: %s index (recorded source %s bytes) does not match %s; "
+                "using the ZIM unindexed until the index is rebuilt",
+                stem,
+                recorded_sizes[stem],
+                stale,
+            )
+            found[stem] = ("zim", stale)
+        for stem, path in zim_paths.items():
+            if stem not in finished:
+                found[stem] = ("zim", path)
         return found
 
     def _open_index(self, db_path: Path) -> _LocalIndex | None:

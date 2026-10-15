@@ -505,7 +505,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(search.search("new article", limit=1)[0]["title"], "New article")
             self.assertEqual(search.search("old article", limit=1), [])
 
-    def test_corrupt_vectors_and_missing_zim_degrade_to_title_search(self):
+    def test_corrupt_vectors_degrade_and_missing_zim_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             zim_path = self._build_fixture(root)
@@ -516,17 +516,12 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertFalse(search.indexes["manual"].semantic)
             self.assertEqual(search.search("alpha", limit=1)[0]["title"], "Alpha")
 
+            # Removing the archive orphans the finished index: it is ignored
+            # entirely rather than served title-only, so the source disappears.
             zim_path.unlink()
             missing_zim_search = self._open_search(root)
-            self.assertIsNone(missing_zim_search.indexes["manual"].archive)
-            self.assertEqual(
-                missing_zim_search.search("beta", limit=1)[0]["title"],
-                "Beta",
-            )
-            health = missing_zim_search.health()
-            self.assertEqual(health["status"], "degraded")
-            self.assertFalse(health["indexes"][0]["capabilities"]["article"])
-            self.assertIn("ZIM archive unavailable", health["indexes"][0]["issues"])
+            self.assertNotIn("manual", missing_zim_search.indexes)
+            self.assertEqual(missing_zim_search.health()["status"], "degraded")
 
     def test_redirects_collapse_and_disambiguation_ranking_survive_real_build(self):
         with tempfile.TemporaryDirectory() as tmp:

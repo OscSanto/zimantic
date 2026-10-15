@@ -913,6 +913,14 @@ def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
         rows,
     )
     db.execute("INSERT INTO meta VALUES ('done', ?)", (done,))
+    # A matching archive so a finished index is not treated as orphaned, plus
+    # the source size a real build would record.
+    zim = index_dir / f"{name}.zim"
+    zim.write_bytes(b"zim")
+    db.execute(
+        "INSERT OR REPLACE INTO meta VALUES ('filesize', ?)",
+        (str(zim.stat().st_size),),
+    )
     db.commit()
     db.close()
     return index_dir / f"{name}.sqlite"
@@ -1006,7 +1014,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
             self.assertTrue(search.indexes["manual"].semantic)
 
-    def test_archive_lookup_prefers_the_matching_size_and_tolerates_conflicts(self):
+    def test_archive_lookup_prefers_the_matching_size_then_the_largest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             nested = root / "collection" / "nested"
@@ -1017,32 +1025,34 @@ class GracefulDegradationTests(unittest.TestCase):
 
             self.assertEqual(search._find_zim_path("manual", 10), moved)
             (root / "other").mkdir()
-            (root / "other" / "manual.zim").write_bytes(b"x" * 11)
-            # A same-stem file of a different size is a different identity; the
-            # archive that matches the recorded size is still found.
+            larger = root / "other" / "manual.zim"
+            larger.write_bytes(b"x" * 11)
+            # An exact-size archive is still the index's own identity.
             self.assertEqual(search._find_zim_path("manual", 10), moved)
-            # No candidate carries the recorded size: no archive to attach.
-            self.assertIsNone(search._find_zim_path("manual", 12))
+            # With no size match, the largest same-stem file is used rather than
+            # leaving the index with no archive at all.
+            self.assertEqual(search._find_zim_path("manual", 12), larger)
 
-    def test_scan_zim_paths_drops_only_conflicting_stems(self):
+    def test_scan_zim_paths_keeps_the_largest_of_a_repeated_stem(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "a").mkdir()
             (root / "a" / "solo.zim").write_bytes(b"x" * 10)
-            # Same-size duplicates keep the first path (build drops the rest).
+            # Same-size duplicates keep the first path.
             (root / "a" / "twin.zim").write_bytes(b"y" * 4)
             (root / "b").mkdir()
             (root / "b" / "twin.zim").write_bytes(b"z" * 4)
-            # Conflicting sizes drop the whole stem.
+            # Different sizes: the larger file wins instead of dropping the stem.
             (root / "a" / "clash.zim").write_bytes(b"x" * 5)
-            (root / "b" / "clash.zim").write_bytes(b"x" * 6)
+            larger = root / "b" / "clash.zim"
+            larger.write_bytes(b"x" * 6)
 
             search = _bare_search({"zim_dir": str(root)})
             found = search._scan_zim_paths()
 
             self.assertEqual(found["solo"], root / "a" / "solo.zim")
             self.assertEqual(found["twin"], root / "a" / "twin.zim")
-            self.assertNotIn("clash", found)
+            self.assertEqual(found["clash"], larger)
 
     def test_finished_stream_is_cached_for_search_method(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1248,6 +1258,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertFalse(search.indexes["manual"].semantic)
 
             (tmp / "manual.sqlite").unlink()
+            (tmp / "manual.zim").unlink()
             summary = search.reload()
             self.assertEqual(summary["removed"], ["manual"])
             self.assertEqual(search.indexes, {})
@@ -1304,6 +1315,52 @@ class GracefulDegradationTests(unittest.TestCase):
             db.commit()
             db.close()
             self.assertEqual(search._discover_local_indexes()["manual"][0], "sqlite")
+            search._executor.shutdown(wait=True)
+
+    def test_index_whose_zim_changed_size_falls_back_to_the_unindexed_zim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
+            db = sqlite3.connect(tmp / "manual.sqlite")
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', '999')")
+            db.commit()
+            db.close()
+            zim = tmp / "manual.zim"
+            zim.write_bytes(b"zim")  # 3 bytes, not the recorded 999
+
+            search = _bare_search(self._cfg(tmp))
+            found = search._discover_local_indexes()
+            # The stale index is ignored and the archive serves unindexed.
+            self.assertEqual(found["manual"], ("zim", zim))
+            search._executor.shutdown(wait=True)
+
+    def test_index_matching_its_zim_size_stays_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
+            zim = tmp / "manual.zim"
+            zim.write_bytes(b"zim")
+            db = sqlite3.connect(tmp / "manual.sqlite")
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('filesize', ?)",
+                (str(zim.stat().st_size),),
+            )
+            db.commit()
+            db.close()
+
+            search = _bare_search(self._cfg(tmp))
+            self.assertEqual(search._discover_local_indexes()["manual"][0], "sqlite")
+            search._executor.shutdown(wait=True)
+
+    def test_finished_index_with_no_local_zim_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
+            (tmp / "manual.zim").unlink()
+
+            search = _bare_search(self._cfg(tmp))
+            # With no archive to serve, the orphaned index is not loaded.
+            self.assertNotIn("manual", search._discover_local_indexes())
             search._executor.shutdown(wait=True)
 
 
