@@ -35,6 +35,7 @@
             let modalPreviousFocus = null;
             let activeModalUrl = null;
             let activeSearchResult = null;
+            let activeLibraryArticleUrl = null;
             let previousModalArticleUrl = null;
             let pendingModalArticleUrl = null;
             let pendingModalNavigation = null;
@@ -743,6 +744,11 @@
                 const modal = $("articleModal");
                 const frame = $("articleModalFrame");
                 if (!modal || !frame) return;
+                if (navigationKind === "library") {
+                    activeLibraryArticleUrl = articleUrl;
+                } else if (navigationKind !== "parent") {
+                    activeLibraryArticleUrl = null;
+                }
                 hideExternalLinkNotice();
                 if (modal.hidden) modalPreviousFocus = document.activeElement;
                 const previousActiveArticleUrl = readModalUrl(activeModalUrl);
@@ -810,6 +816,44 @@
                 });
             }
 
+            function libraryArticleLinks() {
+                return [...$("libraryGrid").querySelectorAll("article.library-card")].map((card) =>
+                    card.querySelector("a[data-library-article][href]"),
+                ).filter(Boolean);
+            }
+
+            function libraryModalNavigation() {
+                const unavailable = {
+                    previous: null,
+                    next: null,
+                    previousAvailable: false,
+                    nextAvailable: false,
+                };
+                if (!activeLibraryArticleUrl) return unavailable;
+                const links = libraryArticleLinks();
+                const currentValue = articleUrlValue(new URL(activeLibraryArticleUrl, location.href));
+                const index = links.findIndex((link) => {
+                    try {
+                        return articleUrlValue(new URL(link.href, location.href)) === currentValue;
+                    } catch (_) {
+                        return false;
+                    }
+                });
+                if (index < 0) return unavailable;
+                const urlFor = (offset) => {
+                    const link = links[index + offset];
+                    return link ? articleUrlValue(new URL(link.href, location.href)) : null;
+                };
+                const previous = urlFor(-1);
+                const next = urlFor(1);
+                return {
+                    previous,
+                    next,
+                    previousAvailable: Boolean(previous),
+                    nextAvailable: Boolean(next),
+                };
+            }
+
             function rememberSearchResult(link) {
                 if (!current || !link) return false;
                 const articleUrl = readModalUrl(link.href);
@@ -846,7 +890,11 @@
                     previousAvailable: false,
                     nextAvailable: false,
                 };
-                if (!activeSearchResult || !current) return unavailable;
+                if (!activeSearchResult || !current) {
+                    return location.pathname === "/library"
+                        ? libraryModalNavigation()
+                        : unavailable;
+                }
                 const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
                 if (activeSearchResult.page !== current.page) {
                     return {
@@ -889,6 +937,10 @@
                 if (requestedUrl) {
                     const articleUrl = readModalUrl(requestedUrl);
                     if (!articleUrl || articleUrlValue(articleUrl) !== navigation[direction]) return;
+                    if (location.pathname === "/library" && !activeSearchResult) {
+                        navigateArticleModal(articleUrl, "library");
+                        return;
+                    }
                     if (!rememberSearchResultUrl(articleUrl.href)) return;
                     navigateArticleModal(articleUrl, "search");
                     return;
@@ -1169,6 +1221,7 @@
                 document.body.classList.remove("modal-open");
                 activeModalUrl = null;
                 activeSearchResult = null;
+                activeLibraryArticleUrl = null;
                 previousModalArticleUrl = null;
                 pendingModalArticleUrl = null;
                 pendingModalNavigation = null;
@@ -1975,7 +2028,7 @@
                 if (!link || modifiedClick(event)) return;
                 if (new URL(link.href, location.href).origin !== location.origin) return;
                 event.preventDefault();
-                showArticleModal(new URL(link.href, location.href).href, "manual");
+                showArticleModal(new URL(link.href, location.href).href, "library");
             });
             $("libraryFilter").addEventListener("input", renderLibrary);
 
