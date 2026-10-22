@@ -239,9 +239,10 @@ translations, so less common languages may contain mistakes.
 
 ## Requirements
 
-- Python 3.11 or newer. `libzim` ships wheels for specific Python ABIs and
-  platforms, so choose an interpreter with a compatible wheel; the lockfile
-  records the available wheels for the pinned release.
+- Python 3.11–3.14 with the current native dependency wheels. `libzim` ships
+  wheels for specific Python ABIs and platforms, so choose an interpreter
+  with a compatible wheel; update this range when the native dependencies add
+  support for a newer Python version.
 - 32-bit Linux platforms (such as armhf/armv7) are not supported because required native
   dependencies do not publish compatible wheels. On a Raspberry Pi Zero 2 W this means running 64-bit
   Raspberry Pi OS (aarch64) is required.

@@ -7,7 +7,7 @@ name = "zimantic"
 version = "0.1.0"
 description = "Offline semantic search for Kiwix ZIM files"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "numpy",
     "tqdm",
