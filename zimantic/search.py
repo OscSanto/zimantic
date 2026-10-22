@@ -1467,7 +1467,7 @@ class Search:
         )
 
     def library_dicts(self) -> list[dict[str, Any]]:
-        """Return metadata for every local ZIM, including unindexed archives."""
+        """Return metadata for local ZIMs that can serve a homepage."""
         with self._state_lock:
             indexed = {
                 source.local_name: source
@@ -1479,7 +1479,8 @@ class Search:
             source = indexed.get(zim_name)
             if source is None:
                 source = self._inspect_library_archive(zim_name, zim_path)
-            library.append(source.to_dict(include_metadata=True))
+            if source.available and source.homepage:
+                library.append(source.to_dict(include_metadata=True))
         return library
 
     def library_version(self):

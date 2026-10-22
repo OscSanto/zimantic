@@ -986,6 +986,38 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIsNone(report["indexes"][0]["homepage"])
             search._executor.shutdown(wait=True)
 
+    def test_library_hides_sources_without_a_homepage(self):
+        search = _bare_search({})
+        search.sources = {
+            "readable": SourceInfo(
+                "readable",
+                "Readable",
+                "readable",
+                "local",
+                local_name="readable",
+                homepage="Main_Page",
+            ),
+            "unreadable": SourceInfo(
+                "unreadable",
+                "Unreadable",
+                "unreadable",
+                "local",
+                local_name="unreadable",
+            ),
+        }
+        with patch.object(
+            search,
+            "_scan_zim_paths",
+            return_value={
+                "readable": Path("/zims/readable.zim"),
+                "unreadable": Path("/zims/unreadable.zim"),
+            },
+        ):
+            library = search.library_dicts()
+
+        self.assertEqual([source["name"] for source in library], ["Readable"])
+        search._executor.shutdown(wait=True)
+
     def test_deferred_faiss_loads_vectors_after_indexes_open(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

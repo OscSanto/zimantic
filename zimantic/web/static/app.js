@@ -13,6 +13,8 @@
             const THUMB_LIMIT = 128 * 1024;
             const THUMB_CONCURRENCY = 4;
             const SOURCE_FILTER_LIMIT = 10;
+            const SOURCE_CACHE_KEY = "zimantic.sources.v1";
+            const LIBRARY_CACHE_KEY = "zimantic.library.v1";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let librarySources = [];
@@ -114,6 +116,39 @@
 
             function libraryTitle(source) {
                 return String(source.title || source.name || source.book || "Untitled ZIM").trim();
+            }
+
+            function readJsonCache(key) {
+                try {
+                    const value = JSON.parse(localStorage.getItem(key) || "null");
+                    return Array.isArray(value) ? value : null;
+                } catch (_) {
+                    return null;
+                }
+            }
+
+            function writeJsonCache(key, value) {
+                try {
+                    localStorage.setItem(key, JSON.stringify(value));
+                } catch (_) {
+                    // Storage is an optimization; private browsing and quota limits
+                    // must not prevent the page from loading fresh data.
+                }
+            }
+
+            async function fetchCachedJson(path, key) {
+                const cached = readJsonCache(key);
+                try {
+                    const response = await fetch(path, { cache: "no-cache" });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const payload = await response.json();
+                    if (!Array.isArray(payload)) throw new Error("invalid JSON payload");
+                    writeJsonCache(key, payload);
+                    return { payload, stale: false, error: null };
+                } catch (error) {
+                    if (cached) return { payload: cached, stale: true, error };
+                    throw error;
+                }
             }
 
             function renderLibrary() {
@@ -2091,12 +2126,12 @@
                 try {
                     // Source discovery is read-only; refreshing the index/catalog set is an
                     // admin action done only via `zimantic reload` or SIGHUP.
-                    const requests = [
-                        fetch("/config"),
-                        fetch("/sources"),
-                    ];
-                    if (libraryView) requests.push(fetch("/library.json"));
-                    const [configResponse, sourcesResponse, libraryResponse] = await Promise.all(requests);
+                    const dataPath = libraryView ? "/library.json" : "/sources";
+                    const dataCacheKey = libraryView ? LIBRARY_CACHE_KEY : SOURCE_CACHE_KEY;
+                    const [configResponse, data] = await Promise.all([
+                        fetch("/config", { cache: "no-cache" }),
+                        fetchCachedJson(dataPath, dataCacheKey),
+                    ]);
                     if (configResponse.ok) {
                         const config = await configResponse.json();
                         debugMode = Boolean(config.debug);
@@ -2104,15 +2139,21 @@
                             PAGE_SIZE = config.page_size;
                         }
                     }
-                    if (!sourcesResponse.ok) throw new Error(`HTTP ${sourcesResponse.status}`);
-                    sources = await sourcesResponse.json();
                     if (libraryView) {
-                        if (!libraryResponse.ok) throw new Error(`HTTP ${libraryResponse.status}`);
-                        librarySources = await libraryResponse.json();
+                        librarySources = data.payload.filter(
+                            (source) => source.available !== false && source.homepage,
+                        );
                         renderLibrary();
+                    } else {
+                        sources = data.payload;
+                    }
+                    if (data.stale) {
+                        $("status").textContent =
+                            `Using cached ${libraryView ? "library" : "source"} data; refresh failed: ${data.error.message}`;
                     }
                 } catch (error) {
-                    $("status").textContent = `Could not load sources: ${error.message}`;
+                    $("status").textContent =
+                        `Could not load ${libraryView ? "library" : "sources"}: ${error.message}`;
                 }
                 $("searchView").hidden = libraryView;
                 $("libraryView").hidden = !libraryView;

@@ -21,6 +21,44 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     # Serialized-JSON memo owned by this app instance (see _json_response).
     memos: dict = {}
 
+    def paged_json_response(
+        request: Request,
+        memo_key: str,
+        version,
+        payload_factory,
+        memos,
+        limit: int | None,
+        offset: int,
+    ):
+        if limit is None:
+            response = web_app._json_response(
+                request,
+                memo_key,
+                version,
+                payload_factory,
+                memos,
+            )
+            return response
+
+        _, payload, _, _ = web_app._memoized_json(
+            memo_key,
+            version,
+            payload_factory,
+            memos,
+        )
+        page = payload[offset : offset + limit]
+        response = web_app._json_response(
+            request,
+            f"{memo_key}:page:{offset}:{limit}",
+            version,
+            lambda: page,
+            memos,
+        )
+        response.headers["X-Total-Count"] = str(len(payload))
+        response.headers["X-Offset"] = str(offset)
+        response.headers["X-Has-More"] = str(offset + len(page) < len(payload)).lower()
+        return response
+
     @app.get("/", include_in_schema=False)
     def page():
         return FileResponse(web_app.PAGE)
@@ -75,19 +113,29 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         )
 
     @app.get("/sources")
-    def sources(request: Request):
+    def sources(
+        request: Request,
+        limit: int | None = Query(default=None, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ):
         version_of = getattr(search_class, "source_version", None)
         version = version_of() if callable(version_of) else 0
-        return web_app._json_response(
+        return paged_json_response(
             request,
             "sources",
             version,
             search_class.source_dicts,
             memos,
+            limit,
+            offset,
         )
 
     @app.get("/library.json")
-    def library(request: Request):
+    def library(
+        request: Request,
+        limit: int | None = Query(default=None, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ):
         version_of = getattr(search_class, "library_version", None)
         version = version_of() if callable(version_of) else 0
         library_of = getattr(search_class, "library_dicts", None)
@@ -95,14 +143,30 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             library_of = lambda: [
                 source
                 for source in search_class.source_dicts()
-                if source.get("mode") == "local"
+                if (
+                    source.get("mode") == "local"
+                    and source.get("available", True)
+                    and source.get("homepage")
+                )
             ]
-        return web_app._json_response(
+        else:
+            original_library_of = library_of
+
+            def library_of():
+                return [
+                    source
+                    for source in original_library_of()
+                    if source.get("available", True) and source.get("homepage")
+                ]
+
+        return paged_json_response(
             request,
             "library",
             version,
             library_of,
             memos,
+            limit,
+            offset,
         )
 
     @app.get("/health")

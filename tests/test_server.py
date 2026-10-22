@@ -33,6 +33,7 @@ class FakeSearch:
             "mode": "local",
             "local_name": "manual",
             "available": True,
+            "homepage": "Main_Page",
         }]
 
     def refresh_sources(self):
@@ -97,6 +98,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.json()[0]["title"], "Page")
         # Totals travel as headers so the body stays a plain list.
         self.assertEqual(response.headers["x-total-count"], "1")
+        self.assertEqual(response.headers["x-has-more"], "false")
+
+    def test_sources_supports_optional_pagination(self):
+        response = self.client.get("/sources", params={"limit": 1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["key"], "manual")
+        self.assertEqual(response.headers["x-total-count"], "1")
+        self.assertEqual(response.headers["x-offset"], "0")
         self.assertEqual(response.headers["x-has-more"], "false")
 
     def test_page_assets_are_served(self):

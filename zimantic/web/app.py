@@ -879,6 +879,17 @@ def _article_content_response(content: bytes | memoryview, mimetype: str) -> Res
     )
 
 
+def _memoized_json(memo_key: str, version, payload_factory, memos):
+    """Return a memoized JSON payload, body, and ETag for one app instance."""
+    cached = memos.get(memo_key)
+    if cached is None or cached[0] != version:
+        payload = payload_factory()
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
+        etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
+        memos[memo_key] = (version, payload, body, etag)
+    return memos[memo_key]
+
+
 def _json_response(request: Request, memo_key: str, version, payload_factory, memos) -> Response:
     """JSON response with a content ETag, memoized per app instance.
 
@@ -887,14 +898,7 @@ def _json_response(request: Request, memo_key: str, version, payload_factory, me
     serialized body is reused until ``version`` changes. ``memos`` is owned by
     the calling app, so two app instances never share cached payloads.
     """
-    cached = memos.get(memo_key)
-    if cached is None or cached[0] != version:
-        payload = payload_factory()
-        body = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
-        etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
-        memos[memo_key] = (version, payload, body, etag)
-    else:
-        _, _, body, etag = cached
+    _, _, body, etag = _memoized_json(memo_key, version, payload_factory, memos)
     headers = {"ETag": etag, "Cache-Control": "no-cache"}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
