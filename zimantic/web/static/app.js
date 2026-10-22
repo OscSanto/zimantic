@@ -119,6 +119,28 @@
                 return String(source.title || source.name || source.book || "Untitled ZIM").trim();
             }
 
+            function libraryHomepageUrl(source) {
+                const zim = source.local_name || source.book || source.name;
+                return contentUrl(zim, source.homepage);
+            }
+
+            function openRandomLibraryArticle() {
+                if (!librarySources.length) return;
+                const source = librarySources[Math.floor(Math.random() * librarySources.length)];
+                showArticleModal(libraryHomepageUrl(source), "library");
+            }
+
+            function shuffleLibrary() {
+                for (let index = librarySources.length - 1; index > 0; index--) {
+                    const other = Math.floor(Math.random() * (index + 1));
+                    [librarySources[index], librarySources[other]] = [
+                        librarySources[other],
+                        librarySources[index],
+                    ];
+                }
+                renderLibrary();
+            }
+
             function readJsonCache(key) {
                 try {
                     const value = JSON.parse(localStorage.getItem(key) || "null");
@@ -194,8 +216,7 @@
                 }
                 visibleSources.forEach((source) => {
                     const title = libraryTitle(source);
-                    const zim = source.local_name || source.book || source.name;
-                    const homepage = contentUrl(zim, source.homepage);
+                    const homepage = libraryHomepageUrl(source);
                     const card = document.createElement("article");
                     card.className = "library-card";
                     const available = source.available !== false;
@@ -2031,6 +2052,13 @@
                 showArticleModal(new URL(link.href, location.href).href, "library");
             });
             $("libraryFilter").addEventListener("input", renderLibrary);
+            $("libraryShuffle").addEventListener("click", (event) => {
+                if (event.ctrlKey || event.shiftKey) {
+                    openRandomLibraryArticle();
+                    return;
+                }
+                shuffleLibrary();
+            });
 
             $("pager").addEventListener("click", (event) => {
                 const link = event.target.closest("a[data-page]");
