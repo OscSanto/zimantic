@@ -18,12 +18,21 @@ class SourceInfo:
     homepage: str | None = None
     icon_path: str | None = None
     icon_url: str | None = None
+    title: str | None = None
+    description: str | None = None
+    long_description: str | None = None
+    creator: str | None = None
+    language: str | None = None
+    date: str | None = None
+    tags: tuple[str, ...] = ()
+    size: int | None = None
+    article_count: int | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, include_metadata: bool = False) -> dict[str, Any]:
         # ``icon_path`` is deliberately not exposed: it is a server-side lookup
         # key used to serve ``/source-icon/{zim}`` and is meaningless to
         # clients. The derived ``icon_url`` is the public form.
-        return {
+        payload = {
             "key": self.key,
             "name": self.name,
             "book": self.book,
@@ -35,6 +44,19 @@ class SourceInfo:
             "homepage": self.homepage,
             "icon_url": self.icon_url,
         }
+        if include_metadata:
+            payload.update({
+                "title": self.title,
+                "description": self.description,
+                "long_description": self.long_description,
+                "creator": self.creator,
+                "language": self.language,
+                "date": self.date,
+                "tags": list(self.tags),
+                "size": self.size,
+                "article_count": self.article_count,
+            })
+        return payload
 
 
 @dataclass

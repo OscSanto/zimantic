@@ -26,12 +26,13 @@ Zero 2 W.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. Every search covers **all** available sources; source filters control what is displayed, never what is searched.
+- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
 - **Built-in article serving**: local result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
 - **Web page and JSON API**: search from any browser on the network or use your own programs.
-  Routes use short paths such as `/search`, `/content/<zim>/<path>`, `/article/<zim>/<path>` and `/health`.
+  Routes use short paths such as `/search`, `/library`, `/content/<zim>/<path>`, `/article/<zim>/<path>` and `/health`.
 
 Zimantic can search and serve articles from its local ZIM archives. An optional
 [kiwix-serve](https://kiwix.org/en/applications/) remains useful for sources that are only

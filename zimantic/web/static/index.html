@@ -12,46 +12,74 @@
     </head>
     <body>
         <div class="wrap">
-            <h1 id="homeHeading" role="button" tabindex="0" aria-label="Clear or restore search">Zimantic</h1>
-            <div class="subtitle">
-                Search your offline library by meaning, title, or full text. Results arrive as each source finishes.
-            </div>
+            <header class="site-header">
+                <h1 id="homeHeading" role="button" tabindex="0" aria-label="Clear or restore search">Zimantic</h1>
+                <nav class="view-nav" aria-label="Primary">
+                    <a href="/">Search</a>
+                    <a href="/library">Library</a>
+                </nav>
+            </header>
 
-            <form id="searchForm" autocomplete="off">
-                <input
-                    id="question"
-                    type="search"
-                    placeholder="how to change a lightbulb"
-                    aria-label="Search query"
-                />
-                <button id="searchButton" type="submit">Search</button>
-            </form>
-
-            <div class="status" id="status"></div>
-            <div class="debug-stats" id="debugStats" hidden></div>
-            <div class="source-filters" id="sourceFilters" hidden>
-                <div class="source-filter-toolbar" id="sourceFilterToolbar">
-                    <span class="source-filter-heading">Filter by source</span>
-                    <input
-                        id="sourceFilterSearch"
-                        class="source-filter-search"
-                        type="search"
-                        placeholder="Search sources"
-                        aria-label="Search sources"
-                    />
+            <main id="searchView">
+                <div class="subtitle">
+                    Search your offline library by meaning, title, or full text. Results arrive as each source finishes.
                 </div>
-                <div
-                    class="source-filter-options"
-                    id="sourceFilterOptions"
-                    role="group"
-                    aria-label="Filter by source"
-                ></div>
-                <div class="source-filter-status" id="sourceFilterStatus" aria-live="polite"></div>
-            </div>
-            <div class="filter-line" id="filterLine"></div>
-            <div id="notice"></div>
-            <div id="results"><div class="empty"></div></div>
-            <nav class="pager" id="pager" aria-label="Results pagination"></nav>
+
+                <form id="searchForm" autocomplete="off">
+                    <input
+                        id="question"
+                        type="search"
+                        placeholder="how to change a lightbulb"
+                        aria-label="Search query"
+                    />
+                    <button id="searchButton" type="submit">Search</button>
+                </form>
+
+                <div class="status" id="status"></div>
+                <div class="debug-stats" id="debugStats" hidden></div>
+                <div class="source-filters" id="sourceFilters" hidden>
+                    <div class="source-filter-toolbar" id="sourceFilterToolbar">
+                        <span class="source-filter-heading">Filter by source</span>
+                        <input
+                            id="sourceFilterSearch"
+                            class="source-filter-search"
+                            type="search"
+                            placeholder="Search sources"
+                            aria-label="Search sources"
+                        />
+                    </div>
+                    <div
+                        class="source-filter-options"
+                        id="sourceFilterOptions"
+                        role="group"
+                        aria-label="Filter by source"
+                    ></div>
+                    <div class="source-filter-status" id="sourceFilterStatus" aria-live="polite"></div>
+                </div>
+                <div class="filter-line" id="filterLine"></div>
+                <div id="notice"></div>
+                <div id="results"><div class="empty"></div></div>
+                <nav class="pager" id="pager" aria-label="Results pagination"></nav>
+            </main>
+
+            <section id="libraryView" hidden aria-labelledby="libraryHeading">
+                <div class="library-heading">
+                    <div>
+                        <h2 id="libraryHeading">Your library</h2>
+                        <p class="subtitle">Browse the sites and books available offline on this device.</p>
+                    </div>
+                    <div class="library-toolbar">
+                        <input
+                            id="libraryFilter"
+                            type="search"
+                            placeholder="Filter library"
+                            aria-label="Filter library"
+                        />
+                        <span id="libraryStatus" class="status" aria-live="polite"></span>
+                    </div>
+                </div>
+                <div id="libraryGrid" class="library-grid"></div>
+            </section>
         </div>
 
         <div id="articleModal" class="article-modal" hidden>

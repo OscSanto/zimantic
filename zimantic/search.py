@@ -103,6 +103,44 @@ _HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
 _PHRASE_MIMETYPES = frozenset({"text/plain", "text/html", "application/xhtml+xml"})
 
 
+def _archive_metadata(archive: Archive) -> dict[str, Any]:
+    """Read the small set of metadata used by the installed-library view."""
+    values: dict[str, Any] = {}
+    for key in (
+        "Title",
+        "Description",
+        "LongDescription",
+        "Creator",
+        "Language",
+        "Date",
+        "Tags",
+    ):
+        try:
+            value = archive.get_metadata(key)
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        value = str(value).strip()
+        if value:
+            values[key] = value
+    tags = tuple(
+        tag
+        for tag in (value.strip() for value in values.get("Tags", "").split(";"))
+        if tag and not tag.startswith("_")
+    )
+    values["Tags"] = tags
+    return values
+
+
+def _archive_has_illustration(archive: Archive) -> bool:
+    try:
+        value = getattr(archive, "has_illustration", False)
+        return bool(value() if callable(value) else value)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+
+
 def _readable_words(text: str) -> Iterator[str]:
     """Yield words from text while treating tags and entities as separators."""
     position = 0
@@ -1193,12 +1231,14 @@ class Search:
                     key = local_name
                 homepage = None
                 icon_path = None
+                metadata: dict[str, Any] = {}
                 index = self.indexes[local_name]
                 if index.archive is not None:
                     try:
                         with index.read_lock:
                             homepage = self._resolve_article_entry(index.archive).path
                             icon_path = _find_archive_icon_path(index.archive, homepage)
+                            metadata = _archive_metadata(index.archive)
                     except (
                         ArticleNotFoundError,
                         ArticleUnavailableError,
@@ -1206,6 +1246,26 @@ class Search:
                         ValueError,
                     ):
                         homepage = None
+                icon_url = _source_icon_url(local_name, icon_path)
+                if not icon_url and index.archive is not None and _archive_has_illustration(
+                    index.archive
+                ):
+                    icon_url = _source_icon_url(local_name, "illustration")
+                size = index.source_size
+                if size is None and index.zim_path:
+                    try:
+                        size = Path(index.zim_path).stat().st_size
+                    except OSError:
+                        size = None
+                article_count = None
+                if index.archive is not None:
+                    try:
+                        article_count = getattr(index.archive, "article_count", None)
+                        if callable(article_count):
+                            article_count = article_count()
+                        article_count = int(article_count or 0)
+                    except (AttributeError, RuntimeError, TypeError, ValueError):
+                        article_count = None
                 local[key] = SourceInfo(
                     key=key,
                     name=local_name,
@@ -1214,8 +1274,17 @@ class Search:
                     local_name=local_name,
                     homepage=homepage,
                     icon_path=icon_path,
-                    icon_url=_source_icon_url(local_name, icon_path),
+                    icon_url=icon_url,
                     intent_phrases=_intent_phrases(local_name),
+                    title=metadata.get("Title"),
+                    description=metadata.get("Description"),
+                    long_description=metadata.get("LongDescription"),
+                    creator=metadata.get("Creator"),
+                    language=metadata.get("Language"),
+                    date=metadata.get("Date"),
+                    tags=metadata.get("Tags", ()),
+                    size=size,
+                    article_count=article_count,
                 )
 
             merged = dict(local)
@@ -1342,6 +1411,88 @@ class Search:
         with self._state_lock:
             return [source.to_dict() for source in self.sources.values()]
 
+    def _inspect_library_archive(self, zim_name: str, zim_path: Path) -> SourceInfo:
+        """Build library metadata for a local archive not used by search."""
+        try:
+            archive = Archive(str(zim_path))
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            logger.warning("zimantic: library metadata unavailable for %s (%s)", zim_path, error)
+            return SourceInfo(
+                key=_zim_key(zim_name),
+                name=zim_name,
+                book=zim_name,
+                mode="local",
+                local_name=zim_name,
+                available=False,
+                error="ZIM archive is unavailable",
+                size=zim_path.stat().st_size if zim_path.exists() else None,
+            )
+
+        homepage = None
+        try:
+            homepage = self._resolve_article_entry(archive).path
+        except (ArticleNotFoundError, ArticleUnavailableError, RuntimeError, ValueError):
+            pass
+        icon_path = _find_archive_icon_path(archive, homepage)
+        metadata = _archive_metadata(archive)
+        icon_url = _source_icon_url(zim_name, icon_path)
+        if not icon_url and _archive_has_illustration(archive):
+            icon_url = _source_icon_url(zim_name, "illustration")
+        try:
+            size = zim_path.stat().st_size
+        except OSError:
+            size = None
+        try:
+            article_count = int(getattr(archive, "article_count", 0) or 0)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            article_count = None
+        return SourceInfo(
+            key=_zim_key(zim_name),
+            name=zim_name,
+            book=zim_name,
+            mode="local",
+            local_name=zim_name,
+            homepage=homepage,
+            icon_path=icon_path,
+            icon_url=icon_url,
+            title=metadata.get("Title"),
+            description=metadata.get("Description"),
+            long_description=metadata.get("LongDescription"),
+            creator=metadata.get("Creator"),
+            language=metadata.get("Language"),
+            date=metadata.get("Date"),
+            tags=metadata.get("Tags", ()),
+            size=size,
+            article_count=article_count,
+        )
+
+    def library_dicts(self) -> list[dict[str, Any]]:
+        """Return metadata for every local ZIM, including unindexed archives."""
+        with self._state_lock:
+            indexed = {
+                source.local_name: source
+                for source in self.sources.values()
+                if source.mode == "local" and source.local_name
+            }
+        library: list[dict[str, Any]] = []
+        for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
+            source = indexed.get(zim_name)
+            if source is None:
+                source = self._inspect_library_archive(zim_name, zim_path)
+            library.append(source.to_dict(include_metadata=True))
+        return library
+
+    def library_version(self):
+        """Return a cheap token that changes when installed ZIM files change."""
+        signatures = []
+        for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
+            try:
+                stat = zim_path.stat()
+            except OSError:
+                continue
+            signatures.append((zim_name, stat.st_size, stat.st_mtime_ns))
+        return (self.source_version(), tuple(signatures))
+
     def source_version(self) -> int:
         """Monotonic token that changes whenever the source set changes.
 
@@ -1394,6 +1545,48 @@ class Search:
                 raise ArticleUnavailableError("article redirect is unavailable") from error
         raise ArticleUnavailableError("article redirect chain is too long")
 
+    def _read_archive_article(
+        self,
+        archive: Archive,
+        zim_name: str,
+        path: str | None,
+        head_only: bool,
+    ) -> dict[str, Any]:
+        requested_path = None if path is None else self._article_path(path)
+        try:
+            entry = self._resolve_article_entry(archive, requested_path)
+            item = entry.get_item()
+            mimetype = (
+                item.mimetype or "application/octet-stream"
+            ).split(";", 1)[0].strip().lower()
+            max_bytes = _int_config(
+                self.cfg,
+                "max_article_bytes",
+                33_554_432,
+                minimum=1,
+            )
+            size = int(getattr(item, "size", 0) or 0)
+            if size > max_bytes:
+                raise ArticleTooLargeError(
+                    f"article exceeds the {max_bytes} byte serving limit"
+                )
+            content = item.content[:HEAD_READ_BYTES] if head_only else item.content
+        except (ArticleNotFoundError, ArticleUnavailableError):
+            raise
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise ArticleUnavailableError("article content is unavailable") from error
+        if not head_only and len(content) > max_bytes:
+            raise ArticleTooLargeError(
+                f"article exceeds the {max_bytes} byte serving limit"
+            )
+        return {
+            "zim": zim_name,
+            "path": entry.path,
+            "title": entry.title,
+            "mimetype": mimetype,
+            "content": content,
+        }
+
     def read_article(
         self,
         zim_name: str,
@@ -1411,7 +1604,14 @@ class Search:
         with self._state_lock:
             index = self.indexes.get(zim_name)
         if index is None:
-            raise ArticleNotFoundError("ZIM not found")
+            zim_path = self._scan_zim_paths().get(zim_name)
+            if zim_path is None:
+                raise ArticleNotFoundError("ZIM not found")
+            try:
+                archive = Archive(str(zim_path))
+            except (OSError, RuntimeError, ValueError) as error:
+                raise ArticleUnavailableError("ZIM archive is unavailable") from error
+            return self._read_archive_article(archive, zim_name, path, head_only)
         if index.archive is None:
             raise ArticleUnavailableError("ZIM archive is unavailable")
 
@@ -1422,43 +1622,13 @@ class Search:
             except RuntimeError as error:
                 raise ArticleUnavailableError("ZIM is being reloaded") from error
             acquired = True
-            requested_path = None if path is None else self._article_path(path)
             with index.read_lock:
-                try:
-                    entry = self._resolve_article_entry(index.archive, requested_path)
-                    item = entry.get_item()
-                    mimetype = (
-                        item.mimetype or "application/octet-stream"
-                    ).split(";", 1)[0].strip().lower()
-                    max_bytes = _int_config(
-                        self.cfg,
-                        "max_article_bytes",
-                        33_554_432,
-                        minimum=1,
-                    )
-                    size = int(getattr(item, "size", 0) or 0)
-                    if size > max_bytes:
-                        raise ArticleTooLargeError(
-                            f"article exceeds the {max_bytes} byte serving limit"
-                        )
-                    content = (
-                        item.content[:HEAD_READ_BYTES] if head_only else item.content
-                    )
-                except (ArticleNotFoundError, ArticleUnavailableError):
-                    raise
-                except (KeyError, RuntimeError, ValueError) as error:
-                    raise ArticleUnavailableError("article content is unavailable") from error
-            if not head_only and len(content) > max_bytes:
-                raise ArticleTooLargeError(
-                    f"article exceeds the {max_bytes} byte serving limit"
+                return self._read_archive_article(
+                    index.archive,
+                    zim_name,
+                    path,
+                    head_only,
                 )
-            return {
-                "zim": zim_name,
-                "path": entry.path,
-                "title": entry.title,
-                "mimetype": mimetype,
-                "content": content,
-            }
         finally:
             if acquired:
                 self._release_index(index)
@@ -1468,6 +1638,32 @@ class Search:
     ) -> dict[str, Any]:
         """Read only the leading bytes of one entry (see ``read_article``)."""
         return self.read_article(zim_name, path, head_only=True)
+
+    def _read_archive_icon(
+        self,
+        archive: Archive,
+        zim_name: str,
+        icon_path: str | None,
+    ) -> dict[str, Any]:
+        if icon_path:
+            return self._read_archive_article(archive, zim_name, icon_path, False)
+        try:
+            item = archive.get_illustration_item(48)
+            content = item.content
+            mimetype = (
+                item.mimetype or "application/octet-stream"
+            ).split(";", 1)[0].strip().lower()
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            raise ArticleNotFoundError("source icon not found") from error
+        if len(content) > 1 << 20:
+            raise ArticleTooLargeError("source icon exceeds the 1048576 byte serving limit")
+        return {
+            "zim": zim_name,
+            "path": None,
+            "title": zim_name,
+            "mimetype": mimetype,
+            "content": content,
+        }
 
     def read_source_icon(self, zim_name: str) -> dict[str, Any]:
         """Read the source illustration selected during local source discovery."""
@@ -1480,9 +1676,40 @@ class Search:
                 ),
                 None,
             )
-        if source is None or source.mode != "local" or not source.icon_path:
+        if source is not None and source.mode == "local" and source.icon_path:
+            return self.read_article(zim_name, source.icon_path)
+        if source is None:
+            zim_path = self._scan_zim_paths().get(zim_name)
+            if zim_path is None:
+                raise ArticleNotFoundError("source icon not found")
+            try:
+                archive = Archive(str(zim_path))
+            except (OSError, RuntimeError, ValueError) as error:
+                raise ArticleUnavailableError("source icon unavailable") from error
+            try:
+                homepage = self._resolve_article_entry(archive).path
+            except (ArticleNotFoundError, ArticleUnavailableError, RuntimeError, ValueError):
+                homepage = None
+            icon_path = _find_archive_icon_path(archive, homepage)
+            return self._read_archive_icon(archive, zim_name, icon_path)
+        if source.mode != "local":
             raise ArticleNotFoundError("source icon not found")
-        return self.read_article(zim_name, source.icon_path)
+        with self._state_lock:
+            index = self.indexes.get(zim_name)
+        if index is None or index.archive is None:
+            raise ArticleUnavailableError("source icon unavailable")
+        acquired = False
+        try:
+            try:
+                self._acquire_index(index)
+            except RuntimeError as error:
+                raise ArticleUnavailableError("ZIM is being reloaded") from error
+            acquired = True
+            with index.read_lock:
+                return self._read_archive_icon(index.archive, zim_name, None)
+        finally:
+            if acquired:
+                self._release_index(index)
 
     @staticmethod
     def _is_random_article_entry(entry: Any) -> bool:

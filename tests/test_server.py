@@ -27,7 +27,13 @@ class FakeSearch:
         }
 
     def source_dicts(self):
-        return [{"key": "manual", "name": "Manual", "available": True}]
+        return [{
+            "key": "manual",
+            "name": "Manual",
+            "mode": "local",
+            "local_name": "manual",
+            "available": True,
+        }]
 
     def refresh_sources(self):
         self.refresh_calls += 1
@@ -86,6 +92,7 @@ class ServerTests(unittest.TestCase):
 
     def test_sources_and_json_search(self):
         self.assertEqual(self.client.get("/sources").json()[0]["key"], "manual")
+        self.assertEqual(self.client.get("/library.json").json()[0]["name"], "Manual")
         response = self.client.get("/search?q=page")
         self.assertEqual(response.json()[0]["title"], "Page")
         # Totals travel as headers so the body stays a plain list.
@@ -107,6 +114,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(javascript.status_code, 200)
         self.assertTrue(javascript.headers["content-type"].startswith("application/javascript"))
         self.assertIn("initialize();", javascript.text)
+
+    def test_library_view_is_served(self):
+        page = self.client.get("/library")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('href="/library"', page.text)
+        self.assertIn('id="libraryView"', page.text)
 
     def test_favicon_is_served(self):
         response = self.client.get("/favicon.ico")

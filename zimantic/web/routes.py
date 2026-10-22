@@ -25,6 +25,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     def page():
         return FileResponse(web_app.PAGE)
 
+    @app.get("/library", include_in_schema=False)
+    def library_page():
+        return FileResponse(web_app.PAGE)
+
     static_routes = (
         ("/app.css", web_app.APP_CSS, "text/css"),
         ("/app.js", web_app.APP_JS, "application/javascript"),
@@ -79,6 +83,25 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             "sources",
             version,
             search_class.source_dicts,
+            memos,
+        )
+
+    @app.get("/library.json")
+    def library(request: Request):
+        version_of = getattr(search_class, "library_version", None)
+        version = version_of() if callable(version_of) else 0
+        library_of = getattr(search_class, "library_dicts", None)
+        if not callable(library_of):
+            library_of = lambda: [
+                source
+                for source in search_class.source_dicts()
+                if source.get("mode") == "local"
+            ]
+        return web_app._json_response(
+            request,
+            "library",
+            version,
+            library_of,
             memos,
         )
 

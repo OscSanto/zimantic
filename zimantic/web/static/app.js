@@ -15,6 +15,7 @@
             const SOURCE_FILTER_LIMIT = 10;
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
+            let librarySources = [];
             let current = null;
             let previousHeadingSearch = null;
             let selectedSourceKeys = new Set();
@@ -85,6 +86,167 @@
                             "'": "&#39;",
                         })[c],
                 );
+            }
+
+            function contentUrl(zim, path = null) {
+                const encodedZim = encodeURIComponent(String(zim || ""));
+                if (!path) return `/content/${encodedZim}`;
+                const encodedPath = String(path)
+                    .split("/")
+                    .filter(Boolean)
+                    .map((part) => encodeURIComponent(part))
+                    .join("/");
+                return encodedPath ? `/content/${encodedZim}/${encodedPath}` : `/content/${encodedZim}`;
+            }
+
+            function formatLibrarySize(bytes) {
+                const value = Number(bytes);
+                if (!Number.isFinite(value) || value <= 0) return "";
+                const units = ["B", "MB", "GB", "TB"];
+                let size = value;
+                let unit = 0;
+                while (size >= 1024 && unit < units.length - 1) {
+                    size /= 1024;
+                    unit++;
+                }
+                return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+            }
+
+            function libraryTitle(source) {
+                return String(source.title || source.name || source.book || "Untitled ZIM").trim();
+            }
+
+            function renderLibrary() {
+                const grid = $("libraryGrid");
+                const status = $("libraryStatus");
+                if (!grid || !status) return;
+                grid.replaceChildren();
+                if (!librarySources.length) {
+                    status.textContent = "No installed ZIMs found.";
+                    const empty = document.createElement("p");
+                    empty.className = "empty";
+                    empty.textContent = "Add a .zim file to the configured library and reload the server.";
+                    grid.appendChild(empty);
+                    return;
+                }
+                const query = $("libraryFilter").value.trim().toLocaleLowerCase();
+                const visibleSources = query
+                    ? librarySources.filter((source) =>
+                          [
+                              source.title,
+                              source.name,
+                              source.description,
+                              source.long_description,
+                              source.creator,
+                              ...(Array.isArray(source.tags) ? source.tags : []),
+                          ]
+                              .filter(Boolean)
+                              .join(" ")
+                              .toLocaleLowerCase()
+                              .includes(query),
+                      )
+                    : librarySources;
+                status.textContent = query
+                    ? `${visibleSources.length} of ${librarySources.length} installed ZIMs`
+                    : `${librarySources.length} installed ZIM${librarySources.length === 1 ? "" : "s"}`;
+                if (!visibleSources.length) {
+                    const empty = document.createElement("p");
+                    empty.className = "empty";
+                    empty.textContent = "No installed ZIM matches that filter.";
+                    grid.appendChild(empty);
+                    return;
+                }
+                visibleSources.forEach((source) => {
+                    const title = libraryTitle(source);
+                    const zim = source.local_name || source.book || source.name;
+                    const homepage = contentUrl(zim, source.homepage);
+                    const card = document.createElement("article");
+                    card.className = "library-card";
+                    const available = source.available !== false;
+
+                    const preview = document.createElement(available ? "a" : "div");
+                    preview.className = "library-card-preview";
+                    if (available) {
+                        preview.href = homepage;
+                        preview.dataset.libraryArticle = "true";
+                        preview.setAttribute("aria-label", `Open ${title}`);
+                    } else {
+                        preview.classList.add("library-card-unavailable");
+                        preview.textContent = "Unavailable";
+                    }
+                    if (source.icon_url) {
+                        const image = document.createElement("img");
+                        image.src = source.icon_url;
+                        image.alt = "";
+                        image.loading = "lazy";
+                        image.decoding = "async";
+                        image.addEventListener("error", () => {
+                            image.remove();
+                            preview.classList.add("library-card-placeholder");
+                            preview.textContent = title.slice(0, 1).toUpperCase();
+                        }, { once: true });
+                        preview.appendChild(image);
+                    } else {
+                        preview.classList.add("library-card-placeholder");
+                        preview.textContent = title.slice(0, 1).toUpperCase();
+                    }
+
+                    const body = document.createElement("div");
+                    body.className = "library-card-body";
+                    const heading = document.createElement("h3");
+                    heading.textContent = title;
+                    body.appendChild(heading);
+                    const description =
+                        source.long_description ||
+                        source.description ||
+                        (available ? "" : source.error || "This ZIM cannot be opened.");
+                    if (description) {
+                        const text = document.createElement("p");
+                        text.className = "library-card-description";
+                        text.textContent = description;
+                        body.appendChild(text);
+                    }
+                    const details = document.createElement("p");
+                    details.className = "library-card-details";
+                    const detailValues = [
+                        source.language && String(source.language).toUpperCase(),
+                        formatLibrarySize(source.size),
+                        Number(source.article_count) > 0
+                            ? `${Number(source.article_count).toLocaleString()} articles`
+                            : "",
+                        source.date || "",
+                    ].filter(Boolean);
+                    details.textContent = detailValues.join(" · ");
+                    details.hidden = !detailValues.length;
+                    body.appendChild(details);
+                    if (source.creator) {
+                        const creator = document.createElement("p");
+                        creator.className = "library-card-creator";
+                        creator.textContent = `By ${source.creator}`;
+                        body.appendChild(creator);
+                    }
+                    const tags = Array.isArray(source.tags)
+                        ? source.tags.filter(Boolean).slice(0, 4)
+                        : [];
+                    if (tags.length) {
+                        const tagLine = document.createElement("p");
+                        tagLine.className = "library-card-tags";
+                        tagLine.textContent = tags.join(" · ");
+                        body.appendChild(tagLine);
+                    }
+                    const action = document.createElement(available ? "a" : "span");
+                    action.className = "secondary library-card-action";
+                    if (available) {
+                        action.href = homepage;
+                        action.dataset.libraryArticle = "true";
+                        action.textContent = "Open homepage";
+                    } else {
+                        action.textContent = "Unavailable";
+                    }
+                    body.appendChild(action);
+                    card.append(preview, body);
+                    grid.appendChild(card);
+                });
             }
 
             function resultKey(item) {
@@ -1772,6 +1934,16 @@
                 openArticleModal(link);
             });
 
+            $("libraryGrid").addEventListener("click", (event) => {
+                const target = event.target instanceof Element ? event.target : null;
+                const link = target?.closest("a[data-library-article]");
+                if (!link || modifiedClick(event)) return;
+                if (new URL(link.href, location.href).origin !== location.origin) return;
+                event.preventDefault();
+                showArticleModal(new URL(link.href, location.href).href, "manual");
+            });
+            $("libraryFilter").addEventListener("input", renderLibrary);
+
             $("pager").addEventListener("click", (event) => {
                 const link = event.target.closest("a[data-page]");
                 if (!link || !current) return;
@@ -1915,13 +2087,16 @@
             });
 
             async function initialize() {
+                const libraryView = location.pathname === "/library";
                 try {
                     // Source discovery is read-only; refreshing the index/catalog set is an
                     // admin action done only via `zimantic reload` or SIGHUP.
-                    const [configResponse, sourcesResponse] = await Promise.all([
+                    const requests = [
                         fetch("/config"),
                         fetch("/sources"),
-                    ]);
+                    ];
+                    if (libraryView) requests.push(fetch("/library.json"));
+                    const [configResponse, sourcesResponse, libraryResponse] = await Promise.all(requests);
                     if (configResponse.ok) {
                         const config = await configResponse.json();
                         debugMode = Boolean(config.debug);
@@ -1931,15 +2106,23 @@
                     }
                     if (!sourcesResponse.ok) throw new Error(`HTTP ${sourcesResponse.status}`);
                     sources = await sourcesResponse.json();
+                    if (libraryView) {
+                        if (!libraryResponse.ok) throw new Error(`HTTP ${libraryResponse.status}`);
+                        librarySources = await libraryResponse.json();
+                        renderLibrary();
+                    }
                 } catch (error) {
                     $("status").textContent = `Could not load sources: ${error.message}`;
                 }
+                $("searchView").hidden = libraryView;
+                $("libraryView").hidden = !libraryView;
+                document.body.classList.toggle("library-active", libraryView);
                 const state = readLocationState();
                 syncArticleModal(state.modal);
                 if (state.question) {
                     $("question").value = state.question;
                     runSearch(state.question, state.selectedSources, state.page);
-                } else {
+                } else if (!libraryView) {
                     $("question").focus();
                 }
             }
