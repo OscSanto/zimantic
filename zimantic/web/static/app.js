@@ -119,7 +119,7 @@
             function formatLibrarySize(bytes) {
                 const value = Number(bytes);
                 if (!Number.isFinite(value) || value <= 0) return "";
-                const units = ["B", "MB", "GB", "TB"];
+                const units = ["B", "KB", "MB", "GB", "TB"];
                 let size = value;
                 let unit = 0;
                 while (size >= 1024 && unit < units.length - 1) {
