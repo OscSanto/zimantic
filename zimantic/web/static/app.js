@@ -192,6 +192,11 @@
                 const grid = $("libraryGrid");
                 const status = $("libraryStatus");
                 if (!grid || !status) return;
+                const filter = $("libraryFilter");
+                if (filter) {
+                    const count = librarySources.length;
+                    filter.placeholder = `Filter titles of ${count} ZIM${count === 1 ? "" : "s"}`;
+                }
                 grid.replaceChildren();
                 if (!librarySources.length) {
                     status.textContent = "No installed ZIMs found.";
@@ -220,7 +225,7 @@
                     : librarySources;
                 status.textContent = query
                     ? `${visibleSources.length} of ${librarySources.length} installed ZIMs`
-                    : `${librarySources.length} installed ZIM${librarySources.length === 1 ? "" : "s"}`;
+                      : "";
                 if (!visibleSources.length) {
                     const empty = document.createElement("p");
                     empty.className = "empty";
