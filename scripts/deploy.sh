@@ -30,11 +30,9 @@ sudo "$venv/bin/python" -m pip install \
     "$repo" >/tmp/zimantic-pip-release.log
 sudo systemctl restart zimantic
 
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
 ready=
 for _ in $(seq 1 20); do
-    if curl -fsS --max-time 2 http://127.0.0.1:8090/app.js -o "$tmp"; then
+    if curl -fsS --max-time 2 http://127.0.0.1:8090/app.js >/dev/null 2>&1; then
         ready=1
         break
     fi
