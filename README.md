@@ -359,6 +359,19 @@ Set `DEPLOY_HOST` and `DEPLOY_PATH` to override the SSH target and remote checko
 The deploy target updates the existing checkout, reinstalls the package, restarts
 `zimantic.service`, and verifies the HTTP service and installed package version.
 
+For a development deploy, stage the changes to send and apply them to the existing
+remote checkout without checking out a tag. Before applying the patch, the deploy
+resets tracked files in the remote checkout to `HEAD`, discarding previous
+development-deploy changes:
+
+```bash
+git add path/to/changed-file
+./scripts/deploy.sh --dev
+# or: make deploy DEV=1
+```
+
+The development deploy leaves the newly applied changes in the remote checkout.
+
 ## Use
 
 ```bash

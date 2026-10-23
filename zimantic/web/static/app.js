@@ -2186,6 +2186,66 @@
                 runSearch(previous.question, previous.selectedSources, previous.page);
             }
 
+            function celebrateHeadingClick(event) {
+                if (reducedMotion()) return;
+                const heading = $("homeHeading");
+                if (!heading) return;
+
+                const burst = document.createElement("div");
+                burst.className = "confetti-burst";
+                burst.setAttribute("aria-hidden", "true");
+                document.body.appendChild(burst);
+
+                const rect = heading.getBoundingClientRect();
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
+                const hasPointerPosition =
+                    Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY);
+                const originX = hasPointerPosition ? event.clientX : centerX;
+                const originY = hasPointerPosition ? event.clientY : centerY;
+                const offsetX = originX - centerX;
+                const offsetY = originY - centerY;
+                const offsetLength = Math.hypot(offsetX, offsetY);
+                const clickTimePhase = ((Date.now() % 1000) / 1000) * Math.PI * 2;
+                const direction = offsetLength > 4 ? Math.atan2(offsetY, offsetX) : clickTimePhase;
+                const colors = ["var(--accent)", "var(--ok)", "var(--err)", "var(--text)"];
+                const pieceCount = 28;
+                let remaining = pieceCount;
+                for (let index = 0; index < pieceCount; index++) {
+                    const piece = document.createElement("span");
+                    piece.className = "confetti-piece";
+                    piece.style.left = `${originX}px`;
+                    piece.style.top = `${originY}px`;
+                    piece.style.setProperty(
+                        "--confetti-color",
+                        colors[Math.floor(Math.random() * colors.length)],
+                    );
+                    const angle = direction + (Math.random() - 0.5) * (Math.PI / 2.5);
+                    const distance = 100 + Math.random() * 140;
+                    piece.style.setProperty("--dx", `${Math.cos(angle) * distance}px`);
+                    piece.style.setProperty("--dy", `${Math.sin(angle) * distance}px`);
+                    piece.style.setProperty("--start-rotation", `${Math.random() * 180}deg`);
+                    piece.style.setProperty("--end-rotation", `${360 + Math.random() * 720}deg`);
+                    piece.style.width = `${4 + Math.random() * 5}px`;
+                    piece.style.height = `${8 + Math.random() * 7}px`;
+                    piece.addEventListener(
+                        "animationend",
+                        () => {
+                            piece.remove();
+                            remaining--;
+                            if (!remaining) burst.remove();
+                        },
+                        { once: true },
+                    );
+                    burst.appendChild(piece);
+                }
+            }
+
+            function activateHomeHeading(event) {
+                celebrateHeadingClick(event);
+                toggleHeadingSearch();
+            }
+
             function submitSearch(pushHistory) {
                 const question = $("question").value.trim();
                 if (!question) {
@@ -2208,11 +2268,11 @@
                 submitSearch(true);
             });
 
-            $("homeHeading").addEventListener("click", toggleHeadingSearch);
+            $("homeHeading").addEventListener("click", activateHomeHeading);
             $("homeHeading").addEventListener("keydown", (event) => {
                 if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    toggleHeadingSearch();
+                    activateHomeHeading(event);
                 }
             });
 

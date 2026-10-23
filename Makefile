@@ -1,6 +1,7 @@
 UV ?= uv
 PYTHON ?= python3
 VERSION ?=
+DEV ?=
 DEPLOY_HOST ?= 192.168.1.219
 DEPLOY_PATH ?= /opt/iiab/zimantic
 
@@ -26,7 +27,7 @@ release-dry-run:
 
 deploy:
 	DEPLOY_HOST="$(DEPLOY_HOST)" DEPLOY_PATH="$(DEPLOY_PATH)" VERSION="$(VERSION)" \
-		./scripts/deploy.sh
+		./scripts/deploy.sh $(if $(DEV),--dev,)
 
 release-deploy: release
 	$(MAKE) deploy VERSION="$(VERSION)"

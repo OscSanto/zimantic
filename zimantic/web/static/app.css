@@ -89,6 +89,20 @@ h1 {
 h1[role="button"] {
     display: inline-block;
     cursor: pointer;
+    transition:
+        color 0.18s ease,
+        transform 0.18s ease;
+}
+h1[role="button"]:hover {
+    color: var(--accent);
+}
+h1[role="button"]:active {
+    transform: scale(0.96);
+}
+h1[role="button"]:focus-visible {
+    border-radius: 4px;
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
 }
 .subtitle,
 .status,
@@ -397,6 +411,35 @@ ol.results {
     display: flex;
     gap: 10px;
 }
+.library-toolbar button {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 400;
+    line-height: inherit;
+    padding: 7px 10px;
+    transition:
+        background-color 0.18s ease,
+        border-color 0.18s ease,
+        color 0.18s ease,
+        transform 0.1s ease;
+}
+.library-toolbar button:hover {
+    background: var(--mark-bg);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.library-toolbar button:active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    transform: translateY(1px);
+}
+.library-toolbar button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
 .library-toolbar input {
     max-width: 220px;
     padding: 7px 10px;
@@ -600,6 +643,31 @@ summary {
 }
 .result-exit {
     pointer-events: none;
+}
+.confetti-burst {
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    position: fixed;
+    z-index: 1101;
+}
+.confetti-piece {
+    animation: confetti-fall 1100ms cubic-bezier(0.2, 0.75, 0.35, 1) forwards;
+    background: var(--confetti-color);
+    border-radius: 1px;
+    height: 10px;
+    position: absolute;
+    width: 6px;
+}
+@keyframes confetti-fall {
+    from {
+        opacity: 1;
+        transform: translate3d(0, 0, 0) rotate(var(--start-rotation));
+    }
+    to {
+        opacity: 0;
+        transform: translate3d(var(--dx), var(--dy), 0) rotate(var(--end-rotation));
+    }
 }
 @media (prefers-reduced-motion: reduce) {
     *,
