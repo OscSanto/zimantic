@@ -2161,6 +2161,11 @@
             }
 
             function toggleHeadingSearch() {
+                if (location.pathname === appPath("/library")) {
+                    history.pushState(null, "", appPath("/"));
+                    initialize();
+                    return;
+                }
                 if (current) {
                     previousHeadingSearch = {
                         question: current.question,
@@ -2232,6 +2237,10 @@
 
             async function initialize() {
                 const libraryView = location.pathname === appPath("/library");
+                $("homeHeading").setAttribute(
+                    "aria-label",
+                    libraryView ? "Switch to search" : "Clear or restore search",
+                );
                 try {
                     // Source discovery is read-only; refreshing the index/catalog set is an
                     // admin action done only via `zimantic reload` or SIGHUP.
