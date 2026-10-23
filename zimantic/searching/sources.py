@@ -117,10 +117,12 @@ def _find_archive_icon_path(archive: Archive, homepage: str | None) -> str | Non
     return None
 
 
-def _source_icon_url(zim_name: str, icon_path: str | None) -> str | None:
+def _source_icon_url(
+    zim_name: str, icon_path: str | None, base_path: str = ""
+) -> str | None:
     if not icon_path:
         return None
-    return f"/source-icon/{quote(zim_name, safe='')}"
+    return f"{base_path}/source-icon/{quote(zim_name, safe='')}"
 
 
 def _bounded_catalog_url(url: str, limit: int) -> str:

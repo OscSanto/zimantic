@@ -56,6 +56,7 @@ from .searching.sources import (
     _source_icon_url,
     _zim_key,
 )
+from .settings import normalize_web_base_path
 from .content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PARSE_TIMEOUT,
@@ -556,6 +557,11 @@ class Search:
         # refreshed in the background so an unreachable Kiwix server cannot
         # delay startup (see start_catalog_refresh).
         self.refresh_local_sources()
+
+    @property
+    def web_base_path(self) -> str:
+        """Normalized URL prefix for generated links (reverse-proxy support)."""
+        return normalize_web_base_path(self.cfg.get("web_base_path"))
 
     @staticmethod
     def _index_uri(db_path: Path) -> str:
@@ -1223,6 +1229,7 @@ class Search:
         threading.Thread(target=_refresh, name="zimantic-catalog", daemon=True).start()
 
     def _rebuild_sources(self, entries: list[dict[str, str]]) -> list[dict[str, Any]]:
+        web_base_path = self.web_base_path
         with self._state_lock:
             local: dict[str, SourceInfo] = {}
             for local_name in self.indexes:
@@ -1246,11 +1253,13 @@ class Search:
                         ValueError,
                     ):
                         homepage = None
-                icon_url = _source_icon_url(local_name, icon_path)
+                icon_url = _source_icon_url(local_name, icon_path, web_base_path)
                 if not icon_url and index.archive is not None and _archive_has_illustration(
                     index.archive
                 ):
-                    icon_url = _source_icon_url(local_name, "illustration")
+                    icon_url = _source_icon_url(
+                        local_name, "illustration", web_base_path
+                    )
                 size = index.source_size
                 if size is None and index.zim_path:
                     try:
@@ -1435,9 +1444,10 @@ class Search:
             pass
         icon_path = _find_archive_icon_path(archive, homepage)
         metadata = _archive_metadata(archive)
-        icon_url = _source_icon_url(zim_name, icon_path)
+        web_base_path = self.web_base_path
+        icon_url = _source_icon_url(zim_name, icon_path, web_base_path)
         if not icon_url and _archive_has_illustration(archive):
-            icon_url = _source_icon_url(zim_name, "illustration")
+            icon_url = _source_icon_url(zim_name, "illustration", web_base_path)
         try:
             size = zim_path.stat().st_size
         except OSError:
@@ -2653,6 +2663,7 @@ class Search:
         """Build result documents directly from native ZIM search hits."""
         if archive is None:
             return {}
+        web_base_path = self.web_base_path
         docs: dict[int, dict[str, Any]] = {}
         for rowid, entry in entries.items():
             try:
@@ -2671,7 +2682,7 @@ class Search:
                 "path": path,
                 "mimetype": None,
                 "url": (
-                    f"/content/{quote(source.local_name or source.book, safe='')}/"
+                    f"{web_base_path}/content/{quote(source.local_name or source.book, safe='')}/"
                     f"{quote(path, safe='/')}"
                 ),
             }
@@ -2705,6 +2716,7 @@ class Search:
         # kiwix_url is optional: without it results have no article link, so the
         # UI renders the title as plain text instead of building a broken URL.
         kiwix_url = str(self.cfg.get("kiwix_url") or "").strip().rstrip("/")
+        web_base_path = self.web_base_path
         docs: dict[int, dict[str, Any]] = {}
         for rowid in values:
             original = rows.get(rowid)
@@ -2725,7 +2737,7 @@ class Search:
                 "path": path,
                 "mimetype": None,
                 "url": (
-                    f"/content/{quote(source.local_name or source.book, safe='')}/"
+                    f"{web_base_path}/content/{quote(source.local_name or source.book, safe='')}/"
                     f"{quote(path, safe='/')}"
                     if source.mode == "local" and (source.local_name or source.book)
                     else (

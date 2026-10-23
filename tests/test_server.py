@@ -111,8 +111,8 @@ class ServerTests(unittest.TestCase):
     def test_page_assets_are_served(self):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
-        self.assertIn('href="/app.css"', page.text)
-        self.assertIn('src="/app.js"', page.text)
+        self.assertIn('href="app.css"', page.text)
+        self.assertIn('src="app.js"', page.text)
 
         css = self.client.get("/app.css")
         self.assertEqual(css.status_code, 200)
@@ -127,8 +127,32 @@ class ServerTests(unittest.TestCase):
     def test_library_view_is_served(self):
         page = self.client.get("/library")
         self.assertEqual(page.status_code, 200)
-        self.assertIn('href="/library"', page.text)
+        self.assertIn('href="library"', page.text)
         self.assertIn('id="libraryView"', page.text)
+
+    def test_base_path_is_used_for_generated_article_urls(self):
+        search = FakeSearch()
+        search.cfg = {"web_base_path": "/zimantic"}
+        search.read_article = lambda _zim, path: {
+            "path": path,
+            "title": "Page",
+            "mimetype": "text/html",
+            "content": b"<html><head><title>Page</title></head><body></body></html>",
+        }
+        search.source_dicts = lambda: [
+            {"local_name": "manual", "icon_url": "/zimantic/source-icon/manual"}
+        ]
+        client = TestClient(create_app(search))
+        response = client.get("/content/manual/page")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("/zimantic/article/manual/page", response.text)
+        self.assertIn("/zimantic/content/manual/page", response.text)
+        self.assertIn('const appBasePath = "/zimantic";', response.text)
+        self.assertIn('href="/zimantic/source-icon/manual"', response.text)
+
+        raw = client.get("/article/manual/page")
+        self.assertEqual(raw.status_code, 200)
+        self.assertIn('const prefix = "/zimantic";', raw.text)
 
     def test_favicon_is_served(self):
         response = self.client.get("/favicon.ico")

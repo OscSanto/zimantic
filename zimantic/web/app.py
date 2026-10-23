@@ -21,6 +21,7 @@ from ..search import (
     ArticleUnavailableError,
 )
 from ..searching.sources import _html_attribute
+from ..settings import normalize_web_base_path
 
 ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"
@@ -239,6 +240,7 @@ script[data-zimantic-toolbar] { display: none !important; }
 
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 (() => {
+  const appBasePath = %s;
   const initialize = () => {
     const toolbar = document.querySelector("nav[data-zimantic-toolbar]");
     if (!toolbar) return;
@@ -306,7 +308,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     window.addEventListener("message", event => {
       if (event.data?.type !== "zimantic-shell-navigate") return;
       const url = String(event.data.url || "");
-      if (url.startsWith("/content/")) location.href = url;
+      if (url.startsWith(`${appBasePath}/content/`)) location.href = url;
     });
     window.addEventListener("message", event => {
       if (event.data?.type !== "zimantic-external-link") return;
@@ -371,7 +373,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           window.parent.postMessage({type: "zimantic-search", query}, "*");
         } else if (query) {
           event.preventDefault();
-          location.href = `/?q=${encodeURIComponent(query)}`;
+          location.href = `${appBasePath}/?q=${encodeURIComponent(query)}`;
         }
       } else if (action === "previous" || action === "next") {
         const url = control.dataset.zimanticUrl;
@@ -512,13 +514,17 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
 (() => {
   const initialize = () => {
     const context = new URL(location.href);
-    const parts = context.pathname.split("/").filter(Boolean);
+    const prefix = %s;
+    const routePath = prefix && context.pathname.startsWith(`${prefix}/`)
+      ? context.pathname.slice(prefix.length)
+      : context.pathname;
+    const parts = routePath.split("/").filter(Boolean);
     let zim = parts[1] || "";
     try {
       zim = decodeURIComponent(zim);
     } catch (_) {}
-    const contentHome = `/content/${zim}`;
-    const articleHome = `/article/${zim}`;
+    const contentHome = `${prefix}/content/${zim}`;
+    const articleHome = `${prefix}/article/${zim}`;
     const contentPrefix = `${contentHome}/`;
     const articlePrefix = `${articleHome}/`;
     document.addEventListener("click", event => {
@@ -570,7 +576,7 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
       if (path === contentHome || path.startsWith(contentPrefix)) {
         contentPath = path;
       } else if (path === articleHome || path.startsWith(articlePrefix)) {
-        contentPath = "/content" + path.slice("/article".length);
+        contentPath = `${prefix}/content` + path.slice(`${prefix}/article`.length);
       }
       // Same-origin app pages and assets are left to the iframe.
       if (!contentPath) return;
@@ -594,19 +600,21 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
 </script>"""
 
 
-def _route_url(route: str, zim: str, path: str | None = None) -> str:
-    url = f"/{route}/{quote_path(zim, safe='')}"
+def _route_url(
+    route: str, zim: str, path: str | None = None, base_path: str = ""
+) -> str:
+    url = f"{base_path}/{route}/{quote_path(zim, safe='')}"
     if path:
         url += f"/{quote_path(path, safe='/')}"
     return url
 
 
-def _content_url(zim: str, path: str | None = None) -> str:
-    return _route_url("content", zim, path)
+def _content_url(zim: str, path: str | None = None, base_path: str = "") -> str:
+    return _route_url("content", zim, path, base_path)
 
 
-def _article_url(zim: str, path: str | None = None) -> str:
-    return _route_url("article", zim, path)
+def _article_url(zim: str, path: str | None = None, base_path: str = "") -> str:
+    return _route_url("article", zim, path, base_path)
 
 
 def _article_http_error(error: Exception) -> HTTPException:
@@ -616,13 +624,19 @@ def _article_http_error(error: Exception) -> HTTPException:
     )
 
 
-def _article_toolbar(zim: str, article: dict) -> str:
-    zim_url = _content_url(zim)
-    random_url = f"/random?zim={quote_path(zim, safe='')}"
+def _search_base_path(search) -> str:
+    """Normalized reverse-proxy path prefix for the given Search instance."""
+    cfg = getattr(search, "cfg", {}) or {}
+    return normalize_web_base_path(cfg.get("web_base_path"))
+
+
+def _article_toolbar(zim: str, article: dict, base_path: str = "") -> str:
+    zim_url = _content_url(zim, base_path=base_path)
+    random_url = f"{base_path}/random?zim={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
     article_path = str(article.get("path") or "").strip("/")
     path_parts = [part for part in article_path.split("/") if part]
-    permalink_url = _content_url(zim, article_path) if article_path else zim_url
+    permalink_url = _content_url(zim, article_path, base_path)
     article_title = html_escape(
         str(article.get("title") or article_path or "Permalink"),
         quote=False,
@@ -630,7 +644,7 @@ def _article_toolbar(zim: str, article: dict) -> str:
     breadcrumbs = []
     for depth in range(1, len(path_parts)):
         parent_path = "/".join(path_parts[:depth])
-        parent_url = _content_url(zim, parent_path)
+        parent_url = _content_url(zim, parent_path, base_path)
         breadcrumbs.append(
             f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
             f'<a class="zimantic-toolbar-breadcrumb" href="{parent_url}" '
@@ -675,13 +689,15 @@ def _article_toolbar(zim: str, article: dict) -> str:
         hidden disabled aria-label="Next link in parent page"
         title="Open the next link in the parent page">→</button>
     </span>
-    <a href="/" data-zimantic-action="home" title="Search your library">Zimantic</a>
+    <a href="{base_path}/" data-zimantic-action="home" title="Search your library">Zimantic</a>
   </div>
   <span class="zimantic-toolbar-status" data-zimantic-toolbar-status aria-live="polite"></span>
 </nav>"""
 
 
-def _decorate_article_bridge(content: bytes | memoryview, zim: str) -> bytes:
+def _decorate_article_bridge(
+    content: bytes | memoryview, zim: str, base_path: str = ""
+) -> bytes:
     """Add the shell-navigation bridge and mobile fallback to a raw article.
 
     The article keeps its own markup; a small script lets link clicks ask the
@@ -697,7 +713,7 @@ def _decorate_article_bridge(content: bytes | memoryview, zim: str) -> bytes:
         return content
 
     document, mobile_head = _mobile_article_head(document)
-    additions = mobile_head + ARTICLE_NAV_BRIDGE_SCRIPT
+    additions = mobile_head + (ARTICLE_NAV_BRIDGE_SCRIPT % json.dumps(base_path))
     head_close = re.search(r"</head\s*>", document, re.IGNORECASE)
     if head_close:
         position = head_close.start()
@@ -729,7 +745,7 @@ def _mobile_article_head(document: str) -> tuple[str, str]:
 
 
 def _article_head_meta(
-    content: bytes | memoryview, zim: str, path: str | None
+    content: bytes | memoryview, zim: str, path: str | None, base_path: str = ""
 ) -> tuple[str | None, str | None]:
     """Title and favicon declared by a raw article's ``<head>``.
 
@@ -752,7 +768,8 @@ def _article_head_meta(
     if title_match:
         title = html_unescape(re.sub(r"\s+", " ", title_match.group(1))).strip() or None
 
-    base = _article_url(zim, path) if path else _article_url(zim) + "/"
+    base = _article_url(zim, path, base_path) + ("" if path else "/")
+    icon_prefix = f"{base_path}/article/"
     icon = None
     for tag in re.findall(r"<link\b[^>]*>", head, re.IGNORECASE):
         if "icon" not in _html_attribute(tag, "rel").casefold():
@@ -761,7 +778,7 @@ def _article_head_meta(
         if not href:
             continue
         parsed = urlsplit(urljoin(base, href))
-        if parsed.scheme or parsed.netloc or not parsed.path.startswith("/article/"):
+        if parsed.scheme or parsed.netloc or not parsed.path.startswith(icon_prefix):
             continue
         icon = parsed.path + (f"?{parsed.query}" if parsed.query else "")
         break
@@ -773,6 +790,7 @@ def _content_shell(
     article: dict,
     status_code: int = 200,
     fallback_icon: str | None = None,
+    base_path: str = "",
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -783,14 +801,14 @@ def _content_shell(
     so the modal's tab follows the article too.
     """
     article_path = str(article.get("path") or "").strip("/")
-    iframe_url = _article_url(zim, article_path) if article_path else _article_url(zim)
-    toolbar = _article_toolbar(zim, article)
+    iframe_url = _article_url(zim, article_path, base_path)
+    toolbar = _article_toolbar(zim, article, base_path)
     entry_title = str(article.get("title") or article_path or zim)
     parsed_title = None
     icon = fallback_icon
     if article.get("mimetype") == "text/html" and article.get("content") is not None:
         parsed_title, parsed_icon = _article_head_meta(
-            article["content"], zim, article_path or None
+            article["content"], zim, article_path or None, base_path
         )
         icon = parsed_icon or fallback_icon
     # quote=True so an article title containing a quote cannot break out of the
@@ -843,7 +861,7 @@ iframe[data-zimantic-article] {
         + toolbar
         + f'\n<iframe data-zimantic-article title="{title}" '
         f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
-        + ARTICLE_TOOLBAR_SCRIPT
+        + (ARTICLE_TOOLBAR_SCRIPT % json.dumps(base_path))
         + "\n</body>\n</html>"
     )
     return Response(

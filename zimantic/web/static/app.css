@@ -77,8 +77,8 @@ body.library-active {
     text-decoration: none;
 }
 .view-nav a:hover,
-body.library-active .view-nav a[href="/library"],
-body:not(.library-active) .view-nav a[href="/"] {
+body.library-active .view-nav a[href="library"],
+body:not(.library-active) .view-nav a[href="./"] {
     border-color: var(--accent);
     color: var(--accent);
 }

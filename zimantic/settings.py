@@ -19,6 +19,7 @@ _COMMON = {
     "model_dir": "./model",
     "index_dir": "./indexes",
     "port": 8090,
+    "web_base_path": "",
     "kiwix_url": "",
     "kiwix_server": "",
     "kiwix_catalog_path": "/kiwix/catalog/v2/entries?count=50000",
@@ -83,6 +84,12 @@ KNOWN_KEYS = (
     frozenset(key for profile in PROFILES.values() for key in profile)
     | {"nprobe", "build_workers", "embedding_workers"}
 )
+
+
+def normalize_web_base_path(value: object) -> str:
+    """Return a normalized URL path prefix for reverse-proxy deployments."""
+    path = str(value or "").strip().strip("/")
+    return f"/{path}" if path else ""
 
 
 def _system_memory_gb() -> float:

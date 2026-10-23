@@ -9,11 +9,21 @@ from zimantic.settings import (
     default_build_workers,
     default_embedding_workers,
     load_config,
+    normalize_web_base_path,
     profile_for_hardware,
 )
 
 
 class HardwareProfileTests(unittest.TestCase):
+    def test_web_base_path_is_normalized(self):
+        self.assertEqual(normalize_web_base_path("zimantic/"), "/zimantic")
+        self.assertEqual(normalize_web_base_path("/zimantic"), "/zimantic")
+        self.assertEqual(normalize_web_base_path(" /zimantic/ "), "/zimantic")
+        self.assertEqual(normalize_web_base_path("/"), "")
+        self.assertEqual(normalize_web_base_path("///"), "")
+        self.assertEqual(normalize_web_base_path(""), "")
+        self.assertEqual(normalize_web_base_path(None), "")
+
     @patch.object(settings, "_system_memory_gb", return_value=0.5)
     def test_low_memory_is_mobile(self, _memory):
         with patch("os.cpu_count", return_value=4):

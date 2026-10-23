@@ -2,6 +2,20 @@
             "use strict";
 
             const $ = (id) => document.getElementById(id);
+            const BASE_PATH = (() => {
+                const script = document.currentScript;
+                if (!script) return "";
+                const path = new URL(script.src, document.baseURI).pathname;
+                return path.endsWith("/app.js") ? path.slice(0, -"/app.js".length) : "";
+            })();
+            const appPath = (path) => `${BASE_PATH}${path}`;
+            const stripBasePath = (pathname) => {
+                if (!BASE_PATH) return pathname;
+                if (pathname === BASE_PATH) return "/";
+                return pathname.startsWith(`${BASE_PATH}/`)
+                    ? pathname.slice(BASE_PATH.length)
+                    : pathname;
+            };
             let PAGE_SIZE = 10; // replaced with the server's page_size at startup
             let debugMode = false;
             const AUTO_SUBMIT_DELAY = 500;
@@ -93,13 +107,13 @@
 
             function contentUrl(zim, path = null) {
                 const encodedZim = encodeURIComponent(String(zim || ""));
-                if (!path) return `/content/${encodedZim}`;
+                if (!path) return appPath(`/content/${encodedZim}`);
                 const encodedPath = String(path)
                     .split("/")
                     .filter(Boolean)
                     .map((part) => encodeURIComponent(part))
                     .join("/");
-                return encodedPath ? `/content/${encodedZim}/${encodedPath}` : `/content/${encodedZim}`;
+                return appPath(encodedPath ? `/content/${encodedZim}/${encodedPath}` : `/content/${encodedZim}`);
             }
 
             function formatLibrarySize(bytes) {
@@ -623,7 +637,7 @@
 
                 try {
                     const parsed = new URL(rawUrl, location.href);
-                    const path = segments(parsed.pathname);
+                    const path = segments(stripBasePath(parsed.pathname));
                     if (parsed.origin === location.origin && (path[0] === "article" || path[0] === "content")) {
                         // Both sides are decoded exactly once: rawPath by
                         // segments(), otherwise the already-decoded URL path.
@@ -678,7 +692,10 @@
                 if (!value) return null;
                 try {
                     const articleUrl = new URL(value, location.href);
-                    if (articleUrl.origin !== location.origin || !articleUrl.pathname.startsWith("/content/")) {
+                    if (
+                        articleUrl.origin !== location.origin ||
+                        !articleUrl.pathname.startsWith(appPath("/content/"))
+                    ) {
                         return null;
                     }
                     return articleUrl;
@@ -829,7 +846,8 @@
                     try {
                         const articleUrl = new URL(link.href, location.href);
                         return (
-                            articleUrl.origin === location.origin && articleUrl.pathname.startsWith("/content/")
+                            articleUrl.origin === location.origin &&
+                            articleUrl.pathname.startsWith(appPath("/content/"))
                         );
                     } catch (_) {
                         return false;
@@ -912,7 +930,7 @@
                     nextAvailable: false,
                 };
                 if (!activeSearchResult || !current) {
-                    return location.pathname === "/library"
+                    return location.pathname === appPath("/library")
                         ? libraryModalNavigation()
                         : unavailable;
                 }
@@ -958,7 +976,7 @@
                 if (requestedUrl) {
                     const articleUrl = readModalUrl(requestedUrl);
                     if (!articleUrl || articleUrlValue(articleUrl) !== navigation[direction]) return;
-                    if (location.pathname === "/library" && !activeSearchResult) {
+                    if (location.pathname === appPath("/library") && !activeSearchResult) {
                         navigateArticleModal(articleUrl, "library");
                         return;
                     }
@@ -980,7 +998,7 @@
             }
 
             function articleRouteParts(articleUrl) {
-                const parts = articleUrl.pathname.split("/").filter(Boolean);
+                const parts = stripBasePath(articleUrl.pathname).split("/").filter(Boolean);
                 return parts[0] === "article" && parts.length >= 3 ? parts : null;
             }
 
@@ -991,11 +1009,12 @@
             function rawArticleUrl(articleUrl) {
                 try {
                     const url = new URL(articleUrl?.href || String(articleUrl), location.href);
-                    if (url.origin !== location.origin || !url.pathname.startsWith("/content/")) {
+                    const pathname = stripBasePath(url.pathname);
+                    if (url.origin !== location.origin || !pathname.startsWith("/content/")) {
                         return null;
                     }
                     const raw = new URL(url.href);
-                    raw.pathname = "/article" + url.pathname.slice("/content".length);
+                    raw.pathname = appPath(`/article${pathname.slice("/content".length)}`);
                     return raw;
                 } catch (_) {
                     return null;
@@ -1005,11 +1024,12 @@
             function contentUrlFromRaw(rawUrl) {
                 try {
                     const url = new URL(rawUrl, location.href);
-                    if (url.origin !== location.origin || !url.pathname.startsWith("/article/")) {
+                    const pathname = stripBasePath(url.pathname);
+                    if (url.origin !== location.origin || !pathname.startsWith("/article/")) {
                         return null;
                     }
                     const content = new URL(url.href);
-                    content.pathname = "/content" + url.pathname.slice("/article".length);
+                    content.pathname = appPath(`/content${pathname.slice("/article".length)}`);
                     return content;
                 } catch (_) {
                     return null;
@@ -1017,11 +1037,12 @@
             }
 
             function parentArticleUrl(articleUrl) {
-                const parts = articleUrl.pathname.split("/").filter(Boolean);
+                const pathname = stripBasePath(articleUrl.pathname);
+                const parts = pathname.split("/").filter(Boolean);
                 if (parts[0] !== "content" || parts.length < 3) return null;
-                const lastSlash = articleUrl.pathname.lastIndexOf("/");
+                const lastSlash = pathname.lastIndexOf("/");
                 if (lastSlash <= 0) return null;
-                return new URL(articleUrl.pathname.slice(0, lastSlash), location.origin);
+                return new URL(appPath(pathname.slice(0, lastSlash)), location.origin);
             }
 
             function articleRouteValue(articleUrl) {
@@ -1864,7 +1885,7 @@
                         controller.signal.addEventListener("abort", abortStream, { once: true });
                         let busy;
                         try {
-                            const response = await fetch("/search/stream?" + params, {
+                            const response = await fetch(appPath("/search/stream") + "?" + params, {
                                 signal: streamController.signal,
                             });
                             if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1929,7 +1950,9 @@
                 sourceFilterParams(params);
                 $("status").textContent = "Loading page…";
                 try {
-                    const response = await fetch("/search?" + params, { signal: controller.signal });
+                    const response = await fetch(appPath("/search") + "?" + params, {
+                        signal: controller.signal,
+                    });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const items = await response.json();
                     if (sequence !== searchSequence || controller !== pageController) return;
@@ -2203,14 +2226,14 @@
             });
 
             async function initialize() {
-                const libraryView = location.pathname === "/library";
+                const libraryView = location.pathname === appPath("/library");
                 try {
                     // Source discovery is read-only; refreshing the index/catalog set is an
                     // admin action done only via `zimantic reload` or SIGHUP.
-                    const dataPath = libraryView ? "/library.json" : "/sources";
+                    const dataPath = libraryView ? appPath("/library.json") : appPath("/sources");
                     const dataCacheKey = libraryView ? LIBRARY_CACHE_KEY : SOURCE_CACHE_KEY;
                     const [configResponse, data] = await Promise.all([
-                        fetch("/config", { cache: "no-cache" }),
+                        fetch(appPath("/config"), { cache: "no-cache" }),
                         fetchCachedJson(dataPath, dataCacheKey),
                     ]);
                     if (configResponse.ok) {

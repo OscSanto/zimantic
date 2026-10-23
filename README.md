@@ -148,7 +148,18 @@ but has no SQLite title-word or semantic search until it is built. `serve --fast
 model and all vectors.
 
 FastAPI serves a lightweight HTML page that is accessible from any browser at
-`http://<host>:8090` (the `port` in `config.toml`).
+`http://<host>:8090` (the `port` in `config.toml`). To serve it under a path such
+as `/zimantic`, set `web_base_path = "/zimantic"` and point a reverse proxy at the
+server with that prefix stripped, for example:
+
+```nginx
+location /zimantic/ {
+    proxy_pass http://127.0.0.1:8090/;
+}
+```
+
+Generated links, assets and API requests then stay under `/zimantic/`; open the
+page with the trailing slash.
 
 **Reloading indexes without a restart.** `zimantic reload` sends `SIGHUP` to a normal server,
 which rescans `index_dir` and reconciles the available indexes. `kill -HUP <pid>` also works.

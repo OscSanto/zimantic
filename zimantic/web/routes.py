@@ -20,6 +20,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     # Serialized-JSON memo owned by this app instance (see _json_response).
     memos: dict = {}
+    base_path = web_app._search_base_path(search_class)
 
     def paged_json_response(
         request: Request,
@@ -195,11 +196,13 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         if requested_path != article["path"]:
             return Response(
                 status_code=307,
-                headers={"Location": web_app._article_url(zim, article["path"])},
+                headers={
+                    "Location": web_app._article_url(zim, article["path"], base_path)
+                },
             )
         content = article["content"]
         if article["mimetype"] == "text/html":
-            content = web_app._decorate_article_bridge(content, zim)
+            content = web_app._decorate_article_bridge(content, zim, base_path)
         return web_app._article_content_response(content, article["mimetype"])
 
     def error_shell_article(requested_path: str | None) -> dict:
@@ -243,17 +246,21 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 error_shell_article(requested_path),
                 web_app._ARTICLE_ERROR_STATUS[type(error)],
                 fallback_icon,
+                base_path,
             )
 
         if requested_path != article["path"]:
             return Response(
                 status_code=307,
-                headers={"Location": web_app._content_url(zim, article["path"])},
+                headers={
+                    "Location": web_app._content_url(zim, article["path"], base_path)
+                },
             )
         return web_app._content_shell(
             zim,
             article,
             fallback_icon=fallback_icon,
+            base_path=base_path,
         )
 
     @app.get("/content/{zim}")
@@ -286,7 +293,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         return Response(
             status_code=307,
             headers={
-                "Location": web_app._content_url(zim, path),
+                "Location": web_app._content_url(zim, path, base_path),
                 "Cache-Control": "no-store",
             },
         )

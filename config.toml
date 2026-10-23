@@ -20,6 +20,9 @@ index_dir = "./indexes"
 # Search page port; reachable from other devices on the network.
 port = 8090
 
+# Optional URL path prefix when a reverse proxy strips it before forwarding.
+# web_base_path = "/zimantic"
+
 # Optional Kiwix compatibility for remote-only results. Start kiwix-serve separately, for example:
 #   kiwix-serve --port=8085 ./zims/*.zim
 # Then uncomment this setting. Use this machine's address instead of localhost if results are

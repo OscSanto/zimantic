@@ -60,6 +60,7 @@ from zimantic.search import (
     _query_terms,
     _phrase_words,
     _read_limited_response,
+    _source_icon_url,
     _title_prefix_query,
     _title_query,
 )
@@ -1610,6 +1611,25 @@ class ProductionHardeningTests(unittest.TestCase):
             db.close()
         self.assertEqual(doc["url"], "/content/manual/tire-change")
         self.assertEqual(doc["path"], "tire-change")
+
+    def test_local_results_use_web_base_path(self):
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        search = object.__new__(Search)
+        search.cfg = {"web_base_path": "zimantic"}
+        search.preview_chars = 100
+        db = self._db()
+        try:
+            doc = search._fetch_docs(source, db, {1})[1]
+        finally:
+            db.close()
+        self.assertEqual(doc["url"], "/zimantic/content/manual/tire-change")
+
+    def test_source_icon_urls_use_web_base_path(self):
+        self.assertEqual(
+            _source_icon_url("manual", "-/icon", "/zimantic"),
+            "/zimantic/source-icon/manual",
+        )
+        self.assertIsNone(_source_icon_url("manual", None, "/zimantic"))
 
     def test_exhausted_search_slots_report_busy_without_blocking(self):
         search = _bare_search({"kiwix_url": "http://example/content"})
