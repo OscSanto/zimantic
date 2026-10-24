@@ -331,7 +331,7 @@ class _RankedAssessment:
     title_coverage: float
     title_density: float
     title_quality: float
-    title_phrase_hit: int
+    title_phrase_hit: bool
     content_phrase_hit: bool
     intent: float
     total: float
@@ -831,7 +831,7 @@ class Search:
             zim_path = self._find_zim_path(db_path.stem, source_size)
             if zim_path is not None:
                 try:
-                    archive = Archive(str(zim_path))
+                    archive = Archive(zim_path)
                     searcher = Searcher(archive) if archive.has_fulltext_index else None
                 except Exception as error:  # unreadable ZIM: title search still works
                     logger.warning(
@@ -875,7 +875,7 @@ class Search:
         advertised as an available-but-empty source.
         """
         try:
-            archive = Archive(str(zim_path))
+            archive = Archive(zim_path)
             if not archive.has_fulltext_index:
                 logger.debug(
                     "%s: no SQLite or native full-text index; skipping",
@@ -1423,7 +1423,7 @@ class Search:
     def _inspect_library_archive(self, zim_name: str, zim_path: Path) -> SourceInfo:
         """Build library metadata for a local archive not used by search."""
         try:
-            archive = Archive(str(zim_path))
+            archive = Archive(zim_path)
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             logger.warning("zimantic: library metadata unavailable for %s (%s)", zim_path, error)
             return SourceInfo(
@@ -1619,7 +1619,7 @@ class Search:
             if zim_path is None:
                 raise ArticleNotFoundError("ZIM not found")
             try:
-                archive = Archive(str(zim_path))
+                archive = Archive(zim_path)
             except (OSError, RuntimeError, ValueError) as error:
                 raise ArticleUnavailableError("ZIM archive is unavailable") from error
             return self._read_archive_article(archive, zim_name, path, head_only)
@@ -1694,7 +1694,7 @@ class Search:
             if zim_path is None:
                 raise ArticleNotFoundError("source icon not found")
             try:
-                archive = Archive(str(zim_path))
+                archive = Archive(zim_path)
             except (OSError, RuntimeError, ValueError) as error:
                 raise ArticleUnavailableError("source icon unavailable") from error
             try:
@@ -1782,6 +1782,8 @@ class Search:
     def _random_fallback_article(self, index: _LocalIndex) -> str | None:
         """Pick a uniformly random readable entry from an unindexed archive."""
         archive = index.archive
+        if archive is None:
+            return None
         upper = max(1, int(getattr(archive, "entry_count", 0) or 0))
         for _ in range(RANDOM_ARTICLE_ATTEMPTS):
             point = secrets.randbelow(upper)
@@ -3016,7 +3018,7 @@ class Search:
             )
 
         docs: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for item in root.iter():
             if _local_name(item) not in {"item", "entry"}:
                 continue

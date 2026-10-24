@@ -54,7 +54,7 @@ class _Page(Item):
 
 
 def _build_sample_zim(path: Path) -> None:
-    creator = Creator(str(path))
+    creator = Creator(path)
     creator.config_indexing(True, "eng")
     with creator:
         creator.add_item(_Page("Alpha", "Alpha", BODY_ALPHA))
@@ -65,16 +65,18 @@ def _build_sample_zim(path: Path) -> None:
 class LibzimRuntimeApiTests(unittest.TestCase):
     """The private surface the indexer and searcher rely on, verified live."""
 
+    archive: Archive
+
     @classmethod
     def setUpClass(cls):
         cls._tmp = tempfile.TemporaryDirectory()
         cls.zim_path = Path(cls._tmp.name) / "sample.zim"
         _build_sample_zim(cls.zim_path)
-        cls.archive = Archive(str(cls.zim_path))
+        cls.archive = Archive(cls.zim_path)
 
     @classmethod
     def tearDownClass(cls):
-        cls.archive = None
+        del cls.archive
         cls._tmp.cleanup()
 
     def test_archive_exposes_the_private_entry_lookup(self):
@@ -117,6 +119,7 @@ class LibzimRuntimeApiTests(unittest.TestCase):
             for index in range(self.archive.entry_count)
             if not self.archive._get_entry_by_id(index).is_redirect
         )
+        assert row is not None
         self.assertEqual(len(row), 5)
         self.assertIn("tires", row[2])
 

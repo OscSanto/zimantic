@@ -7,7 +7,7 @@ imports ``starlette.testclient``, unless a real ``httpx`` is already installed.
 """
 
 try:
-    import httpx  # noqa: F401
+    import httpx  # noqa: F401  # ty: ignore[unresolved-import]
 except ImportError:  # pragma: no cover - depends on the environment
     import httpx2
 

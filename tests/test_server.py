@@ -1,5 +1,6 @@
 import json
 import unittest
+from collections.abc import Callable
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -10,6 +11,9 @@ from zimantic.web.app import create_app
 
 
 class FakeSearch:
+    cfg: dict
+    read_article: Callable[..., dict]
+
     def __init__(self):
         self.cache = QueryCache(4)
         self.search_page_calls = []

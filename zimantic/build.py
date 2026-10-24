@@ -319,7 +319,7 @@ def build(
     if state is None:
         return
     try:
-        zim = Archive(str(zim_path))
+        zim = Archive(zim_path)
         if state.db is None:
             raise RuntimeError("build database is unavailable")
         _index_entries(

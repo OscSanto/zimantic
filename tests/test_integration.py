@@ -2,6 +2,7 @@ import itertools
 import json
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import patch
 
@@ -84,9 +85,9 @@ class _PdfPage(Item):
 def _create_zim(
     path: Path,
     pages: list[tuple[str, str, str]],
-    redirects: list[tuple[str, str, str]] = (),
+    redirects: Sequence[tuple[str, str, str]] = (),
 ) -> None:
-    creator = Creator(str(path))
+    creator = Creator(path)
     creator.config_indexing(True, "eng")
     creator.set_mainpath(pages[0][0])
     with creator:
@@ -98,7 +99,7 @@ def _create_zim(
 
 def _create_sparse_zim(path: Path) -> None:
     """A ZIM that is mostly non-articles, like an OSM tile archive."""
-    creator = Creator(str(path))
+    creator = Creator(path)
     creator.config_indexing(True, "eng")
     creator.set_mainpath("Alpha")
     with creator:
@@ -135,7 +136,7 @@ class LocalIntegrationTests(unittest.TestCase):
         root: Path,
         *,
         pages: list[tuple[str, str, str]] | None = None,
-        redirects: list[tuple[str, str, str]] = (),
+        redirects: Sequence[tuple[str, str, str]] = (),
         fast: bool = False,
         zim_name: str = "manual",
     ) -> Path:
@@ -326,6 +327,7 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             index = search.indexes["manual"]
             archive = index.archive
+            assert archive is not None
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
@@ -372,6 +374,7 @@ class LocalIntegrationTests(unittest.TestCase):
             index = search.indexes["manual"]
             self.assertIsNotNone(search._db_for(index))
             archive = index.archive
+            assert archive is not None
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
@@ -398,7 +401,7 @@ class LocalIntegrationTests(unittest.TestCase):
             indexes = root / "indexes"
             zims.mkdir()
             indexes.mkdir()
-            creator = Creator(str(zims / "raw.zim"))
+            creator = Creator(zims / "raw.zim")
             creator.set_mainpath("Alpha")
             with creator:
                 creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
@@ -431,7 +434,7 @@ class LocalIntegrationTests(unittest.TestCase):
             pdf = document.tobytes()
             document.close()
 
-            creator = Creator(str(zim_path))
+            creator = Creator(zim_path)
             creator.config_indexing(True, "eng")
             with creator:
                 creator.add_item(

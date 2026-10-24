@@ -113,11 +113,11 @@ def _coverage(query: list[str], tokens: list[str]) -> float:
     return sum(term in present for term in query) / len(query)
 
 
-def _phrase(query: list[str], tokens: list[str]) -> float:
+def _phrase(query: list[str], tokens: list[str]) -> bool:
     if not query:
-        return 0.0
+        return False
     width = len(query)
-    return float(any(tokens[i:i + width] == query for i in range(len(tokens) - width + 1)))
+    return any(tokens[i:i + width] == query for i in range(len(tokens) - width + 1))
 
 
 def _density(query: list[str], tokens: list[str]) -> float:

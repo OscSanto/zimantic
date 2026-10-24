@@ -169,8 +169,10 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
     if "build_workers" not in user:
         cfg["build_workers"] = default_build_workers()
     if "embedding_workers" not in user:
+        build_workers = cfg.get("build_workers")
+        embed_threads = cfg.get("embed_threads")
         cfg["embedding_workers"] = default_embedding_workers(
-            build_workers=cfg["build_workers"],
-            embed_threads=cfg.get("embed_threads"),
+            build_workers=build_workers if isinstance(build_workers, int) else None,
+            embed_threads=embed_threads if isinstance(embed_threads, int) else None,
         )
     return cfg

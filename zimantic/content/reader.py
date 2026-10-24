@@ -5,7 +5,7 @@ import re
 import time
 from html.parser import HTMLParser
 from urllib.parse import unquote
-from typing import Iterator, NamedTuple
+from typing import Any, Iterator, NamedTuple, Protocol, cast
 from libzim.reader import Archive, set_cluster_cache_max_size
 
 # libzim undercounts this cache: its 16 MB default really used ~170 MB.
@@ -34,6 +34,18 @@ class EntryRecord(NamedTuple):
     excerpt: str
     path: str
     target_id: int | None
+
+
+class EntrySource(Protocol):
+    """The part of a libzim ``Archive`` needed to read one entry by id.
+
+    Companion lookups (``has_entry_by_path``/``get_entry_by_path``) only happen
+    for app-shell pages, so keeping this seam narrow lets tests supply small
+    in-memory archives without reimplementing the whole ``Archive`` API.
+    """
+
+    def _get_entry_by_id(self, entry_id: int, /) -> Any: ...
+
 
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
 DEFAULT_PREVIEW_CHARS = 1000
@@ -922,7 +934,7 @@ def _read_html_entry(
 
 
 def read_entry(
-    zim: Archive,
+    zim: EntrySource,
     i: int,
     fast: bool = False,
     max_html_bytes: int = DEFAULT_MAX_HTML_BYTES,
@@ -983,4 +995,6 @@ def read_entry(
         return _read_pdf_entry(entry, i, raw, max_preview_chars, deadline=deadline)
     if mimetype == "text/plain":
         return _read_plain_text_entry(entry, i, raw, max_preview_chars)
-    return _read_html_entry(zim, entry, i, raw, max_preview_chars, deadline=deadline)
+    return _read_html_entry(
+        cast(Archive, zim), entry, i, raw, max_preview_chars, deadline=deadline
+    )

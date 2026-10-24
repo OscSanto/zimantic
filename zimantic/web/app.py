@@ -37,7 +37,7 @@ WEB_MANIFEST = ASSET_DIR / "site.webmanifest"
 PID_FILE = Path("zimantic.pid")
 logger = logging.getLogger(__name__)
 
-_ARTICLE_ERROR_STATUS = {
+_ARTICLE_ERROR_STATUS: dict[type[Exception], int] = {
     ArticleNotFoundError: 404,
     ArticleTooLargeError: 413,
     ArticleUnavailableError: 503,
@@ -697,7 +697,7 @@ def _article_toolbar(zim: str, article: dict, base_path: str = "") -> str:
 
 def _decorate_article_bridge(
     content: bytes | memoryview, zim: str, base_path: str = ""
-) -> bytes:
+) -> bytes | memoryview:
     """Add the shell-navigation bridge and mobile fallback to a raw article.
 
     The article keeps its own markup; a small script lets link clicks ask the

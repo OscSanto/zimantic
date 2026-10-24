@@ -482,7 +482,7 @@ class SigtermHandlerTests(unittest.TestCase):
         import zimantic.__main__ as main_module
 
         with self.assertRaises(KeyboardInterrupt):
-            main_module._graceful_interrupt(None, None)
+            main_module._graceful_interrupt(0, None)
 
 
 if __name__ == "__main__":

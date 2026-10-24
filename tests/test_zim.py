@@ -13,6 +13,7 @@ reader.set_cluster_cache_max_size = lambda size: None
 from zimantic.content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
+    EntryRecord,
     disambiguation_title,
     extract_excerpt,
     extract_pdf_excerpt,
@@ -22,6 +23,13 @@ from zimantic.content.reader import (
     read_entry,
     truncate_at_word_boundary,
 )
+
+
+def _read_entry(*args, **kwargs) -> EntryRecord:
+    """Call read_entry and assert it produced an indexable record."""
+    row = read_entry(*args, **kwargs)
+    assert row is not None
+    return row
 
 
 HTML = b"""
@@ -135,7 +143,7 @@ def _pdf_archive(content: bytes, *, title: str = "Annual Report", path: str = "f
 class TextExtractionTests(unittest.TestCase):
     def test_extraction_prefers_first_substantial_paragraph(self):
         self.assertEqual(
-            read_entry(_Archive(), 0)[2],
+            _read_entry(_Archive(), 0)[2],
             "A sufficiently long paragraph with useful text that passes the minimum lead length.",
         )
 
@@ -210,7 +218,7 @@ class TextExtractionTests(unittest.TestCase):
 
     def test_html_limit_is_configurable(self):
         self.assertEqual(DEFAULT_MAX_HTML_BYTES, 4 * 1024 * 1024)
-        self.assertEqual(read_entry(_Archive(), 0, max_html_bytes=20)[2], "")
+        self.assertEqual(_read_entry(_Archive(), 0, max_html_bytes=20)[2], "")
 
     def test_entry_limit_is_checked_before_materializing_content(self):
         class _LargeItem:
@@ -237,7 +245,7 @@ class TextExtractionTests(unittest.TestCase):
 
     def test_preview_limit_is_configurable(self):
         self.assertEqual(DEFAULT_PREVIEW_CHARS, 1000)
-        excerpt = read_entry(_Archive(), 0, max_preview_chars=20)[2]
+        excerpt = _read_entry(_Archive(), 0, max_preview_chars=20)[2]
         self.assertLessEqual(len(excerpt), 20)
         self.assertEqual(excerpt, "A sufficiently long")
 
@@ -372,7 +380,7 @@ class TextExtractionTests(unittest.TestCase):
             def _get_entry_by_id(self, _index):
                 return _PlainEntry()
 
-        row = read_entry(_PlainArchive(), 0)
+        row = _read_entry(_PlainArchive(), 0)
         self.assertEqual(
             row[2], "Plain text article. Second paragraph with more useful detail."
         )
@@ -440,7 +448,7 @@ class TextExtractionTests(unittest.TestCase):
             def _get_entry_by_id(self, _index):
                 return _ArticleEntry()
 
-        row = read_entry(_ArticleArchive(), 0)
+        row = _read_entry(_ArticleArchive(), 0)
         self.assertIsNotNone(row)
         self.assertIn("comedy film", row[2])
 
@@ -464,7 +472,7 @@ class TextExtractionTests(unittest.TestCase):
             def _get_entry_by_id(self, _index):
                 return _WordEntry()
 
-        row = read_entry(_WordArchive(), 0)
+        row = _read_entry(_WordArchive(), 0)
         self.assertIsNotNone(row)
         self.assertIn("permission", row[2])
 
@@ -513,7 +521,7 @@ class TextExtractionTests(unittest.TestCase):
             def _get_entry_by_id(self, _index):
                 return _CheatsheetEntry()
 
-        row = read_entry(_CheatsheetArchive(), 0)
+        row = _read_entry(_CheatsheetArchive(), 0)
         self.assertIsNotNone(row)
         self.assertIn("complete solution", row[2])
 
@@ -567,7 +575,7 @@ class TextExtractionTests(unittest.TestCase):
             "Tetanus is a serious bacterial infection caused by Clostridium "
             "tetani. It affects the nervous system and causes muscle spasms."
         )
-        row = read_entry(_pdf_archive(content), 0)
+        row = _read_entry(_pdf_archive(content), 0)
         self.assertEqual(row[1], "Annual Report")
         self.assertIn("bacterial infection", row[2])
         self.assertEqual(row[3], "files/report.pdf")
@@ -587,7 +595,7 @@ class TextExtractionTests(unittest.TestCase):
         self.assertEqual(extract_pdf_excerpt(b"not a pdf at all"), "")
 
     def test_fast_build_stores_pdf_title_without_body(self):
-        row = read_entry(_pdf_archive(b"unused"), 0, fast=True)
+        row = _read_entry(_pdf_archive(b"unused"), 0, fast=True)
         self.assertEqual(row[1], "Annual Report")
         self.assertEqual(row[2], "")
         self.assertEqual(row[3], "files/report.pdf")
@@ -647,7 +655,7 @@ class TextExtractionTests(unittest.TestCase):
             def _get_entry_by_id(self, _index):
                 return _MetaEntry()
 
-        self.assertEqual(read_entry(_MetaArchive(), 0)[2], "A short summary of the topic for search.")
+        self.assertEqual(_read_entry(_MetaArchive(), 0)[2], "A short summary of the topic for search.")
 
     def test_spa_body_accepts_alternate_json_keys(self):
         alt_body = json.dumps({
@@ -660,7 +668,7 @@ class TextExtractionTests(unittest.TestCase):
                     return _JsonEntry(path, alt_body)
                 return super().get_entry_by_path(path)
 
-        row = read_entry(_AltSpaArchive(), 0)
+        row = _read_entry(_AltSpaArchive(), 0)
         self.assertIn("Alternate key article text", row[2])
         self.assertEqual(row[3], "index/page_42")
 
@@ -711,7 +719,7 @@ class DisambiguationTests(unittest.TestCase):
         self.assertEqual(disambiguation_title("Air (disambiguation)"), "Air (disambiguation)")
 
     def test_read_entry_persists_disambiguation_suffix(self):
-        row = read_entry(_DisambiguationArchive(), 0)
+        row = _read_entry(_DisambiguationArchive(), 0)
         self.assertEqual(row[1], "Air (disambiguation)")
         self.assertEqual(len(row), 5)
 
@@ -811,7 +819,7 @@ class _ShellArchive:
 
 class JavaScriptShellTests(unittest.TestCase):
     def test_spa_stub_uses_companion_json_and_keeps_its_own_path(self):
-        row = read_entry(_SpaArchive(), 0)
+        row = _read_entry(_SpaArchive(), 0)
 
         self.assertEqual(row[1], "Collected Poems")
         self.assertIn("real article about collected poems", row[2])
@@ -830,7 +838,7 @@ class JavaScriptShellTests(unittest.TestCase):
             "description": "In this video we begin learning the basics. " * 5,
         }).encode("utf-8")
 
-        row = read_entry(
+        row = _read_entry(
             _media_archive(
                 stub, "Getting Started", "index/getting-started-abc",
                 "videos/getting-started-abc.json", body,
@@ -854,7 +862,7 @@ class JavaScriptShellTests(unittest.TestCase):
             "description": "An in-depth look at SQL and relational databases. " * 5,
         }).encode("utf-8")
 
-        row = read_entry(
+        row = _read_entry(
             _media_archive(
                 stub, "SQL Tutorials", "index/sql-basics",
                 "playlists/sql-basics.json", body,
@@ -877,7 +885,7 @@ class JavaScriptShellTests(unittest.TestCase):
                     return _JsonEntry(path, empty)
                 return super().get_entry_by_path(path)
 
-        row = read_entry(_EmptyArchive(), 0)
+        row = _read_entry(_EmptyArchive(), 0)
 
         self.assertEqual(row[2], "")            # no markup leaked as text
         self.assertEqual(row[3], "index.html")  # falls back to the shell target
@@ -933,7 +941,7 @@ class JavaScriptShellTests(unittest.TestCase):
                     return _MarkdownEntry("Find the Symmetric Difference", path, markdown)
                 return _HtmlEntry("index.html", "index.html", SHELL_HTML)
 
-        row = read_entry(_MarkdownArchive(), 0)
+        row = _read_entry(_MarkdownArchive(), 0)
 
         self.assertEqual(row[1], "Find the Symmetric Difference")
         self.assertIn("symmetric difference of two sets", row[2])
@@ -989,7 +997,7 @@ class JavaScriptShellTests(unittest.TestCase):
                             return _MarkdownEntry()
                         return _HtmlEntry("index.html", "index.html", SHELL_HTML)
 
-                row = read_entry(_MarkdownArchive(), 0)
+                row = _read_entry(_MarkdownArchive(), 0)
                 self.assertIn("sufficiently substantial Markdown companion", row[2])
                 self.assertEqual(row[3], _StubEntry.path)
 
@@ -1028,7 +1036,7 @@ class JavaScriptShellTests(unittest.TestCase):
             def _get_entry_by_id(self, _index):
                 return _LoaderEntry()
 
-        row = read_entry(_LoaderArchive(), 0)
+        row = _read_entry(_LoaderArchive(), 0)
         self.assertIsNotNone(row)
         self.assertEqual(row[1], "Acid-Base Solutions")
         self.assertEqual(row[2], "")

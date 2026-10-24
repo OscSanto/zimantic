@@ -55,3 +55,9 @@ norecursedirs = [
     "venv",
     "__pypackages__",
 ]
+
+[tool.ty.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+unresolved-attribute = "ignore"
+
