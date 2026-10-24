@@ -49,6 +49,42 @@ class _LocalIndex:
     source_size: int | None = None
     zim_path: str | None = None
     zim_signature: tuple[int, int, int, int] | None = None
+    has_fulltext_index: bool | None = None
+    error: str | None = None
+
+    def ensure_open(self) -> Archive | None:
+        """Open the archive on first use, not at server startup."""
+        if self.archive is not None:
+            return self.archive
+        with self.lock:
+            if self.archive is None:
+                if not self.zim_path:
+                    return None
+                try:
+                    self.archive = Archive(self.zim_path)
+                except Exception as error:
+                    self.error = str(error)
+                    return None
+            return self.archive
+
+    def ensure_searcher(self) -> Searcher | None:
+        """Create the libzim full-text searcher on first use."""
+        if self.has_fulltext_index is False:
+            return None
+        archive = self.ensure_open()
+        if archive is None:
+            return None
+        if self.searcher is not None:
+            return self.searcher
+        with self.lock:
+            if self.searcher is None:
+                try:
+                    if getattr(archive, "has_fulltext_index", False):
+                        self.searcher = Searcher(archive)
+                except Exception as error:
+                    self.error = str(error)
+                    return None
+            return self.searcher
 
     @property
     def semantic(self) -> bool:

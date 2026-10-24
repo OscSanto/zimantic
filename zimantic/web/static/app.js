@@ -28,7 +28,7 @@
             const THUMB_CONCURRENCY = 4;
             const SOURCE_FILTER_LIMIT = 10;
             const SOURCE_CACHE_KEY = "zimantic.sources.v1";
-            const LIBRARY_CACHE_KEY = "zimantic.library.v1";
+            const LIBRARY_CACHE_KEY = "zimantic.library.v3";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let librarySources = [];
@@ -47,6 +47,7 @@
             let activeThumbnails = 0;
             let streamRenderTimer = null;
             let modalPreviousFocus = null;
+            let libraryInfoPreviousFocus = null;
             let activeModalUrl = null;
             let activeSearchResult = null;
             let activeLibraryArticleUrl = null;
@@ -135,7 +136,215 @@
 
             function libraryHomepageUrl(source) {
                 const zim = source.local_name || source.book || source.name;
-                return contentUrl(zim, source.homepage);
+                // No path: the server resolves the ZIM's main entry.  This also
+                // avoids broken "mainPage" links from older catalogs.
+                return contentUrl(zim);
+            }
+
+            function libraryLanguage(source, join = false) {
+                const parts = String(source.language || "")
+                    .split(",")
+                    .map((part) => part.trim())
+                    .filter(Boolean);
+                if (!parts.length) return "";
+                if (join) return parts.join(", ");
+                return parts.length > 1 ? "MUL" : parts[0].toUpperCase();
+            }
+
+            function infoUrl(value) {
+                const text = String(value || "").trim();
+                if (!text) return "";
+                if (/^https?:\/\//i.test(text)) return text;
+                if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(text)) {
+                    return `https://${text}`;
+                }
+                return "";
+            }
+
+            function infoValue(value) {
+                return value === null || value === undefined ? "" : String(value).trim();
+            }
+
+            function appendInfoRow(list, label, value, options = {}) {
+                const text = infoValue(value);
+                if (!text) return;
+                const term = document.createElement("dt");
+                term.textContent = label;
+                const detail = document.createElement("dd");
+                const href = options.href === false ? "" : infoUrl(text);
+                if (href) {
+                    const link = document.createElement("a");
+                    link.href = href;
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    link.textContent = text;
+                    detail.appendChild(link);
+                } else {
+                    detail.textContent = text;
+                }
+                list.append(term, detail);
+            }
+
+            function counterSummary(counter) {
+                return String(counter || "")
+                    .split(";")
+                    .map((entry) => {
+                        const [mime, count] = entry.split("=");
+                        return {
+                            mime: String(mime || "").trim(),
+                            count: Number(count),
+                        };
+                    })
+                    .filter((entry) => entry.mime && Number.isFinite(entry.count) && entry.count > 0)
+                    .sort((left, right) => right.count - left.count);
+            }
+
+            function searchWithinLibrarySource(source) {
+                closeLibraryInfo();
+                const key = source.key || source.local_name || source.book || source.name;
+                if (!key) return;
+                const target = new URL(makeStateUrl("", [key], 0), location.href);
+                target.pathname = appPath("/");
+                window.location.assign(target.toString());
+            }
+
+            function closeLibraryInfo() {
+                const modal = $("libraryInfoModal");
+                if (!modal || modal.hidden) return;
+                modal.hidden = true;
+                document.body.classList.remove("library-info-open");
+                if (
+                    libraryInfoPreviousFocus &&
+                    typeof libraryInfoPreviousFocus.focus === "function"
+                ) {
+                    libraryInfoPreviousFocus.focus();
+                }
+                libraryInfoPreviousFocus = null;
+            }
+
+            function showLibraryInfo(source) {
+                const modal = $("libraryInfoModal");
+                const content = $("libraryInfoContent");
+                if (!modal || !content) return;
+                libraryInfoPreviousFocus = document.activeElement;
+                const title = libraryTitle(source);
+                const homepage = libraryHomepageUrl(source);
+                const available = source.available !== false;
+                content.replaceChildren();
+
+                const header = document.createElement("div");
+                header.className = "library-info-header";
+                const thumb = document.createElement("div");
+                thumb.className = "library-info-thumb";
+                if (source.icon_url) {
+                    const image = document.createElement("img");
+                    image.src = source.icon_url;
+                    image.alt = "";
+                    image.addEventListener("error", () => {
+                        image.remove();
+                        thumb.textContent = title.slice(0, 1).toUpperCase();
+                    }, { once: true });
+                    thumb.appendChild(image);
+                } else {
+                    thumb.textContent = title.slice(0, 1).toUpperCase();
+                }
+                const heading = document.createElement("div");
+                heading.className = "library-info-heading";
+                const headingTitle = document.createElement("h2");
+                headingTitle.id = "libraryInfoTitle";
+                headingTitle.textContent = title;
+                heading.appendChild(headingTitle);
+                const subtitle = [
+                    source.creator && `By ${source.creator}`,
+                    source.date && String(source.date),
+                    libraryLanguage(source, true),
+                ].filter(Boolean).join(" · ");
+                if (subtitle) {
+                    const line = document.createElement("p");
+                    line.className = "library-info-subtitle";
+                    line.textContent = subtitle;
+                    heading.appendChild(line);
+                }
+                header.append(thumb, heading);
+                content.appendChild(header);
+
+                const description = source.long_description || source.description;
+                if (description) {
+                    const text = document.createElement("p");
+                    text.className = "library-info-description";
+                    text.textContent = description;
+                    content.appendChild(text);
+                }
+
+                if (available && homepage) {
+                    const actions = document.createElement("div");
+                    actions.className = "library-info-actions";
+                    const open = document.createElement("a");
+                    open.className = "primary library-info-action";
+                    open.href = homepage;
+                    open.dataset.libraryArticle = "true";
+                    open.textContent = "Open";
+                    const search = document.createElement("button");
+                    search.type = "button";
+                    search.className = "secondary library-info-action";
+                    search.textContent = "Search";
+                    search.addEventListener("click", () => searchWithinLibrarySource(source));
+                    actions.append(open, search);
+                    content.appendChild(actions);
+                } else if (!available) {
+                    const unavailable = document.createElement("p");
+                    unavailable.className = "library-info-unavailable";
+                    unavailable.textContent =
+                        source.error || "This ZIM is currently unavailable.";
+                    content.appendChild(unavailable);
+                }
+
+                const list = document.createElement("dl");
+                list.className = "library-info-meta";
+                appendInfoRow(list, "Publisher", source.publisher);
+                appendInfoRow(list, "Creator", source.creator);
+                appendInfoRow(list, "Language", libraryLanguage(source, true));
+                appendInfoRow(list, "Date", source.date);
+                appendInfoRow(list, "Size", formatLibrarySize(source.size));
+                if (Number(source.article_count) > 0) {
+                    appendInfoRow(list, "Articles", Number(source.article_count).toLocaleString());
+                }
+                if (Number(source.media_count) > 0) {
+                    appendInfoRow(list, "Media", Number(source.media_count).toLocaleString());
+                }
+                appendInfoRow(list, "Category", source.category);
+                appendInfoRow(list, "Flavour", source.flavour);
+                appendInfoRow(
+                    list,
+                    "Tags",
+                    Array.isArray(source.tags) ? source.tags.filter(Boolean).join(" · ") : "",
+                );
+                appendInfoRow(list, "License", source.license);
+                appendInfoRow(list, "Scraper", source.scraper);
+                appendInfoRow(list, "Source", source.source);
+                appendInfoRow(list, "Attribution", source.attribution, { href: false });
+                appendInfoRow(list, "Relation", source.relation);
+                appendInfoRow(list, "ZIM name", source.perma_ref);
+                if (list.children.length) content.appendChild(list);
+
+                const counter = counterSummary(source.counter);
+                if (counter.length) {
+                    const details = document.createElement("details");
+                    details.className = "library-info-counter";
+                    const summary = document.createElement("summary");
+                    summary.textContent = "Content types";
+                    details.appendChild(summary);
+                    const code = document.createElement("code");
+                    code.textContent = counter
+                        .map((entry) => `${entry.mime}: ${entry.count.toLocaleString()}`)
+                        .join("\n");
+                    details.appendChild(code);
+                    content.appendChild(details);
+                }
+
+                modal.hidden = false;
+                document.body.classList.add("library-info-open");
+                $("libraryInfoClose")?.focus();
             }
 
             function openRandomLibraryArticle() {
@@ -270,7 +479,15 @@
                     const body = document.createElement("div");
                     body.className = "library-card-body";
                     const heading = document.createElement("h3");
-                    heading.textContent = title;
+                    const titleLink = document.createElement(available ? "a" : "span");
+                    titleLink.className = "library-card-title";
+                    titleLink.textContent = title;
+                    if (available) {
+                        titleLink.href = homepage;
+                        titleLink.dataset.libraryArticle = "true";
+                        titleLink.setAttribute("aria-label", `Open ${title}`);
+                    }
+                    heading.appendChild(titleLink);
                     body.appendChild(heading);
                     const description =
                         source.long_description ||
@@ -285,7 +502,7 @@
                     const details = document.createElement("p");
                     details.className = "library-card-details";
                     const detailValues = [
-                        source.language && String(source.language).toUpperCase(),
+                        libraryLanguage(source),
                         formatLibrarySize(source.size),
                         Number(source.article_count) > 0
                             ? `${Number(source.article_count).toLocaleString()} articles`
@@ -301,25 +518,21 @@
                         creator.textContent = `By ${source.creator}`;
                         body.appendChild(creator);
                     }
-                    const tags = Array.isArray(source.tags)
-                        ? source.tags.filter(Boolean).slice(0, 4)
-                        : [];
-                    if (tags.length) {
-                        const tagLine = document.createElement("p");
-                        tagLine.className = "library-card-tags";
-                        tagLine.textContent = tags.join(" · ");
-                        body.appendChild(tagLine);
+                    const actions = document.createElement("div");
+                    actions.className = "library-card-actions";
+                    if (!available) {
+                        const status = document.createElement("span");
+                        status.className = "secondary library-card-action";
+                        status.textContent = "Unavailable";
+                        actions.appendChild(status);
                     }
-                    const action = document.createElement(available ? "a" : "span");
-                    action.className = "secondary library-card-action";
-                    if (available) {
-                        action.href = homepage;
-                        action.dataset.libraryArticle = "true";
-                        action.textContent = "Open homepage";
-                    } else {
-                        action.textContent = "Unavailable";
-                    }
-                    body.appendChild(action);
+                    const detailsButton = document.createElement("button");
+                    detailsButton.type = "button";
+                    detailsButton.className = "secondary library-card-action";
+                    detailsButton.textContent = "Details";
+                    detailsButton.addEventListener("click", () => showLibraryInfo(source));
+                    actions.appendChild(detailsButton);
+                    body.appendChild(actions);
                     card.append(preview, body);
                     grid.appendChild(card);
                 });
@@ -2079,6 +2292,20 @@
                 event.preventDefault();
                 showArticleModal(new URL(link.href, location.href).href, "library");
             });
+            $("libraryInfoModal").addEventListener("click", (event) => {
+                const target = event.target instanceof Element ? event.target : null;
+                if (target?.classList.contains("library-info-backdrop")) {
+                    closeLibraryInfo();
+                    return;
+                }
+                const link = target?.closest("a[data-library-article]");
+                if (!link || modifiedClick(event)) return;
+                if (new URL(link.href, location.href).origin !== location.origin) return;
+                event.preventDefault();
+                closeLibraryInfo();
+                showArticleModal(new URL(link.href, location.href).href, "library");
+            });
+            $("libraryInfoClose").addEventListener("click", closeLibraryInfo);
             $("libraryFilter").addEventListener("input", renderLibrary);
             $("libraryShuffle").addEventListener("click", (event) => {
                 if (event.ctrlKey || event.shiftKey) {
@@ -2107,6 +2334,11 @@
                 if (event.target === event.currentTarget) hideExternalLinkNotice();
             });
             window.addEventListener("keydown", (event) => {
+                if (event.key === "Escape" && !$("libraryInfoModal").hidden) {
+                    event.preventDefault();
+                    closeLibraryInfo();
+                    return;
+                }
                 if (event.key === "Escape" && !$("articleModal").hidden) {
                     event.preventDefault();
                     closeArticleModal();
@@ -2337,6 +2569,7 @@
                 $("libraryView").hidden = !libraryView;
                 document.body.classList.toggle("library-active", libraryView);
                 const state = readLocationState();
+                setSelectedSources(state.selectedSources);
                 syncArticleModal(state.modal);
                 if (state.question) {
                     $("question").value = state.question;

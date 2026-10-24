@@ -27,6 +27,20 @@ class SourceInfo:
     tags: tuple[str, ...] = ()
     size: int | None = None
     article_count: int | None = None
+    # Catalog fields (local sources; empty for remote-only sources).
+    uuid: str | None = None
+    publisher: str | None = None
+    perma_ref: str | None = None
+    flavour: str | None = None
+    category: str | None = None
+    media_count: int | None = None
+    license: str | None = None
+    scraper: str | None = None
+    source: str | None = None
+    attribution: str | None = None
+    relation: str | None = None
+    counter: str | None = None
+    has_fulltext_index: bool | None = None
 
     def to_dict(self, include_metadata: bool = False) -> dict[str, Any]:
         # ``icon_path`` is deliberately not exposed: it is a server-side lookup
@@ -55,6 +69,19 @@ class SourceInfo:
                 "tags": list(self.tags),
                 "size": self.size,
                 "article_count": self.article_count,
+                "uuid": self.uuid,
+                "publisher": self.publisher,
+                "perma_ref": self.perma_ref,
+                "flavour": self.flavour,
+                "category": self.category,
+                "media_count": self.media_count,
+                "license": self.license,
+                "scraper": self.scraper,
+                "source": self.source,
+                "attribution": self.attribution,
+                "relation": self.relation,
+                "counter": self.counter,
+                "has_fulltext_index": self.has_fulltext_index,
             })
         return payload
 

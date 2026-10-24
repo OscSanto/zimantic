@@ -20,9 +20,10 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 from libzim.reader import Archive
-from libzim.search import Query, Searcher
+from libzim.search import Query
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
+from .catalog import CATALOG_FILENAME, ZimCatalog
 from .contracts import SourceInfo, SourceResult
 from .searching.config import _file_signature, _float_config, _int_config
 from .searching.index import _LocalIndex, _nprobe
@@ -552,6 +553,29 @@ class Search:
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
         )
+        # Single metadata catalog.  It is a disposable cache: the ZIM directory
+        # remains the source of truth, and a missing/corrupt catalog falls back
+        # to the archive-scanning behavior below.
+        self.catalog: ZimCatalog | None = None
+        index_dir = cfg.get("index_dir")
+        if index_dir:
+            try:
+                self.catalog = ZimCatalog(
+                    Path(index_dir) / CATALOG_FILENAME,
+                    zim_dir=cfg.get("zim_dir"),
+                )
+                self.catalog.scan()
+            except Exception as error:
+                logger.warning(
+                    "zimantic: catalog unavailable (%s); falling back to archive scans",
+                    error,
+                )
+                if self.catalog is not None:
+                    try:
+                        self.catalog.close()
+                    except Exception:
+                        pass
+                self.catalog = None
         self._load_indexes()
         # Local indexes are ready immediately; the optional Kiwix catalog is
         # refreshed in the background so an unreachable Kiwix server cannot
@@ -562,6 +586,11 @@ class Search:
     def web_base_path(self) -> str:
         """Normalized URL prefix for generated links (reverse-proxy support)."""
         return normalize_web_base_path(self.cfg.get("web_base_path"))
+
+    @property
+    def _catalog(self) -> ZimCatalog | None:
+        """Tolerate Search instances built without ``__init__`` (tests)."""
+        return getattr(self, "catalog", None)
 
     @staticmethod
     def _index_uri(db_path: Path) -> str:
@@ -740,6 +769,8 @@ class Search:
         finished: dict[str, Path] = {}
         recorded_sizes: dict[str, int | None] = {}
         for path in db_paths:
+            if path.name == CATALOG_FILENAME:
+                continue
             done, source_size = self._read_index_state(path)
             if done:
                 finished[path.stem] = path
@@ -774,6 +805,51 @@ class Search:
         for stem, path in zim_paths.items():
             if stem not in finished:
                 found[stem] = ("zim", path)
+
+        # The UUID is the book identity.  Two copies of the same ZIM (same
+        # UUID, different filename/path) must not appear as two sources.  Keep
+        # one deterministic copy, preferring an indexed one, then the larger
+        # file, then the shorter/lexicographically earlier path.
+        if self._catalog:
+            chosen: dict[str, tuple[tuple, str]] = {}
+            for stem, (kind, _path) in found.items():
+                record = self._catalog.get_stem(stem)
+                uuid_value = record.uuid if record is not None else ""
+                if not uuid_value:
+                    continue
+                rank = (
+                    kind == "sqlite",
+                    record.size,
+                    -len(record.path),
+                )
+                current = chosen.get(uuid_value)
+                if (
+                    current is None
+                    or rank > current[0]
+                    or (rank == current[0] and stem < current[1])
+                ):
+                    if current is not None:
+                        logger.warning(
+                            "zimantic: %s duplicates %s (UUID %s); using %s",
+                            stem,
+                            current[1],
+                            uuid_value,
+                            stem,
+                        )
+                    chosen[uuid_value] = (rank, stem)
+                else:
+                    logger.warning(
+                        "zimantic: %s duplicates %s (UUID %s); skipping %s",
+                        stem,
+                        current[1],
+                        uuid_value,
+                        stem,
+                    )
+            keep = {stem for _rank, stem in chosen.values()}
+            for stem in list(found):
+                record = self._catalog.get_stem(stem)
+                if record is not None and record.uuid and stem not in keep:
+                    del found[stem]
         return found
 
     def _open_index(self, db_path: Path) -> _LocalIndex | None:
@@ -826,30 +902,29 @@ class Search:
                     )
                     faiss_index = None
 
-            archive = None
-            searcher = None
-            zim_path = self._find_zim_path(db_path.stem, source_size)
-            if zim_path is not None:
-                try:
-                    archive = Archive(zim_path)
-                    searcher = Searcher(archive) if archive.has_fulltext_index else None
-                except Exception as error:  # unreadable ZIM: title search still works
-                    logger.warning(
-                        "%s: ZIM unavailable (%s); title search only",
-                        db_path.stem,
-                        error,
-                    )
-                    archive = None
-                    searcher = None
-            # The connection used for the one-off "done" check is not used for
-            # searches (those use per-thread read-only connections); close it
-            # rather than hold an idle descriptor open for the index lifetime.
+            record = (
+                self._catalog.get_stem_size(db_path.stem, source_size)
+                if self._catalog
+                else None
+            )
+            if record is not None:
+                # Keep a valid SQLite index usable for title search even if the
+                # archive is currently unreadable; opening is lazy and reports
+                # the failure only for operations that need the archive.
+                zim_path = Path(record.path)
+                if source_size is None:
+                    source_size = record.size
+            else:
+                zim_path = self._find_zim_path(db_path.stem, source_size)
+            # The archive and its libzim Searcher are opened on first use.  A
+            # 5000-ZIM library therefore no longer opens 5000 archives (or
+            # creates 5000 Searchers) at startup.
             db.close()
             return _LocalIndex(
                 None,
                 faiss_index,
-                archive,
-                searcher,
+                None,
+                None,
                 threading.Lock(),
                 db_path=uri,
                 db_signature=_file_signature(db_path),
@@ -862,6 +937,9 @@ class Search:
                 source_size=source_size,
                 zim_path=str(zim_path) if zim_path is not None else None,
                 zim_signature=_file_signature(zim_path) if zim_path is not None else None,
+                has_fulltext_index=(
+                    bool(record.has_fulltext_index) if record is not None else None
+                ),
             )
         except sqlite3.Error:
             db.close()
@@ -874,33 +952,46 @@ class Search:
         source (no SQLite title index either), so it is skipped rather than
         advertised as an available-but-empty source.
         """
-        try:
-            archive = Archive(zim_path)
-            if not archive.has_fulltext_index:
+        record = self._catalog.get_stem(zim_path.stem) if self._catalog else None
+        if record is not None:
+            if not record.available:
+                return None
+            if not record.has_fulltext_index:
                 logger.debug(
                     "%s: no SQLite or native full-text index; skipping",
                     zim_path.stem,
                 )
                 return None
-            searcher = Searcher(archive)
-            source_size = zim_path.stat().st_size
-        except Exception as error:  # a corrupt archive must not abort discovery
-            logger.warning(
-                "%s: ZIM fallback unavailable (%s)",
-                zim_path.stem,
-                error,
-            )
-            return None
+            archive = None
+            source_size = record.size
+        else:
+            try:
+                archive = Archive(zim_path)
+                if not archive.has_fulltext_index:
+                    logger.debug(
+                        "%s: no SQLite or native full-text index; skipping",
+                        zim_path.stem,
+                    )
+                    return None
+                source_size = zim_path.stat().st_size
+            except Exception as error:  # a corrupt archive must not abort discovery
+                logger.warning(
+                    "%s: ZIM fallback unavailable (%s)",
+                    zim_path.stem,
+                    error,
+                )
+                return None
         return _LocalIndex(
             None,
             None,
             archive,
-            searcher,
+            None,
             threading.Lock(),
             done="filesystem",
             source_size=source_size,
             zim_path=str(zim_path),
             zim_signature=_file_signature(zim_path),
+            has_fulltext_index=True,
         )
 
     def _load_indexes(self) -> None:
@@ -971,7 +1062,10 @@ class Search:
 
             self._defer_faiss = False
             try:
-                self.reload()
+                # __init__ just scanned the catalog and built the source set;
+                # this reload only reopens index handles to attach their
+                # vectors. Rescanning here would duplicate both at startup.
+                self.reload(scan_catalog=False, refresh=False)
             except Exception as error:
                 logger.warning(
                     "zimantic: FAISS indexes unavailable (%s); "
@@ -990,14 +1084,25 @@ class Search:
 
         threading.Thread(target=_load, name="zimantic-faiss", daemon=True).start()
 
-    def reload(self) -> dict[str, Any]:
+    def reload(
+        self, *, scan_catalog: bool = True, refresh: bool = True
+    ) -> dict[str, Any]:
         """Rescan local indexes and ZIM files without restarting.
 
         Picks up new finished indexes and unindexed archives, forgets removed
         sources, upgrades fast indexes that gained vectors, and refreshes the
         Kiwix catalog. Cheap enough for systemd.path to trigger.
+
+        ``start_faiss`` passes ``scan_catalog=False`` and ``refresh=False``
+        because it runs moments after ``__init__`` scanned the catalog and built
+        the source set; only the index handles need reopening for their vectors.
         """
         with self._reload_lock:
+            if scan_catalog and self._catalog is not None:
+                try:
+                    self._catalog.scan()
+                except Exception as error:
+                    logger.warning("zimantic: catalog rescan failed (%s)", error)
             found = self._discover_local_indexes()
             with self._state_lock:
                 current_names = set(self.indexes)
@@ -1102,7 +1207,8 @@ class Search:
                 preview_cache = getattr(self, "preview_cache", None)
                 if preview_cache is not None:
                     preview_cache.clear()
-            self.refresh_sources()
+            if refresh:
+                self.refresh_sources()
             with self._state_lock:
                 indexes = sorted(self.indexes)
             return {
@@ -1236,27 +1342,90 @@ class Search:
                 key = _zim_key(local_name)
                 if key in local:
                     key = local_name
+                index = self.indexes[local_name]
+                record = (
+                    self._catalog.get_stem_size(local_name, index.source_size)
+                    if self._catalog
+                    else None
+                )
+                if record is not None:
+                    meta = record.to_source_metadata()
+                    icon_url = _source_icon_url(
+                        local_name,
+                        "catalog-favicon" if record.favicon else meta["icon_path"],
+                        web_base_path,
+                    )
+                    local[key] = SourceInfo(
+                        key=key,
+                        name=local_name,
+                        book=local_name,
+                        mode="local",
+                        local_name=local_name,
+                        homepage=meta["homepage"],
+                        icon_path=meta["icon_path"],
+                        icon_url=icon_url,
+                        intent_phrases=_intent_phrases(local_name),
+                        title=meta["title"],
+                        description=meta["description"],
+                        long_description=meta["long_description"],
+                        creator=meta["creator"],
+                        publisher=meta["publisher"],
+                        language=meta["language"],
+                        date=meta["date"],
+                        tags=meta["tags"],
+                        size=meta["size"],
+                        article_count=meta["article_count"],
+                        uuid=meta["uuid"],
+                        perma_ref=meta["name"],
+                        flavour=meta["flavour"],
+                        category=meta["category"],
+                        media_count=meta["media_count"],
+                        license=meta["license"],
+                        scraper=meta["scraper"],
+                        source=meta["source"],
+                        attribution=meta["attribution"],
+                        relation=meta["relation"],
+                        counter=meta["counter"],
+                        has_fulltext_index=meta["has_fulltext_index"],
+                        error=record.last_error or None,
+                    )
+                    continue
+
+                # Fallback for archives without a catalog row (e.g. a catalog
+                # created before this version, or a build that could not write
+                # it).  This opens the archive, as prior versions always did.
+                archive = index.ensure_open()
+                if archive is None:
+                    # A title-only index can still serve results when its ZIM is
+                    # absent (the SQLite docs table is self-contained).  Keep the
+                    # source available, as prior versions did.
+                    local[key] = SourceInfo(
+                        key=key,
+                        name=local_name,
+                        book=local_name,
+                        mode="local",
+                        local_name=local_name,
+                        intent_phrases=_intent_phrases(local_name),
+                        size=index.source_size,
+                    )
+                    continue
                 homepage = None
                 icon_path = None
                 metadata: dict[str, Any] = {}
-                index = self.indexes[local_name]
-                if index.archive is not None:
-                    try:
-                        with index.read_lock:
-                            homepage = self._resolve_article_entry(index.archive).path
-                            icon_path = _find_archive_icon_path(index.archive, homepage)
-                            metadata = _archive_metadata(index.archive)
-                    except (
-                        ArticleNotFoundError,
-                        ArticleUnavailableError,
-                        RuntimeError,
-                        ValueError,
-                    ):
-                        homepage = None
-                icon_url = _source_icon_url(local_name, icon_path, web_base_path)
-                if not icon_url and index.archive is not None and _archive_has_illustration(
-                    index.archive
+                try:
+                    with index.read_lock:
+                        homepage = self._resolve_article_entry(archive).path
+                        icon_path = _find_archive_icon_path(archive, homepage)
+                        metadata = _archive_metadata(archive)
+                except (
+                    ArticleNotFoundError,
+                    ArticleUnavailableError,
+                    RuntimeError,
+                    ValueError,
                 ):
+                    homepage = None
+                icon_url = _source_icon_url(local_name, icon_path, web_base_path)
+                if not icon_url and _archive_has_illustration(archive):
                     icon_url = _source_icon_url(
                         local_name, "illustration", web_base_path
                     )
@@ -1267,14 +1436,13 @@ class Search:
                     except OSError:
                         size = None
                 article_count = None
-                if index.archive is not None:
-                    try:
-                        article_count = getattr(index.archive, "article_count", None)
-                        if callable(article_count):
-                            article_count = article_count()
-                        article_count = int(article_count or 0)
-                    except (AttributeError, RuntimeError, TypeError, ValueError):
-                        article_count = None
+                try:
+                    article_count = getattr(archive, "article_count", None)
+                    if callable(article_count):
+                        article_count = article_count()
+                    article_count = int(article_count or 0)
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    article_count = None
                 local[key] = SourceInfo(
                     key=key,
                     name=local_name,
@@ -1422,6 +1590,57 @@ class Search:
 
     def _inspect_library_archive(self, zim_name: str, zim_path: Path) -> SourceInfo:
         """Build library metadata for a local archive not used by search."""
+        record = self._catalog.get_stem(zim_path.stem) if self._catalog else None
+        if record is not None:
+            meta = record.to_source_metadata()
+            if not record.available:
+                return SourceInfo(
+                    key=_zim_key(zim_name),
+                    name=zim_name,
+                    book=zim_name,
+                    mode="local",
+                    local_name=zim_name,
+                    available=False,
+                    error=record.last_error or "ZIM archive is unavailable",
+                    size=record.size,
+                )
+            icon_url = _source_icon_url(
+                zim_name,
+                "catalog-favicon" if record.favicon else meta["icon_path"],
+                self.web_base_path,
+            )
+            return SourceInfo(
+                key=_zim_key(zim_name),
+                name=zim_name,
+                book=zim_name,
+                mode="local",
+                local_name=zim_name,
+                homepage=meta["homepage"],
+                icon_path=meta["icon_path"],
+                icon_url=icon_url,
+                title=meta["title"],
+                description=meta["description"],
+                long_description=meta["long_description"],
+                creator=meta["creator"],
+                publisher=meta["publisher"],
+                language=meta["language"],
+                date=meta["date"],
+                tags=meta["tags"],
+                size=meta["size"],
+                article_count=meta["article_count"],
+                uuid=meta["uuid"],
+                perma_ref=meta["name"],
+                flavour=meta["flavour"],
+                category=meta["category"],
+                media_count=meta["media_count"],
+                license=meta["license"],
+                scraper=meta["scraper"],
+                source=meta["source"],
+                attribution=meta["attribution"],
+                relation=meta["relation"],
+                counter=meta["counter"],
+                has_fulltext_index=meta["has_fulltext_index"],
+            )
         try:
             archive = Archive(zim_path)
         except (OSError, RuntimeError, TypeError, ValueError) as error:
@@ -1484,14 +1703,30 @@ class Search:
                 for source in self.sources.values()
                 if source.mode == "local" and source.local_name
             }
-        library: list[dict[str, Any]] = []
+            indexed_names = set(self.indexes)
+        # One card per UUID: prefer the searchable copy, then the larger file,
+        # then the shorter/lexicographically earlier name.
+        chosen: dict[str, tuple[tuple, SourceInfo]] = {}
         for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
             source = indexed.get(zim_name)
             if source is None:
                 source = self._inspect_library_archive(zim_name, zim_path)
-            if source.available and source.homepage:
-                library.append(source.to_dict(include_metadata=True))
-        return library
+            if not (source.available and source.homepage):
+                continue
+            identity = source.uuid or f"stem:{source.name}"
+            rank = (
+                source.name in indexed_names,
+                source.size or 0,
+                -len(source.name or ""),
+                source.name or "",
+            )
+            current = chosen.get(identity)
+            if current is None or rank > current[0]:
+                chosen[identity] = (rank, source)
+        return [
+            source.to_dict(include_metadata=True)
+            for _rank, source in chosen.values()
+        ]
 
     def library_version(self):
         """Return a cheap token that changes when installed ZIM files change."""
@@ -1519,6 +1754,10 @@ class Search:
         executor = getattr(self, "_executor", None)
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
+        catalog = getattr(self, "catalog", None)
+        if catalog is not None:
+            catalog.close()
+            self.catalog = None
 
     def local_names(self) -> list[str]:
         with self._state_lock:
@@ -1615,7 +1854,12 @@ class Search:
         with self._state_lock:
             index = self.indexes.get(zim_name)
         if index is None:
-            zim_path = self._scan_zim_paths().get(zim_name)
+            record = self._catalog.get_stem(zim_name) if self._catalog else None
+            zim_path = (
+                Path(record.path)
+                if record is not None and record.available
+                else self._scan_zim_paths().get(zim_name)
+            )
             if zim_path is None:
                 raise ArticleNotFoundError("ZIM not found")
             try:
@@ -1623,7 +1867,8 @@ class Search:
             except (OSError, RuntimeError, ValueError) as error:
                 raise ArticleUnavailableError("ZIM archive is unavailable") from error
             return self._read_archive_article(archive, zim_name, path, head_only)
-        if index.archive is None:
+        archive = index.ensure_open()
+        if archive is None:
             raise ArticleUnavailableError("ZIM archive is unavailable")
 
         acquired = False
@@ -1635,7 +1880,7 @@ class Search:
             acquired = True
             with index.read_lock:
                 return self._read_archive_article(
-                    index.archive,
+                    archive,
                     zim_name,
                     path,
                     head_only,
@@ -1687,6 +1932,19 @@ class Search:
                 ),
                 None,
             )
+        if source is not None and source.mode == "local" and self._catalog:
+            data, mime = self._catalog.favicon(zim_name)
+            if data:
+                return {
+                    "zim": zim_name,
+                    "path": None,
+                    "title": source.title or zim_name,
+                    "mimetype": (mime or "application/octet-stream")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower(),
+                    "content": data,
+                }
         if source is not None and source.mode == "local" and source.icon_path:
             return self.read_article(zim_name, source.icon_path)
         if source is None:
@@ -1707,7 +1965,10 @@ class Search:
             raise ArticleNotFoundError("source icon not found")
         with self._state_lock:
             index = self.indexes.get(zim_name)
-        if index is None or index.archive is None:
+        if index is None:
+            raise ArticleUnavailableError("source icon unavailable")
+        archive = index.ensure_open()
+        if archive is None:
             raise ArticleUnavailableError("source icon unavailable")
         acquired = False
         try:
@@ -1717,7 +1978,7 @@ class Search:
                 raise ArticleUnavailableError("ZIM is being reloaded") from error
             acquired = True
             with index.read_lock:
-                return self._read_archive_icon(index.archive, zim_name, None)
+                return self._read_archive_icon(archive, zim_name, None)
         finally:
             if acquired:
                 self._release_index(index)
@@ -1748,7 +2009,8 @@ class Search:
             "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
         ).fetchone():
             return None
-        upper = max(1, int(getattr(index.archive, "entry_count", 0) or 0))
+        archive = index.ensure_open()
+        upper = max(1, int(getattr(archive, "entry_count", 0) or 0)) if archive else 1
         # Entry rowids are dense entry ids, so sampling one and rejecting gaps,
         # unindexed entries and redirects gives every eligible row equal weight
         # in O(1) per probe. This is fine for normal indexes, but an archive can
@@ -1781,7 +2043,7 @@ class Search:
 
     def _random_fallback_article(self, index: _LocalIndex) -> str | None:
         """Pick a uniformly random readable entry from an unindexed archive."""
-        archive = index.archive
+        archive = index.ensure_open()
         if archive is None:
             return None
         upper = max(1, int(getattr(archive, "entry_count", 0) or 0))
@@ -1822,7 +2084,7 @@ class Search:
             index = self.indexes.get(zim_name)
         if index is None:
             raise ArticleNotFoundError("ZIM not found")
-        if index.archive is None:
+        if index.ensure_open() is None:
             raise ArticleUnavailableError("ZIM archive is unavailable")
 
         acquired = False
@@ -1870,6 +2132,11 @@ class Search:
             if not db_current:
                 reasons.append("index file changed since load")
 
+            record = (
+                self._catalog.get_stem_size(name, index.source_size)
+                if self._catalog
+                else None
+            )
             archive_path = (
                 Path(index.zim_path)
                 if index.zim_path
@@ -1878,7 +2145,7 @@ class Search:
             archive_current = (
                 archive_path is not None
                 and archive_path.exists()
-                and index.archive is not None
+                and (record is None or bool(record.available))
             )
             if not archive_current:
                 reasons.append("ZIM archive unavailable")
@@ -1888,6 +2155,11 @@ class Search:
             if vectors_expected and not vectors_loaded:
                 reasons.append("semantic vectors unavailable")
 
+            fulltext_capability = (
+                bool(record.has_fulltext_index)
+                if record is not None
+                else index.ensure_searcher() is not None
+            )
             report: dict[str, Any] = {
                 "name": name,
                 "status": "ok" if not reasons else "degraded",
@@ -1895,7 +2167,7 @@ class Search:
                 "archive": archive_current,
                 "capabilities": {
                     "title": index.db_path is not None,
-                    "fulltext": index.searcher is not None,
+                    "fulltext": fulltext_capability,
                     "semantic": vectors_loaded,
                     "article": archive_current,
                 },
@@ -1903,17 +2175,27 @@ class Search:
             if reasons:
                 report["issues"] = reasons
 
-            acquired = False
-            if archive_current:
+            if record is not None:
+                report["entry_count"] = record.entry_count
+                report["homepage"] = record.homepage or None
+                report["article_count"] = record.article_count
+                report["media_count"] = record.media_count
+                if record.last_error:
+                    report["issues"] = [*reasons, record.last_error]
+                    report["status"] = "degraded"
+            elif archive_current:
+                acquired = False
                 try:
                     self._acquire_index(index)
                     acquired = True
                     with index.read_lock:
-                        report["entry_count"] = int(index.archive.entry_count)
-                        try:
-                            report["homepage"] = self._resolve_article_entry(index.archive).path
-                        except (ArticleNotFoundError, ArticleUnavailableError):
-                            report["homepage"] = None
+                        archive = index.ensure_open()
+                        if archive is not None:
+                            report["entry_count"] = int(archive.entry_count)
+                            try:
+                                report["homepage"] = self._resolve_article_entry(archive).path
+                            except (ArticleNotFoundError, ArticleUnavailableError):
+                                report["homepage"] = None
                 except (RuntimeError, ValueError):
                     report["status"] = "degraded"
                     report.setdefault("issues", []).append("archive check failed")
@@ -2610,16 +2892,18 @@ class Search:
                 keyword.append((float(bm25), {"rowid": int(rowid)}))
 
         fulltext_rows: list[tuple[int, int]] = []
-        if index.searcher and index.archive:
+        searcher = index.ensure_searcher()
+        archive = index.ensure_open()
+        if searcher and archive:
             # libzim's Searcher is not documented as thread-safe: serialise it.
             with index.lock:
                 try:
-                    paths = index.searcher.search(
+                    paths = searcher.search(
                         Query().set_query(fulltext_query or query)
                     ).getResults(0, count)
                     for rank, path in enumerate(paths):
                         try:
-                            entry = index.archive.get_entry_by_path(path)
+                            entry = archive.get_entry_by_path(path)
                             rowid = entry._index
                             rowids.add(rowid)
                             archive_entries[rowid] = entry
@@ -2632,14 +2916,14 @@ class Search:
         docs = (
             self._fetch_docs(source, db, rowids)
             if db is not None
-            else self._fetch_archive_docs(source, index.archive, archive_entries)
+            else self._fetch_archive_docs(source, archive, archive_entries)
         )
         for score, rowid in semantic_ids:
             doc = docs.get(rowid)
             if doc:
                 semantic.append((score, doc))
         keyword = [(score, docs[row["rowid"]]) for score, row in keyword if row["rowid"] in docs]
-        if index.archive:
+        if archive:
             for rank, rowid in fulltext_rows:
                 doc = docs.get(rowid)
                 if doc:
@@ -2760,7 +3044,10 @@ class Search:
         """Extract previews for one local source while holding its archive lock."""
         with self._state_lock:
             index = self.indexes.get(local_name)
-        if index is None or index.archive is None:
+        if index is None:
+            return {doc["id"]: "" for doc in docs}
+        archive = index.ensure_open()
+        if archive is None:
             return {doc["id"]: "" for doc in docs}
 
         try:
@@ -2773,9 +3060,9 @@ class Search:
             with index.read_lock:
                 for doc in docs:
                     try:
-                        entry = index.archive.get_entry_by_path(doc["path"])
+                        entry = archive.get_entry_by_path(doc["path"])
                         row = read_entry(
-                            index.archive,
+                            archive,
                             entry._index,
                             max_html_bytes=_int_config(
                                 self.cfg,
@@ -2891,7 +3178,7 @@ class Search:
                 if source is None or not source.local_name:
                     continue
                 index = indexes.get(source.local_name)
-                if index is None or index.archive is None:
+                if index is None or index.ensure_open() is None:
                     continue
                 checked += 1
                 phrase_ids.add(result["id"])
@@ -2906,7 +3193,10 @@ class Search:
         found = False
         for local_name, result_docs in grouped.items():
             index = indexes.get(local_name)
-            if index is None or index.archive is None:
+            if index is None:
+                continue
+            archive = index.ensure_open()
+            if archive is None:
                 continue
             try:
                 self._acquire_index(index)
@@ -2919,7 +3209,7 @@ class Search:
                         if not is_phrase_candidate and result.get("mimetype"):
                             continue  # nothing left to learn about this doc
                         try:
-                            item = index.archive.get_entry_by_path(result["path"]).get_item()
+                            item = archive.get_entry_by_path(result["path"]).get_item()
                             mimetype = (
                                 item.mimetype or "application/octet-stream"
                             ).split(";", 1)[0].strip().lower()

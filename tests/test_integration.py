@@ -326,7 +326,7 @@ class LocalIntegrationTests(unittest.TestCase):
 
             search = self._open_search(root)
             index = search.indexes["manual"]
-            archive = index.archive
+            archive = index.ensure_open()
             assert archive is not None
             article_id = None
             asset_ids: list[int] = []
@@ -373,7 +373,7 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             index = search.indexes["manual"]
             self.assertIsNotNone(search._db_for(index))
-            archive = index.archive
+            archive = index.ensure_open()
             assert archive is not None
             article_id = None
             asset_ids: list[int] = []

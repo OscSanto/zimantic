@@ -1032,9 +1032,9 @@ class GracefulDegradationTests(unittest.TestCase):
             reloaded = threading.Event()
             original_reload = search.reload
 
-            def reload():
+            def reload(**kwargs):
                 try:
-                    return original_reload()
+                    return original_reload(**kwargs)
                 finally:
                     reloaded.set()
 
@@ -1045,6 +1045,39 @@ class GracefulDegradationTests(unittest.TestCase):
                 search.start_faiss()
                 self.assertTrue(reloaded.wait(2))
 
+            self.assertTrue(search.indexes["manual"].semantic)
+
+    def test_deferred_faiss_reload_skips_catalog_and_source_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
+            (tmp / "manual.faiss").write_bytes(b"vectors")
+            search = Search(self._cfg(tmp), semantic=True)
+            self.addCleanup(search._executor.shutdown, wait=True)
+            self.assertIsNotNone(search.catalog)
+
+            reloaded = threading.Event()
+            original_reload = search.reload
+
+            def reload(**kwargs):
+                try:
+                    return original_reload(**kwargs)
+                finally:
+                    reloaded.set()
+
+            with (
+                patch.object(sys.modules["faiss"], "read_index", return_value=object(), create=True),
+                patch.object(search, "reload", side_effect=reload),
+                patch.object(search.catalog, "scan") as catalog_scan,
+                patch.object(search, "refresh_sources") as refresh_sources,
+            ):
+                search.start_faiss()
+                self.assertTrue(reloaded.wait(2))
+
+            # __init__ already scanned the catalog and built the source set, so
+            # the startup FAISS reload must not repeat either.
+            catalog_scan.assert_not_called()
+            refresh_sources.assert_not_called()
             self.assertTrue(search.indexes["manual"].semantic)
 
     def test_archive_lookup_prefers_the_matching_size_then_the_largest(self):

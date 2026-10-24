@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from tqdm import tqdm
 from libzim.reader import Archive
+from .catalog import CATALOG_FILENAME, ZimCatalog
 from .content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
@@ -320,6 +321,15 @@ def build(
         return
     try:
         zim = Archive(zim_path)
+        # The archive is already open: store its catalog metadata now, so serve
+        # can list sources without reopening every ZIM at startup.
+        try:
+            with ZimCatalog(Path(index_dir) / CATALOG_FILENAME) as catalog:
+                catalog.upsert_from_archive(zim, zim_path)
+        except Exception as error:
+            logger.warning(
+                "catalog metadata update failed for %s (%s)", zim_path, error
+            )
         if state.db is None:
             raise RuntimeError("build database is unavailable")
         _index_entries(
