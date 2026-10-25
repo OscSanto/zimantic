@@ -6,7 +6,14 @@ import time
 from html.parser import HTMLParser
 from urllib.parse import unquote
 from typing import Any, Iterator, NamedTuple, Protocol, cast
-from libzim.reader import Archive, set_cluster_cache_max_size
+from libzim.reader import Archive
+
+try:
+    from libzim.reader import set_cluster_cache_max_size
+except ImportError:
+    def set_cluster_cache_max_size(_size: int) -> None:
+        """Keep compatibility with older distro libzim bindings."""
+        pass
 
 # libzim undercounts this cache: its 16 MB default really used ~170 MB.
 # 1 MB used ~4 MB and was not slower.
