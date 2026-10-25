@@ -261,6 +261,57 @@ class ServerTests(unittest.TestCase):
         self.assertIn('src="/article/manual/docs/home/"', response.text)
         self.assertIn('href="/content/manual/docs/home/"', response.text)
 
+    def test_content_shell_forwards_shared_selection(self):
+        body = b"<html><head></head><body>Hello world</body></html>"
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda zim, path: {
+                "path": path,
+                "title": "Page",
+                "mimetype": "text/html",
+                "content": body,
+            },
+            create=True,
+        ):
+            shell = self.client.get(
+                "/content/manual/page",
+                params={"highlight": "Hello world"},
+            )
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn(
+            'src="/article/manual/page?highlight=Hello%20world"',
+            shell.text,
+        )
+        self.assertIn(
+            'href="/content/manual/page?highlight=Hello%20world"',
+            shell.text,
+        )
+        self.assertIn("zimantic-article-selection", shell.text)
+
+    def test_shared_selection_survives_article_redirects(self):
+        self.search.read_article = lambda zim, path: {
+            "path": "page",
+            "title": "Page",
+            "mimetype": "text/html",
+            "content": b"<html><head></head><body>Hello</body></html>",
+        }
+        try:
+            response = self.client.get(
+                "/article/manual/page/",
+                params={"highlight": "Hello world"},
+                follow_redirects=False,
+            )
+        finally:
+            del self.search.read_article
+
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(
+            response.headers["location"],
+            "/article/manual/page?highlight=Hello%20world",
+        )
+
     def test_raw_article_assets_allow_sandboxed_fetches(self):
         search = FakeSearch()
         search.read_article = lambda zim, path: {

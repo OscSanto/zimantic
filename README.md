@@ -473,7 +473,10 @@ JSON API examples:
   icon-only navigation through visible search results and, for nested articles, the adjacent article
   links listed on the article's parent page. When a modal article opens another modal article,
   the preceding article can also provide the navigation context. Back navigation uses browser
-  history when available, otherwise the Close control attempts to close the tab. `GET /random?zim=<name>`
+  history when available, otherwise the Close control attempts to close the tab. Article views keep
+  the current ZIM and path in the address bar, including from `/library`, so the URL can be shared.
+  Selecting text adds the passage to that URL and to the toolbar's Copy link action; reopening the
+  link scrolls to and highlights the passage. `GET /random?zim=<name>`
   redirects to a random indexed article's shell. Links from an offline article to an external
   `http` or `https` site show an in-modal notice identifying the destination as online and offer
   to open it in a new tab, avoiding failures from sites that disallow iframe embedding.

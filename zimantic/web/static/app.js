@@ -352,7 +352,7 @@
             function openRandomLibraryArticle() {
                 if (!librarySources.length) return;
                 const source = librarySources[Math.floor(Math.random() * librarySources.length)];
-                showArticleModal(libraryHomepageUrl(source), "library");
+                navigateArticleModal(new URL(libraryHomepageUrl(source), location.href), "library");
             }
 
             function shuffleLibrary() {
@@ -1074,23 +1074,22 @@
 
             function navigateArticleModal(articleUrl, navigationKind = "search") {
                 const locationState = readLocationState();
-                const question = current?.question || locationState.question;
-                if (question) {
-                    history.pushState(
-                        {
-                            ...(history.state || {}),
-                            zimanticModal: true,
-                            zimanticModalNavigation: navigationKind,
-                        },
-                        "",
-                        makeStateUrl(
-                            question,
-                            current ? selectedSourceKeys : locationState.selectedSources,
-                            current?.page ?? locationState.page,
-                            articleUrlValue(articleUrl),
-                        ),
-                    );
-                }
+                // Library articles have no query, but their modal URL still needs a
+                // history entry so the address bar is a shareable deep link.
+                history.pushState(
+                    {
+                        ...(history.state || {}),
+                        zimanticModal: true,
+                        zimanticModalNavigation: navigationKind,
+                    },
+                    "",
+                    makeStateUrl(
+                        current?.question || locationState.question,
+                        current ? selectedSourceKeys : locationState.selectedSources,
+                        current?.page ?? locationState.page,
+                        articleUrlValue(articleUrl),
+                    ),
+                );
                 showArticleModal(articleUrl.href, navigationKind);
             }
 
@@ -1589,6 +1588,7 @@
                             previousModalArticleUrl = activeArticleUrl.href;
                         }
                         activeModalUrl = articleUrl.href;
+                        syncModalStateUrl(articleUrl);
                         pendingModalArticleUrl = null;
                         pendingModalNavigation = null;
                         if (navigationKind === "parent" && isPendingNavigation && pendingNavigation.parentUrl) {
@@ -1601,6 +1601,19 @@
                             });
                         }
                     }
+                }
+                if (event.data?.type === "zimantic-article-selection") {
+                    const articleUrl = readModalUrl(event.data.url);
+                    const activeArticleUrl = readModalUrl(activeModalUrl);
+                    if (
+                        !articleUrl ||
+                        !activeArticleUrl ||
+                        articleUrl.pathname !== activeArticleUrl.pathname
+                    ) {
+                        return;
+                    }
+                    syncModalStateUrl(articleUrl);
+                    return;
                 }
                 if (event.data?.type === "zimantic-article-navigate") {
                     const direction = event.data.direction;
@@ -2293,6 +2306,24 @@
                 return makeStateUrl(current.question, selectedSourceKeys, page);
             }
 
+            function syncModalStateUrl(articleUrl) {
+                // Keep the address bar pointing at the article that is actually
+                // visible, including when a link inside the article navigated the
+                // shell or when a text selection was shared.
+                const modal = $("articleModal");
+                if (!modal || modal.hidden) return;
+                const value = articleUrl ? articleUrlValue(articleUrl) : null;
+                const url = new URL(location.href);
+                if (value) {
+                    if (url.searchParams.get("modal") === value) return;
+                    url.searchParams.set("modal", value);
+                } else {
+                    if (!url.searchParams.has("modal")) return;
+                    url.searchParams.delete("modal");
+                }
+                history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+            }
+
             function readLocationState() {
                 const params = new URLSearchParams(location.search);
                 const pageNumber = Number.parseInt(params.get("page") || "1", 10);
@@ -2307,7 +2338,12 @@
             function syncArticleModal(modalValue) {
                 const articleUrl = readModalUrl(modalValue);
                 if (articleUrl) {
-                    showArticleModal(articleUrl.href, history.state?.zimanticModalNavigation || "search");
+                    // A shared /library?modal=... link has no history.state, so infer
+                    // the library navigation context from the page itself.
+                    const navigationKind =
+                        history.state?.zimanticModalNavigation ||
+                        (location.pathname === appPath("/library") ? "library" : "search");
+                    showArticleModal(articleUrl.href, navigationKind);
                 } else {
                     closeArticleModal({ navigateHistory: false });
                 }
@@ -2356,7 +2392,7 @@
                 if (!link || modifiedClick(event)) return;
                 if (new URL(link.href, location.href).origin !== location.origin) return;
                 event.preventDefault();
-                showArticleModal(new URL(link.href, location.href).href, "library");
+                navigateArticleModal(new URL(link.href, location.href), "library");
             });
             $("libraryInfoModal").addEventListener("click", (event) => {
                 const target = event.target instanceof Element ? event.target : null;
@@ -2369,7 +2405,7 @@
                 if (new URL(link.href, location.href).origin !== location.origin) return;
                 event.preventDefault();
                 closeLibraryInfo();
-                showArticleModal(new URL(link.href, location.href).href, "library");
+                navigateArticleModal(new URL(link.href, location.href), "library");
             });
             $("libraryInfoClose").addEventListener("click", closeLibraryInfo);
             $("libraryFilter").addEventListener("input", renderLibrary);

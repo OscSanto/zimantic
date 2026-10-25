@@ -280,7 +280,31 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const parentPrevious = toolbar.querySelector("[data-zimantic-parent-previous]");
     const parentNext = toolbar.querySelector("[data-zimantic-parent-next]");
     const actions = toolbar.querySelector(".zimantic-toolbar-actions");
+    const articleFrame = document.querySelector("iframe[data-zimantic-article]");
     let selectedSearchText = "";
+    let articleSelection = "";
+    const normalizeSelection = value =>
+      String(value || "").replace(/\\s+/g, " ").trim().slice(0, 2048);
+    const shareUrl = value => {
+      const url = new URL(location.href);
+      url.hash = "";
+      url.searchParams.delete("highlight");
+      const text = normalizeSelection(value);
+      if (text) url.searchParams.set("highlight", text);
+      return url.href;
+    };
+    const setArticleSelection = value => {
+      articleSelection = normalizeSelection(value);
+      if (permalink) permalink.href = shareUrl(articleSelection);
+      if (window.parent !== window) {
+        window.parent.postMessage({
+          type: "zimantic-article-selection",
+          url: shareUrl(articleSelection),
+        }, "*");
+      } else {
+        history.replaceState(history.state, "", shareUrl(articleSelection));
+      }
+    };
     const contextControls = [
       [previous, "previous"],
       [next, "next"],
@@ -329,6 +353,11 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       if (event.data?.type === "zimantic-modal-navigation") {
         setContextNavigation(event.data);
       }
+    });
+    window.addEventListener("message", event => {
+      if (!articleFrame || event.source !== articleFrame.contentWindow) return;
+      if (event.data?.type !== "zimantic-article-selection") return;
+      setArticleSelection(event.data.text);
     });
     // The raw article iframe cannot see or update this toolbar, so its bridge
     // asks us to navigate the whole shell. Reloading keeps breadcrumbs, the
@@ -394,7 +423,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           window.close();
         }
       } else if (action === "home") {
-        const query = selectedSearchText || selectedText();
+        const query = selectedSearchText || articleSelection || selectedText();
         selectedSearchText = "";
         if (window.parent !== window) {
           event.preventDefault();
@@ -434,7 +463,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         if (!navigator.clipboard || !navigator.clipboard.writeText) {
           announce("Copy unavailable");
         } else {
-          navigator.clipboard.writeText(location.href).then(
+          navigator.clipboard.writeText(shareUrl(articleSelection)).then(
             () => {
               control.textContent = "Link copied";
               announce("Link copied");
@@ -555,6 +584,155 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
     const articleHome = `${prefix}/article/${zim}`;
     const contentPrefix = `${contentHome}/`;
     const articlePrefix = `${articleHome}/`;
+    const normalizeText = value =>
+      String(value || "").replace(/\\s+/g, " ").trim();
+    const escapeRegExp = value =>
+      String(value).replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+    const phrasePattern = words =>
+      new RegExp(words.map(escapeRegExp).join("\\\\s+"), "i");
+    const visibleTextNodes = () => {
+      const root = document.body || document.documentElement;
+      if (!root) return [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          if (!node.nodeValue || !node.nodeValue.trim()) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          const parent = node.parentElement;
+          if (
+            !parent ||
+            parent.closest("script, style, noscript, template, textarea, select, option")
+          ) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+      const nodes = [];
+      let node = walker.nextNode();
+      while (node) {
+        nodes.push(node);
+        node = walker.nextNode();
+      }
+      return nodes;
+    };
+    const matchWords = (nodes, words, fromIndex = 0, fromOffset = 0) => {
+      const limit = Math.min(words.length, 24);
+      for (let take = limit; take >= 1; take--) {
+        const pattern = phrasePattern(words.slice(0, take));
+        for (let index = fromIndex; index < nodes.length; index++) {
+          const value = nodes[index].nodeValue || "";
+          const offset = index === fromIndex ? fromOffset : 0;
+          const tail = offset ? value.slice(offset) : value;
+          pattern.lastIndex = 0;
+          const match = pattern.exec(tail);
+          if (!match) continue;
+          return {
+            index,
+            start: offset + match.index,
+            end: offset + match.index + match[0].length,
+            wordsUsed: take,
+          };
+        }
+      }
+      return null;
+    };
+    const matchLastWords = (nodes, words, after) => {
+      const limit = Math.min(words.length, 24);
+      for (let take = limit; take >= 1; take--) {
+        const pattern = phrasePattern(words.slice(words.length - take));
+        for (let index = after.index; index < nodes.length; index++) {
+          const value = nodes[index].nodeValue || "";
+          const offset = index === after.index ? after.end : 0;
+          const tail = offset ? value.slice(offset) : value;
+          pattern.lastIndex = 0;
+          const match = pattern.exec(tail);
+          if (!match) continue;
+          return {
+            index,
+            start: offset + match.index,
+            end: offset + match.index + match[0].length,
+          };
+        }
+      }
+      return null;
+    };
+    const applyHighlight = value => {
+      const text = normalizeText(value).slice(0, 4096);
+      if (!text) return false;
+      const words = text.split(" ");
+      const nodes = visibleTextNodes();
+      if (!nodes.length) return false;
+      const start = matchWords(nodes, words);
+      if (!start) return false;
+      const end = start.wordsUsed === words.length
+        ? start
+        : matchLastWords(nodes, words, start) || start;
+      const range = document.createRange();
+      range.setStart(nodes[start.index], start.start);
+      range.setEnd(nodes[end.index], end.end);
+      if (range.collapsed) return false;
+      const selection = window.getSelection();
+      if (!selection) return false;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const target = range.startContainer.parentElement || document.body;
+      if (target && target.scrollIntoView) {
+        target.scrollIntoView({block: "center", inline: "nearest"});
+      }
+      return true;
+    };
+    let lastSelection = "";
+    let selectionTimer = null;
+    const currentSelection = () => {
+      const selection = typeof window.getSelection === "function"
+        ? window.getSelection()
+        : null;
+      return normalizeText(selection?.toString() || "").slice(0, 2048);
+    };
+    const publishSelection = () => {
+      const text = currentSelection();
+      if (text === lastSelection) return;
+      lastSelection = text;
+      if (window.parent !== window) {
+        window.parent.postMessage({
+          type: "zimantic-article-selection",
+          text,
+        }, "*");
+      }
+    };
+    const scheduleSelection = () => {
+      clearTimeout(selectionTimer);
+      selectionTimer = setTimeout(publishSelection, 200);
+    };
+    document.addEventListener("selectionchange", scheduleSelection);
+    // Publish on the gesture that finishes a selection too, so a quick click on
+    // Copy link cannot race the debounce and drop the selected text.
+    window.addEventListener("mouseup", publishSelection);
+    window.addEventListener("keyup", publishSelection);
+    window.addEventListener("message", event => {
+      if (event.source !== window.parent) return;
+      if (event.data?.type !== "zimantic-article-highlight") return;
+      applyHighlight(event.data.text);
+    });
+    const requestedHighlight = (() => {
+      try {
+        return normalizeText(
+          new URL(location.href).searchParams.get("highlight") || ""
+        ).slice(0, 4096);
+      } catch (_) {
+        return "";
+      }
+    })();
+    if (requestedHighlight) {
+      let attempts = 0;
+      const tryHighlight = () => {
+        if (applyHighlight(requestedHighlight) || attempts >= 6) return;
+        attempts += 1;
+        setTimeout(tryHighlight, 400);
+      };
+      tryHighlight();
+    }
     document.addEventListener("click", event => {
       const anchor = event.target && event.target.closest
         ? event.target.closest("a[href]")
@@ -645,6 +823,14 @@ def _article_url(zim: str, path: str | None = None, base_path: str = "") -> str:
     return _route_url("article", zim, path, base_path)
 
 
+def _append_highlight(url: str, highlight: str | None = None) -> str:
+    """Add the shared-text selection to a shell or raw article URL."""
+    if not highlight:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}highlight={quote_path(highlight, safe='')}"
+
+
 def _article_http_error(error: Exception) -> HTTPException:
     return HTTPException(
         status_code=_ARTICLE_ERROR_STATUS[type(error)],
@@ -658,7 +844,12 @@ def _search_base_path(search) -> str:
     return normalize_web_base_path(cfg.get("web_base_path"))
 
 
-def _article_toolbar(zim: str, article: dict, base_path: str = "") -> str:
+def _article_toolbar(
+    zim: str,
+    article: dict,
+    base_path: str = "",
+    highlight: str | None = None,
+) -> str:
     zim_url = _content_url(zim, base_path=base_path)
     random_url = f"{base_path}/random?zim={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
@@ -666,10 +857,13 @@ def _article_toolbar(zim: str, article: dict, base_path: str = "") -> str:
     trailing_slash = article_url_path.endswith("/")
     article_path = article_url_path.strip("/")
     path_parts = [part for part in article_path.split("/") if part]
-    permalink_url = _content_url(
-        zim,
-        article_path + "/" if trailing_slash and article_path else article_path,
-        base_path,
+    permalink_url = _append_highlight(
+        _content_url(
+            zim,
+            article_path + "/" if trailing_slash and article_path else article_path,
+            base_path,
+        ),
+        highlight,
     )
     article_title = html_escape(
         str(article.get("title") or article_path or "Permalink"),
@@ -831,6 +1025,7 @@ def _content_shell(
     status_code: int = 200,
     fallback_icon: str | None = None,
     base_path: str = "",
+    highlight: str | None = None,
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -842,8 +1037,11 @@ def _content_shell(
     """
     article_url_path = str(article.get("path") or "").strip()
     article_path = article_url_path.strip("/")
-    iframe_url = _article_url(zim, article_url_path, base_path)
-    toolbar = _article_toolbar(zim, article, base_path)
+    iframe_url = _append_highlight(
+        _article_url(zim, article_url_path, base_path),
+        highlight,
+    )
+    toolbar = _article_toolbar(zim, article, base_path, highlight)
     entry_title = str(article.get("title") or article_path or zim)
     parsed_title = None
     icon = fallback_icon

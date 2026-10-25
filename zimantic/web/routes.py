@@ -187,7 +187,13 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             "cache": search_class.cache.stats(),
         }
 
-    def raw_article_response(zim: str, path: str | None = None):
+    def requested_highlight(request: Request) -> str | None:
+        value = (request.query_params.get("highlight") or "").strip()
+        return value[:4096] or None
+
+    def raw_article_response(
+        zim: str, path: str | None = None, highlight: str | None = None
+    ):
         try:
             article = search_class.read_article(zim, path)
         except (
@@ -202,7 +208,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             return Response(
                 status_code=307,
                 headers={
-                    "Location": web_app._article_url(zim, article["path"], base_path)
+                    "Location": web_app._append_highlight(
+                        web_app._article_url(zim, article["path"], base_path),
+                        highlight,
+                    )
                 },
             )
         content = article["content"]
@@ -232,7 +241,9 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 return icon_url
         return None
 
-    def content_shell_response(zim: str, path: str | None = None):
+    def content_shell_response(
+        zim: str, path: str | None = None, highlight: str | None = None
+    ):
         requested_path = None if path is None else path
         fallback_icon = zim_icon_url(zim)
         read_head = getattr(search_class, "read_article_head", None)
@@ -252,13 +263,17 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 web_app._ARTICLE_ERROR_STATUS[type(error)],
                 fallback_icon,
                 base_path,
+                highlight,
             )
 
         if requested_path != article["path"]:
             return Response(
                 status_code=307,
                 headers={
-                    "Location": web_app._content_url(zim, article["path"], base_path)
+                    "Location": web_app._append_highlight(
+                        web_app._content_url(zim, article["path"], base_path),
+                        highlight,
+                    )
                 },
             )
         return web_app._content_shell(
@@ -266,23 +281,32 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             article,
             fallback_icon=fallback_icon,
             base_path=base_path,
+            highlight=highlight,
         )
 
     @app.get("/content/{zim}")
-    def content_homepage(zim: str):
-        return content_shell_response(zim)
+    def content_homepage(zim: str, request: Request):
+        return content_shell_response(zim, highlight=requested_highlight(request))
 
     @app.get("/content/{zim}/{path:path}")
-    def content_article(zim: str, path: str):
-        return content_shell_response(zim, path)
+    def content_article(zim: str, path: str, request: Request):
+        return content_shell_response(
+            zim,
+            path,
+            highlight=requested_highlight(request),
+        )
 
     @app.get("/article/{zim}")
-    def article_homepage(zim: str):
-        return raw_article_response(zim)
+    def article_homepage(zim: str, request: Request):
+        return raw_article_response(zim, highlight=requested_highlight(request))
 
     @app.get("/article/{zim}/{path:path}")
-    def article(zim: str, path: str):
-        return raw_article_response(zim, path)
+    def article(zim: str, path: str, request: Request):
+        return raw_article_response(
+            zim,
+            path,
+            highlight=requested_highlight(request),
+        )
 
     @app.get("/random")
     def random_article(zim: str = Query(..., min_length=1)):
