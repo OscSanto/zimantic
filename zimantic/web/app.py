@@ -257,7 +257,7 @@ script[data-zimantic-toolbar] { display: none !important; }
   font-size: 18px !important;
   line-height: 1 !important;
   min-width: 32px !important;
-  padding: 3px 7px !important;
+  padding: 4px 7px !important;
 }
 [data-zimantic-toolbar] .zimantic-toolbar-parent-nav {
   flex: 0 0 auto !important;
@@ -384,15 +384,44 @@ script[data-zimantic-toolbar] { display: none !important; }
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 (() => {
   const appBasePath = %s;
+  const storageNotice = document.querySelector("[data-zimantic-storage-notice]");
+  const storageNoticeOpen = document.querySelector(
+    "[data-zimantic-storage-notice-open]"
+  );
+  const storageNoticeDismiss = document.querySelector(
+    "[data-zimantic-storage-notice-dismiss]"
+  );
+  let storageNoticeDismissed = false;
+  const showStorageNotice = () => {
+    if (storageNoticeDismissed || !storageNotice) return;
+    if (storageNoticeOpen) storageNoticeOpen.href = location.href;
+    storageNotice.hidden = false;
+  };
+  if (storageNoticeDismiss) {
+    storageNoticeDismiss.addEventListener("click", () => {
+      storageNoticeDismissed = true;
+      if (storageNotice) storageNotice.hidden = true;
+      const articleFrame = document.querySelector("iframe[data-zimantic-article]");
+      if (articleFrame) articleFrame.focus();
+    });
+  }
+  if (storageNoticeOpen) {
+    // The modal embeds this shell in a sandbox that forbids new browsing
+    // contexts, so ask the host to open the standalone view instead.
+    storageNoticeOpen.addEventListener("click", event => {
+      if (window.parent === window) return;
+      event.preventDefault();
+      window.parent.postMessage({
+        type: "zimantic-open-article",
+        url: location.href,
+      }, "*");
+    });
+  }
   // Register before DOMContentLoaded: the article frame can report blocked
   // storage while its own deferred modules run, before this shell initializes.
   window.addEventListener("message", event => {
     if (event.data?.type !== "zimantic-article-storage-blocked") return;
-    if (window.parent === window) return;
-    window.parent.postMessage({
-      type: "zimantic-article-storage-blocked",
-      url: location.href,
-    }, "*");
+    showStorageNotice();
   });
   const initialize = () => {
     const toolbar = document.querySelector("nav[data-zimantic-toolbar]");
@@ -1528,6 +1557,37 @@ nav[data-zimantic-toolbar] {
   margin: 0 !important;
   position: static !important;
 }
+[data-zimantic-storage-notice] {
+  align-items: center;
+  background: #fff8e1;
+  border-bottom: 1px solid #ead9a1;
+  color: #4a3b00;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  font: 13px/1.45 system-ui, sans-serif;
+  gap: 8px 12px;
+  padding: 8px 12px;
+}
+[data-zimantic-storage-notice][hidden] { display: none; }
+[data-zimantic-storage-notice] p {
+  flex: 1 1 260px;
+  margin: 0;
+}
+[data-zimantic-storage-notice] a,
+[data-zimantic-storage-notice] button {
+  background: #fff;
+  border: 1px solid #cbb877;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  padding: 3px 10px;
+  text-decoration: none;
+}
+[data-zimantic-storage-notice] a:hover,
+[data-zimantic-storage-notice] button:hover { background: #f6ecc8; }
 [data-zimantic-capture-notice] {
   align-items: center;
   background: #fff8e1;
@@ -1570,6 +1630,17 @@ iframe[data-zimantic-article] {
 <body>
 """
         + toolbar
+        + "\n<div id=\"articleStorageNotice\" class=\"article-storage-notice\" "
+        "data-zimantic-storage-notice role=\"status\" hidden>\n"
+        "<p>This article uses browser storage, which is isolated inside this "
+        "viewer. Changes may not be saved.</p>\n"
+        "<a id=\"articleStorageNoticeOpen\" class=\"secondary\" "
+        "data-zimantic-storage-notice-open href=\"#\" target=\"_blank\" "
+        "rel=\"noopener noreferrer\">Open in a new tab "
+        "<span aria-hidden=\"true\">↗</span></a>\n"
+        "<button id=\"articleStorageNoticeDismiss\" class=\"secondary\" "
+        "data-zimantic-storage-notice-dismiss type=\"button\">Dismiss</button>\n"
+        "</div>\n"
         + "\n<div data-zimantic-capture-notice hidden>"
         "<p>This capture has no readable content. The archived page may have "
         "been empty (for example, a parked domain), or its scripts and styles "

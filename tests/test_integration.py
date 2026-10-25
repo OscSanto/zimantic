@@ -206,6 +206,16 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b"zimantic-modal-navigation", shell.content)
             self.assertIn(b"zimantic-shell-navigate", shell.content)
             self.assertIn(b"zimantic-article-storage-blocked", shell.content)
+            self.assertIn(b"data-zimantic-storage-notice", shell.content)
+            self.assertIn(b"zimantic-open-article", shell.content)
+            self.assertLess(
+                shell.content.index(b'data-zimantic-action="close"'),
+                shell.content.index(b"data-zimantic-storage-notice-dismiss"),
+            )
+            self.assertLess(
+                shell.content.index(b"data-zimantic-storage-notice-dismiss"),
+                shell.content.index(b"<iframe data-zimantic-article"),
+            )
             self.assertIn(b"zimantic-article-ready", shell.content)
             self.assertIn(b"zimantic-article-navigate", shell.content)
             self.assertIn(b"zimantic-parent-article-navigate", shell.content)

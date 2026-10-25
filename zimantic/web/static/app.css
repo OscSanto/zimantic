@@ -835,31 +835,6 @@ body.modal-open {
         background: rgba(15, 17, 21, 0.7);
     }
 }
-.article-storage-notice {
-    align-items: center;
-    background: #fff8e1;
-    border-bottom: 1px solid #ead9a1;
-    color: #4a3b00;
-    display: flex;
-    flex: 0 0 auto;
-    flex-wrap: wrap;
-    font-size: 0.85rem;
-    gap: 8px 12px;
-    padding: 8px 12px;
-}
-.article-storage-notice p {
-    flex: 1 1 260px;
-    margin: 0;
-}
-.article-storage-notice a.secondary,
-.article-storage-notice button.secondary {
-    border-color: #cbb877;
-    color: #4a3b00;
-}
-.article-storage-notice a.secondary:hover,
-.article-storage-notice button.secondary:hover {
-    background: #f6ecc8;
-}
 .empty {
     color: var(--muted);
     padding: 16px 0;

@@ -117,13 +117,13 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn('href="app.css"', page.text)
         self.assertIn('src="app.js"', page.text)
-        self.assertIn('id="articleStorageNotice"', page.text)
+        self.assertIn('id="articleModalFrame"', page.text)
 
         css = self.client.get("/app.css")
         self.assertEqual(css.status_code, 200)
         self.assertTrue(css.headers["content-type"].startswith("text/css"))
         self.assertIn(":root", css.text)
-        self.assertIn("article-storage-notice", css.text)
+        self.assertIn(".article-modal-frame", css.text)
 
         javascript = self.client.get("/app.js")
         self.assertEqual(javascript.status_code, 200)
@@ -131,7 +131,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("initialize();", javascript.text)
         self.assertIn("handleExternalLink", javascript.text)
         self.assertIn('credentials: "same-origin"', javascript.text)
-        self.assertIn("showStorageNotice", javascript.text)
+        self.assertIn("zimantic-open-article", javascript.text)
 
         shim = self.client.get("/indexeddb-shim.js")
         self.assertEqual(shim.status_code, 200)
@@ -267,6 +267,19 @@ class ServerTests(unittest.TestCase):
         self.assertIn("if (location.hash) scrollArticleTo(location.hash)", shell.text)
         self.assertIn("zimantic-article-hash", shell.text)
         self.assertNotIn("data-zimantic-toolbar", raw.text)
+
+        # The storage notice is part of the shell chrome, directly below the
+        # toolbar and above the article iframe.
+        self.assertIn("data-zimantic-storage-notice", shell.text)
+        self.assertIn("zimantic-open-article", shell.text)
+        self.assertLess(
+            shell.text.index('data-zimantic-action="close"'),
+            shell.text.index("data-zimantic-storage-notice-dismiss"),
+        )
+        self.assertLess(
+            shell.text.index("data-zimantic-storage-notice-dismiss"),
+            shell.text.index("<iframe data-zimantic-article"),
+        )
 
     def test_content_shell_preserves_trailing_article_paths(self):
         self.search.read_article = lambda zim, path: {
