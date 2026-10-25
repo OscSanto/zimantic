@@ -9,10 +9,14 @@ from libzim.reader import Archive
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.catalog import (
+    SCHEMA_VERSION,
     ZimCatalog,
+    _SCHEMA_COLUMNS,
+    normalize_counter,
     normalize_tags,
     perma_ref,
     read_catalog,
+    resolve_homepage,
 )
 
 
@@ -168,6 +172,97 @@ class CatalogTests(unittest.TestCase):
             catalog = ZimCatalog(db_path, zims, archive_factory=Archive)
             self.assertEqual(catalog.rows(), [])
             catalog.close()
+
+    def test_foreign_schema_is_rebuilt(self):
+        # A database that claims the current version but uses another layout
+        # (e.g. IIAB's iiab_zim_catalog.py) must be rebuilt, not queried.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "catalog.sqlite"
+            db = sqlite3.connect(db_path)
+            db.execute("CREATE TABLE zims (path TEXT PRIMARY KEY, size INTEGER)")
+            db.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+            db.commit()
+            db.close()
+
+            with ZimCatalog(db_path) as catalog:
+                self.assertEqual(catalog.rows(), [])
+                columns = {
+                    row["name"]
+                    for row in catalog.db.execute("PRAGMA table_info(zims)")
+                }
+            self.assertEqual(columns, set(_SCHEMA_COLUMNS))
+
+    def test_missing_directory_keeps_the_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            zims.mkdir()
+            _create_zim(zims / "manual.zim")
+            db_path = root / "indexes" / "catalog.sqlite"
+            with ZimCatalog(db_path, zims, archive_factory=Archive) as catalog:
+                catalog.scan()
+                self.assertEqual(len(catalog.rows()), 1)
+
+            # The drive is not mounted: the scan must fail without deleting the
+            # cache that the mounted directory will populate again.
+            missing = ZimCatalog(db_path, root / "unmounted", archive_factory=Archive)
+            with self.assertRaises(FileNotFoundError):
+                missing.scan()
+            self.assertEqual(len(missing.rows()), 1)
+            missing.close()
+
+            with ZimCatalog(db_path, zims, archive_factory=Archive) as catalog:
+                self.assertEqual(len(catalog.rows()), 1)
+                self.assertEqual(catalog.scan()["skipped"], 1)
+
+    def test_version_token_tracks_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            zims.mkdir()
+            _create_zim(zims / "manual.zim")
+            with ZimCatalog(root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive) as catalog:
+                before = catalog.version()
+                catalog.scan()
+                self.assertNotEqual(catalog.version(), before)
+                after_scan = catalog.version()
+                catalog.scan()
+                self.assertEqual(catalog.version(), after_scan)
+
+    def test_normalize_counter_sorts_by_count(self):
+        self.assertEqual(
+            normalize_counter("text/html=2;image/png=10;broken;video/mp4=2"),
+            "image/png=10;text/html=2;video/mp4=2;broken",
+        )
+        self.assertEqual(normalize_counter(""), "")
+        self.assertEqual(normalize_counter("nonsense"), "nonsense")
+
+    def test_resolve_homepage_follows_redirects(self):
+        class _Entry:
+            def __init__(self, path, target=None):
+                self.path = path
+                self.is_redirect = target is not None
+                self._target = target
+
+            def get_redirect_entry(self):
+                return self._target
+
+        class _Archive:
+            has_main_entry = True
+
+            def __init__(self, entry):
+                self.main_entry = entry
+
+        target = _Entry("Alpha")
+        self.assertEqual(
+            resolve_homepage(_Archive(_Entry("mainPage", target))), "Alpha"
+        )
+        self.assertEqual(resolve_homepage(_Archive(target)), "Alpha")
+
+        loop = _Entry("a")
+        loop._target = loop
+        loop.is_redirect = True
+        self.assertEqual(resolve_homepage(_Archive(loop)), "")
 
 
 if __name__ == "__main__":

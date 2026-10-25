@@ -693,6 +693,57 @@ class LocalIntegrationTests(unittest.TestCase):
                 200,
             )
 
+    def test_unreadable_archive_is_reported_in_sources_and_library(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zim_path = self._build_fixture(root)
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+            self.assertTrue(search.source_dicts()[0]["available"])
+
+            # Corrupt the archive without changing its size, so the index stays
+            # trusted while the archive itself cannot be opened.
+            data = bytearray(zim_path.read_bytes())
+            data[0:4] = b"XXXX"
+            zim_path.write_bytes(bytes(data))
+            search.reload()
+
+            sources = search.source_dicts()
+            self.assertEqual([source["name"] for source in sources], ["manual"])
+            self.assertFalse(sources[0]["available"])
+            self.assertTrue(sources[0]["error"])
+
+            library = client.get("/library.json")
+            self.assertEqual(library.status_code, 200)
+            self.assertEqual(len(library.json()), 1)
+            self.assertFalse(library.json()[0]["available"])
+            self.assertTrue(library.json()[0]["error"])
+            self.assertEqual(library.json()[0]["local_name"], "manual")
+            self.assertEqual(library.json()[0]["size"], zim_path.stat().st_size)
+
+    def test_readable_duplicate_replaces_an_unreadable_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zim_path = self._build_fixture(root)
+            copy_path = zim_path.with_name("manual-copy.zim")
+            copy_path.write_bytes(zim_path.read_bytes())
+            search = self._open_search(root)
+
+            data = bytearray(zim_path.read_bytes())
+            data[0:4] = b"XXXX"
+            zim_path.write_bytes(bytes(data))
+            search.reload()
+
+            # The two files share a UUID, so one source remains, and the readable
+            # copy wins over the unreadable indexed one.
+            sources = search.source_dicts()
+            self.assertEqual([source["name"] for source in sources], ["manual-copy"])
+            self.assertTrue(sources[0]["available"])
+            self.assertEqual(
+                [source["name"] for source in search.library_dicts()],
+                ["manual-copy"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

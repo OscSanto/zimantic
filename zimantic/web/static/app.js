@@ -28,7 +28,7 @@
             const THUMB_CONCURRENCY = 4;
             const SOURCE_FILTER_LIMIT = 10;
             const SOURCE_CACHE_KEY = "zimantic.sources.v1";
-            const LIBRARY_CACHE_KEY = "zimantic.library.v3";
+            const LIBRARY_CACHE_KEY = "zimantic.library.v4";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let librarySources = [];
@@ -348,9 +348,16 @@
                 $("libraryInfoClose")?.focus();
             }
 
+            function openableLibrarySources() {
+                return librarySources.filter(
+                    (source) => source.available !== false && source.homepage,
+                );
+            }
+
             function openRandomLibraryArticle() {
-                if (!librarySources.length) return;
-                const source = librarySources[Math.floor(Math.random() * librarySources.length)];
+                const openable = openableLibrarySources();
+                if (!openable.length) return;
+                const source = openable[Math.floor(Math.random() * openable.length)];
                 navigateArticleModal(new URL(libraryHomepageUrl(source), location.href), "library");
             }
 
@@ -467,8 +474,11 @@
                         preview.dataset.libraryArticle = "true";
                         preview.setAttribute("aria-label", `Open ${title}`);
                     } else {
+                        // The card explains the problem next to an "Unavailable"
+                        // badge, so dim the artwork instead of replacing it with
+                        // text (an unreadable ZIM usually still has a favicon).
                         preview.classList.add("library-card-unavailable");
-                        preview.textContent = "Unavailable";
+                        preview.setAttribute("aria-hidden", "true");
                     }
                     if (source.icon_url) {
                         const image = document.createElement("img");
@@ -2704,8 +2714,10 @@
                         }
                     }
                     if (libraryView) {
+                        // Unreadable ZIMs stay visible so the card can explain
+                        // why they cannot be opened; see renderLibrary().
                         librarySources = data.payload.filter(
-                            (source) => source.available !== false && source.homepage,
+                            (source) => source.available === false || source.homepage,
                         );
                         renderLibrary();
                     } else {

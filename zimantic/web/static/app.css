@@ -503,9 +503,7 @@ ol.results {
     font-weight: 700;
 }
 .library-card-unavailable {
-    color: var(--err);
-    font-size: 0.85rem;
-    font-weight: 600;
+    opacity: 0.55;
 }
 .library-card-body {
     display: flex;

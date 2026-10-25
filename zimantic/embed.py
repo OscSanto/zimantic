@@ -103,7 +103,7 @@ class Embedder:
             int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
         )
         self.low_memory = _low_memory_host() if low_memory is None else low_memory
-        opts = ort.SessionOptions()
+        opts = ort.SessionOptions()  # ty: ignore[possibly-missing-attribute]
         opts.intra_op_num_threads = self.threads
         opts.inter_op_num_threads = 1
         # The CPU arena holds the largest batch's working set for the lifetime

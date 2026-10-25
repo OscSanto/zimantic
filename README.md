@@ -26,7 +26,7 @@ Zero 2 W.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. A small selection (at most `min(10, 35%)` of available sources) is searched on its own for deeper per-source results and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed.
-- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported.
+- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
@@ -108,7 +108,7 @@ the local ZIM only for the final displayed page.
 **Storage.** Each ZIM gets two files in `index_dir`, plus one shared catalog:
 - `<name>.sqlite`: titles, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
 - `<name>.faiss`: the vectors, in one of two layouts depending on article count.
-- `catalog.sqlite`: one row per local ZIM with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, UUID, perma-ref, flavour, category, normalized tags, article/media/entry counts, license, scraper, source, attribution, relation, content-type counts, homepage, full-text capability, and the favicon as a BLOB). It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. `serve` reads this catalog instead of opening every archive at startup; archives and their libzim `Searcher` objects are opened lazily on first use.
+- `catalog.sqlite`: one row per local ZIM with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, UUID, perma-ref, flavour, category, normalized tags, article/media/entry counts, license, scraper, source, attribution, relation, content-type counts, homepage, full-text capability, availability, and the favicon as a BLOB). It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. `serve` reads this catalog instead of opening every archive at startup; archives and their libzim `Searcher` objects are opened lazily on first use. A missing or unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous catalog, rather than being mistaken for a library from which every ZIM disappeared.
 
 
 The index identity is `(ZIM filename stem, source byte size)`, not the source path. A ZIM can
@@ -506,11 +506,15 @@ JSON API examples:
   SIGHUP restarts the whole server in debug mode; `serve --dev` is an alias for this mode.
 - `GET /sources`, `/config`, `/zims`, `/library.json` and `/health` return source,
   configuration, local-index and health information. Source records include a `homepage` path when
-  the local ZIM exposes one. `/library.json` also exposes `uuid`, `publisher`, `perma_ref`,
-  `flavour`, `category`, `media_count`, `license`, `scraper`, `source`, `attribution`,
-  `relation`, `counter`, and `has_fulltext_index` from the catalog. The UUID is the book
-  identity: duplicate copies of the same ZIM are collapsed to one source. Health is read-only and reports index/archive capabilities, entry counts, homepage
-  resolution, embedding state, and cache statistics.
+  the local ZIM exposes one, plus `available`/`error` for archives that cannot be read.
+  `/library.json` also exposes
+  `uuid`, `publisher`, `perma_ref`, `flavour`, `category`, `media_count`, `license`, `scraper`,
+  `source`, `attribution`, `relation`, `counter`, and `has_fulltext_index` from the catalog. The
+  UUID is the book identity: duplicate copies of the same ZIM are collapsed to one source, preferring
+  a readable copy. An unreadable archive stays in `/library.json` with `available: false` and an
+  `error` so the library page can explain why it cannot be opened. Health is read-only and reports
+  index/archive capabilities, entry counts, homepage resolution, embedding state, and cache
+  statistics.
 
 Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
 `kill -HUP <pid>`.

@@ -4,11 +4,16 @@ import types
 import unittest
 
 
-libzim = sys.modules.setdefault("libzim", types.ModuleType("libzim"))
-libzim.__path__ = []
-reader = sys.modules.setdefault("libzim.reader", types.ModuleType("libzim.reader"))
-reader.Archive = object
-reader.set_cluster_cache_max_size = lambda size: None
+try:
+    import libzim.reader  # noqa: F401
+except ImportError:
+    libzim = types.ModuleType("libzim")
+    libzim.__path__ = []
+    reader = types.ModuleType("libzim.reader")
+    reader.Archive = object
+    reader.set_cluster_cache_max_size = lambda size: None
+    sys.modules["libzim"] = libzim
+    sys.modules["libzim.reader"] = reader
 
 from zimantic.content.reader import (
     DEFAULT_MAX_HTML_BYTES,

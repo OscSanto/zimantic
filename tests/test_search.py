@@ -13,40 +13,53 @@ import numpy as np
 
 
 def _install_optional_dependency_stubs():
-    faiss = types.ModuleType("faiss")
-    faiss.IO_FLAG_MMAP_IFC = 1
-    faiss.IO_FLAG_READ_ONLY = 2
-    faiss.METRIC_INNER_PRODUCT = 0
+    """Stub heavy dependencies only when they are not installed.
 
-    class _Index:
-        def train(self, _vectors):
-            pass
+    Tests that require the real class (e.g. catalog scans in test_integration)
+    must not be affected by another module's stubs, so an already-imported
+    module is never modified here.
+    """
+    try:
+        import faiss  # noqa: F401
+    except ImportError:
+        faiss = types.ModuleType("faiss")
+        faiss.IO_FLAG_MMAP_IFC = 1
+        faiss.IO_FLAG_READ_ONLY = 2
+        faiss.METRIC_INNER_PRODUCT = 0
 
-        def add_with_ids(self, _vectors, _ids):
-            pass
+        class _Index:
+            def train(self, _vectors):
+                pass
 
-    faiss.index_factory = lambda *_args: _Index()
-    faiss.write_index = lambda _index, path: Path(path).write_bytes(b"vectors")
+            def add_with_ids(self, _vectors, _ids):
+                pass
 
-    libzim = types.ModuleType("libzim")
-    libzim.__path__ = []
-    reader = types.ModuleType("libzim.reader")
-    reader.Archive = object
-    reader.set_cluster_cache_max_size = lambda size: None
-    search = types.ModuleType("libzim.search")
-    search.Query = object
-    search.Searcher = object
-    sys.modules.setdefault("faiss", faiss)
-    sys.modules.setdefault("libzim", libzim)
-    sys.modules.setdefault("libzim.reader", reader)
-    sys.modules.setdefault("libzim.search", search)
+        faiss.index_factory = lambda *_args: _Index()
+        faiss.write_index = lambda _index, path: Path(path).write_bytes(b"vectors")
+        sys.modules["faiss"] = faiss
+
+    try:
+        import libzim.reader  # noqa: F401
+        import libzim.search  # noqa: F401
+    except ImportError:
+        libzim = types.ModuleType("libzim")
+        libzim.__path__ = []
+        reader = types.ModuleType("libzim.reader")
+        reader.Archive = object
+        reader.set_cluster_cache_max_size = lambda size: None
+        search = types.ModuleType("libzim.search")
+        search.Query = object
+        search.Searcher = object
+        sys.modules["libzim"] = libzim
+        sys.modules["libzim.reader"] = reader
+        sys.modules["libzim.search"] = search
 
 
 _install_optional_dependency_stubs()
 
-from zimantic.cache import QueryCache
-from zimantic.contracts import SourceInfo, SourceResult
-from zimantic.search import (
+from zimantic.cache import QueryCache  # noqa: E402
+from zimantic.contracts import SourceInfo, SourceResult  # noqa: E402
+from zimantic.search import (  # noqa: E402
     Search,
     SearchBusyError,
     ArticleUnavailableError,
@@ -1019,12 +1032,97 @@ class GracefulDegradationTests(unittest.TestCase):
         self.assertEqual([source["name"] for source in library], ["Readable"])
         search._executor.shutdown(wait=True)
 
+    def test_library_lists_an_unreadable_source(self):
+        search = _bare_search({})
+        search.sources = {
+            "broken": SourceInfo(
+                "broken",
+                "Broken",
+                "broken",
+                "local",
+                local_name="broken",
+                available=False,
+                error="Invalid magic number",
+                title="A broken book",
+            ),
+        }
+        with patch.object(
+            search,
+            "_scan_zim_paths",
+            return_value={"broken": Path("/zims/broken.zim")},
+        ):
+            library = search.library_dicts()
+
+        self.assertEqual([source["name"] for source in library], ["Broken"])
+        self.assertFalse(library[0]["available"])
+        self.assertEqual(library[0]["error"], "Invalid magic number")
+        self.assertEqual(library[0]["title"], "A broken book")
+        search._executor.shutdown(wait=True)
+
+    def test_library_prefers_a_readable_duplicate(self):
+        search = _bare_search({})
+        search.sources = {
+            "broken": SourceInfo(
+                "broken",
+                "Broken",
+                "broken",
+                "local",
+                local_name="broken",
+                available=False,
+                uuid="same-uuid",
+                error="Invalid magic number",
+            ),
+            "copy": SourceInfo(
+                "copy",
+                "Copy",
+                "copy",
+                "local",
+                local_name="copy",
+                available=True,
+                uuid="same-uuid",
+                homepage="Main_Page",
+                title="Working copy",
+            ),
+        }
+        with patch.object(
+            search,
+            "_scan_zim_paths",
+            return_value={
+                "broken": Path("/zims/broken.zim"),
+                "copy": Path("/zims/copy.zim"),
+            },
+        ):
+            library = search.library_dicts()
+
+        self.assertEqual([source["name"] for source in library], ["Copy"])
+        self.assertTrue(library[0]["available"])
+        search._executor.shutdown(wait=True)
+
+    def test_failed_archive_open_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = _LocalIndex(
+                None,
+                None,
+                None,
+                None,
+                threading.Lock(),
+                zim_path=str(Path(tmp) / "missing.zim"),
+            )
+            with patch(
+                "zimantic.searching.index.Archive",
+                side_effect=RuntimeError("cannot open"),
+            ) as archive:
+                self.assertIsNone(index.ensure_open())
+                self.assertIsNone(index.ensure_open())
+                self.assertEqual(archive.call_count, 1)
+            self.assertEqual(index.error, "cannot open")
+
     def test_deferred_faiss_loads_vectors_after_indexes_open(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             (tmp / "manual.faiss").write_bytes(b"vectors")
-            search = Search(self._cfg(tmp), semantic=True)
+            search = Search(self._cfg(tmp), semantic=True, archive_factory=object)
             self.addCleanup(search._executor.shutdown, wait=True)
 
             self.assertFalse(search.indexes["manual"].semantic)
@@ -1052,7 +1150,7 @@ class GracefulDegradationTests(unittest.TestCase):
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             (tmp / "manual.faiss").write_bytes(b"vectors")
-            search = Search(self._cfg(tmp), semantic=True)
+            search = Search(self._cfg(tmp), semantic=True, archive_factory=object)
             self.addCleanup(search._executor.shutdown, wait=True)
             self.assertIsNotNone(search.catalog)
 

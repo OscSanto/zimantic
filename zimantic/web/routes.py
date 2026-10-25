@@ -147,23 +147,16 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         version = version_of() if callable(version_of) else 0
         library_of = getattr(search_class, "library_dicts", None)
         if not callable(library_of):
-            library_of = lambda: [
-                source
-                for source in search_class.source_dicts()
-                if (
-                    source.get("mode") == "local"
-                    and source.get("available", True)
-                    and source.get("homepage")
-                )
-            ]
-        else:
-            original_library_of = library_of
 
             def library_of():
                 return [
                     source
-                    for source in original_library_of()
-                    if source.get("available", True) and source.get("homepage")
+                    for source in search_class.source_dicts()
+                    if source.get("mode") == "local"
+                    and (
+                        not source.get("available", True)
+                        or source.get("homepage")
+                    )
                 ]
 
         return paged_json_response(

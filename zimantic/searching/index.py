@@ -51,19 +51,27 @@ class _LocalIndex:
     zim_signature: tuple[int, int, int, int] | None = None
     has_fulltext_index: bool | None = None
     error: str | None = None
+    open_failed: bool = field(default=False, repr=False, compare=False)
 
     def ensure_open(self) -> Archive | None:
         """Open the archive on first use, not at server startup."""
         if self.archive is not None:
             return self.archive
+        if self.open_failed:
+            # Remember the failure: retrying on every search would reopen a
+            # missing or corrupt archive each time.  reload() builds a fresh
+            # _LocalIndex, which clears the flag.
+            return None
         with self.lock:
             if self.archive is None:
                 if not self.zim_path:
+                    self.open_failed = True
                     return None
                 try:
                     self.archive = Archive(self.zim_path)
                 except Exception as error:
                     self.error = str(error)
+                    self.open_failed = True
                     return None
             return self.archive
 

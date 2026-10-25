@@ -517,9 +517,12 @@ class Search:
         cfg: dict,
         embedder=None,
         semantic: bool = True,
+        archive_factory: Any | None = None,
     ):
         self.cfg = cfg
         self.embedder = embedder
+        # Tests pass ``object`` to keep the catalog from opening real archives.
+        self.archive_factory = archive_factory
         # Fast mode skips FAISS and the model.
         self.semantic = bool(semantic)
         self._defer_faiss = self.semantic
@@ -566,22 +569,37 @@ class Search:
         index_dir = cfg.get("index_dir")
         if index_dir:
             try:
-                self.catalog = ZimCatalog(
+                catalog = ZimCatalog(
                     Path(index_dir) / CATALOG_FILENAME,
                     zim_dir=cfg.get("zim_dir"),
+                    archive_factory=self.archive_factory,
                 )
-                self.catalog.scan()
             except Exception as error:
                 logger.warning(
                     "zimantic: catalog unavailable (%s); falling back to archive scans",
                     error,
                 )
-                if self.catalog is not None:
+            else:
+                try:
+                    catalog.scan()
+                except OSError as error:
+                    # An unmounted ZIM directory is not a reason to throw away
+                    # the cached metadata; reload() will scan again.
+                    logger.warning(
+                        "zimantic: catalog scan failed (%s); keeping the previous catalog",
+                        error,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "zimantic: catalog unavailable (%s); falling back to archive scans",
+                        error,
+                    )
                     try:
-                        self.catalog.close()
+                        catalog.close()
                     except Exception:
                         pass
-                self.catalog = None
+                    catalog = None
+                self.catalog = catalog
         self._load_indexes()
         # Local indexes are ready immediately; the optional Kiwix catalog is
         # refreshed in the background so an unreachable Kiwix server cannot
@@ -814,8 +832,8 @@ class Search:
 
         # The UUID is the book identity.  Two copies of the same ZIM (same
         # UUID, different filename/path) must not appear as two sources.  Keep
-        # one deterministic copy, preferring an indexed one, then the larger
-        # file, then the shorter/lexicographically earlier path.
+        # one deterministic copy, preferring a readable one, then an indexed
+        # one, then the larger file, then the shorter path.
         if self._catalog:
             chosen: dict[str, tuple[tuple, str]] = {}
             for stem, (kind, _path) in found.items():
@@ -824,6 +842,7 @@ class Search:
                 if not uuid_value:
                     continue
                 rank = (
+                    bool(record.available),
                     kind == "sqlite",
                     record.size,
                     -len(record.path),
@@ -1367,6 +1386,8 @@ class Search:
                         book=local_name,
                         mode="local",
                         local_name=local_name,
+                        available=bool(record.available),
+                        error=record.last_error or None,
                         homepage=meta["homepage"],
                         icon_path=meta["icon_path"],
                         icon_url=icon_url,
@@ -1393,7 +1414,6 @@ class Search:
                         relation=meta["relation"],
                         counter=meta["counter"],
                         has_fulltext_index=meta["has_fulltext_index"],
-                        error=record.last_error or None,
                     )
                     continue
 
@@ -1599,17 +1619,7 @@ class Search:
         record = self._catalog.get_stem(zim_path.stem) if self._catalog else None
         if record is not None:
             meta = record.to_source_metadata()
-            if not record.available:
-                return SourceInfo(
-                    key=_zim_key(zim_name),
-                    name=zim_name,
-                    book=zim_name,
-                    mode="local",
-                    local_name=zim_name,
-                    available=False,
-                    error=record.last_error or "ZIM archive is unavailable",
-                    size=record.size,
-                )
+            available = bool(record.available)
             icon_url = _source_icon_url(
                 zim_name,
                 "catalog-favicon" if record.favicon else meta["icon_path"],
@@ -1621,7 +1631,11 @@ class Search:
                 book=zim_name,
                 mode="local",
                 local_name=zim_name,
-                homepage=meta["homepage"],
+                available=available,
+                error=(record.last_error or None) if not available else None,
+                # An unreadable archive has no openable homepage; the library
+                # still lists it so the UI can explain why.
+                homepage=meta["homepage"] if available else None,
                 icon_path=meta["icon_path"],
                 icon_url=icon_url,
                 title=meta["title"],
@@ -1702,7 +1716,12 @@ class Search:
         )
 
     def library_dicts(self) -> list[dict[str, Any]]:
-        """Return metadata for local ZIMs that can serve a homepage."""
+        """Return metadata for every local ZIM in the library.
+
+        Unreadable archives are included with ``available: false`` so the UI can
+        explain why a ZIM cannot be opened; only a readable archive without a
+        homepage (nothing to open) is omitted.
+        """
         with self._state_lock:
             indexed = {
                 source.local_name: source
@@ -1710,17 +1729,18 @@ class Search:
                 if source.mode == "local" and source.local_name
             }
             indexed_names = set(self.indexes)
-        # One card per UUID: prefer the searchable copy, then the larger file,
-        # then the shorter/lexicographically earlier name.
+        # One card per UUID: prefer a readable copy, then a searchable one, then
+        # the larger file, then the shorter/lexicographically earlier name.
         chosen: dict[str, tuple[tuple, SourceInfo]] = {}
         for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
             source = indexed.get(zim_name)
             if source is None:
                 source = self._inspect_library_archive(zim_name, zim_path)
-            if not (source.available and source.homepage):
+            if source.available and not source.homepage:
                 continue
             identity = source.uuid or f"stem:{source.name}"
             rank = (
+                source.available,
                 source.name in indexed_names,
                 source.size or 0,
                 -len(source.name or ""),
@@ -1735,7 +1755,7 @@ class Search:
         ]
 
     def library_version(self):
-        """Return a cheap token that changes when installed ZIM files change."""
+        """Return a cheap token that changes when the library contents change."""
         signatures = []
         for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
             try:
@@ -1745,15 +1765,12 @@ class Search:
             signatures.append((zim_name, stat.st_size, stat.st_mtime_ns))
         return (self.source_version(), tuple(signatures))
 
-    def source_version(self) -> int:
-        """Monotonic token that changes whenever the source set changes.
-
-        Lets the HTTP layer cache a serialized ``/sources`` payload instead of
-        rebuilding and hashing it on every poll (a large Kiwix catalog makes
-        that payload multi-megabyte).
-        """
+    def source_version(self):
+        """Token that changes whenever the source set or its metadata changes."""
         with self._state_lock:
-            return getattr(self, "_cache_generation", 0)
+            generation = getattr(self, "_cache_generation", 0)
+        catalog = self._catalog
+        return (generation, *(catalog.version() if catalog is not None else ()))
 
     def close(self) -> None:
         """Release the search thread pool, cancelling work not yet started."""
@@ -2214,7 +2231,7 @@ class Search:
                 reasons.append("semantic vectors unavailable")
 
             fulltext_capability = (
-                bool(record.has_fulltext_index)
+                bool(record.has_fulltext_index) and bool(record.available)
                 if record is not None
                 else index.ensure_searcher() is not None
             )
