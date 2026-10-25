@@ -205,6 +205,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(">↓</button>".encode(), shell.content)
             self.assertIn(b"zimantic-modal-navigation", shell.content)
             self.assertIn(b"zimantic-shell-navigate", shell.content)
+            self.assertIn(b"zimantic-article-storage-blocked", shell.content)
             self.assertIn(b"zimantic-article-ready", shell.content)
             self.assertIn(b"zimantic-article-navigate", shell.content)
             self.assertIn(b"zimantic-parent-article-navigate", shell.content)

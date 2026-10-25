@@ -485,7 +485,9 @@ JSON API examples:
   URL can be shared.
   Selecting text adds the passage to that URL and to the toolbar's Copy link action; reopening the
   link scrolls to and highlights the passage. Fragment links scroll inside the article without
-  reloading the shell. `GET /random?zim=<name>`
+  reloading the shell. The modal's sandbox has an opaque origin, so an article that uses Web Storage
+  gets an in-memory fallback and the modal offers to open the same `/content/` view in a new tab,
+  where the browser's persistent storage is available. `GET /random?zim=<name>`
   redirects to a random indexed article's shell. Links from an offline article to an external
   `http` or `https` site show an in-modal notice identifying the destination as online and offer
   to open it in a new tab, avoiding failures from sites that disallow iframe embedding. A directly

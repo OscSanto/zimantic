@@ -117,11 +117,13 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn('href="app.css"', page.text)
         self.assertIn('src="app.js"', page.text)
+        self.assertIn('id="articleStorageNotice"', page.text)
 
         css = self.client.get("/app.css")
         self.assertEqual(css.status_code, 200)
         self.assertTrue(css.headers["content-type"].startswith("text/css"))
         self.assertIn(":root", css.text)
+        self.assertIn("article-storage-notice", css.text)
 
         javascript = self.client.get("/app.js")
         self.assertEqual(javascript.status_code, 200)
@@ -129,6 +131,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("initialize();", javascript.text)
         self.assertIn("handleExternalLink", javascript.text)
         self.assertIn('credentials: "same-origin"', javascript.text)
+        self.assertIn("showStorageNotice", javascript.text)
 
     def test_debug_page_assets_are_not_cached(self):
         for path in ("/", "/library", "/app.css", "/app.js"):
@@ -397,6 +400,22 @@ class ServerTests(unittest.TestCase):
     def test_raw_html_shims_cookie_access_in_opaque_sandboxes(self):
         raw = self._raw_article(b"<html><head></head><body>Article</body></html>")
         self.assertIn("data-zimantic-cookie-shim", raw.text)
+
+    def test_raw_html_keeps_web_storage_usable_in_opaque_sandboxes(self):
+        raw = self._raw_article(b"<html><head></head><body>Article</body></html>")
+        self.assertIn("data-zimantic-storage-shim", raw.text)
+        self.assertIn("makeMemoryStorage", raw.text)
+        self.assertIn("zimantic-article-storage-blocked", raw.text)
+
+    def test_raw_html_installs_storage_shim_before_page_scripts(self):
+        raw = self._raw_article(
+            b'<html><head><script>localStorage.getItem("x")</script>'
+            b"</head><body>Article</body></html>"
+        )
+        self.assertLess(
+            raw.text.index("data-zimantic-storage-shim"),
+            raw.text.index('localStorage.getItem("x")'),
+        )
 
     def _raw_article(self, body: bytes):
         with patch.object(

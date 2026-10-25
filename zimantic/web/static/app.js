@@ -55,6 +55,8 @@
             let pendingModalArticleUrl = null;
             let pendingModalNavigation = null;
             let offlineLinkRequest = 0;
+            let storageNoticeUrl = null;
+            let storageNoticeDismissed = false;
             let activeParentNavigation = null;
             let activeParentUrl = null;
             let parentNavigationSequence = 0;
@@ -1049,6 +1051,28 @@
                 }
             }
 
+            function hideStorageNotice() {
+                storageNoticeUrl = null;
+                const notice = $("articleStorageNotice");
+                if (notice) notice.hidden = true;
+            }
+
+            function showStorageNotice(articleUrl) {
+                if (storageNoticeDismissed || !articleUrl) return;
+                const modal = $("articleModal");
+                const notice = $("articleStorageNotice");
+                const link = $("articleStorageNoticeOpen");
+                if (!modal || modal.hidden || !notice || !link) return;
+                storageNoticeUrl = articleUrl.href;
+                link.href = articleUrl.href;
+                notice.hidden = false;
+            }
+
+            function resetStorageNotice() {
+                storageNoticeDismissed = false;
+                hideStorageNotice();
+            }
+
             function showArticleModal(articleUrl, navigationKind = "manual") {
                 const modal = $("articleModal");
                 const frame = $("articleModalFrame");
@@ -1059,11 +1083,15 @@
                     activeLibraryArticleUrl = null;
                 }
                 hideExternalLinkNotice();
-                if (modal.hidden) modalPreviousFocus = document.activeElement;
+                if (modal.hidden) {
+                    modalPreviousFocus = document.activeElement;
+                    resetStorageNotice();
+                }
                 const previousActiveArticleUrl = readModalUrl(activeModalUrl);
                 const shouldLoad = activeModalUrl !== articleUrl;
                 activeModalUrl = articleUrl;
                 if (shouldLoad) {
+                    hideStorageNotice();
                     previousModalArticleUrl = previousActiveArticleUrl?.href || null;
                     pendingModalArticleUrl = articleUrl;
                     pendingModalNavigation = {
@@ -1538,6 +1566,7 @@
                 pendingModalArticleUrl = null;
                 pendingModalNavigation = null;
                 hideExternalLinkNotice();
+                resetStorageNotice();
                 activeParentNavigation = null;
                 activeParentUrl = null;
                 parentNavigationSequence++;
@@ -1577,10 +1606,19 @@
                     handleExternalLink(event.data.url, event.data.offlineUrl);
                     return;
                 }
+                if (event.data?.type === "zimantic-article-storage-blocked") {
+                    const articleUrl = readModalUrl(event.data.url);
+                    if (articleUrl) showStorageNotice(articleUrl);
+                    return;
+                }
                 if (event.data?.type === "zimantic-article-close") closeArticleModal();
                 if (event.data?.type === "zimantic-article-ready") {
                     const articleUrl = readModalUrl(event.data.url);
                     if (articleUrl) {
+                        const noticedUrl = readModalUrl(storageNoticeUrl);
+                        if (noticedUrl && articleUrlValue(noticedUrl) !== articleUrlValue(articleUrl)) {
+                            hideStorageNotice();
+                        }
                         applyArticleDocumentMeta(event.data.title, event.data.icon);
                         const activeArticleUrl = readModalUrl(activeModalUrl);
                         const pendingArticleUrl = readModalUrl(pendingModalArticleUrl);
@@ -2464,6 +2502,11 @@
                 }
             });
             $("externalLinkBack").addEventListener("click", hideExternalLinkNotice);
+            $("articleStorageNoticeDismiss").addEventListener("click", () => {
+                storageNoticeDismissed = true;
+                hideStorageNotice();
+                $("articleModalFrame").focus();
+            });
             $("externalLinkNotice").addEventListener("click", (event) => {
                 if (event.target === event.currentTarget) hideExternalLinkNotice();
             });
