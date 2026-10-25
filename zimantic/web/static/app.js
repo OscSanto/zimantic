@@ -54,6 +54,7 @@
             let previousModalArticleUrl = null;
             let pendingModalArticleUrl = null;
             let pendingModalNavigation = null;
+            let offlineLinkRequest = 0;
             let activeParentNavigation = null;
             let activeParentUrl = null;
             let parentNavigationSequence = 0;
@@ -991,6 +992,7 @@
             }
 
             function hideExternalLinkNotice() {
+                offlineLinkRequest++;
                 const notice = $("externalLinkNotice");
                 const frame = $("articleModalFrame");
                 if (notice) notice.hidden = true;
@@ -1009,6 +1011,42 @@
                 urlLabel.textContent = url.href;
                 notice.hidden = false;
                 notice.focus();
+            }
+
+            async function handleExternalLink(value, offlineValue) {
+                const url = readExternalUrl(value);
+                const offlineUrl = readModalUrl(offlineValue);
+                if (!url) return;
+                if (!offlineUrl) {
+                    showExternalLinkNotice(url.href);
+                    return;
+                }
+                const request = ++offlineLinkRequest;
+                const currentArticleUrl = activeModalUrl;
+                try {
+                    const response = await fetch(offlineUrl.href, {
+                        cache: "no-store",
+                        credentials: "same-origin",
+                    });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    if (
+                        request !== offlineLinkRequest ||
+                        $("articleModal").hidden ||
+                        activeModalUrl !== currentArticleUrl
+                    ) {
+                        return;
+                    }
+                    const resolvedUrl = readModalUrl(response.url) || offlineUrl;
+                    resolvedUrl.search = offlineUrl.search;
+                    resolvedUrl.hash = offlineUrl.hash;
+                    const navigationKind =
+                        location.pathname === appPath("/library") && !activeSearchResult
+                            ? "library"
+                            : "search";
+                    navigateArticleModal(resolvedUrl, navigationKind);
+                } catch (_) {
+                    if (request === offlineLinkRequest) showExternalLinkNotice(url.href);
+                }
             }
 
             function showArticleModal(articleUrl, navigationKind = "manual") {
@@ -1536,7 +1574,7 @@
                     return;
                 }
                 if (event.data?.type === "zimantic-external-link") {
-                    showExternalLinkNotice(event.data.url);
+                    handleExternalLink(event.data.url, event.data.offlineUrl);
                     return;
                 }
                 if (event.data?.type === "zimantic-article-close") closeArticleModal();

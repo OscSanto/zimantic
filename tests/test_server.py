@@ -127,6 +127,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(javascript.status_code, 200)
         self.assertTrue(javascript.headers["content-type"].startswith("application/javascript"))
         self.assertIn("initialize();", javascript.text)
+        self.assertIn("handleExternalLink", javascript.text)
+        self.assertIn('credentials: "same-origin"', javascript.text)
 
     def test_debug_page_assets_are_not_cached(self):
         for path in ("/", "/library", "/app.css", "/app.js"):
@@ -243,6 +245,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Article body", raw.text)
         self.assertIn("data-zimantic-bridge", raw.text)
         self.assertIn("zimantic-external-link", raw.text)
+        self.assertIn("offlineUrl: offlineUrlFor(url)", raw.text)
+        self.assertIn("offlineUrl: String(event.data.offlineUrl || \"\") || null", shell.text)
         self.assertNotIn("data-zimantic-toolbar", raw.text)
 
     def test_content_shell_preserves_trailing_article_paths(self):

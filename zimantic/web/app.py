@@ -380,6 +380,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         window.parent.postMessage({
           type: "zimantic-external-link",
           url: url.href,
+          offlineUrl: String(event.data.offlineUrl || "") || null,
         }, "*");
       } else {
         location.href = url.href;
@@ -580,10 +581,36 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
     try {
       zim = decodeURIComponent(zim);
     } catch (_) {}
-    const contentHome = `${prefix}/content/${zim}`;
-    const articleHome = `${prefix}/article/${zim}`;
+    const encodedZim = encodeURIComponent(zim);
+    const contentHome = `${prefix}/content/${encodedZim}`;
+    const articleHome = `${prefix}/article/${encodedZim}`;
     const contentPrefix = `${contentHome}/`;
     const articlePrefix = `${articleHome}/`;
+    const localArticleRoot = (() => {
+      const value = parts[2] || "";
+      try {
+        return decodeURIComponent(value);
+      } catch (_) {
+        return value;
+      }
+    })();
+    const comparableHost = value =>
+      String(value || "").toLowerCase().replace(/\\.$/, "").replace(/^www\\./, "");
+    const offlineUrlFor = url => {
+      if (
+        !localArticleRoot ||
+        comparableHost(localArticleRoot) !== comparableHost(url.hostname)
+      ) {
+        return null;
+      }
+      const local = new URL(
+        `${contentHome}/${localArticleRoot}${url.pathname || "/"}`,
+        context
+      );
+      local.search = url.search;
+      local.hash = url.hash;
+      return local.href;
+    };
     const normalizeText = value =>
       String(value || "").replace(/\\s+/g, " ").trim();
     const escapeRegExp = value =>
@@ -761,6 +788,7 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
           window.parent.postMessage({
             type: "zimantic-external-link",
             url: url.href,
+            offlineUrl: offlineUrlFor(url),
           }, "*");
         } else {
           location.href = url.href;
