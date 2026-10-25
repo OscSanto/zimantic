@@ -7,7 +7,8 @@
 # ZIM files, downloaded from https://library.kiwix.org.
 zim_dir = "./zims"
 
-# Must contain model.onnx and sentencepiece.bpe.model (see the README).
+# Must contain model.onnx and either sentencepiece.bpe.model (multilingual-e5)
+# or vocab.txt (English e5-v2). See the README.
 model_dir = "./model"
 
 # Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.

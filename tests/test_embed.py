@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import types
@@ -8,6 +9,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from zimantic import embed
+
+
+def _sentencepiece_dir(directory):
+    """The Embedder needs a tokenizer artifact to select the XLM-R path."""
+    (Path(directory) / "sentencepiece.bpe.model").write_bytes(b"")
+    return directory
 
 
 class ModelChecksumTests(unittest.TestCase):
@@ -52,6 +59,7 @@ class LowMemoryArenaTests(unittest.TestCase):
             patch.object(embed, "_system_memory_gb", return_value=memory_gb),
         ):
             with tempfile.TemporaryDirectory() as tmp:
+                _sentencepiece_dir(tmp)
                 embed.Embedder(tmp, low_memory=low_memory)
         return captured["arena"]
 
@@ -84,6 +92,7 @@ class LowMemoryArenaTests(unittest.TestCase):
             ),
         ):
             with tempfile.TemporaryDirectory() as tmp:
+                _sentencepiece_dir(tmp)
                 small = embed.Embedder(tmp, low_memory=True)
                 normal = embed.Embedder(tmp, low_memory=False)
 
@@ -96,6 +105,60 @@ class LowMemoryArenaTests(unittest.TestCase):
         with patch.object(embed, "_reclaim_native_memory") as reclaim:
             normal.embed(["passage: a", "passage: b"])
             reclaim.assert_not_called()
+
+
+class TokenizerSelectionTests(unittest.TestCase):
+    def test_sentencepiece_artifact_selects_xlm_roberta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _sentencepiece_dir(tmp)
+            kind, path = embed._resolve_tokenizer(tmp)
+        self.assertEqual(kind, "sentencepiece")
+        self.assertEqual(path.name, "sentencepiece.bpe.model")
+
+    def test_vocab_artifact_selects_wordpiece(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+            kind, path = embed._resolve_tokenizer(tmp)
+        self.assertEqual(kind, "wordpiece")
+        self.assertEqual(path.name, "vocab.txt")
+
+    def test_tokenizer_config_disambiguates_when_both_exist(self):
+        cases = (
+            ("BertTokenizer", "wordpiece"),
+            ("XLMRobertaTokenizer", "sentencepiece"),
+        )
+        for tokenizer_class, expected in cases:
+            with self.subTest(tokenizer_class=tokenizer_class):
+                with tempfile.TemporaryDirectory() as tmp:
+                    _sentencepiece_dir(tmp)
+                    (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+                    (Path(tmp) / "tokenizer_config.json").write_text(
+                        json.dumps({"tokenizer_class": tokenizer_class}),
+                        encoding="utf-8",
+                    )
+                    kind, _ = embed._resolve_tokenizer(tmp)
+                self.assertEqual(kind, expected)
+
+    def test_both_artifacts_without_config_keep_sentencepiece(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _sentencepiece_dir(tmp)
+            (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+            kind, _ = embed._resolve_tokenizer(tmp)
+        self.assertEqual(kind, "sentencepiece")
+
+    def test_malformed_tokenizer_config_keeps_sentencepiece(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _sentencepiece_dir(tmp)
+            (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+            (Path(tmp) / "tokenizer_config.json").write_text("[]", encoding="utf-8")
+            kind, _ = embed._resolve_tokenizer(tmp)
+        self.assertEqual(kind, "sentencepiece")
+
+    def test_missing_tokenizer_is_reported(self):
+        with patch.object(embed.ort, "InferenceSession", return_value=MagicMock()):
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(FileNotFoundError, "vocab.txt"):
+                    embed.Embedder(tmp)
 
 
 class InputSignatureTests(unittest.TestCase):
@@ -117,6 +180,7 @@ class InputSignatureTests(unittest.TestCase):
             ),
         ):
             with tempfile.TemporaryDirectory() as tmp:
+                _sentencepiece_dir(tmp)
                 embedder = embed.Embedder(tmp)
         embedder.embed(["query: a"])
         return session.run.call_args.args[1]

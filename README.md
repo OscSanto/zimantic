@@ -53,12 +53,13 @@ The server benchmark loaded the embedding model, opened the single ZIM index, an
 source-discovery and search requests. `serve --fast` omits the model and FAISS, so it uses much less
 memory but does not provide meaning-based search.
 
-**Where the memory goes.** The ~118 MB int8 model and the SentencePiece vocabulary (~50 MB of
-native memory) make up most of the footprint; they are loaded once and are not duplicated, and
-`gc.collect()` cannot release them because they are C++ allocations, not Python objects. ONNX
-Runtime also reads the file into a temporary buffer while loading (so there is a short-lived ~2×
-peak at startup) and its **CPU memory arena** keeps the working set of the largest embedding batch
-for the lifetime of the session. At `batch_size = 32` that arena alone can consume ~400 MB and
+**Where the memory goes.** With the default model, the ~118 MB int8 weights and the SentencePiece
+vocabulary (~50 MB of native memory) make up most of the footprint; the English-only `e5-small-v2`
+replaces both with a ~34 MB model and a small WordPiece vocabulary. They are loaded once and are not
+duplicated, and `gc.collect()` cannot release them because they are C++ allocations, not Python
+objects. ONNX Runtime also reads the file into a temporary buffer while loading (so there is a
+short-lived ~2× peak at startup) and its **CPU memory arena** keeps the working set of the largest
+embedding batch for the lifetime of the session. At `batch_size = 32` that arena alone can consume ~400 MB and
 retain it. On hosts with **2 GB RAM or less**, Zimantic therefore disables the arena and returns
 freed heap memory to the OS between batches (`malloc_trim` on glibc), capping build memory near the
 model size at a modest throughput cost. Machines with more RAM keep the arena for faster builds.
@@ -103,8 +104,8 @@ documents without one are skipped.
 **Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
 The model receives a fixed 256-token budget. See
-[Using a different embedding model](#using-a-different-embedding-model) for the larger e5 variants
-and their memory and speed trade-offs. Search previews are generated independently from
+[Using a different embedding model](#using-a-different-embedding-model) for other e5 models, their
+tokenizers, and their memory and speed trade-offs. Search previews are generated independently from
 the local ZIM only for the final displayed page.
 
 **Storage.** Each ZIM gets two files in `index_dir`, plus one shared catalog:
@@ -288,7 +289,8 @@ translations, so less common languages may contain mistakes.
 - 32-bit Linux platforms (such as armhf/armv7) are not supported because required native
   dependencies do not publish compatible wheels. On a Raspberry Pi Zero 2 W this means running 64-bit
   Raspberry Pi OS (aarch64) is required.
-- About 120 MB for the embedding model, plus your ZIM files
+- About 120 MB for the default embedding model, plus your ZIM files (the English-only `e5-small-v2`
+  is about 35 MB on disk)
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
 - Local indexed results are served directly by Zimantic, so `kiwix-serve` is not required.
   To serve remote-only results through Kiwix, run `kiwix-serve` and uncomment `kiwix_url` in
@@ -302,7 +304,7 @@ The installed CLI is separate from runtime data. By default the data directory i
 ```
 ~/.local/share/zimantic/
 ├── config.toml          ← settings (paths below are its defaults)
-├── model/               ← model_dir: model.onnx + sentencepiece.bpe.model   (you download)
+├── model/               ← model_dir: model.onnx + tokenizer vocabulary      (you download)
 ├── zims/                ← zim_dir:   your .zim files                          (you download)
 ├── indexes/             ← index_dir: <name>.sqlite + <name>.faiss + catalog.sqlite
 └── zimantic.pid         ← server PID (present while serving)
@@ -332,7 +334,7 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
 
    For development, use `uv sync` and `. .venv/bin/activate` instead.
 
-3. **Download the model into `model/`** using these file names:
+3. **Download the default multilingual model into `model/`:**
 
    ```bash
    mkdir -p model
@@ -340,7 +342,9 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    curl -L -o model/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
    ```
 
-   Zimantic warns if either file differs from the documented checksum, but still runs.
+   English-only and larger multilingual models use the same `model_dir` layout; see
+   [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns if a file
+   differs from the documented default checksum, but still runs.
 
 4. **Put your ZIM files in `zims/`.** Download them from
    [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
@@ -359,12 +363,21 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
 
 ### Using a different embedding model
 
-The default is `multilingual-e5-small`, but Zimantic loads whatever ONNX graph and SentencePiece
-vocabulary are in `model_dir`. The model must follow the same e5 contract: `input_ids` and
+The default is `multilingual-e5-small`, but Zimantic loads whatever ONNX graph and tokenizer
+vocabulary are in `model_dir`. Two tokenizer formats are supported:
+
+- `sentencepiece.bpe.model` selects the XLM-R SentencePiece tokenizer used by the multilingual-e5
+  models.
+- `vocab.txt` selects the BERT WordPiece tokenizer used by the English e5-v2 models.
+
+Zimantic chooses by which vocabulary file is present. If a directory contains both, it reads
+`tokenizer_config.json` when available; otherwise it keeps the historical SentencePiece choice. The
+ONNX graph itself cannot reliably identify its tokenizer, so this file-based switch is the dependable
+signal. Apart from the vocabulary, the model must follow the same e5 contract: `input_ids` and
 `attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state`
-output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes. The larger
-multilingual-e5 models keep the same tokenizer and contract. For example, to try
-`multilingual-e5-base`:
+output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes.
+
+For example, to try the larger multilingual model:
 
 ```bash
 mkdir -p model-e5-base
@@ -372,14 +385,23 @@ curl -L -o model-e5-base/model.onnx https://huggingface.co/Xenova/multilingual-e
 curl -L -o model-e5-base/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-base/resolve/main/sentencepiece.bpe.model
 ```
 
-Replace `base` with `large` in both URLs to try `multilingual-e5-large`.
+Replace `base` with `large` in both URLs to try `multilingual-e5-large`. For the English-only
+`e5-small-v2`, download its WordPiece vocabulary instead:
+
+```bash
+mkdir -p model-e5-small-v2
+curl -L -o model-e5-small-v2/model.onnx https://huggingface.co/Xenova/e5-small-v2/resolve/main/onnx/model_quantized.onnx
+curl -L -o model-e5-small-v2/vocab.txt https://huggingface.co/Xenova/e5-small-v2/resolve/main/vocab.txt
+```
+
+The same layout works for other BERT WordPiece e5-v2 models such as `e5-base-v2`.
 
 Point `model_dir` at the new folder, use a separate `index_dir` so the old indexes stay usable, and
 rebuild every index:
 
 ```toml
-model_dir = "./model-e5-base"
-index_dir = "./indexes-e5-base"
+model_dir = "./model-e5-small-v2"
+index_dir = "./indexes-e5-small-v2"
 ```
 
 ```bash
@@ -399,7 +421,7 @@ Absolute numbers vary with CPU, but the ratios show the trade-off:
 | `multilingual-e5-small` | 118 MB | 384 | ~190 MB | 68/s (1×) | Default; 100+ languages |
 | `multilingual-e5-base` | 279 MB | 768 | ~340 MB | 26/s (0.38×) | 100+ languages; ~2.7× slower |
 | `multilingual-e5-large` | 562 MB | 1,024 | ~730 MB | 9/s (0.13×) | 100+ languages; ~7.8× slower |
-| `e5-small-v2` | 34 MB | 384 | ~35 MB³ | ≈1×³ | English only; not loadable as-is³ |
+| `e5-small-v2` | 34 MB | 384 | ~65 MB | 64/s (0.93×) | English only; WordPiece |
 
 ¹ Additional resident memory for the model and vocabulary after loading, excluding ONNX Runtime's
 batch arena. Add this to the server's baseline footprint (see **Measured memory use**); leave about
@@ -407,14 +429,14 @@ batch arena. Add this to the server's baseline footprint (see **Measured memory 
 so builds stay closer to these figures.
 
 ² Passages per second while embedding 256 passages in batches of 32. A single query embedding takes
-about 13 ms with small, 39 ms with base and 110 ms with large, so query latency rises in the same
-direction.
+about 14 ms with either small model, 39 ms with base and 110 ms with large, so query latency rises in
+the same direction.
 
-³ `e5-small-v2` uses a BERT WordPiece vocabulary (`vocab.txt`), not SentencePiece, so it is not a
-drop-in. Its encoder has the same 12 layers and 384 hidden units as `multilingual-e5-small`; the
-smaller file comes from a 30k-entry instead of a 250k-entry embedding table, and compute is about the
-same. It buys little speed and loses all non-English search, so the default model is usually the
-better small-footprint choice.
+`e5-small-v2` has the same 12-layer, 384-hidden encoder as `multilingual-e5-small`; the smaller file
+comes from a 30k-entry instead of a 250k-entry embedding table. It therefore saves roughly 125 MB of
+resident memory but embeds at about the same speed, and it cannot search non-English text. Choose it
+only for an English-only library on a RAM-constrained host; otherwise the default gives much broader
+coverage for the same compute.
 
 Vector storage also grows with dimension: an 8-bit IVF index stores one byte per dimension per article
 (384 B, 768 B and 1 KB), while a flat index for under 10,000 articles stores float16 vectors
