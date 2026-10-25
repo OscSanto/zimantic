@@ -1771,7 +1771,11 @@ class Search:
 
     @staticmethod
     def _article_path(path: str) -> str:
-        path = unquote(str(path))
+        # The ASGI server already percent-decodes the request path before it
+        # gets here. Unquoting again corrupts entries whose names contain
+        # literal escapes, such as the LibreTexts cover thumbnails stored as
+        # ``.../mindtouch.page%23thumbnail?revision=2``.
+        path = str(path)
         if not path or path.startswith("/") or "\\" in path:
             raise ArticleNotFoundError("invalid article path")
         if any(part == ".." for part in path.split("/")):

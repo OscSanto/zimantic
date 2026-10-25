@@ -1744,6 +1744,15 @@ class SourceScopeTests(unittest.TestCase):
 
 
 class ProductionHardeningTests(unittest.TestCase):
+    def test_article_path_preserves_literal_percent_escapes(self):
+        # The ASGI layer decodes the request path once. A second decode here
+        # would turn "%23" into "#" and make real ZIM entries unreachable.
+        path = (
+            "content/biz.libretexts.org/@api/deki/files/667/"
+            "mindtouch.page%23thumbnail?revision=2"
+        )
+        self.assertEqual(Search._article_path(path), path)
+
     def _db(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
