@@ -192,6 +192,8 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b'data-zimantic-toolbar', shell.content)
             self.assertIn(b"min-height: 0 !important", shell.content)
             self.assertIn(b'data-zimantic-action="close"', shell.content)
+            self.assertIn(b"window.close()", shell.content)
+            self.assertIn(b"history.back()", shell.content)
             self.assertIn(b'data-zimantic-action="home"', shell.content)
             self.assertIn(b'data-zimantic-action="previous"', shell.content)
             self.assertIn(b'data-zimantic-action="next"', shell.content)

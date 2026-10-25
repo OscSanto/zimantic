@@ -421,7 +421,19 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         if (window.parent !== window) {
           window.parent.postMessage({type: "zimantic-article-close"}, "*");
         } else {
+          // Browsers only let scripts close windows they opened. When that
+          // is refused in a directly loaded /content/ view, leave the view:
+          // go back if this tab came from another page, or open the library
+          // when the article is the first history entry.
           window.close();
+          setTimeout(() => {
+            if (window.closed) return;
+            if (history.length > 1) {
+              history.back();
+            } else {
+              location.href = `${appBasePath}/`;
+            }
+          }, 0);
         }
       } else if (action === "home") {
         const query = selectedSearchText || articleSelection || selectedText();
