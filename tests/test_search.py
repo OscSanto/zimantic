@@ -1610,6 +1610,22 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual(paged, [doc["id"] for doc in whole])
             search._executor.shutdown(wait=True)
 
+    def test_out_of_range_offset_clamps_to_last_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 6)]
+            _write_index(tmp, "manual", rows=rows)
+            search = _bare_search(self._cfg(tmp))
+            search._load_indexes()
+            search.refresh_sources()
+
+            page = search.search_page("tire change", limit=2, offset=100)
+            self.assertEqual(page["offset"], 4)
+            self.assertEqual(len(page["results"]), 1)
+            self.assertFalse(page["has_more"])
+            self.assertEqual(page["total"], 5)
+            search._executor.shutdown(wait=True)
+
     def test_second_page_reuses_the_cached_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

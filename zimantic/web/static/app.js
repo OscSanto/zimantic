@@ -170,6 +170,41 @@
                 ).trim();
             }
 
+            function librarySearchText(source) {
+                const tags = Array.isArray(source.tags) ? source.tags : [];
+                return [
+                    source.title,
+                    source.name,
+                    source.local_name,
+                    source.book,
+                    source.key,
+                    source.description,
+                    source.long_description,
+                    source.creator,
+                    source.publisher,
+                    source.language,
+                    source.date,
+                    source.category,
+                    source.flavour,
+                    source.license,
+                    source.scraper,
+                    source.source,
+                    source.attribution,
+                    source.relation,
+                    source.perma_ref,
+                    source.mode,
+                    source.error,
+                    source.counter,
+                    source.article_count,
+                    source.media_count,
+                    formatLibrarySize(source.size),
+                    ...tags,
+                ]
+                    .filter(Boolean)
+                    .join(" ")
+                    .toLocaleLowerCase();
+            }
+
             function libraryHomepageUrl(source) {
                 const zim = source.local_name || source.book || source.name;
                 // No path: the server resolves the ZIM's main entry.  This also
@@ -451,7 +486,7 @@
                 const filter = $("libraryFilter");
                 if (filter) {
                     const count = librarySources.length;
-                    filter.placeholder = `Filter titles of ${count} ZIM${count === 1 ? "" : "s"}`;
+                    filter.placeholder = `Filter ${count.toLocaleString()} ZIM${count === 1 ? "" : "s"}`;
                 }
                 grid.replaceChildren();
                 if (!librarySources.length) {
@@ -467,24 +502,14 @@
                 const excludedTerms = terms
                     .filter((term) => term.startsWith("-") && term.length > 1)
                     .map((term) => term.slice(1));
-                const includedQuery = terms
-                    .filter((term) => !term.startsWith("-") || term.length === 1)
-                    .join(" ");
+                const includedTerms = terms.filter(
+                    (term) => !term.startsWith("-") || term.length === 1,
+                );
                 const visibleSources = query
                     ? librarySources.filter((source) => {
-                          const searchable = [
-                              source.title,
-                              source.name,
-                              source.description,
-                              source.long_description,
-                              source.creator,
-                              ...(Array.isArray(source.tags) ? source.tags : []),
-                          ]
-                              .filter(Boolean)
-                              .join(" ")
-                              .toLocaleLowerCase();
+                          const searchable = librarySearchText(source);
                           return (
-                              (!includedQuery || searchable.includes(includedQuery)) &&
+                              includedTerms.every((term) => searchable.includes(term)) &&
                               excludedTerms.every((term) => !searchable.includes(term))
                           );
                       })
@@ -502,12 +527,14 @@
                 visibleSources.forEach((source) => {
                     const title = libraryTitle(source);
                     const homepage = libraryHomepageUrl(source);
+                    const stem = sourceStemName(source);
                     const card = document.createElement("article");
                     card.className = "library-card";
                     const available = source.available !== false;
 
                     const preview = document.createElement(available ? "a" : "div");
                     preview.className = "library-card-preview";
+                    if (stem) preview.title = stem;
                     if (available) {
                         preview.href = homepage;
                         preview.dataset.libraryArticle = "true";
@@ -542,6 +569,7 @@
                     const titleLink = document.createElement(available ? "a" : "span");
                     titleLink.className = "library-card-title";
                     titleLink.textContent = title;
+                    if (stem) titleLink.title = stem;
                     if (available) {
                         titleLink.href = homepage;
                         titleLink.dataset.libraryArticle = "true";
@@ -776,15 +804,21 @@
                     (outcome) => failed(outcome) || outcomeCount(outcome) > 0,
                 );
                 const query = $("sourceFilterSearch").value.trim().toLocaleLowerCase();
-                const matching = query
+                const queryTerms = query.split(/\s+/).filter(Boolean);
+                const matching = queryTerms.length
                     ? nonEmptyOutcomes.filter((outcome) => {
-                          const source = outcome.source;
-                          return `${source.name} ${source.key}`.toLocaleLowerCase().includes(query);
+                          const searchable = librarySearchText(outcome.source);
+                          return queryTerms.every((term) => searchable.includes(term));
                       })
                     : nonEmptyOutcomes;
                 const sorted = matching.sort((left, right) => {
                     const countDifference = outcomeCount(right) - outcomeCount(left);
-                    return countDifference || left.source.name.localeCompare(right.source.name);
+                    return (
+                        countDifference ||
+                        sourceDisplayName(left.source).localeCompare(
+                            sourceDisplayName(right.source),
+                        )
+                    );
                 });
                 const topVisible = sorted.slice(0, SOURCE_FILTER_LIMIT);
                 const selectedVisible = query
@@ -860,9 +894,12 @@
                           : "source-filter-option";
                     button.type = "button";
                     button.dataset.source = outcome.source.key;
+                    const sourceLabel = sourceDisplayName(outcome.source);
                     button.textContent = isFailed
-                        ? `${outcome.source.name}: ${outcome.error}`
-                        : `${outcome.source.name}: ${count}`;
+                        ? `${sourceLabel}: ${outcome.error}`
+                        : `${sourceLabel}: ${count}`;
+                    const stem = sourceStemName(outcome.source);
+                    if (stem) button.title = stem;
                     button.disabled = isFailed;
                     button.setAttribute(
                         "aria-pressed",
@@ -2069,23 +2106,23 @@
                 return `${from}–${to} of ${total} result${total === 1 ? "" : "s"}`;
             }
 
-            function correctOutOfRangePage(page, total) {
-                if (!(total > 0) || !Number.isInteger(page)) return null;
-                const lastPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
-                if (page <= lastPage) return null;
-                if (current) {
-                    history.replaceState(
-                        history.state,
-                        "",
-                        makeStateUrl(
-                            current.question,
-                            selectedSourceKeys,
-                            lastPage,
-                            readLocationState().modal,
-                        ),
-                    );
-                }
-                return lastPage;
+            function syncPageFromOffset(offset, pageSize = PAGE_SIZE) {
+                const value = Number(offset);
+                const size = Number(pageSize) > 0 ? Number(pageSize) : PAGE_SIZE;
+                if (!Number.isFinite(value) || value < 0 || !current) return;
+                const effectivePage = Math.floor(value / size);
+                if (effectivePage === current.page) return;
+                current.page = effectivePage;
+                history.replaceState(
+                    history.state,
+                    "",
+                    makeStateUrl(
+                        current.question,
+                        selectedSourceKeys,
+                        effectivePage,
+                        readLocationState().modal,
+                    ),
+                );
             }
 
             function searchStatusText() {
@@ -2149,13 +2186,9 @@
 
             function renderView() {
                 if (!current) return;
-                // The server already sliced this page and applied any display filter, so
-                // there is nothing to slice here.
+                // The server already sliced this page and clamped any
+                // out-of-range offset; there is nothing to re-slice here.
                 const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
-                if (current.completed === current.sourcesTotal) {
-                    if (current.page >= pageCount) current.page = pageCount - 1;
-                    if (current.page < 0) current.page = 0;
-                }
                 renderSourceFilters();
                 renderFilterLine(current.total);
                 renderPager(current.total, pageCount);
@@ -2335,6 +2368,9 @@
                     current.completed = event.completed;
                     current.pageItems = event.results || [];
                     current.total = event.total || 0;
+                    if (event.offset !== undefined) {
+                        syncPageFromOffset(event.offset, event.limit);
+                    }
                     if (event.counts) current.counts = event.counts;
                     if (event.matched_by) current.matchedBy = event.matched_by;
                 };
@@ -2375,15 +2411,6 @@
                         applyPage(event);
                         current.streaming = false;
                         cancelStreamRender();
-                        const corrected = correctOutOfRangePage(
-                            current.page,
-                            current.total,
-                        );
-                        if (corrected !== null) {
-                            current.page = corrected;
-                            loadPage(corrected);
-                            return;
-                        }
                         renderView();
                         $("status").textContent = searchStatusText();
                         announceSearchStatus();
@@ -2562,11 +2589,7 @@
                     current.page = pageIndex;
                     current.pageItems = items;
                     current.total = Number(response.headers.get("X-Total-Count") || items.length);
-                    const corrected = correctOutOfRangePage(pageIndex, current.total);
-                    if (corrected !== null) {
-                        loadPage(corrected);
-                        return;
-                    }
+                    syncPageFromOffset(response.headers.get("X-Offset"));
                     if (debugMode) {
                         const matchedBy = response.headers.get("X-Matched-By");
                         if (matchedBy) {

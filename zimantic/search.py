@@ -2440,11 +2440,20 @@ class Search:
             doc for doc in pool if doc.get("source_key") in selected
         ]
         total = len(scoped)
-        page = scoped[offset:offset + page_size]
+        # Clamp an out-of-range offset to the last real page here, where the
+        # total is known. Callers can then show real results and report the
+        # effective offset instead of fetching an empty page and correcting it
+        # client-side.
+        if total:
+            effective_offset = min(offset, ((total - 1) // page_size) * page_size)
+        else:
+            effective_offset = 0
+        page = scoped[effective_offset:effective_offset + page_size]
         return {
             "results": [self._public(doc, debug) for doc in page],
             "total": total,
-            "has_more": offset + page_size < total,
+            "has_more": effective_offset + page_size < total,
+            "offset": effective_offset,
             "counts": self._source_counts(pool),
         }
 
@@ -2466,7 +2475,7 @@ class Search:
             "total_sources": total_sources,
             "total": state["total"],
             "has_more": state["has_more"],
-            "offset": offset,
+            "offset": state.get("offset", offset),
             "limit": limit,
             "counts": state["counts"],
         }
