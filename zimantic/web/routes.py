@@ -247,6 +247,25 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         requested_path = None if path is None else path
         fallback_icon = zim_icon_url(zim)
         read_head = getattr(search_class, "read_article_head", None)
+        check_path = getattr(search_class, "article_path_exists", None)
+
+        def path_exists(parent_path: str) -> bool:
+            """Avoid breadcrumb links to containers that are not entries."""
+            try:
+                if callable(check_path):
+                    return bool(check_path(zim, parent_path))
+                if callable(read_head):
+                    read_head(zim, parent_path)
+                else:
+                    search_class.read_article(zim, parent_path)
+                return True
+            except (
+                ArticleNotFoundError,
+                ArticleTooLargeError,
+                ArticleUnavailableError,
+            ):
+                return False
+
         try:
             if callable(read_head):
                 article = read_head(zim, path)
@@ -264,6 +283,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 fallback_icon,
                 base_path,
                 highlight,
+                path_exists=path_exists,
             )
 
         if requested_path != article["path"]:
@@ -282,6 +302,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             fallback_icon=fallback_icon,
             base_path=base_path,
             highlight=highlight,
+            path_exists=path_exists,
         )
 
     @app.get("/content/{zim}")

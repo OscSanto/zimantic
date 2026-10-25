@@ -884,15 +884,47 @@ def _search_base_path(search) -> str:
     return normalize_web_base_path(cfg.get("web_base_path"))
 
 
+_ZIM_DATE_SUFFIX_RE = re.compile(r"(?:[_-]20\d{2}-\d{2}(?:-\d{2})?)$")
+_ZIM_LANGUAGE_SUFFIX_RE = re.compile(r"_(?:[a-z]{2,3}(?:-[a-z0-9]+)?)(?:_|$)")
+
+
+def _zim_site_name(zim: str) -> str:
+    """Short site name for the toolbar's home link.
+
+    Kiwix stems look like ``<site>_<language>_<flavour>_<date>``. The leading
+    component is usually the captured site's domain (``based.cooking``) or its
+    project name (``dandwiki``), which reads much better in a toolbar than the
+    full stem. The full stem stays available in the link's tooltip.
+    """
+    stem = str(zim).strip()
+    without_date = _ZIM_DATE_SUFFIX_RE.sub("", stem)
+    match = _ZIM_LANGUAGE_SUFFIX_RE.search(without_date)
+    if match:
+        site = without_date[: match.start()]
+        if site:
+            return site
+    return without_date or stem
+
+
+def _same_site_segment(segment: str, site_name: str) -> bool:
+    left = segment.strip("/").casefold()
+    right = site_name.strip("/").casefold()
+    if not left or not right:
+        return False
+    return left == right or left.removeprefix("www.") == right.removeprefix("www.")
+
+
 def _article_toolbar(
     zim: str,
     article: dict,
     base_path: str = "",
     highlight: str | None = None,
+    path_exists=None,
 ) -> str:
     zim_url = _content_url(zim, base_path=base_path)
     random_url = f"{base_path}/random?zim={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
+    site_name = _zim_site_name(zim)
     article_url_path = str(article.get("path") or "").strip()
     trailing_slash = article_url_path.endswith("/")
     article_path = article_url_path.strip("/")
@@ -909,18 +941,49 @@ def _article_toolbar(
         str(article.get("title") or article_path or "Permalink"),
         quote=False,
     )
+
+    def parent_exists(parent_path: str) -> bool:
+        if not callable(path_exists):
+            return True
+        try:
+            return bool(path_exists(parent_path))
+        except Exception:
+            return False
+
+    # ZIMs commonly use the first path segment as a container rather than an
+    # article: zimit captures start with the site's domain, MediaWiki archives
+    # with a one-letter first-letter bucket, and some tools add other folders.
+    # The toolbar home link already names the site, so don't render that first
+    # segment as a (usually broken) breadcrumb link.
+    start = 0
+    if len(path_parts) > 1:
+        first = path_parts[0]
+        if (
+            _same_site_segment(first, site_name)
+            or (len(first) == 1 and first.isalpha())
+            or not parent_exists(first)
+        ):
+            start = 1
+
     breadcrumbs = []
-    for depth in range(1, len(path_parts)):
+    for depth in range(start + 1, len(path_parts)):
         parent_path = "/".join(path_parts[:depth])
         if trailing_slash:
             parent_path += "/"
-        parent_url = _content_url(zim, parent_path, base_path)
-        breadcrumbs.append(
-            f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
-            f'<a class="zimantic-toolbar-breadcrumb" href="{parent_url}" '
-            f'title="Open {html_escape(parent_path, quote=True)}">'
-            f'{html_escape(path_parts[depth - 1])}</a>'
-        )
+        label = html_escape(path_parts[depth - 1])
+        if parent_exists(parent_path):
+            parent_url = _content_url(zim, parent_path, base_path)
+            breadcrumbs.append(
+                f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
+                f'<a class="zimantic-toolbar-breadcrumb" href="{parent_url}" '
+                f'title="Open {html_escape(parent_path, quote=True)}">'
+                f'{label}</a>'
+            )
+        else:
+            breadcrumbs.append(
+                f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
+                f'<span class="zimantic-toolbar-breadcrumb">{label}</span>'
+            )
     breadcrumb_html = "".join(breadcrumbs) + (
         '<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
         f'<a class="zimantic-toolbar-article" data-zimantic-permalink '
@@ -942,8 +1005,8 @@ def _article_toolbar(
         title="Open the next search result">→</button>
     </span>
     <a href="{random_url}" title="Open a random article">Random</a>
-    <a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" title="Open this ZIM's homepage">
-      <span class="zimantic-toolbar-home-full">{zim_name}</span>
+    <a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" title="Open this ZIM's homepage ({zim_name})">
+      <span class="zimantic-toolbar-home-full">{html_escape(site_name)}</span>
       <span class="zimantic-toolbar-home-short">Home</span>
     </a>
     <span class="zimantic-toolbar-breadcrumbs">{breadcrumb_html}</span>
@@ -1066,6 +1129,7 @@ def _content_shell(
     fallback_icon: str | None = None,
     base_path: str = "",
     highlight: str | None = None,
+    path_exists=None,
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -1081,7 +1145,7 @@ def _content_shell(
         _article_url(zim, article_url_path, base_path),
         highlight,
     )
-    toolbar = _article_toolbar(zim, article, base_path, highlight)
+    toolbar = _article_toolbar(zim, article, base_path, highlight, path_exists)
     entry_title = str(article.get("title") or article_path or zim)
     parsed_title = None
     icon = fallback_icon

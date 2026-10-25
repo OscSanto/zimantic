@@ -317,6 +317,33 @@ class LocalIntegrationTests(unittest.TestCase):
             raw = client.get("/article/manual/docs/", follow_redirects=True)
             self.assertEqual(raw.status_code, 200)
 
+    def test_toolbar_skips_container_paths_that_are_not_articles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._build_fixture(
+                root,
+                pages=[("A/5e_Hazards", "5e Hazards", ALPHA_HTML)],
+            )
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+
+            self.assertTrue(search.article_path_exists("manual", "A/5e_Hazards"))
+            self.assertFalse(search.article_path_exists("manual", "A"))
+
+            shell = client.get("/content/manual/A/5e_Hazards")
+            self.assertEqual(shell.status_code, 200)
+            self.assertIn(
+                b'<span class="zimantic-toolbar-home-full">manual</span>',
+                shell.content,
+            )
+            self.assertIn(
+                b'title="Open this ZIM\'s homepage (manual)"',
+                shell.content,
+            )
+            # The MediaWiki first-letter container must not become a link.
+            self.assertNotIn(b'href="/content/manual/A"', shell.content)
+            self.assertIn(b">5e Hazards</span>", shell.content)
+
     def test_unindexed_zim_uses_native_fulltext_before_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

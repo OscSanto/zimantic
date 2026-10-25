@@ -1903,6 +1903,52 @@ class Search:
         """Read only the leading bytes of one entry (see ``read_article``)."""
         return self.read_article(zim_name, path, head_only=True)
 
+    def article_path_exists(self, zim_name: str, path: str) -> bool:
+        """Whether ``path`` resolves to a local ZIM entry.
+
+        The article toolbar uses this to avoid linking breadcrumb containers
+        such as ``A`` in ``A/Article``: those path segments are namespaces or
+        directories, not articles, so opening them would show a 404.
+        """
+        try:
+            requested_path = self._article_path(path)
+            with self._state_lock:
+                index = self.indexes.get(zim_name)
+            if index is None:
+                record = self._catalog.get_stem(zim_name) if self._catalog else None
+                zim_path = (
+                    Path(record.path)
+                    if record is not None and record.available
+                    else self._scan_zim_paths().get(zim_name)
+                )
+                if zim_path is None:
+                    return False
+                try:
+                    archive = Archive(zim_path)
+                except (OSError, RuntimeError, ValueError):
+                    return False
+                self._resolve_article_entry(archive, requested_path)
+                return True
+            archive = index.ensure_open()
+            if archive is None:
+                return False
+
+            acquired = False
+            try:
+                try:
+                    self._acquire_index(index)
+                except RuntimeError:
+                    return False
+                acquired = True
+                with index.read_lock:
+                    self._resolve_article_entry(archive, requested_path)
+                    return True
+            finally:
+                if acquired:
+                    self._release_index(index)
+        except (ArticleNotFoundError, ArticleUnavailableError):
+            return False
+
     def _read_archive_icon(
         self,
         archive: Archive,

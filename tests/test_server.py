@@ -6,7 +6,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from zimantic.cache import QueryCache
-from zimantic.search import SearchQueryError
+from zimantic.search import ArticleNotFoundError, SearchQueryError
 from zimantic.web.app import create_app
 
 
@@ -264,6 +264,59 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('src="/article/manual/docs/home/"', response.text)
         self.assertIn('href="/content/manual/docs/home/"', response.text)
+
+    def test_toolbar_home_shows_site_name_and_stem_on_hover(self):
+        zim = "based.cooking_en_all_2025-10"
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda _zim, path: {
+                "path": path,
+                "title": "Recipe",
+                "mimetype": "text/html",
+                "content": b"<html><head></head><body>Recipe</body></html>",
+            },
+            create=True,
+        ):
+            shell = self.client.get(f"/content/{zim}/based.cooking/recipe/")
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn(
+            '<span class="zimantic-toolbar-home-full">based.cooking</span>',
+            shell.text,
+        )
+        self.assertIn(
+            f'title="Open this ZIM\'s homepage ({zim})"',
+            shell.text,
+        )
+        # The captured domain is the home label, not a second breadcrumb.
+        self.assertNotIn(f'href="/content/{zim}/based.cooking/"', shell.text)
+        self.assertIn(f'href="/content/{zim}/based.cooking/recipe/"', shell.text)
+
+    def test_toolbar_drops_breadcrumb_for_missing_container(self):
+        zim = "dandwiki_en_all_nopic_2025-04"
+
+        def read_article(_zim, path):
+            if path == "A":
+                raise ArticleNotFoundError("article not found")
+            return {
+                "path": path,
+                "title": "5e Hazards",
+                "mimetype": "text/html",
+                "content": b"<html><head></head><body>Hazards</body></html>",
+            }
+
+        with patch.object(self.search, "read_article", read_article, create=True):
+            shell = self.client.get(f"/content/{zim}/A/5e_Hazards")
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn(
+            '<span class="zimantic-toolbar-home-full">dandwiki</span>',
+            shell.text,
+        )
+        # "A" is a namespace bucket, not an article, so no broken link to it.
+        self.assertNotIn(f'href="/content/{zim}/A"', shell.text)
+        self.assertNotIn('title="Open A"', shell.text)
 
     def test_content_shell_forwards_shared_selection(self):
         body = b"<html><head></head><body>Hello world</body></html>"
