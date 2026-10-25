@@ -41,6 +41,17 @@ MAX_FAVICON_BYTES = 1 << 20
 # the on-disk catalog identical to IIAB's iiab_zim_catalog.py.
 ILLUSTRATION_SIZE = 48
 
+
+def is_zim_filename(name: str) -> bool:
+    """True for a ZIM file name, ignoring extension case.
+
+    USB/FAT media commonly stores ``.ZIM`` in upper case, so every scanner must
+    use the same predicate; otherwise the catalog could index files that source
+    discovery and ``build`` cannot see.
+    """
+    return name.lower().endswith(".zim")
+
+
 # Serializes schema creation between threads in one process.  Cross-process
 # callers are serialized by BEGIN IMMEDIATE below.
 _SCHEMA_LOCK = threading.Lock()
@@ -434,92 +445,96 @@ class ZimCatalog:
         self.db.execute("PRAGMA busy_timeout=30000")
         self._ensure_schema()
 
+    def _schema_current(self) -> tuple[bool, int]:
+        """Read the schema state without taking a write lock."""
+        version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
+        columns = {
+            row["name"] for row in self.db.execute("PRAGMA table_info(zims)")
+        }
+        current = version == SCHEMA_VERSION and columns == set(_SCHEMA_COLUMNS)
+        return current, version
+
     def _ensure_schema(self) -> None:
         with _SCHEMA_LOCK:
             # Journal mode is persistent per database; do it under the same lock
             # as the schema check so parallel workers cannot race on first use.
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=NORMAL")
-            # BEGIN IMMEDIATE serializes the version check and the rebuild with
-            # other processes (e.g. parallel ``zimantic build`` workers).
+            # Most opens just read this; only a rebuild needs a write lock.
+            current, _version = self._schema_current()
+            if current:
+                return
+            # Serialize the rebuild with other processes (e.g. parallel
+            # ``zimantic build`` workers), then re-check: another process may
+            # have rebuilt the catalog while we waited for the lock.
             self.db.execute("BEGIN IMMEDIATE")
             try:
-                version = self.db.execute("PRAGMA user_version").fetchone()[0]
-                columns = {
-                    row["name"]
-                    for row in self.db.execute("PRAGMA table_info(zims)")
-                }
-                current = version == SCHEMA_VERSION and columns == set(
-                    _SCHEMA_COLUMNS
-                )
-                if not current and version:
-                    reason = (
-                        "schema version %s" % version
-                        if version != SCHEMA_VERSION
-                        else "a different table layout"
-                    )
-                    logger.warning(
-                        "%s has %s, rebuilding (wanted version %s)",
-                        self.db_path,
-                        reason,
-                        SCHEMA_VERSION,
-                    )
+                current, version = self._schema_current()
                 if not current:
-                    self.db.execute("DROP TABLE IF EXISTS zims")
-                    self.db.execute(
-                        """
-                        CREATE TABLE zims (
-                            path TEXT PRIMARY KEY,
-                            stem TEXT NOT NULL,
-                            uuid TEXT NOT NULL DEFAULT '',
-                            size INTEGER NOT NULL,
-                            mtime REAL NOT NULL,
-                            title TEXT NOT NULL DEFAULT '',
-                            description TEXT NOT NULL DEFAULT '',
-                            long_description TEXT NOT NULL DEFAULT '',
-                            language TEXT NOT NULL DEFAULT '',
-                            creator TEXT NOT NULL DEFAULT '',
-                            publisher TEXT NOT NULL DEFAULT '',
-                            date TEXT NOT NULL DEFAULT '',
-                            tags TEXT NOT NULL DEFAULT '',
-                            public_tags TEXT NOT NULL DEFAULT '',
-                            name TEXT NOT NULL DEFAULT '',
-                            flavour TEXT NOT NULL DEFAULT '',
-                            category TEXT NOT NULL DEFAULT '',
-                            article_count INTEGER NOT NULL DEFAULT 0,
-                            media_count INTEGER NOT NULL DEFAULT 0,
-                            entry_count INTEGER NOT NULL DEFAULT 0,
-                            license TEXT NOT NULL DEFAULT '',
-                            scraper TEXT NOT NULL DEFAULT '',
-                            source TEXT NOT NULL DEFAULT '',
-                            attribution TEXT NOT NULL DEFAULT '',
-                            relation TEXT NOT NULL DEFAULT '',
-                            counter TEXT NOT NULL DEFAULT '',
-                            homepage TEXT NOT NULL DEFAULT '',
-                            has_fulltext_index INTEGER NOT NULL DEFAULT 0,
-                            favicon BLOB,
-                            favicon_mime TEXT NOT NULL DEFAULT '',
-                            icon_path TEXT NOT NULL DEFAULT '',
-                            has_illustration INTEGER NOT NULL DEFAULT 0,
-                            available INTEGER NOT NULL DEFAULT 1,
-                            last_error TEXT NOT NULL DEFAULT '',
-                            scanned_at REAL NOT NULL
-                        )
-                        """
-                    )
-                    self.db.execute(
-                        "CREATE INDEX zims_stem ON zims(stem)"
-                    )
-                    self.db.execute(
-                        "CREATE INDEX zims_uuid ON zims(uuid)"
-                    )
-                    self.db.execute(
-                        f"PRAGMA user_version = {SCHEMA_VERSION}"
-                    )
+                    self._rebuild_schema(version)
                 self.db.commit()
             except BaseException:
                 self.db.rollback()
                 raise
+
+    def _rebuild_schema(self, version: int) -> None:
+        if version:
+            reason = (
+                "schema version %s" % version
+                if version != SCHEMA_VERSION
+                else "a different table layout"
+            )
+            logger.warning(
+                "%s has %s, rebuilding (wanted version %s)",
+                self.db_path,
+                reason,
+                SCHEMA_VERSION,
+            )
+        self.db.execute("DROP TABLE IF EXISTS zims")
+        self.db.execute(
+            """
+            CREATE TABLE zims (
+                path TEXT PRIMARY KEY,
+                stem TEXT NOT NULL,
+                uuid TEXT NOT NULL DEFAULT '',
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                long_description TEXT NOT NULL DEFAULT '',
+                language TEXT NOT NULL DEFAULT '',
+                creator TEXT NOT NULL DEFAULT '',
+                publisher TEXT NOT NULL DEFAULT '',
+                date TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '',
+                public_tags TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                flavour TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                article_count INTEGER NOT NULL DEFAULT 0,
+                media_count INTEGER NOT NULL DEFAULT 0,
+                entry_count INTEGER NOT NULL DEFAULT 0,
+                license TEXT NOT NULL DEFAULT '',
+                scraper TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                attribution TEXT NOT NULL DEFAULT '',
+                relation TEXT NOT NULL DEFAULT '',
+                counter TEXT NOT NULL DEFAULT '',
+                homepage TEXT NOT NULL DEFAULT '',
+                has_fulltext_index INTEGER NOT NULL DEFAULT 0,
+                favicon BLOB,
+                favicon_mime TEXT NOT NULL DEFAULT '',
+                icon_path TEXT NOT NULL DEFAULT '',
+                has_illustration INTEGER NOT NULL DEFAULT 0,
+                available INTEGER NOT NULL DEFAULT 1,
+                last_error TEXT NOT NULL DEFAULT '',
+                scanned_at REAL NOT NULL
+            )
+            """
+        )
+        self.db.execute("CREATE INDEX zims_stem ON zims(stem)")
+        self.db.execute("CREATE INDEX zims_uuid ON zims(uuid)")
+        self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def version(self) -> tuple[int, int]:
         """Cheap token that changes when the catalog contents change."""
@@ -619,7 +634,9 @@ class ZimCatalog:
         ZIM that cannot be read keeps its old metadata (if any) but is marked
         unavailable; it is retried on every scan.  A missing or unreadable
         ``zim_dir`` raises instead of treating every row as removed, so an
-        unmounted drive keeps the previous cache and library.
+        unmounted drive keeps the previous cache and library.  A subdirectory
+        that cannot be listed keeps its rows but does not block updates to the
+        rest of the tree.
         """
         if self.zim_dir is None:
             raise ValueError("scan() needs zim_dir")
@@ -631,31 +648,70 @@ class ZimCatalog:
                 "ZIM directory does not exist: %s" % self.zim_dir
             )
         files: dict[str, os.stat_result] = {}
-        walk_errors: list[OSError] = []
+        unreadable_roots: set[str] = set()
+        stat_failed: set[str] = set()
+        top_error: OSError | None = None
 
         def remember_error(error: OSError) -> None:
-            walk_errors.append(error)
+            nonlocal top_error
+            target = (
+                Path(error.filename).resolve()
+                if error.filename
+                else self.zim_dir
+            )
+            if target == self.zim_dir:
+                top_error = error
+            else:
+                # Keep rows below this directory instead of deleting them.
+                unreadable_roots.add(str(target))
+            logger.warning("zimantic: cannot list %s (%s)", target, error)
 
         for root, _dirs, names in os.walk(self.zim_dir, onerror=remember_error):
             for name in names:
-                if not name.lower().endswith(".zim"):
+                if not is_zim_filename(name):
                     continue
                 path = Path(root, name)
                 try:
                     files[str(path.resolve())] = path.stat()
                 except OSError as error:
-                    logger.warning("zimantic: cannot stat %s (%s)", path, error)
-        if walk_errors:
-            # Keep the previous cache when part of the tree could not be read,
-            # rather than deleting the rows that belong to the unreadable part.
-            raise walk_errors[0]
+                    # A transient stat failure must not look like a deletion.
+                    stat_failed.add(str(path.resolve()))
+                    logger.warning(
+                        "zimantic: cannot stat %s (%s); keeping its row",
+                        path,
+                        error,
+                    )
+        if top_error is not None:
+            # The tree itself could not be listed; a scan would look like every
+            # ZIM was removed, so fail and keep the previous catalog instead.
+            raise top_error
 
         stats = {"added": 0, "updated": 0, "removed": 0, "skipped": 0, "invalid": 0}
         with self._lock:
             existing = {
                 row["path"]: row for row in self.db.execute("SELECT * FROM zims")
             }
-        stale = set(existing) - set(files)
+
+        def unreadable(path_str: str) -> bool:
+            if path_str in stat_failed:
+                return True
+            path = Path(path_str)
+            for root in unreadable_roots:
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    continue
+                return True
+            return False
+
+        missing = set(existing) - set(files)
+        stale = {path_str for path_str in missing if not unreadable(path_str)}
+        kept = missing - stale
+        if kept:
+            logger.warning(
+                "zimantic: keeping %d catalog row(s) under unreadable paths",
+                len(kept),
+            )
 
         # Unit tests replace libzim.reader.Archive with ``object`` to prevent
         # accidental archive access.  In that environment the catalog cannot

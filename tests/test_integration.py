@@ -715,12 +715,14 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual([source["name"] for source in sources], ["manual"])
             self.assertFalse(sources[0]["available"])
             self.assertTrue(sources[0]["error"])
+            self.assertIsNone(sources[0]["homepage"])
 
             library = client.get("/library.json")
             self.assertEqual(library.status_code, 200)
             self.assertEqual(len(library.json()), 1)
             self.assertFalse(library.json()[0]["available"])
             self.assertTrue(library.json()[0]["error"])
+            self.assertIsNone(library.json()[0]["homepage"])
             self.assertEqual(library.json()[0]["local_name"], "manual")
             self.assertEqual(library.json()[0]["size"], zim_path.stat().st_size)
 

@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from libzim.reader import Archive
 from libzim.writer import Creator, Hint, Item, StringProvider
@@ -228,6 +229,56 @@ class CatalogTests(unittest.TestCase):
                 after_scan = catalog.version()
                 catalog.scan()
                 self.assertEqual(catalog.version(), after_scan)
+
+    def test_uppercase_extension_is_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            zims.mkdir()
+            _create_zim(zims / "MANUAL.ZIM")
+            with ZimCatalog(
+                root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive
+            ) as catalog:
+                stats = catalog.scan()
+                self.assertEqual(stats["added"], 1)
+                self.assertIsNotNone(catalog.get_stem("MANUAL"))
+
+    def test_unreadable_subdirectory_keeps_its_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            unreadable = zims / "private"
+            unreadable.mkdir(parents=True)
+            with ZimCatalog(
+                root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive
+            ) as catalog:
+                catalog.mark_error(unreadable / "hidden.zim", "permission denied")
+
+                def fake_walk(_top, onerror=None):
+                    onerror(PermissionError(13, "denied", str(unreadable)))
+                    return iter([(str(zims), [], [])])
+
+                with mock.patch("zimantic.catalog.os.walk", fake_walk):
+                    stats = catalog.scan()
+                self.assertEqual(stats["removed"], 0)
+                self.assertIsNotNone(catalog.get_stem("hidden"))
+
+    def test_unreadable_root_aborts_the_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            zims.mkdir()
+            with ZimCatalog(
+                root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive
+            ) as catalog:
+
+                def fake_walk(top, onerror=None):
+                    onerror(PermissionError(13, "denied", str(top)))
+                    return iter(())
+
+                with mock.patch("zimantic.catalog.os.walk", fake_walk):
+                    with self.assertRaises(PermissionError):
+                        catalog.scan()
 
     def test_normalize_counter_sorts_by_count(self):
         self.assertEqual(

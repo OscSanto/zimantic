@@ -171,11 +171,17 @@ def _make_parser() -> argparse.ArgumentParser:
 
 def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
     """Expand CLI files and folders into unique ZIM paths."""
+    from .catalog import is_zim_filename
+
     zims: list[Path] = []
     seen: set[Path] = set()
     for source in (paths or [Path(default_dir)]):
         if source.is_dir():
-            matches = sorted(source.rglob("*.zim"))
+            matches = sorted(
+                zim
+                for zim in source.rglob("*")
+                if is_zim_filename(zim.name) and zim.is_file()
+            )
         elif source.is_file():
             matches = [source]
         else:

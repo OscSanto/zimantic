@@ -23,7 +23,12 @@ from libzim.reader import Archive
 from libzim.search import Query
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
-from .catalog import CATALOG_FILENAME, ZimCatalog, normalize_creator
+from .catalog import (
+    CATALOG_FILENAME,
+    ZimCatalog,
+    is_zim_filename,
+    normalize_creator,
+)
 from .contracts import SourceInfo, SourceResult
 from .searching.config import _file_signature, _float_config, _int_config
 from .searching.index import _LocalIndex, _nprobe
@@ -637,8 +642,8 @@ class Search:
             return None, False
         try:
             candidates = sorted(
-                path for path in Path(zim_dir).rglob("*.zim")
-                if path.stem == stem
+                path for path in Path(zim_dir).rglob("*")
+                if path.stem == stem and is_zim_filename(path.name)
             )
         except OSError:
             return None, False
@@ -711,7 +716,7 @@ class Search:
                         try:
                             if entry.is_dir(follow_symlinks=False):
                                 scan(entry.path)
-                            elif entry.is_file() and entry.name.endswith(".zim"):
+                            elif entry.is_file() and is_zim_filename(entry.name):
                                 record(Path(entry.path))
                         except OSError:
                             continue
@@ -1192,6 +1197,10 @@ class Search:
                     )
                 )
                 if current is not None and not changed:
+                    # A failed archive open is not part of the index signature
+                    # (it may have been transient), so give retained indexes
+                    # another chance instead of latching the failure forever.
+                    current.allow_reopen()
                     continue
 
                 fresh = (
@@ -1375,6 +1384,7 @@ class Search:
                 )
                 if record is not None:
                     meta = record.to_source_metadata()
+                    available = bool(record.available)
                     icon_url = _source_icon_url(
                         local_name,
                         "catalog-favicon" if record.favicon else meta["icon_path"],
@@ -1386,9 +1396,10 @@ class Search:
                         book=local_name,
                         mode="local",
                         local_name=local_name,
-                        available=bool(record.available),
-                        error=record.last_error or None,
-                        homepage=meta["homepage"],
+                        available=available,
+                        error=(record.last_error or None) if not available else None,
+                        # An unreadable archive has no openable homepage.
+                        homepage=meta["homepage"] if available else None,
                         icon_path=meta["icon_path"],
                         icon_url=icon_url,
                         intent_phrases=_intent_phrases(local_name),
@@ -1754,7 +1765,9 @@ class Search:
             for _rank, source in chosen.values()
         ]
 
-    def library_version(self):
+    def library_version(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int], ...]]:
         """Return a cheap token that changes when the library contents change."""
         signatures = []
         for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
@@ -1763,14 +1776,16 @@ class Search:
             except OSError:
                 continue
             signatures.append((zim_name, stat.st_size, stat.st_mtime_ns))
-        return (self.source_version(), tuple(signatures))
+        catalog = self._catalog
+        # The catalog is read live for archives without a library source record,
+        # so metadata-only writes must invalidate this payload too.
+        catalog_version = catalog.version() if catalog is not None else ()
+        return (self.source_version(), catalog_version, tuple(signatures))
 
-    def source_version(self):
+    def source_version(self) -> tuple[int, ...]:
         """Token that changes whenever the source set or its metadata changes."""
         with self._state_lock:
-            generation = getattr(self, "_cache_generation", 0)
-        catalog = self._catalog
-        return (generation, *(catalog.version() if catalog is not None else ()))
+            return (getattr(self, "_cache_generation", 0),)
 
     def close(self) -> None:
         """Release the search thread pool, cancelling work not yet started."""

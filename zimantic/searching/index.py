@@ -59,11 +59,13 @@ class _LocalIndex:
             return self.archive
         if self.open_failed:
             # Remember the failure: retrying on every search would reopen a
-            # missing or corrupt archive each time.  reload() builds a fresh
-            # _LocalIndex, which clears the flag.
+            # missing or corrupt archive each time.  reload() calls
+            # allow_reopen() so an explicit rescan retries.
             return None
         with self.lock:
             if self.archive is None:
+                if self.open_failed:
+                    return None
                 if not self.zim_path:
                     self.open_failed = True
                     return None
@@ -74,6 +76,16 @@ class _LocalIndex:
                     self.open_failed = True
                     return None
             return self.archive
+
+    def allow_reopen(self) -> None:
+        """Clear a latched open failure so the next use retries.
+
+        ``reload()`` keeps index objects whose files did not change, so this is
+        the recovery path after a transient failure (fixed permissions, a
+        remounted drive, or an archive repaired in place).
+        """
+        self.open_failed = False
+        self.error = None
 
     def ensure_searcher(self) -> Searcher | None:
         """Create the libzim full-text searcher on first use."""

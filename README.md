@@ -110,7 +110,6 @@ the local ZIM only for the final displayed page.
 - `<name>.faiss`: the vectors, in one of two layouts depending on article count.
 - `catalog.sqlite`: one row per local ZIM with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, UUID, perma-ref, flavour, category, normalized tags, article/media/entry counts, license, scraper, source, attribution, relation, content-type counts, homepage, full-text capability, availability, and the favicon as a BLOB). It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. `serve` reads this catalog instead of opening every archive at startup; archives and their libzim `Searcher` objects are opened lazily on first use. A missing or unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous catalog, rather than being mistaken for a library from which every ZIM disappeared.
 
-
 The index identity is `(ZIM filename stem, source byte size)`, not the source path. A ZIM can
 move between nested folders below `zim_dir` without rebuilding. If one scan finds the same stem at
 different sizes, those conflicting inputs are rejected with a warning.

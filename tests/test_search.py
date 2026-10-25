@@ -77,6 +77,7 @@ from zimantic.search import (  # noqa: E402
     _title_prefix_query,
     _title_query,
 )
+from zimantic.searching.config import _file_signature  # noqa: E402
 
 
 def _bare_search(cfg):
@@ -1117,6 +1118,41 @@ class GracefulDegradationTests(unittest.TestCase):
                 self.assertEqual(archive.call_count, 1)
             self.assertEqual(index.error, "cannot open")
 
+    def test_reload_retries_a_latched_archive_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zim = Path(tmp) / "manual.zim"
+            zim.write_bytes(b"not a zim")
+            search = _bare_search({"zim_dir": tmp})
+            search._defer_faiss = False
+            index = _LocalIndex(
+                None,
+                None,
+                None,
+                None,
+                threading.Lock(),
+                zim_path=str(zim),
+                zim_signature=_file_signature(zim),
+            )
+            search.indexes["manual"] = index
+            with patch.object(
+                search,
+                "_discover_local_indexes",
+                return_value={"manual": ("zim", zim)},
+            ), patch(
+                "zimantic.searching.index.Archive",
+                side_effect=RuntimeError("cannot open"),
+            ) as archive:
+                self.assertIsNone(index.ensure_open())
+                self.assertTrue(index.open_failed)
+                # Nothing about the index changed, but an explicit reload must
+                # still retry (e.g. permissions or a mount were fixed).
+                search.reload(scan_catalog=False, refresh=False)
+                self.assertIs(search.indexes["manual"], index)
+                self.assertFalse(index.open_failed)
+                self.assertIsNone(index.ensure_open())
+                self.assertEqual(archive.call_count, 2)
+            search._executor.shutdown(wait=True)
+
     def test_deferred_faiss_loads_vectors_after_indexes_open(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -1196,6 +1232,15 @@ class GracefulDegradationTests(unittest.TestCase):
             # With no size match, the largest same-stem file is used rather than
             # leaving the index with no archive at all.
             self.assertEqual(search._find_zim_path("manual", 12), larger)
+
+    def test_scan_zim_paths_accepts_uppercase_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            upper = root / "manual.ZIM"
+            upper.write_bytes(b"x")
+            search = _bare_search({"zim_dir": str(root)})
+            self.assertEqual(search._scan_zim_paths(), {"manual": upper})
+            self.assertEqual(search._find_zim_path("manual", 1), upper)
 
     def test_scan_zim_paths_keeps_the_largest_of_a_repeated_stem(self):
         with tempfile.TemporaryDirectory() as tmp:
