@@ -118,6 +118,12 @@ class ServerTests(unittest.TestCase):
         self.assertIn('href="app.css"', page.text)
         self.assertIn('src="app.js"', page.text)
         self.assertIn('id="articleModalFrame"', page.text)
+        # Same-origin target="_blank" links (for example PDFs) must be able to
+        # open outside the article modal's sandbox.
+        self.assertIn(
+            'sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"',
+            page.text,
+        )
 
         css = self.client.get("/app.css")
         self.assertEqual(css.status_code, 200)

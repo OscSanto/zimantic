@@ -406,8 +406,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     });
   }
   if (storageNoticeOpen) {
-    // The modal embeds this shell in a sandbox that forbids new browsing
-    // contexts, so ask the host to open the standalone view instead.
+    // Ask the host to open the standalone view so it does not depend on the
+    // modal iframe's sandbox popup permissions.
     storageNoticeOpen.addEventListener("click", event => {
       if (window.parent === window) return;
       event.preventDefault();
