@@ -569,6 +569,10 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(event_types.count("source"), 2)
         self.assertEqual(event_types.count("snapshot"), 2)
         self.assertEqual(len(events[-1]["results"]), 2)
+        for event in events:
+            if event["type"] in {"snapshot", "done"}:
+                self.assertEqual(event["page"], 0)
+                self.assertEqual(event["page_count"], 1)
 
     def test_stream_bounds_intermediate_ranking_passes_for_many_sources(self):
         sources = [
@@ -621,6 +625,93 @@ class SearchContractTests(unittest.TestCase):
             len(rank_sizes),
         )
         self.assertEqual(len(events[-1]["results"]), 2)
+
+    def test_stream_emits_timed_snapshot_and_progress_heartbeat(self):
+        # Two sources are processed in one batch: only the first is due, so
+        # the second waits for the interval. A following empty interval gets a
+        # heartbeat instead of leaving the stream silent.
+        from concurrent.futures import Future
+
+        import zimantic.search as search_module
+
+        sources = [
+            SourceInfo(f"source-{index}", f"Source {index}", f"source-{index}", "local")
+            for index in range(3)
+        ]
+        search = _bare_search({"candidate_count": 2, "max_stream_ranks": 1})
+        search.max_stream_ranks = 1  # rank_interval = ceil(3 / 1) = 3
+        search.stream_update_interval = 0.05
+        search.semantic = False
+        search.sources = {source.key: source for source in sources}
+        search._state_lock = threading.RLock()
+        search._search_slots = threading.BoundedSemaphore(1)
+        search.embedder = None
+
+        def fake_source_search(source, query, title_query, fulltext_query, query_vector, limit):
+            doc = {
+                "id": f"{source.key}:page",
+                "source_key": source.key,
+                "source": source.name,
+                "title": source.name,
+                "lead": "",
+                "path": "page",
+                "url": None,
+                "source_rank": 1,
+            }
+            return SourceResult(source=source, items=[doc], fulltext=[(0, doc)])
+
+        order = []
+        by_source = {}
+        for source in sources:
+            future = Future()
+            future.set_result(fake_source_search(source, "query", "", "", None, 2))
+            by_source[source.key] = future
+            order.append(future)
+
+        calls = {"count": 0}
+
+        def fake_as_completed(futures, timeout=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                # Both finish inside one interval but only the first is due:
+                # the second stays unranked until the interval elapses.
+                yield order[0]
+                yield order[1]
+                raise TimeoutError
+            if calls["count"] == 2:
+                # No new completion during this interval: heartbeat.
+                raise TimeoutError
+            yield from order[2:]
+
+        def submit(_fn, source, *_args, **_kwargs):
+            return by_source[source.key]
+
+        try:
+            with (
+                patch.object(search, "_executor") as executor,
+                patch.object(
+                    search,
+                    "_enrich_pool",
+                    lambda results, query, pool, limit: pool,
+                ),
+                patch.object(search, "_hydrate_results", lambda docs: None),
+                patch.object(search_module, "as_completed", new=fake_as_completed),
+            ):
+                executor.submit.side_effect = submit
+                events = list(search.stream_search("query", limit=2))
+        finally:
+            search._executor.shutdown(wait=True)
+
+        types = [event["type"] for event in events]
+        self.assertEqual(types.count("snapshot"), 3)
+        progress = [event for event in events if event["type"] == "progress"]
+        self.assertEqual(len(progress), 1)
+        self.assertEqual(progress[0]["completed"], 2)
+        self.assertEqual(progress[0]["total_sources"], 3)
+        self.assertGreaterEqual(progress[0]["elapsed"], 0)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["page"], 0)
+        self.assertEqual(events[-1]["page_count"], 2)
 
     def test_local_source_uses_batched_document_hydration(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
@@ -1666,6 +1757,8 @@ class PaginationTests(unittest.TestCase):
 
             page = search.search_page("tire change", limit=2, offset=100)
             self.assertEqual(page["offset"], 4)
+            self.assertEqual(page["page"], 2)
+            self.assertEqual(page["page_count"], 3)
             self.assertEqual(len(page["results"]), 1)
             self.assertFalse(page["has_more"])
             self.assertEqual(page["total"], 5)

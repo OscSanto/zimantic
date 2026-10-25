@@ -459,10 +459,13 @@ JSON API examples:
   A small `zim` selection searches only those sources. A selection larger than `min(10, 35%)` of
   the available sources is promoted to a full search so its cached pool can be shared; pass
   `source=<key>` to narrow the displayed results. Totals are in `X-Total-Count`, `X-Has-More`,
-  `X-Offset` and `X-Page-Size` headers. An offset past the last page is clamped to the last real
-  page, and `X-Offset`/stream `offset` report that effective offset.
+  `X-Offset`, `X-Page`, `X-Page-Count` and `X-Page-Size` headers. An offset past the last page is
+  clamped to the last real page, and `X-Offset`/`X-Page`/stream `offset`/`page` report that
+  effective position.
 - `GET /search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
-  events and result snapshots.
+  events and result snapshots. `snapshot` and `done` events carry the effective `page` and
+  `page_count`. While sources are still working, the stream emits a `progress` heartbeat about every
+  700ms; when a source finishes in between, a fresh snapshot is emitted instead.
 - `GET /content/<zim>/<path>` serves a toolbar shell for a local ZIM entry; `GET /content/<zim>`
   serves the resolved ZIM homepage. The shell keeps the navigation bar in the page and loads the
   article itself from an inner iframe pointed at `/article/<zim>/<path>`, so the toolbar stays
@@ -526,7 +529,8 @@ when the set of searchable sources differs. Small source selections get their ow
 selected ZIM contributes a larger share of the pool, but that scope is not cached; larger selections
 share the cached full-search pool.
 For large libraries, `search_workers` controls how many ZIM indexes are searched in
-parallel. `max_stream_ranks` limits intermediate progress-ranking passes; the final result still
-ranks every source, while a lower value reduces CPU use on small devices. The automatic profiles
-use 8 workers and 16 intermediate passes on desktops, and 2 workers and 8 passes on low-memory
-devices.
+parallel. `max_stream_ranks` limits completion-spaced intermediate ranking passes; timed snapshots
+are additionally emitted about every 700ms so a slow query keeps updating, and the final result
+still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. The
+automatic profiles use 8 workers and 16 completion-spaced passes on desktops, and 2 workers and 8
+passes on low-memory devices.

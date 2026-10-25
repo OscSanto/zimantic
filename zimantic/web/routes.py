@@ -397,6 +397,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             "X-Total-Count": str(page["total"]),
             "X-Has-More": "true" if page["has_more"] else "false",
             "X-Offset": str(page["offset"]),
+            "X-Page": str(page["page"]),
+            "X-Page-Count": str(page["page_count"]),
             "X-Page-Size": str(len(page["results"])),
         }
         if debug and page.get("matched_by") is not None:

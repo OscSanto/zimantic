@@ -21,7 +21,14 @@
             const AUTO_SUBMIT_DELAY = 800;
             const AUTO_HISTORY_DELAY = 3000;
             const MAX_QUERY_LENGTH = 4096;
-            const STREAM_RENDER_DELAY = 750;
+            // Streaming renders at two cadences:
+            //  - Fast: the status line ("n/m sources complete") is updated
+            //    immediately on every event, straight from the event handler.
+            //  - Slow: everything else (result list, source filters, pager,
+            //    notice) is re-rendered on this single throttled cadence.
+            // Source/snapshot events coalesce into one render per interval so a
+            // burst of completions can't thrash the DOM.
+            const STREAM_RENDER_DELAY = 700;
             const STREAM_SEARCH_TIMEOUT = 15000;
             const BUSY_RETRY_BASE_DELAY = 1000;
             const BUSY_RETRY_MAX_DELAY = 8000;
@@ -79,6 +86,9 @@
                 }
             }
 
+            // Coalesce source/snapshot events into one full-view render per
+            // STREAM_RENDER_DELAY. The status line is deliberately not handled
+            // here — it is the fast path, updated directly as each event arrives.
             function scheduleStreamRender(sequence) {
                 if (streamRenderTimer !== null) return;
                 streamRenderTimer = setTimeout(() => {
@@ -2106,20 +2116,21 @@
                 return `${from}–${to} of ${total} result${total === 1 ? "" : "s"}`;
             }
 
-            function syncPageFromOffset(offset, pageSize = PAGE_SIZE) {
-                const value = Number(offset);
-                const size = Number(pageSize) > 0 ? Number(pageSize) : PAGE_SIZE;
-                if (!Number.isFinite(value) || value < 0 || !current) return;
-                const effectivePage = Math.floor(value / size);
-                if (effectivePage === current.page) return;
-                current.page = effectivePage;
+            function syncPage(pageNumber) {
+                // The server clamps out-of-range offsets and reports the
+                // effective page, so the client never has to infer it from the
+                // offset and its own page-size assumption.
+                const page = Number(pageNumber);
+                if (!current || !Number.isInteger(page) || page < 0) return;
+                if (page === current.page) return;
+                current.page = page;
                 history.replaceState(
                     history.state,
                     "",
                     makeStateUrl(
                         current.question,
                         selectedSourceKeys,
-                        effectivePage,
+                        page,
                         readLocationState().modal,
                     ),
                 );
@@ -2138,6 +2149,11 @@
                     current.completed === current.sourcesTotal
                     ? `${range} · ${current.completed}/${current.sourcesTotal} sources complete`
                     : range;
+            }
+
+            function sourceProgressText(completed, total) {
+                const noun = total === 1 ? "source" : "sources";
+                return `${completed}/${total} ${noun} complete`;
             }
 
             function announceSearchStatus(message = null) {
@@ -2368,9 +2384,7 @@
                     current.completed = event.completed;
                     current.pageItems = event.results || [];
                     current.total = event.total || 0;
-                    if (event.offset !== undefined) {
-                        syncPageFromOffset(event.offset, event.limit);
-                    }
+                    syncPage(event.page);
                     if (event.counts) current.counts = event.counts;
                     if (event.matched_by) current.matchedBy = event.matched_by;
                 };
@@ -2401,8 +2415,21 @@
                         current.completed = event.completed;
                         current.outcomes.set(event.source.key, event);
                         if (typeof event.count === "number") current.counts[event.source.key] = event.count;
-                        $("status").textContent = `${event.completed}/${event.total_sources} sources complete`;
+                        $("status").textContent = sourceProgressText(
+                            event.completed,
+                            event.total_sources,
+                        );
                         scheduleStreamRender(sequence);
+                    } else if (event.type === "progress") {
+                        // A slow source has not finished yet. Keep the status
+                        // clock moving without re-rendering the result list.
+                        current.completed = event.completed;
+                        if (typeof event.total_sources === "number") {
+                            current.sourcesTotal = event.total_sources;
+                        }
+                        $("status").textContent =
+                            `Searching… ${Number(event.elapsed || 0).toFixed(1)}s · ` +
+                            sourceProgressText(event.completed, event.total_sources);
                     } else if (event.type === "snapshot") {
                         applyPage(event);
                         scheduleStreamRender(sequence);
@@ -2589,7 +2616,7 @@
                     current.page = pageIndex;
                     current.pageItems = items;
                     current.total = Number(response.headers.get("X-Total-Count") || items.length);
-                    syncPageFromOffset(response.headers.get("X-Offset"));
+                    syncPage(response.headers.get("X-Page"));
                     if (debugMode) {
                         const matchedBy = response.headers.get("X-Matched-By");
                         if (matchedBy) {

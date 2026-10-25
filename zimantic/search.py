@@ -80,6 +80,11 @@ DEFAULT_CANDIDATES = 16
 DEFAULT_SOURCE_TIMEOUT = 12
 DEFAULT_MAX_CONCURRENT_SEARCHES = 4
 DEFAULT_MAX_STREAM_RANKS = 16
+# A slow source must not leave the page looking frozen. While a search is
+# running, snapshots are also emitted on this cadence (whenever at least one
+# source finished since the last one), and a lightweight progress event keeps
+# the status line moving when nothing has completed yet.
+DEFAULT_STREAM_UPDATE_INTERVAL = 0.7
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
@@ -2469,6 +2474,10 @@ class Search:
             "total": total,
             "has_more": effective_offset + page_size < total,
             "offset": effective_offset,
+            # The effective page is server-authoritative: the client may have
+            # requested an out-of-range offset that was clamped above.
+            "page": effective_offset // page_size,
+            "page_count": max(1, math.ceil(total / page_size)),
             "counts": self._source_counts(pool),
         }
 
@@ -2492,6 +2501,11 @@ class Search:
             "has_more": state["has_more"],
             "offset": state.get("offset", offset),
             "limit": limit,
+            "page": state.get("page", state.get("offset", offset) // limit),
+            "page_count": state.get(
+                "page_count",
+                max(1, math.ceil(state["total"] / limit)),
+            ),
             "counts": state["counts"],
         }
         if matched_by is not None:
@@ -2551,6 +2565,8 @@ class Search:
             "total": final.get("total", 0),
             "has_more": final.get("has_more", False),
             "offset": final.get("offset", max(0, int(offset))),
+            "page": final.get("page", 0),
+            "page_count": final.get("page_count", 1),
             "counts": final.get("counts", {}),
             "matched_by": final.get("matched_by"),
         }
@@ -2768,6 +2784,9 @@ class Search:
                     "results": [],
                     "total": 0,
                     "has_more": False,
+                    "offset": 0,
+                    "page": 0,
+                    "page_count": 1,
                     "counts": {},
                 }
                 yield self._event(
@@ -2799,6 +2818,14 @@ class Search:
                 ),
             )
             rank_interval = max(1, math.ceil(total_sources / max_stream_ranks))
+            update_interval = max(
+                0.0,
+                getattr(
+                    self,
+                    "stream_update_interval",
+                    DEFAULT_STREAM_UPDATE_INTERVAL,
+                ),
+            )
             source_limit = self._source_limit(total_sources)
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
@@ -2816,42 +2843,97 @@ class Search:
                 )
 
             future_sources = dict(zip(futures, sources))
-            for future in as_completed(futures):
-                src = future_sources[future]
+            started_at = time.monotonic()
+            last_rank_at = started_at
+            rank_passes = 0
+            unranked = 0
+            remaining = set(futures)
+            while remaining:
+                timed_out = False
                 try:
-                    result = future.result()
-                except Exception as error:
-                    result = SourceResult(
-                        source=src,
-                        error=f"search failed: {error}",
-                        status="error",
-                    )
-                completed_futures.add(future)
-                completed.append(result)
-                should_rank = (
-                    len(completed) == 1
-                    or len(completed) % rank_interval == 0
-                    or len(completed) == total_sources
-                )
-                if should_rank:
+                    for future in as_completed(
+                        remaining,
+                        timeout=update_interval if update_interval > 0 else None,
+                    ):
+                        remaining.discard(future)
+                        src = future_sources[future]
+                        try:
+                            result = future.result()
+                        except Exception as error:
+                            result = SourceResult(
+                                source=src,
+                                error=f"search failed: {error}",
+                                status="error",
+                            )
+                        completed_futures.add(future)
+                        completed.append(result)
+                        unranked += 1
+                        now = time.monotonic()
+                        count_due = (
+                            len(completed) == 1
+                            or len(completed) % rank_interval == 0
+                        )
+                        final = len(completed) == total_sources
+                        timed_due = (
+                            update_interval > 0
+                            and now - last_rank_at >= update_interval
+                        )
+                        # Completion-spaced passes stay bounded by
+                        # max_stream_ranks. Timed passes are bounded by the
+                        # interval itself, so a long query keeps producing
+                        # snapshots instead of going silent until the next
+                        # completion batch.
+                        count_rank = count_due and rank_passes < max_stream_ranks
+                        should_rank = final or timed_due or count_rank
+                        if should_rank:
+                            pool = self._rank_results(completed, query, pool_target)
+                            counts = self._source_counts(pool)
+                            # This source is part of the pool that was just
+                            # ranked, so its count is current. Between rank
+                            # passes a newly finished source is not in `counts`
+                            # yet; omit its count instead of reporting a
+                            # misleading 0. The snapshot that follows a rank
+                            # pass always carries the full, current map.
+                            reported_count = counts.get(src.key, 0)
+                            if count_rank:
+                                rank_passes += 1
+                            last_rank_at = now
+                            unranked = 0
+                        else:
+                            reported_count = None
+                        reported_counts[src.key] = reported_count
+                        yield {
+                            "type": "source",
+                            **result.to_event(reported_count),
+                            "completed": len(completed),
+                            "total_sources": total_sources,
+                        }
+                        if should_rank:
+                            state = self._page_state(pool, source, offset, page_size, debug)
+                            yield self._event(
+                                "snapshot",
+                                state,
+                                len(completed),
+                                total_sources,
+                                offset,
+                                page_size,
+                                self._matched_by(pool) if debug else None,
+                            )
+                except TimeoutError:
+                    timed_out = True
+                if not remaining:
+                    break
+                if not timed_out:
+                    continue
+                now = time.monotonic()
+                if unranked:
+                    # A source finished less than one interval after the last
+                    # rank pass. Publish it now instead of waiting for the next
+                    # completion, which may be a long way off.
                     pool = self._rank_results(completed, query, pool_target)
                     counts = self._source_counts(pool)
-                    # This source is part of the pool that was just ranked, so
-                    # its count is current. Between rank passes a newly finished
-                    # source is not in `counts` yet; omit its count instead of
-                    # reporting a misleading 0. The snapshot that follows a rank
-                    # pass always carries the full, current map.
-                    reported_count = counts.get(src.key, 0)
-                else:
-                    reported_count = None
-                reported_counts[src.key] = reported_count
-                yield {
-                    "type": "source",
-                    **result.to_event(reported_count),
-                    "completed": len(completed),
-                    "total_sources": total_sources,
-                }
-                if should_rank:
+                    last_rank_at = now
+                    unranked = 0
                     state = self._page_state(pool, source, offset, page_size, debug)
                     yield self._event(
                         "snapshot",
@@ -2862,6 +2944,15 @@ class Search:
                         page_size,
                         self._matched_by(pool) if debug else None,
                     )
+                else:
+                    # Nothing new to rank: keep the stream (and the status
+                    # line) alive while a slow source is still working.
+                    yield {
+                        "type": "progress",
+                        "completed": len(completed),
+                        "total_sources": total_sources,
+                        "elapsed": round(now - started_at, 1),
+                    }
 
             if len(completed) != total_sources:
                 pool = self._rank_results(completed, query, pool_target)

@@ -95,7 +95,8 @@ max_concurrent_searches = 4
 # source still returns the whole pool while hundreds of sources each fetch only
 # their share. Raise it to trade speed for recall.
 candidate_count = 16
-# Maximum intermediate ranking passes during a streamed search. The final
+# Maximum completion-spaced intermediate ranking passes during a streamed
+# search. Timed snapshots are still emitted about every 700ms, and the final
 # ranking always includes every source; lower this on slow CPUs.
 max_stream_ranks = 8
 # Timeout for catalog and Kiwix fallback requests, in seconds.

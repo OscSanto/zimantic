@@ -60,6 +60,8 @@ class FakeSearch:
             "total": 1,
             "has_more": False,
             "offset": offset,
+            "page": offset // max(1, limit or 10),
+            "page_count": 1,
             "counts": {"manual": 1},
             "matched_by": {"semantic": 1, "title": 2, "fulltext": 3},
         }
@@ -82,6 +84,8 @@ class FakeSearch:
             "has_more": False,
             "offset": offset,
             "limit": limit or 10,
+            "page": offset // max(1, limit or 10),
+            "page_count": 1,
             "counts": {"manual": 1},
             "matched_by": {"semantic": 1, "title": 2, "fulltext": 3},
         }
@@ -579,6 +583,8 @@ class ServerTests(unittest.TestCase):
         response = self.client.get("/search?q=page&offset=10&source=manual&limit=5")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-offset"], "10")
+        self.assertEqual(response.headers["x-page"], "2")
+        self.assertEqual(response.headers["x-page-count"], "1")
         self.assertNotIn("score", response.json()[0])
         self.assertEqual(
             self.search.search_page_calls[-1],
