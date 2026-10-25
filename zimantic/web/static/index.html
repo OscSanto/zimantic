@@ -13,7 +13,9 @@
     <body>
         <div class="wrap">
             <header class="site-header">
-                <h1 id="homeHeading" role="button" tabindex="0" aria-label="Clear or restore search">Zimantic</h1>
+                <h1>
+                    <button id="homeHeading" type="button" aria-label="Clear or restore search">Zimantic</button>
+                </h1>
                 <nav class="view-nav" aria-label="Primary">
                     <a href="./">Search</a>
                     <a href="library">Library</a>
@@ -29,6 +31,7 @@
                     <input
                         id="question"
                         type="search"
+                        maxlength="4096"
                         placeholder="how to change a lightbulb"
                         aria-label="Search query"
                     />
@@ -62,9 +65,10 @@
                 <div id="notice"></div>
                 <div id="results"><div class="empty"></div></div>
                 <nav class="pager" id="pager" aria-label="Results pagination"></nav>
+                <div id="searchAnnouncement" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
             </main>
 
-            <section id="libraryView" hidden aria-labelledby="libraryHeading">
+            <section id="libraryView" hidden role="main" aria-labelledby="libraryHeading">
                 <div class="library-heading">
                     <div>
                         <h2 id="libraryHeading">Your library</h2>

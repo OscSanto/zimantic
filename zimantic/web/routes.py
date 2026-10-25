@@ -213,13 +213,43 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             content = web_app._decorate_article_bridge(content, zim, base_path)
         return web_app._article_content_response(content, article["mimetype"])
 
-    def error_shell_article(requested_path: str | None) -> dict:
+    def error_shell_article(
+        requested_path: str | None,
+        error: Exception,
+        zim: str,
+    ) -> dict:
         safe_path = "/".join(
             part
             for part in (requested_path or "").split("/")
             if part and part not in {".", ".."}
         )
-        return {"path": safe_path, "title": safe_path or "Article"}
+        message = str(error)
+        zim_found = message != "ZIM not found" and (
+            not isinstance(error, ArticleUnavailableError)
+            or isinstance(error, ArticleTooLargeError)
+        )
+        if isinstance(error, ArticleTooLargeError):
+            title = "Article too large"
+            detail = "This article is too large to display in the offline viewer."
+        elif isinstance(error, ArticleUnavailableError):
+            title = "Source unavailable"
+            detail = "This offline source is not available right now."
+        elif message == "ZIM not found":
+            title = "Source not found"
+            detail = "This offline source is not installed on this device."
+        elif message == "invalid article path":
+            title = "Article not found"
+            detail = "The requested path is not valid."
+        else:
+            title = "Article not found"
+            detail = "This page is not available in the offline archive."
+        return {
+            "path": safe_path,
+            "title": title,
+            "message": detail,
+            "zim": zim,
+            "zim_found": zim_found,
+        }
 
     def zim_icon_url(zim: str) -> str | None:
         """Return the ZIM favicon used when an article declares none."""
@@ -270,14 +300,16 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             ArticleTooLargeError,
             ArticleUnavailableError,
         ) as error:
+            error_info = error_shell_article(requested_path, error, zim)
             return web_app._content_shell(
                 zim,
-                error_shell_article(requested_path),
+                error_info,
                 web_app._ARTICLE_ERROR_STATUS[type(error)],
                 fallback_icon,
                 base_path,
                 highlight,
                 path_exists=path_exists,
+                error=error_info,
             )
 
         if requested_path != article["path"]:

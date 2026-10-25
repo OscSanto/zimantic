@@ -18,7 +18,9 @@
             };
             let PAGE_SIZE = 10; // replaced with the server's page_size at startup
             let debugMode = false;
-            const AUTO_SUBMIT_DELAY = 500;
+            const AUTO_SUBMIT_DELAY = 800;
+            const AUTO_HISTORY_DELAY = 3000;
+            const MAX_QUERY_LENGTH = 4096;
             const STREAM_RENDER_DELAY = 750;
             const STREAM_SEARCH_TIMEOUT = 15000;
             const BUSY_RETRY_BASE_DELAY = 1000;
@@ -39,6 +41,9 @@
             let pageController = null;
             let searchSequence = 0;
             let autoSubmitTimer = null;
+            let autoSearchBase = null;
+            let autoSearchCommitTimer = null;
+            let composing = false;
             let resultList = null;
             let thumbnailGeneration = 0;
             const thumbnailCache = new Map();
@@ -55,6 +60,8 @@
             let pendingModalArticleUrl = null;
             let pendingModalNavigation = null;
             let offlineLinkRequest = 0;
+            let closingModalHistory = false;
+            let closeHistoryAttempts = 0;
             let activeParentNavigation = null;
             let activeParentUrl = null;
             let parentNavigationSequence = 0;
@@ -133,6 +140,34 @@
 
             function libraryTitle(source) {
                 return String(source.title || source.name || source.book || "Untitled ZIM").trim();
+            }
+
+            function sourceRecord(keyOrSource) {
+                if (keyOrSource && typeof keyOrSource === "object") return keyOrSource;
+                const wanted = String(keyOrSource || "").trim();
+                if (!wanted) return null;
+                const matches = (source) =>
+                    [source.key, source.local_name, source.book, source.name].some(
+                        (value) => String(value || "") === wanted,
+                    );
+                return sources.find(matches) || librarySources.find(matches) || null;
+            }
+
+            function sourceDisplayName(keyOrSource) {
+                const source = sourceRecord(keyOrSource);
+                if (source) return libraryTitle(source);
+                const fallback = typeof keyOrSource === "string" ? keyOrSource : "";
+                return fallback || "Unknown source";
+            }
+
+            function sourceStemName(keyOrSource) {
+                const source = sourceRecord(keyOrSource);
+                if (!source) {
+                    return typeof keyOrSource === "string" ? keyOrSource : "";
+                }
+                return String(
+                    source.local_name || source.book || source.name || source.key || "",
+                ).trim();
             }
 
             function libraryHomepageUrl(source) {
@@ -214,6 +249,8 @@
                 if (!modal || modal.hidden) return;
                 modal.hidden = true;
                 document.body.classList.remove("library-info-open");
+                const wrap = document.querySelector(".wrap");
+                if (wrap) wrap.inert = false;
                 if (
                     libraryInfoPreviousFocus &&
                     typeof libraryInfoPreviousFocus.focus === "function"
@@ -345,6 +382,8 @@
 
                 modal.hidden = false;
                 document.body.classList.add("library-info-open");
+                const wrap = document.querySelector(".wrap");
+                if (wrap) wrap.inert = true;
                 $("libraryInfoClose")?.focus();
             }
 
@@ -526,7 +565,11 @@
                         libraryLanguage(source),
                         formatLibrarySize(source.size),
                         Number(source.article_count) > 0
-                            ? `${Number(source.article_count).toLocaleString()} articles`
+                            ? `${Number(source.article_count).toLocaleString()} ${
+                                  Number(source.article_count) === 1
+                                      ? "article"
+                                      : "articles"
+                              }`
                             : "",
                         source.date || "",
                     ].filter(Boolean);
@@ -564,70 +607,92 @@
             }
 
             function queryTerms(text) {
-                return (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter(
-                    (word) =>
-                        !new Set([
-                            "a",
-                            "an",
-                            "the",
-                            "is",
-                            "are",
-                            "was",
-                            "were",
-                            "be",
-                            "been",
-                            "being",
-                            "how",
-                            "what",
-                            "where",
-                            "when",
-                            "why",
-                            "who",
-                            "which",
-                            "can",
-                            "could",
-                            "do",
-                            "does",
-                            "did",
-                            "i",
-                            "you",
-                            "my",
-                            "me",
-                            "to",
-                            "of",
-                            "in",
-                            "on",
-                            "at",
-                            "for",
-                            "with",
-                            "about",
-                            "find",
-                            "some",
-                            "any",
-                            "there",
-                            "it",
-                            "that",
-                            "this",
-                            "and",
-                            "or",
-                            "if",
-                            "so",
-                            "will",
-                            "would",
-                            "should",
-                        ]).has(word),
+                const stopwords = new Set([
+                    "a",
+                    "an",
+                    "the",
+                    "is",
+                    "are",
+                    "was",
+                    "were",
+                    "be",
+                    "been",
+                    "being",
+                    "how",
+                    "what",
+                    "where",
+                    "when",
+                    "why",
+                    "who",
+                    "which",
+                    "can",
+                    "could",
+                    "do",
+                    "does",
+                    "did",
+                    "i",
+                    "you",
+                    "my",
+                    "me",
+                    "to",
+                    "of",
+                    "in",
+                    "on",
+                    "at",
+                    "for",
+                    "with",
+                    "about",
+                    "find",
+                    "some",
+                    "any",
+                    "there",
+                    "it",
+                    "that",
+                    "this",
+                    "and",
+                    "or",
+                    "if",
+                    "so",
+                    "will",
+                    "would",
+                    "should",
+                ]);
+                return (String(text).toLocaleLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) || []).filter(
+                    (word) => !stopwords.has(word),
                 );
             }
 
             function highlight(text, terms) {
-                const wanted = new Set(terms);
-                return String(text)
-                    .split(/([A-Za-z0-9]+)/)
-                    .map((part, index) => {
-                        if (index % 2 && wanted.has(part.toLowerCase()))
-                            return `<mark>${escapeHtml(part)}</mark>`;
-                        return escapeHtml(part);
+                const value = String(text);
+                const wanted = [
+                    ...new Set(
+                        (Array.isArray(terms) ? terms : [])
+                            .map((term) => String(term || "").toLocaleLowerCase())
+                            .filter(Boolean),
+                    ),
+                ].sort((left, right) => right.length - left.length);
+                if (!wanted.length) return escapeHtml(value);
+                const pattern = wanted
+                    .map((term) => {
+                        const safe = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                        // Keep word matching for Latin scripts, but allow substrings
+                        // for scripts without word separators (and inflected forms).
+                        return /^[a-z0-9]+$/i.test(term) ? `\\b${safe}\\b` : safe;
                     })
+                    .join("|");
+                let matcher;
+                try {
+                    matcher = new RegExp(`(${pattern})`, "giu");
+                } catch (_) {
+                    return escapeHtml(value);
+                }
+                return value
+                    .split(matcher)
+                    .map((part, index) =>
+                        index % 2
+                            ? `<mark>${escapeHtml(part)}</mark>`
+                            : escapeHtml(part),
+                    )
                     .join("");
             }
 
@@ -763,11 +828,13 @@
                 const status = $("sourceFilterStatus");
                 if (!current) {
                     panel.hidden = true;
+                    panel.classList.remove("empty-selection");
                     toolbar.hidden = true;
                     options.replaceChildren();
                     status.textContent = "";
                     return;
                 }
+                panel.classList.remove("empty-selection");
                 const layout = sourceFilterLayout();
                 panel.hidden = false;
                 toolbar.hidden = !layout.query && !layout.showOther;
@@ -818,11 +885,53 @@
                     status.textContent = layout.query
                         ? "No matching sources."
                         : layout.outcomes.length
-                          ? "No sources have results."
+                          ? ""
                           : "No sources have reported yet.";
                 } else {
                     status.textContent = "";
                 }
+            }
+
+            function renderSourceSelectionSummary() {
+                const panel = $("sourceFilters");
+                const toolbar = $("sourceFilterToolbar");
+                const options = $("sourceFilterOptions");
+                const status = $("sourceFilterStatus");
+                if (current || !selectedSourceKeys.size) {
+                    if (!current) {
+                        panel.hidden = true;
+                        panel.classList.remove("empty-selection");
+                        toolbar.hidden = true;
+                        options.replaceChildren();
+                        status.textContent = "";
+                    }
+                    return;
+                }
+                panel.hidden = false;
+                panel.classList.add("empty-selection");
+                toolbar.hidden = true;
+                const all = document.createElement("button");
+                all.className = "secondary source-filter-option";
+                all.type = "button";
+                all.dataset.sourceAction = "all";
+                all.setAttribute("aria-pressed", "false");
+                all.textContent = "All Sources";
+                const entries = [...selectedSourceKeys].map((key) => {
+                    const button = document.createElement("button");
+                    button.className = "source-filter-option ok";
+                    button.type = "button";
+                    button.dataset.source = key;
+                    button.setAttribute("aria-pressed", "true");
+                    button.textContent = sourceDisplayName(key);
+                    const stem = sourceStemName(key);
+                    if (stem) button.title = stem;
+                    return button;
+                });
+                options.replaceChildren(all, ...entries);
+                const count = entries.length;
+                status.textContent =
+                    `${count} selected source${count === 1 ? "" : "s"}. ` +
+                    `Type a query to search ${count === 1 ? "it" : "them"}.`;
             }
 
             function renderFilterLine(total) {
@@ -847,7 +956,11 @@
                     meta.appendChild(icon);
                 }
                 const source = document.createElement("span");
-                source.textContent = item.source || "";
+                const sourceKey = item.source_key || item.source || "";
+                source.textContent = sourceDisplayName(sourceKey);
+                const stem = sourceStemName(sourceKey);
+                if (stem) source.title = stem;
+                if (sourceKey) source.dataset.sourceKey = sourceKey;
                 meta.appendChild(source);
                 const separator = document.createElement("span");
                 separator.className = "result-meta-separator";
@@ -1009,6 +1122,40 @@
                 if (frame) frame.focus();
             }
 
+            async function copyTextToClipboard(text) {
+                try {
+                    if (navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        return true;
+                    }
+                } catch (_) {
+                    // Sandboxed or permission-restricted contexts fall through to
+                    // the selection-based fallback below.
+                }
+                const area = document.createElement("textarea");
+                area.value = text;
+                area.setAttribute("readonly", "");
+                area.style.position = "fixed";
+                area.style.opacity = "0";
+                area.style.pointerEvents = "none";
+                const previous = document.activeElement;
+                document.body.appendChild(area);
+                area.focus();
+                area.select();
+                let copied = false;
+                try {
+                    copied = document.execCommand("copy");
+                } catch (_) {
+                    copied = false;
+                } finally {
+                    area.remove();
+                    if (previous instanceof HTMLElement && document.contains(previous)) {
+                        previous.focus();
+                    }
+                }
+                return copied;
+            }
+
             function showExternalLinkNotice(value) {
                 const url = readExternalUrl(value);
                 const modal = $("articleModal");
@@ -1063,13 +1210,14 @@
                 const modal = $("articleModal");
                 const frame = $("articleModalFrame");
                 if (!modal || !frame) return;
+                const wasHidden = modal.hidden;
                 if (navigationKind === "library") {
                     activeLibraryArticleUrl = articleUrl;
                 } else if (navigationKind !== "parent") {
                     activeLibraryArticleUrl = null;
                 }
                 hideExternalLinkNotice();
-                if (modal.hidden) {
+                if (wasHidden) {
                     modalPreviousFocus = document.activeElement;
                 }
                 const previousActiveArticleUrl = readModalUrl(activeModalUrl);
@@ -1087,7 +1235,17 @@
                         activeParentNavigation = null;
                         parentNavigationSequence++;
                     }
-                    frame.src = articleUrl;
+                    if (!wasHidden && frame.contentWindow) {
+                        // An already-open shell can replace its own document
+                        // without adding another joint-history entry for the
+                        // iframe. The first load still uses src.
+                        frame.contentWindow.postMessage({
+                            type: "zimantic-shell-navigate",
+                            url: articleUrl,
+                        }, "*");
+                    } else {
+                        frame.src = articleUrl;
+                    }
                 }
                 modal.hidden = false;
                 document.documentElement.classList.add("modal-open");
@@ -1097,22 +1255,36 @@
 
             function navigateArticleModal(articleUrl, navigationKind = "search") {
                 const locationState = readLocationState();
-                // Library articles have no query, but their modal URL still needs a
-                // history entry so the address bar is a shareable deep link.
-                history.pushState(
-                    {
-                        ...(history.state || {}),
-                        zimanticModal: true,
-                        zimanticModalNavigation: navigationKind,
-                    },
-                    "",
-                    makeStateUrl(
-                        current?.question || locationState.question,
-                        current ? selectedSourceKeys : locationState.selectedSources,
-                        current?.page ?? locationState.page,
-                        articleUrlValue(articleUrl),
-                    ),
+                commitAutoSearchHistory();
+                const modalOpen = !$("articleModal").hidden;
+                const managed = Boolean(history.state?.zimanticModal);
+                const state = {
+                    ...(history.state || {}),
+                    zimanticModal: true,
+                    zimanticModalNavigation: navigationKind,
+                };
+                const url = makeStateUrl(
+                    current?.question || locationState.question,
+                    current ? selectedSourceKeys : locationState.selectedSources,
+                    current?.page ?? locationState.page,
+                    articleUrlValue(articleUrl),
                 );
+                if (!modalOpen) {
+                    // One history entry per viewer session. Article-to-article
+                    // navigation reuses it, so Close/Back returns straight to the
+                    // page underneath without a stack of same-view entries.
+                    state.zimanticModalDepth = 1;
+                    history.pushState(state, "", url);
+                } else if (managed) {
+                    state.zimanticModalDepth = 1;
+                    history.replaceState(state, "", url);
+                } else {
+                    // A deep link opened the modal without an app-managed history
+                    // entry; keep a single shareable entry instead of growing a
+                    // stack we cannot safely unwind.
+                    delete state.zimanticModalDepth;
+                    history.replaceState(state, "", url);
+                }
                 showArticleModal(articleUrl.href, navigationKind);
             }
 
@@ -1531,15 +1703,30 @@
                 line.hidden = false;
             }
 
-            function closeArticleModal({ navigateHistory = true } = {}) {
+            function bindArticleFrameLoad(frame = $("articleModalFrame")) {
+                if (!frame) return;
+                frame.addEventListener("load", () => {
+                    const modal = $("articleModal");
+                    const activeFrame = $("articleModalFrame");
+                    if (modal.hidden || !activeFrame.src || activeFrame.src === "about:blank") {
+                        return;
+                    }
+                    postArticleModalNavigation();
+                });
+            }
+
+            function replaceArticleFrame() {
+                const old = $("articleModalFrame");
+                if (!old) return;
+                const fresh = old.cloneNode(false);
+                fresh.removeAttribute("src");
+                old.replaceWith(fresh);
+                bindArticleFrameLoad(fresh);
+            }
+
+            function hideArticleModal() {
                 const modal = $("articleModal");
-                const frame = $("articleModalFrame");
                 if (!modal || modal.hidden) return;
-                if (navigateHistory && new URL(location.href).searchParams.has("modal")) {
-                    const url = new URL(location.href);
-                    url.searchParams.delete("modal");
-                    history.replaceState(history.state, "", url.pathname + url.search + url.hash);
-                }
                 modal.hidden = true;
                 document.documentElement.classList.remove("modal-open");
                 document.body.classList.remove("modal-open");
@@ -1554,24 +1741,75 @@
                 activeParentUrl = null;
                 parentNavigationSequence++;
                 resetArticleDocumentMeta();
-                if (frame) frame.src = "about:blank";
+                replaceArticleFrame();
                 if (modalPreviousFocus instanceof HTMLElement && document.contains(modalPreviousFocus)) {
                     modalPreviousFocus.focus();
                 }
                 modalPreviousFocus = null;
             }
 
-            $("articleModalFrame").addEventListener("load", () => {
-                const modal = $("articleModal");
-                const frame = $("articleModalFrame");
-                if (modal.hidden || !frame.src || frame.src === "about:blank") {
+            function stepCloseArticleHistory() {
+                if (!closingModalHistory) return;
+                closeHistoryAttempts += 1;
+                const stillModal = new URL(location.href).searchParams.has("modal");
+                if (!stillModal || closeHistoryAttempts > 8) {
+                    closingModalHistory = false;
+                    if (stillModal) {
+                        const url = new URL(location.href);
+                        url.searchParams.delete("modal");
+                        history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+                    }
+                    hideArticleModal();
                     return;
                 }
-                postArticleModalNavigation();
-            });
+                history.back();
+                setTimeout(stepCloseArticleHistory, 120);
+            }
+
+            function closeArticleModal({ navigateHistory = true } = {}) {
+                const modal = $("articleModal");
+                if (!modal || modal.hidden || closingModalHistory) return;
+                if (navigateHistory && new URL(location.href).searchParams.has("modal")) {
+                    const depth = Number(history.state?.zimanticModalDepth) || 0;
+                    if (history.state?.zimanticModal && depth > 0) {
+                        // Walk back over the modal entry and any joint iframe
+                        // entries it left behind. Keeping the viewer up while the
+                        // history unwinds avoids a blank flash; popstate is
+                        // ignored until the URL is the page underneath.
+                        closingModalHistory = true;
+                        closeHistoryAttempts = 0;
+                        stepCloseArticleHistory();
+                        return;
+                    }
+                    const url = new URL(location.href);
+                    url.searchParams.delete("modal");
+                    history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+                }
+                hideArticleModal();
+            }
+
+            bindArticleFrameLoad();
             window.addEventListener("message", (event) => {
                 const frame = $("articleModalFrame");
                 if (event.source !== frame.contentWindow) return;
+                if (event.data?.type === "zimantic-article-copy") {
+                    let url;
+                    try {
+                        url = new URL(String(event.data.text || ""), location.href);
+                    } catch (_) {
+                        return;
+                    }
+                    if (url.origin !== location.origin) return;
+                    copyTextToClipboard(url.href).then((ok) => {
+                        const activeFrame = $("articleModalFrame");
+                        if (!activeFrame?.contentWindow) return;
+                        activeFrame.contentWindow.postMessage(
+                            { type: "zimantic-article-copy-result", ok },
+                            "*",
+                        );
+                    });
+                    return;
+                }
                 if (event.data?.type === "zimantic-search") {
                     const question = String(event.data.query || "")
                         .trim()
@@ -1825,10 +2063,29 @@
             }
 
             function pageRangeText(total, page) {
-                if (!total) return "No results.";
+                if (!total) return "No results";
                 const from = page * PAGE_SIZE + 1;
                 const to = Math.min((page + 1) * PAGE_SIZE, total);
                 return `${from}–${to} of ${total} result${total === 1 ? "" : "s"}`;
+            }
+
+            function correctOutOfRangePage(page, total) {
+                if (!(total > 0) || !Number.isInteger(page)) return null;
+                const lastPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
+                if (page <= lastPage) return null;
+                if (current) {
+                    history.replaceState(
+                        history.state,
+                        "",
+                        makeStateUrl(
+                            current.question,
+                            selectedSourceKeys,
+                            lastPage,
+                            readLocationState().modal,
+                        ),
+                    );
+                }
+                return lastPage;
             }
 
             function searchStatusText() {
@@ -1836,7 +2093,7 @@
                 const range = current.total
                     ? pageRangeText(current.total, current.page)
                     : current.sourcesTotal
-                      ? "No results."
+                      ? "No results"
                       : "No searchable sources.";
                 // Keep the source tally visible once the stream has finished, on
                 // every page, so paging does not drop it from the status line.
@@ -1844,6 +2101,19 @@
                     current.completed === current.sourcesTotal
                     ? `${range} · ${current.completed}/${current.sourcesTotal} sources complete`
                     : range;
+            }
+
+            function announceSearchStatus(message = null) {
+                const node = $("searchAnnouncement");
+                if (!node) return;
+                if (message) {
+                    node.textContent = message;
+                    return;
+                }
+                node.textContent =
+                    current && current.completed === current.sourcesTotal
+                        ? searchStatusText()
+                        : "";
             }
 
             function renderPager(total, pageCount) {
@@ -1972,6 +2242,7 @@
                     const src = (image.getAttribute("src") || "").trim();
                     if (!src || src.startsWith("data:") || /\.svg(?:[?#]|$)/i.test(src)) continue;
                     if (/(^|[\W_])(icon|logo|avatar|symbol|sprite|spacer|blank)/i.test(src)) continue;
+                    if (/\/users?\/profiles?\//i.test(src)) continue;
                     try {
                         return new URL(src, articleUrl).href;
                     } catch (_) {}
@@ -2104,12 +2375,23 @@
                         applyPage(event);
                         current.streaming = false;
                         cancelStreamRender();
+                        const corrected = correctOutOfRangePage(
+                            current.page,
+                            current.total,
+                        );
+                        if (corrected !== null) {
+                            current.page = corrected;
+                            loadPage(corrected);
+                            return;
+                        }
                         renderView();
                         $("status").textContent = searchStatusText();
+                        announceSearchStatus();
                         renderNotice();
                     } else if (event.type === "error") {
                         busy = Boolean(event.busy);
                         $("status").textContent = event.error || "Search failed";
+                        announceSearchStatus($("status").textContent);
                     }
                     return false;
                 };
@@ -2166,6 +2448,7 @@
                     // values with the scope it actually searched.
                     searchAll: searchKeys.length === 0,
                 };
+                announceSearchStatus();
                 document.body.classList.add("search-active");
                 window.scrollTo({ top: 0, left: 0, behavior: "auto" });
                 $("searchSummary").hidden = false;
@@ -2233,6 +2516,7 @@
                         await loadPage(pageIndex);
                     } else if (error.name !== "AbortError" && sequence === searchSequence) {
                         $("status").textContent = `Search failed: ${error.message}`;
+                        announceSearchStatus($("status").textContent);
                     }
                 } finally {
                     if (sequence === searchSequence) {
@@ -2278,6 +2562,11 @@
                     current.page = pageIndex;
                     current.pageItems = items;
                     current.total = Number(response.headers.get("X-Total-Count") || items.length);
+                    const corrected = correctOutOfRangePage(pageIndex, current.total);
+                    if (corrected !== null) {
+                        loadPage(corrected);
+                        return;
+                    }
                     if (debugMode) {
                         const matchedBy = response.headers.get("X-Matched-By");
                         if (matchedBy) {
@@ -2290,6 +2579,7 @@
                     }
                     renderView();
                     $("status").textContent = searchStatusText();
+                    announceSearchStatus();
                     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
                 } catch (error) {
                     if (
@@ -2298,6 +2588,7 @@
                         controller === pageController
                     ) {
                         $("status").textContent = `Search failed: ${error.message}`;
+                        announceSearchStatus($("status").textContent);
                     }
                 } finally {
                     if (controller === pageController) pageController = null;
@@ -2377,7 +2668,7 @@
                 const params = new URLSearchParams(location.search);
                 const pageNumber = Number.parseInt(params.get("page") || "1", 10);
                 return {
-                    question: (params.get("q") || "").trim(),
+                    question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
                     selectedSources: [...new Set(params.getAll("src").filter(Boolean))],
                     page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0,
                     modal: params.get("modal") || null,
@@ -2404,8 +2695,30 @@
 
             $("sourceFilterOptions").addEventListener("click", (event) => {
                 const button = event.target.closest("button[data-source], button[data-source-action]");
-                if (!button || button.disabled || !current) return;
+                if (!button || button.disabled) return;
                 const key = button.dataset.source || null;
+                if (!current) {
+                    if (button.dataset.sourceAction === "all") {
+                        selectedSourceKeys.clear();
+                    } else if (key && selectedSourceKeys.has(key)) {
+                        selectedSourceKeys.delete(key);
+                    } else if (key) {
+                        selectedSourceKeys.add(key);
+                    }
+                    const selected = [...selectedSourceKeys];
+                    history.replaceState(
+                        history.state,
+                        "",
+                        makeStateUrl("", selected, 0),
+                    );
+                    renderSourceSelectionSummary();
+                    const next = selected.length
+                        ? $("sourceFilterOptions").querySelector("button")
+                        : null;
+                    if (next) next.focus();
+                    else $("question").focus();
+                    return;
+                }
                 if (button.dataset.sourceAction === "all") {
                     selectedSourceKeys.clear();
                 } else if (button.dataset.sourceAction === "other") {
@@ -2420,6 +2733,7 @@
                     selectedSourceKeys.add(key);
                 }
                 const selected = [...selectedSourceKeys];
+                commitAutoSearchHistory();
                 history.pushState(null, "", makeStateUrl(current.question, selected, 0));
                 renderSourceFilters();
                 applySourceSelection(current.question, selected, 0);
@@ -2457,6 +2771,28 @@
                 navigateArticleModal(new URL(link.href, location.href), "library");
             });
             $("libraryInfoClose").addEventListener("click", closeLibraryInfo);
+            $("libraryInfoModal").addEventListener("keydown", (event) => {
+                if (event.key !== "Tab" || $("libraryInfoModal").hidden) return;
+                const modal = $("libraryInfoModal");
+                const focusable = [
+                    ...modal.querySelectorAll(
+                        'a[href], button:not([disabled]):not([tabindex="-1"]), ' +
+                            "input:not([disabled]), select:not([disabled]), " +
+                            "textarea:not([disabled]), summary, " +
+                            '[tabindex]:not([tabindex="-1"])',
+                    ),
+                ].filter((node) => node.getClientRects().length > 0);
+                if (!focusable.length) return;
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            });
             $("libraryFilter").addEventListener("input", renderLibrary);
             $("libraryShuffle").addEventListener("click", (event) => {
                 if (event.ctrlKey || event.shiftKey) {
@@ -2471,6 +2807,7 @@
                 if (!link || !current) return;
                 event.preventDefault();
                 const page = Number(link.dataset.page);
+                commitAutoSearchHistory();
                 history.pushState(null, "", makeStateUrl(current.question, selectedSourceKeys, page));
                 loadPage(page);
             });
@@ -2485,6 +2822,11 @@
                 if (event.target === event.currentTarget) hideExternalLinkNotice();
             });
             window.addEventListener("keydown", (event) => {
+                if (event.key === "Escape" && !$("externalLinkNotice").hidden) {
+                    event.preventDefault();
+                    hideExternalLinkNotice();
+                    return;
+                }
                 if (event.key === "Escape" && !$("libraryInfoModal").hidden) {
                     event.preventDefault();
                     closeLibraryInfo();
@@ -2501,6 +2843,7 @@
                 // search-active so the empty page re-centers like a fresh load.
                 clearTimeout(autoSubmitTimer);
                 autoSubmitTimer = null;
+                cancelAutoSearchHistory();
                 if (requestController) requestController.abort();
                 requestController = null;
                 if (pageController) pageController.abort();
@@ -2513,6 +2856,7 @@
                 activeSearchResult = null;
                 selectedSourceKeys = new Set();
                 resultList = null;
+                announceSearchStatus();
                 document.body.classList.remove("search-active");
                 $("searchSummary").hidden = true;
                 $("sourceFilterToolbar").hidden = true;
@@ -2563,6 +2907,7 @@
                 if (!previousHeadingSearch) return;
                 const previous = previousHeadingSearch;
                 $("question").value = previous.question;
+                commitAutoSearchHistory();
                 history.pushState(
                     null,
                     "",
@@ -2585,7 +2930,9 @@
                 const centerX = rect.left + rect.width / 2;
                 const centerY = rect.top + rect.height / 2;
                 const hasPointerPosition =
-                    Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY);
+                    Number.isFinite(event?.clientX) &&
+                    Number.isFinite(event?.clientY) &&
+                    (event.clientX !== 0 || event.clientY !== 0);
                 const originX = hasPointerPosition ? event.clientX : centerX;
                 const originY = hasPointerPosition ? event.clientY : centerY;
                 const offsetX = originX - centerX;
@@ -2631,44 +2978,124 @@
                 toggleHeadingSearch();
             }
 
-            function submitSearch(pushHistory) {
+            function currentUrlValue() {
+                return location.pathname + location.search + location.hash;
+            }
+
+            function cancelAutoSearchHistory() {
+                clearTimeout(autoSearchCommitTimer);
+                autoSearchCommitTimer = null;
+                autoSearchBase = null;
+            }
+
+            function beginAutoSearchHistory() {
+                if (autoSearchBase) return;
+                autoSearchBase = {
+                    state: history.state,
+                    url: currentUrlValue(),
+                };
+            }
+
+            function commitAutoSearchHistory() {
+                if (!autoSearchBase) return;
+                const base = autoSearchBase;
+                const searchUrl = currentUrlValue();
+                autoSearchBase = null;
+                clearTimeout(autoSearchCommitTimer);
+                autoSearchCommitTimer = null;
+                // Restore the entry the burst started from, then add the settled
+                // query as its own entry. This avoids pushing a duplicate URL (and
+                // the no-op Back press that comes with it).
+                history.replaceState(base.state, "", base.url);
+                if (searchUrl !== base.url) {
+                    history.pushState(null, "", searchUrl);
+                }
+            }
+
+            function scheduleAutoSearchHistoryCommit() {
+                clearTimeout(autoSearchCommitTimer);
+                autoSearchCommitTimer = setTimeout(() => {
+                    autoSearchCommitTimer = null;
+                    commitAutoSearchHistory();
+                }, AUTO_HISTORY_DELAY);
+            }
+
+            function scheduleAutoSubmit() {
+                clearTimeout(autoSubmitTimer);
+                autoSubmitTimer = null;
+                if (composing) return;
+                if (!$("question").value.trim()) return;
+                autoSubmitTimer = setTimeout(() => {
+                    autoSubmitTimer = null;
+                    if (composing) return;
+                    submitSearch(false, { auto: true });
+                }, AUTO_SUBMIT_DELAY);
+            }
+
+            function submitSearch(pushHistory, { auto = false } = {}) {
                 const question = $("question").value.trim();
                 if (!question) {
                     clearSearch(pushHistory);
                     return;
                 }
+                if (question.length > MAX_QUERY_LENGTH) {
+                    $("searchButton").disabled = false;
+                    $("status").textContent = "";
+                    $("notice").textContent =
+                        `Search queries are limited to ${MAX_QUERY_LENGTH.toLocaleString()} characters.`;
+                    return;
+                }
                 // Keep the current source filter when the query changes, so a search
                 // started from a library source's "Search" button stays scoped to it.
                 const selectedSources = [...selectedSourceKeys];
-                history[pushHistory ? "pushState" : "replaceState"](
-                    null,
-                    "",
-                    makeStateUrl(question, selectedSources, 0),
-                );
+                const url = makeStateUrl(question, selectedSources, 0);
+                if (pushHistory) {
+                    const before = currentUrlValue();
+                    const hadAutoSearch = Boolean(autoSearchBase);
+                    commitAutoSearchHistory();
+                    if (!(hadAutoSearch && url === before)) {
+                        history.pushState(null, "", url);
+                    }
+                } else if (auto) {
+                    beginAutoSearchHistory();
+                    history.replaceState(null, "", url);
+                    scheduleAutoSearchHistoryCommit();
+                } else {
+                    // A deliberate search that should replace the current entry (for
+                    // example, searching selected text from the article toolbar).
+                    cancelAutoSearchHistory();
+                    history.replaceState(null, "", url);
+                }
                 runSearch(question, selectedSources);
             }
 
-            $("question").addEventListener("input", () => {
+            $("question").addEventListener("input", (event) => {
+                if (composing || event.isComposing) return;
+                scheduleAutoSubmit();
+            });
+            $("question").addEventListener("compositionstart", () => {
+                composing = true;
                 clearTimeout(autoSubmitTimer);
-                if (!$("question").value.trim()) return;
-                autoSubmitTimer = setTimeout(() => submitSearch(false), AUTO_SUBMIT_DELAY);
+                autoSubmitTimer = null;
+            });
+            $("question").addEventListener("compositionend", () => {
+                composing = false;
+                scheduleAutoSubmit();
             });
 
             $("searchForm").addEventListener("submit", (event) => {
                 event.preventDefault();
                 clearTimeout(autoSubmitTimer);
+                autoSubmitTimer = null;
+                if (composing) return;
                 submitSearch(true);
             });
 
             $("homeHeading").addEventListener("click", activateHomeHeading);
-            $("homeHeading").addEventListener("keydown", (event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    activateHomeHeading(event);
-                }
-            });
 
             window.addEventListener("popstate", () => {
+                if (closingModalHistory) return;
+                cancelAutoSearchHistory();
                 const state = readLocationState();
                 syncArticleModal(state.modal);
                 if (!state.question) {
@@ -2734,11 +3161,20 @@
                 $("searchView").hidden = libraryView;
                 $("libraryView").hidden = !libraryView;
                 document.body.classList.toggle("library-active", libraryView);
+                for (const link of document.querySelectorAll(".view-nav a")) {
+                    const isLibraryLink = link.getAttribute("href") === "library";
+                    if (isLibraryLink === libraryView) {
+                        link.setAttribute("aria-current", "page");
+                    } else {
+                        link.removeAttribute("aria-current");
+                    }
+                }
                 syncArticleModal(state.modal);
                 if (state.question) {
                     $("question").value = state.question;
                     runSearch(state.question, state.selectedSources, state.page);
                 } else if (!libraryView) {
+                    renderSourceSelectionSummary();
                     $("question").focus();
                 }
             }

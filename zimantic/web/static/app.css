@@ -33,6 +33,17 @@
 [hidden] {
     display: none !important;
 }
+.visually-hidden {
+    border: 0;
+    clip: rect(0 0 0 0);
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    padding: 0;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+}
 body {
     background: var(--bg);
     color: var(--text);
@@ -86,20 +97,29 @@ h1 {
     font-size: 1.4rem;
     margin: 0 0 4px;
 }
-h1[role="button"] {
-    display: inline-block;
+.site-header h1 button {
+    background: none;
+    border: 0;
+    color: inherit;
     cursor: pointer;
+    display: inline-block;
+    font: inherit;
+    letter-spacing: inherit;
+    line-height: inherit;
+    margin: 0;
+    padding: 0;
+    text-align: inherit;
     transition:
         color 0.18s ease,
         transform 0.18s ease;
 }
-h1[role="button"]:hover {
+.site-header h1 button:hover {
     color: var(--accent);
 }
-h1[role="button"]:active {
+.site-header h1 button:active {
     transform: scale(0.96);
 }
-h1[role="button"]:focus-visible {
+.site-header h1 button:focus-visible {
     border-radius: 4px;
     outline: 2px solid var(--accent);
     outline-offset: 4px;
@@ -181,6 +201,9 @@ a.secondary {
 }
 .source-filters {
     margin-bottom: 8px;
+}
+.source-filters.empty-selection {
+    margin-top: 16px;
 }
 .source-filter-toolbar {
     align-items: center;

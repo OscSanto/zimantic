@@ -466,9 +466,10 @@ JSON API examples:
 - `GET /content/<zim>/<path>` serves a toolbar shell for a local ZIM entry; `GET /content/<zim>`
   serves the resolved ZIM homepage. The shell keeps the navigation bar in the page and loads the
   article itself from an inner iframe pointed at `/article/<zim>/<path>`, so the toolbar stays
-  visible even when the article is missing or fails. `GET /article/<zim>/<path>` serves the raw
-  entry: redirects are followed, article links and assets resolve under the same route, and entries
-  larger than `max_article_bytes` return `413`. `max_html_bytes` only limits HTML read during
+  visible even when the article is missing or fails. Unreadable entries render a friendly error
+  panel in the shell instead of showing the raw `/article` JSON error body. `GET /article/<zim>/<path>`
+  serves the raw entry: redirects are followed, article links and assets resolve under the same
+  route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` only limits HTML read during
   indexing; `max_article_bytes` limits the uncompressed response body because Zimantic reads each
   requested entry into memory, including binary assets. The toolbar shell also uses the viewed
   article's own `<title>` and declared icon for the browser tab title and favicon (falling back to the

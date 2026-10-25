@@ -370,6 +370,9 @@ script[data-zimantic-toolbar] { display: none !important; }
   [data-zimantic-toolbar] .zimantic-toolbar-actions {
     margin-left: 8px !important;
   }
+  [data-zimantic-toolbar] .zimantic-toolbar-actions > .zimantic-toolbar-search {
+    display: none !important;
+  }
   [data-zimantic-toolbar] .zimantic-toolbar-home-full,
   [data-zimantic-toolbar] .zimantic-toolbar-article-full {
     display: none !important;
@@ -520,10 +523,30 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       if (event.source !== window.parent) return;
       if (event.data?.type === "zimantic-modal-navigation") {
         setContextNavigation(event.data);
+        return;
       }
+      if (event.data?.type === "zimantic-article-copy-result") {
+        if (event.data.ok) {
+          if (permalink) permalink.textContent = "Link copied";
+          announce("Link copied");
+        } else {
+          announce("Copy unavailable");
+        }
+      }
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || window.parent === window) return;
+      event.preventDefault();
+      window.parent.postMessage({type: "zimantic-article-close"}, "*");
     });
     window.addEventListener("message", event => {
       if (!articleFrame || event.source !== articleFrame.contentWindow) return;
+      if (event.data?.type === "zimantic-article-close") {
+        if (window.parent !== window) {
+          window.parent.postMessage({type: "zimantic-article-close"}, "*");
+        }
+        return;
+      }
       if (event.data?.type === "zimantic-article-ready" && location.hash) {
         scrollArticleTo(location.hash);
         return;
@@ -539,7 +562,11 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       const url = String(event.data.url || "");
       if (url.startsWith(`${appBasePath}/content/`)) {
         offlineRequest += 1;
-        location.href = url;
+        if (window.parent !== window) {
+          location.replace(url);
+        } else {
+          location.href = url;
+        }
       }
     });
     const offlineArticleUrl = value => {
@@ -770,14 +797,27 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           return;
         }
         event.preventDefault();
-        if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        const text = shareUrl(articleSelection);
+        const copied = () => {
+          control.textContent = "Link copied";
+          announce("Link copied");
+        };
+        const delegate = () => {
+          announce("Copying…");
+          window.parent.postMessage({
+            type: "zimantic-article-copy",
+            text,
+          }, "*");
+        };
+        if (window.parent !== window) {
+          // Clipboard access is blocked in the modal's sandbox (notably in
+          // Chromium), so let the top-level page perform the write.
+          delegate();
+        } else if (!navigator.clipboard || !navigator.clipboard.writeText) {
           announce("Copy unavailable");
         } else {
-          navigator.clipboard.writeText(shareUrl(articleSelection)).then(
-            () => {
-              control.textContent = "Link copied";
-              announce("Link copied");
-            },
+          navigator.clipboard.writeText(text).then(
+            copied,
             () => announce("Copy unavailable")
           );
         }
@@ -1093,6 +1133,12 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
         location.hash = hash;
       } catch (_) {}
     });
+    if (window.parent !== window) {
+      document.addEventListener("keydown", event => {
+        if (event.key !== "Escape") return;
+        window.parent.postMessage({type: "zimantic-article-close"}, "*");
+      });
+    }
     const requestedHighlight = (() => {
       try {
         return normalizeText(
@@ -1277,6 +1323,7 @@ def _article_toolbar(
     base_path: str = "",
     highlight: str | None = None,
     path_exists=None,
+    error: dict | None = None,
 ) -> str:
     zim_url = _content_url(zim, base_path=base_path)
     random_url = f"{base_path}/random?zim={quote_path(zim, safe='')}"
@@ -1307,49 +1354,67 @@ def _article_toolbar(
         except Exception:
             return False
 
-    # ZIMs commonly use the first path segment as a container rather than an
-    # article: zimit captures start with the site's domain, MediaWiki archives
-    # with a one-letter first-letter bucket, and some tools add other folders.
-    # The toolbar home link already names the site, so don't render that first
-    # segment as a (usually broken) breadcrumb link.
-    start = 0
-    if len(path_parts) > 1:
-        first = path_parts[0]
-        if (
-            _same_site_segment(first, site_name)
-            or (len(first) == 1 and first.isalpha())
-            or not parent_exists(first)
-        ):
-            start = 1
+    if error:
+        # The requested entry is not readable (or the source is missing), so a
+        # breadcrumb trail and a permalink would point at broken pages. Keep
+        # Close and the site/home controls; the error panel carries the detail.
+        breadcrumb_html = ""
+        random_html = ""
+    else:
+        # ZIMs commonly use the first path segment as a container rather than an
+        # article: zimit captures start with the site's domain, MediaWiki archives
+        # with a one-letter first-letter bucket, and some tools add other folders.
+        # The toolbar home link already names the site, so don't render that first
+        # segment as a (usually broken) breadcrumb link.
+        start = 0
+        if len(path_parts) > 1:
+            first = path_parts[0]
+            if (
+                _same_site_segment(first, site_name)
+                or (len(first) == 1 and first.isalpha())
+                or not parent_exists(first)
+            ):
+                start = 1
 
-    breadcrumbs = []
-    for depth in range(start + 1, len(path_parts)):
-        parent_path = "/".join(path_parts[:depth])
-        if trailing_slash:
-            parent_path += "/"
-        label = html_escape(path_parts[depth - 1])
-        if parent_exists(parent_path):
-            parent_url = _content_url(zim, parent_path, base_path)
-            breadcrumbs.append(
-                f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
-                f'<a class="zimantic-toolbar-breadcrumb" href="{parent_url}" '
-                f'title="Open {html_escape(parent_path, quote=True)}">'
-                f'{label}</a>'
-            )
-        else:
-            breadcrumbs.append(
-                f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
-                f'<span class="zimantic-toolbar-breadcrumb">{label}</span>'
-            )
-    breadcrumb_html = "".join(breadcrumbs) + (
-        '<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
-        f'<a class="zimantic-toolbar-article" data-zimantic-permalink '
-        f'data-zimantic-action="copy" href="{permalink_url}" '
-        f'title="Open or copy this article\'s permalink">'
-        f'<span class="zimantic-toolbar-article-full">{article_title}</span>'
-        '<span class="zimantic-toolbar-article-short">'
-        "Permalink</span></a>"
-    )
+        breadcrumbs = []
+        for depth in range(start + 1, len(path_parts)):
+            parent_path = "/".join(path_parts[:depth])
+            if trailing_slash:
+                parent_path += "/"
+            label = html_escape(path_parts[depth - 1])
+            if parent_exists(parent_path):
+                parent_url = _content_url(zim, parent_path, base_path)
+                breadcrumbs.append(
+                    f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
+                    f'<a class="zimantic-toolbar-breadcrumb" href="{parent_url}" '
+                    f'title="Open {html_escape(parent_path, quote=True)}">'
+                    f'{label}</a>'
+                )
+            else:
+                breadcrumbs.append(
+                    f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
+                    f'<span class="zimantic-toolbar-breadcrumb">{label}</span>'
+                )
+        breadcrumb_html = "".join(breadcrumbs) + (
+            '<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
+            f'<a class="zimantic-toolbar-article" data-zimantic-permalink '
+            f'data-zimantic-action="copy" href="{permalink_url}" '
+            f'title="Open or copy this article\'s permalink">'
+            f'<span class="zimantic-toolbar-article-full">{article_title}</span>'
+            '<span class="zimantic-toolbar-article-short">'
+            "Permalink</span></a>"
+        )
+        random_html = f'<a href="{random_url}" title="Open a random article">Random</a>'
+
+    home_html = ""
+    if error is None or error.get("zim_found"):
+        home_html = (
+            f'<a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" '
+            f'title="Open this ZIM\'s homepage ({zim_name})">'
+            f'<span class="zimantic-toolbar-home-full">{html_escape(site_name)}</span>'
+            '<span class="zimantic-toolbar-home-short">Home</span>'
+            "</a>"
+        )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
     <button type="button" data-zimantic-action="close" title="Close article">Close</button>
@@ -1361,11 +1426,8 @@ def _article_toolbar(
         data-zimantic-context-next hidden disabled aria-label="Next search result"
         title="Open the next search result">→</button>
     </span>
-    <a href="{random_url}" title="Open a random article">Random</a>
-    <a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" title="Open this ZIM's homepage ({zim_name})">
-      <span class="zimantic-toolbar-home-full">{html_escape(site_name)}</span>
-      <span class="zimantic-toolbar-home-short">Home</span>
-    </a>
+    {random_html}
+    {home_html}
     <span class="zimantic-toolbar-breadcrumbs">{breadcrumb_html}</span>
   </div>
   <div class="zimantic-toolbar-actions">
@@ -1379,7 +1441,7 @@ def _article_toolbar(
         hidden disabled aria-label="Next link in parent page"
         title="Open the next link in the parent page">↓</button>
     </span>
-    <a href="{base_path}/" data-zimantic-action="home" title="Search your library">Zimantic</a>
+    <a class="zimantic-toolbar-search" href="{base_path}/" data-zimantic-action="home" title="Search your library">Zimantic</a>
   </div>
   <span class="zimantic-toolbar-status" data-zimantic-toolbar-status aria-live="polite"></span>
 </nav>"""
@@ -1491,6 +1553,28 @@ def _article_head_meta(
     return title, icon
 
 
+def _content_error_panel(error: dict, base_path: str = "") -> str:
+    """Friendly error body used when an article or source cannot be read."""
+    title = html_escape(str(error.get("title") or "Article unavailable"))
+    message = html_escape(str(error.get("message") or ""))
+    path = html_escape(str(error.get("path") or ""))
+    path_html = (
+        f'<p class="zimantic-shell-error-path">Requested path: <code>{path}</code></p>'
+        if path
+        else ""
+    )
+    return (
+        '<div class="zimantic-shell-error" role="alert">'
+        f"<h1>{title}</h1>"
+        f"<p>{message}</p>"
+        f"{path_html}"
+        f'<p class="zimantic-shell-error-links">'
+        f'<a href="{base_path}/">Search your library</a>'
+        "</p>"
+        "</div>"
+    )
+
+
 def _content_shell(
     zim: str,
     article: dict,
@@ -1499,6 +1583,7 @@ def _content_shell(
     base_path: str = "",
     highlight: str | None = None,
     path_exists=None,
+    error: dict | None = None,
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -1506,7 +1591,8 @@ def _content_shell(
     navigation inside the iframe, including 404s and other error bodies. The
     shell also mirrors the article's title and favicon: directly loaded shells
     use them for the browser tab, and embedded shells forward them to the host
-    so the modal's tab follows the article too.
+    so the modal's tab follows the article too. Unreadable entries get a
+    friendly error panel instead of rendering the raw JSON error body.
     """
     article_url_path = str(article.get("path") or "").strip()
     article_path = article_url_path.strip("/")
@@ -1514,11 +1600,18 @@ def _content_shell(
         _article_url(zim, article_url_path, base_path),
         highlight,
     )
-    toolbar = _article_toolbar(zim, article, base_path, highlight, path_exists)
-    entry_title = str(article.get("title") or article_path or zim)
+    toolbar = _article_toolbar(
+        zim,
+        article,
+        base_path,
+        highlight,
+        path_exists,
+        error=error,
+    )
+    entry_title = str((error or {}).get("title") or article.get("title") or article_path or zim)
     parsed_title = None
     icon = fallback_icon
-    if article.get("mimetype") == "text/html" and article.get("content") is not None:
+    if not error and article.get("mimetype") == "text/html" and article.get("content") is not None:
         parsed_title, parsed_icon = _article_head_meta(
             article["content"], zim, article_url_path or None, base_path
         )
@@ -1625,30 +1718,67 @@ iframe[data-zimantic-article] {
   min-width: 0 !important;
   width: 100% !important;
 }
+.zimantic-shell-error {
+  align-items: flex-start;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+  margin: 0 auto;
+  max-width: 720px;
+  overflow: auto;
+  padding: 40px 24px;
+  width: 100%;
+}
+.zimantic-shell-error h1 {
+  font: 700 1.5rem/1.25 system-ui, sans-serif;
+  margin: 0;
+}
+.zimantic-shell-error p {
+  color: #333;
+  font: 15px/1.5 system-ui, sans-serif;
+  margin: 0;
+}
+.zimantic-shell-error .zimantic-shell-error-path {
+  color: #5d6673;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.zimantic-shell-error .zimantic-shell-error-links a {
+  color: #1f6fd6;
+}
 </style>
 </head>
 <body>
 """
         + toolbar
-        + "\n<div id=\"articleStorageNotice\" class=\"article-storage-notice\" "
-        "data-zimantic-storage-notice role=\"status\" hidden>\n"
-        "<p>This article uses browser storage, which is isolated inside this "
-        "viewer. Changes may not be saved.</p>\n"
-        "<a id=\"articleStorageNoticeOpen\" class=\"secondary\" "
-        "data-zimantic-storage-notice-open href=\"#\" target=\"_blank\" "
-        "rel=\"noopener noreferrer\">Open in a new tab "
-        "<span aria-hidden=\"true\">↗</span></a>\n"
-        "<button id=\"articleStorageNoticeDismiss\" class=\"secondary\" "
-        "data-zimantic-storage-notice-dismiss type=\"button\">Dismiss</button>\n"
-        "</div>\n"
-        + "\n<div data-zimantic-capture-notice hidden>"
-        "<p>This capture has no readable content. The archived page may have "
-        "been empty (for example, a parked domain), or its scripts and styles "
-        "may not have been saved.</p>"
-        '<button type="button" data-zimantic-capture-notice-dismiss>Dismiss</button>'
-        "</div>\n"
-        + f'<iframe data-zimantic-article title="{title}" '
-        f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
+        + (
+            _content_error_panel(error, base_path)
+            if error
+            else (
+                "\n<div id=\"articleStorageNotice\" class=\"article-storage-notice\" "
+                "data-zimantic-storage-notice role=\"status\" hidden>\n"
+                "<p>This article uses browser storage, which is isolated inside this "
+                "viewer. Changes may not be saved.</p>\n"
+                "<a id=\"articleStorageNoticeOpen\" class=\"secondary\" "
+                "data-zimantic-storage-notice-open href=\"#\" target=\"_blank\" "
+                "rel=\"noopener noreferrer\">Open in a new tab "
+                "<span aria-hidden=\"true\">↗</span></a>\n"
+                "<button id=\"articleStorageNoticeDismiss\" class=\"secondary\" "
+                "data-zimantic-storage-notice-dismiss type=\"button\">Dismiss</button>\n"
+                "</div>\n"
+                + "\n<div data-zimantic-capture-notice hidden>"
+                "<p>This capture has no readable content. The archived page may have "
+                "been empty (for example, a parked domain), or its scripts and styles "
+                "may not have been saved.</p>"
+                '<button type="button" data-zimantic-capture-notice-dismiss>Dismiss</button>'
+                "</div>\n"
+                + f'<iframe data-zimantic-article title="{title}" '
+                f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
+            )
+        )
         + (ARTICLE_TOOLBAR_SCRIPT % json.dumps(base_path))
         + "\n</body>\n</html>"
     )

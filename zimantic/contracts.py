@@ -57,6 +57,9 @@ class SourceInfo:
             "intent_phrases": list(self.intent_phrases),
             "homepage": self.homepage,
             "icon_url": self.icon_url,
+            # The search UI shows a friendly source name next to results; keep the
+            # archive stem in ``name``/``local_name`` for API consumers.
+            "title": self.title,
         }
         if include_metadata:
             payload.update({

@@ -282,12 +282,15 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(raw_homepage.status_code, 307)
             self.assertIn("/article/manual/", raw_homepage.headers["location"])
 
-            # A missing article still gets a toolbar shell so the modal's
-            # navigation never disappears; only /article/ returns the JSON 404.
+            # A missing article still gets a toolbar shell with a friendly error
+            # panel; only /article/ returns the JSON 404.
             missing = client.get("/content/manual/missing")
             self.assertEqual(missing.status_code, 404)
             self.assertIn(b'data-zimantic-toolbar', missing.content)
-            self.assertIn(b'src="/article/manual/missing"', missing.content)
+            self.assertIn(b"Article not found", missing.content)
+            self.assertIn(b"not available in the offline archive", missing.content)
+            self.assertNotIn(b'{"detail":"article not found"}', missing.content)
+            self.assertNotIn(b'src="/article/manual/missing"', missing.content)
             missing_raw = client.get("/article/manual/missing")
             self.assertEqual(missing_raw.status_code, 404)
             self.assertEqual(missing_raw.json(), {"detail": "article not found"})
