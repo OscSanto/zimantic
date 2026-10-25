@@ -27,8 +27,6 @@
             const THUMB_LIMIT = 128 * 1024;
             const THUMB_CONCURRENCY = 4;
             const SOURCE_FILTER_LIMIT = 10;
-            const SELECTIVE_SOURCE_LIMIT = 10;
-            const SELECTIVE_SOURCE_RATIO = 0.35;
             const SOURCE_CACHE_KEY = "zimantic.sources.v1";
             const LIBRARY_CACHE_KEY = "zimantic.library.v3";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -681,31 +679,6 @@
 
             function setSelectedSources(values) {
                 selectedSourceKeys = new Set(selectionValues(values));
-            }
-
-            function searchScope(values) {
-                // A small selection is searched on its own: the ranked pool is
-                // shared between fewer sources, so each selected source contributes
-                // deeper results. A larger selection uses one full search instead,
-                // because that pool can be cached and reused by every large
-                // selection. `[]` means "every available source".
-                const available = activeSources();
-                const availableKeys = new Set(available.map((source) => source.key));
-                const selected = [...new Set(selectionValues(values))].filter((key) =>
-                    availableKeys.has(key),
-                );
-                if (!selected.length) return [];
-                const limit = Math.min(
-                    SELECTIVE_SOURCE_LIMIT,
-                    Math.floor(available.length * SELECTIVE_SOURCE_RATIO),
-                );
-                return selected.length <= limit ? selected : [];
-            }
-
-            function sameSearchScope(left, right) {
-                if (left.length !== right.length) return false;
-                const keys = new Set(left);
-                return right.every((key) => keys.has(key));
             }
 
             function searchScopeParams(params, keys) {
@@ -2052,6 +2025,14 @@
                     if (event.type === "started") {
                         current.sourcesTotal = event.total_sources || 0;
                         current.completed = 0;
+                        if (Array.isArray(event.sources)) {
+                            current.searchKeys = event.sources
+                                .map((source) => source?.key)
+                                .filter(Boolean);
+                        }
+                        if (typeof event.all_sources === "boolean") {
+                            current.searchAll = event.all_sources;
+                        }
                         $("status").textContent =
                             `Searching ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
                     } else if (event.type === "source") {
@@ -2111,7 +2092,7 @@
                 const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
                 activeSearchResult = null;
                 setSelectedSources(selectedSources);
-                const searchKeys = searchScope(selectedSources);
+                const searchKeys = [...new Set(selectionValues(selectedSources))];
                 current = {
                     question,
                     terms: queryTerms(question),
@@ -2125,6 +2106,10 @@
                     streaming: true,
                     page: pageIndex,
                     searchKeys,
+                    // The server decides whether this selection is small
+                    // enough to search on its own; `started` replaces both
+                    // values with the scope it actually searched.
+                    searchAll: searchKeys.length === 0,
                 };
                 document.body.classList.add("search-active");
                 window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -2148,9 +2133,9 @@
                     });
                     sourceFilterParams(params);
                     searchScopeParams(params, searchKeys);
-                    // Small selections search only the selected sources; larger ones
-                    // send no zim params so one full, cached pool is reused. Page size,
-                    // offset and the display filter are not cached keys.
+                    // The server promotes large selections to one full search, so
+                    // this request's scope is reported in the `started` event. Page
+                    // size, offset and the display filter are not cached keys.
                     let busyRetries = 0;
                     while (true) {
                         const streamController = new AbortController();
@@ -2226,7 +2211,7 @@
                     offset: String(pageIndex * PAGE_SIZE),
                 });
                 sourceFilterParams(params);
-                searchScopeParams(params, current.searchKeys || []);
+                searchScopeParams(params, current.searchAll ? [] : current.searchKeys || []);
                 $("status").textContent = "Loading page…";
                 try {
                     const response = await fetch(appPath("/search") + "?" + params, {
@@ -2265,20 +2250,29 @@
             }
 
             function applySourceSelection(question, selectedSources, page = 0) {
-                // Moving within a large selection reuses the full cached pool. A
-                // selection small enough to search on its own needs a new stream
-                // whenever its source set changes.
-                const searchKeys = searchScope(selectedSources);
-                if (
-                    current &&
-                    current.question === question &&
-                    sameSearchScope(searchKeys, current.searchKeys || [])
-                ) {
-                    setSelectedSources(selectedSources);
-                    loadPage(page);
-                    return;
+                // The running search already knows its real scope. A full pool
+                // can serve any display filter, so selecting a source never
+                // refreshes it. A small pool only covers what it searched:
+                // narrowing is display-only, but adding sources (or choosing All
+                // Sources) needs a fresh search.
+                const requested = [...new Set(selectionValues(selectedSources))];
+                if (current && current.question === question) {
+                    if (current.searchAll) {
+                        setSelectedSources(requested);
+                        loadPage(page);
+                        return;
+                    }
+                    const scope = new Set(current.searchKeys || []);
+                    if (
+                        requested.length &&
+                        requested.every((key) => scope.has(key))
+                    ) {
+                        setSelectedSources(requested);
+                        loadPage(page);
+                        return;
+                    }
                 }
-                runSearch(question, selectedSources, page);
+                runSearch(question, requested, page);
             }
 
             function makeStateUrl(question, selectedSources, page, modal = null) {

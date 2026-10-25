@@ -78,6 +78,10 @@ DEFAULT_MAX_STREAM_RANKS = 16
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
+# A selection at or below this many sources is searched on its own. Larger
+# selections are promoted to one full search so their pool can be shared.
+SELECTIVE_SOURCE_LIMIT = 10
+SELECTIVE_SOURCE_RATIO = 0.35
 DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
 DEFAULT_KIWIX_CATALOG_LIMIT = 50_000
 DEFAULT_KIWIX_CATALOG_ATTEMPTS = 3
@@ -2222,18 +2226,47 @@ class Search:
             "cache": self.cache.stats(),
         }
 
-    def _selected_sources(self, zim: list[str] | None) -> list[SourceInfo]:
+    @staticmethod
+    def _selective_source_limit(total_sources: int) -> int:
+        """Largest selection that still searches only the selected sources."""
+        return min(
+            SELECTIVE_SOURCE_LIMIT,
+            math.floor(total_sources * SELECTIVE_SOURCE_RATIO),
+        )
+
+    def _search_scope(
+        self, zim: list[str] | None
+    ) -> tuple[list[SourceInfo], bool, tuple[str, ...] | None]:
+        """Resolve which sources to search and how the pool may be cached.
+
+        A small selection searches only those sources and is treated as a
+        one-off scope: it is not cached, because users can try many different
+        subsets. A larger selection is promoted to a full search over every
+        available source; that pool is cached without a selection in its key so
+        every large selection and every unfiltered search share it.
+        """
         with self._state_lock:
             available = [source for source in self.sources.values() if source.available]
         if not zim:
-            return available
+            return available, False, None
 
         wanted = set(zim)
-        selected: list[SourceInfo] = []
-        for source in available:
-            if wanted.intersection({source.key, source.name, source.book, source.local_name}):
-                selected.append(source)
-        return selected
+        selected = [
+            source
+            for source in available
+            if wanted.intersection({source.key, source.name, source.book, source.local_name})
+        ]
+        limit = self._selective_source_limit(len(available))
+        if len(selected) <= limit:
+            return (
+                selected,
+                bool(selected),
+                tuple(sorted(source.key for source in selected)),
+            )
+        return available, False, None
+
+    def _selected_sources(self, zim: list[str] | None) -> list[SourceInfo]:
+        return self._search_scope(zim)[0]
 
     @staticmethod
     def _validate_query(query: str) -> str:
@@ -2253,8 +2286,10 @@ class Search:
         The ranked pool is independent of page size, offset, display filter and
         debug flag, so none of those belong in the key: every page of a query
         reuses one cached pool instead of fragmenting the cache per `limit`.
+        A ``None`` selection is the shared full-search pool; an empty tuple is a
+        deliberately empty source scope.
         """
-        selection = tuple(sorted(zim)) if zim else None
+        selection = tuple(sorted(zim)) if zim is not None else None
         normalized = re.sub(r"\s+", " ", query).strip().casefold()
         return (normalized, selection)
 
@@ -2451,6 +2486,8 @@ class Search:
         offset: int,
         page_size: int,
         debug: bool,
+        selective: bool = False,
+        all_sources: bool = True,
     ) -> Iterator[dict[str, Any]]:
         """Replay a cached pool as a finished stream (progress + one page)."""
         pool, cached_sources = self._unpack_cache(cached)
@@ -2462,6 +2499,8 @@ class Search:
             "query": query,
             "sources": [src.to_dict() for src in sources],
             "total_sources": total_sources,
+            "selective": selective,
+            "all_sources": all_sources,
             "offset": offset,
             "limit": page_size,
         }
@@ -2538,22 +2577,32 @@ class Search:
 
         Ranking runs once to a fixed pool (`max_results`, at least
         `candidate_count`); `limit`/`offset`/`source` only slice that pool for
-        the response. The pool is cached by `(query, sources)`, so every page
-        and display filter reuses one computation. Concurrent identical queries
-        share a single computation.
+        the response. The pool is cached by query and resolved source scope, so
+        every page and display filter reuses one computation. Small selected
+        scopes are not cached; larger selections promote to the shared full
+        search. Concurrent identical queries share a single computation.
         """
         query = self._validate_query(query)
         page_size = self._page_size(limit)
         offset = max(0, int(offset))
-        cache_key = self._cache_key(query, zim)
+        sources, selective, scope_key = self._search_scope(zim)
+        all_sources = scope_key is None
+        cache_key = self._cache_key(query, scope_key)
         with self._state_lock:
             generation = getattr(self, "_cache_generation", 0)
         inflight_key = (generation, cache_key)
-        sources = self._selected_sources(zim)
         cached, pending = self._claim_search(cache_key, inflight_key, generation)
         if cached is not None:
             yield from self._cached_events(
-                cached, query, sources, source, offset, page_size, debug
+                cached,
+                query,
+                sources,
+                source,
+                offset,
+                page_size,
+                debug,
+                selective,
+                all_sources,
             )
             return
         if pending is None:
@@ -2568,6 +2617,8 @@ class Search:
             offset,
             page_size,
             debug,
+            selective,
+            all_sources,
         )
 
     def _run_search_owner(
@@ -2581,6 +2632,8 @@ class Search:
         offset: int,
         page_size: int,
         debug: bool,
+        selective: bool = False,
+        all_sources: bool = True,
     ) -> Iterator[dict[str, Any]]:
         """Run one uncached search and publish progress to waiting callers."""
         total_sources = len(sources)
@@ -2609,6 +2662,8 @@ class Search:
                 "query": query,
                 "sources": [src.to_dict() for src in sources],
                 "total_sources": total_sources,
+                "selective": selective,
+                "all_sources": all_sources,
                 "offset": offset,
                 "limit": page_size,
             }
@@ -2616,7 +2671,7 @@ class Search:
                 cache_value = {"generation": generation, "pool": [], "sources": []}
                 with self._state_lock:
                     current_generation = getattr(self, "_cache_generation", 0)
-                if current_generation == generation:
+                if not selective and current_generation == generation:
                     self.cache.put(cache_key, cache_value)
                 empty_state = {
                     "results": [],
@@ -2744,7 +2799,7 @@ class Search:
             }
             with self._state_lock:
                 current_generation = getattr(self, "_cache_generation", 0)
-            if current_generation == generation:
+            if not selective and current_generation == generation:
                 self.cache.put(cache_key, cache_value)
             yield self._event(
                 "done",
@@ -2776,6 +2831,7 @@ class Search:
                         offset,
                         page_size,
                         debug,
+                        selective,
                         futures,
                         completed_futures,
                         completed,
@@ -2803,6 +2859,7 @@ class Search:
         offset: int,
         page_size: int,
         debug: bool,
+        selective: bool,
         futures: list[Future[SourceResult]],
         completed_futures: set[Future[SourceResult]],
         completed: list[SourceResult],
@@ -2848,7 +2905,7 @@ class Search:
             }
             with self._state_lock:
                 current_generation = getattr(self, "_cache_generation", 0)
-            if current_generation == generation:
+            if not selective and current_generation == generation:
                 self.cache.put(cache_key, cache_value)
         except Exception:
             logger.exception("zimantic: abandoned search finalization failed")

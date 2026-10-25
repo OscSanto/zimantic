@@ -1653,6 +1653,96 @@ class PaginationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
 
+class SourceScopeTests(unittest.TestCase):
+    def _cfg(self, tmp):
+        return {
+            "index_dir": str(tmp),
+            "zim_dir": str(tmp),
+            "candidate_count": 16,
+            "page_size": 10,
+            "max_results": 100,
+        }
+
+    def _search(self, tmp):
+        for index in range(1, 7):
+            _write_index(
+                tmp,
+                f"s{index}",
+                rows=[(1, f"Tire Change {index}", f"tire-{index}", None)],
+            )
+        search = _bare_search(self._cfg(tmp))
+        search._load_indexes()
+        search.refresh_sources()
+        return search
+
+    def test_selective_limit_is_min_ten_or_thirty_five_percent(self):
+        self.assertEqual(Search._selective_source_limit(1), 0)
+        self.assertEqual(Search._selective_source_limit(3), 1)
+        self.assertEqual(Search._selective_source_limit(20), 7)
+        self.assertEqual(Search._selective_source_limit(100), 10)
+        self.assertEqual(Search._selective_source_limit(1_000), 10)
+
+    def test_small_selection_searches_only_those_sources_and_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            search = self._search(tmp)
+            try:
+                events = list(
+                    search.stream_search("tire change", zim=["s1", "s2"], limit=2)
+                )
+                started = events[0]
+                self.assertTrue(started["selective"])
+                self.assertFalse(started["all_sources"])
+                self.assertEqual(started["total_sources"], 2)
+                self.assertEqual(
+                    {source["key"] for source in started["sources"]},
+                    {"s1", "s2"},
+                )
+                self.assertIsNone(
+                    search.cache.get(search._cache_key("tire change", ("s1", "s2")))
+                )
+            finally:
+                search._executor.shutdown(wait=True)
+
+    def test_large_selection_promotes_to_full_cached_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            search = self._search(tmp)
+            try:
+                events = list(
+                    search.stream_search(
+                        "tire change",
+                        zim=["s1", "s2", "s3"],
+                        limit=2,
+                    )
+                )
+                started = events[0]
+                self.assertFalse(started["selective"])
+                self.assertTrue(started["all_sources"])
+                self.assertEqual(started["total_sources"], 6)
+                self.assertIsNotNone(
+                    search.cache.get(search._cache_key("tire change", None))
+                )
+
+                # Every promoted selection shares that full-search pool.
+                with patch.object(
+                    search,
+                    "_search_source",
+                    side_effect=AssertionError("cache miss"),
+                ):
+                    cached = list(
+                        search.stream_search(
+                            "tire change",
+                            zim=["s4", "s5", "s6"],
+                            limit=2,
+                        )
+                    )
+                self.assertFalse(cached[0]["selective"])
+                self.assertTrue(cached[0]["all_sources"])
+            finally:
+                search._executor.shutdown(wait=True)
+
+
 class ProductionHardeningTests(unittest.TestCase):
     def _db(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
