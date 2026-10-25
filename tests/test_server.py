@@ -133,8 +133,14 @@ class ServerTests(unittest.TestCase):
         self.assertIn('credentials: "same-origin"', javascript.text)
         self.assertIn("showStorageNotice", javascript.text)
 
+        shim = self.client.get("/indexeddb-shim.js")
+        self.assertEqual(shim.status_code, 200)
+        self.assertTrue(shim.headers["content-type"].startswith("application/javascript"))
+        self.assertIn("fake-indexeddb", shim.text)
+        self.assertIn("zimantic-article-storage-blocked", shim.text)
+
     def test_debug_page_assets_are_not_cached(self):
-        for path in ("/", "/library", "/app.css", "/app.js"):
+        for path in ("/", "/library", "/app.css", "/app.js", "/indexeddb-shim.js"):
             with self.subTest(path=path):
                 response = self.debug_client.get(path)
                 self.assertEqual(response.status_code, 200)
@@ -169,6 +175,7 @@ class ServerTests(unittest.TestCase):
         raw = client.get("/article/manual/page")
         self.assertEqual(raw.status_code, 200)
         self.assertIn('const prefix = "/zimantic";', raw.text)
+        self.assertIn('const url = "/zimantic/indexeddb-shim.js";', raw.text)
 
     def test_favicon_is_served(self):
         response = self.client.get("/favicon.ico")
@@ -406,6 +413,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn("data-zimantic-storage-shim", raw.text)
         self.assertIn("makeMemoryStorage", raw.text)
         self.assertIn("zimantic-article-storage-blocked", raw.text)
+        self.assertIn("data-zimantic-indexeddb-loader", raw.text)
+        self.assertIn('const url = "/indexeddb-shim.js";', raw.text)
 
     def test_raw_html_installs_storage_shim_before_page_scripts(self):
         raw = self._raw_article(
@@ -414,6 +423,10 @@ class ServerTests(unittest.TestCase):
         )
         self.assertLess(
             raw.text.index("data-zimantic-storage-shim"),
+            raw.text.index('localStorage.getItem("x")'),
+        )
+        self.assertLess(
+            raw.text.index("data-zimantic-indexeddb-loader"),
             raw.text.index('localStorage.getItem("x")'),
         )
 

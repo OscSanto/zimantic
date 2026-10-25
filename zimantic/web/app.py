@@ -27,6 +27,7 @@ ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"
 APP_CSS = ASSET_DIR / "app.css"
 APP_JS = ASSET_DIR / "app.js"
+INDEXEDDB_SHIM = ASSET_DIR / "indexeddb-shim.js"
 FAVICON = ASSET_DIR / "favicon.ico"
 FAVICON_16 = ASSET_DIR / "favicon-16x16.png"
 FAVICON_32 = ASSET_DIR / "favicon-32x32.png"
@@ -168,6 +169,19 @@ ARTICLE_STORAGE_SHIM = """<script data-zimantic-storage-shim>
       });
     } catch (_) {}
   }
+})();
+</script>"""
+
+
+ARTICLE_INDEXEDDB_LOADER = """<script data-zimantic-indexeddb-loader>
+(() => {
+  // The modal's sandbox has an opaque origin, where IndexedDB is unavailable.
+  // Load the in-memory polyfill synchronously so page scripts see it.
+  if (self.origin !== "null") return;
+  const url = %s;
+  document.write(
+    '<script src="' + url + '" data-zimantic-indexeddb-shim><' + '/script>'
+  );
 })();
 </script>"""
 
@@ -1360,18 +1374,18 @@ def _decorate_article_bridge(
         return content
 
     document, mobile_head = _mobile_article_head(document)
-    # Install the storage shim before the page's own scripts: an inline script
-    # that reads localStorage would otherwise throw before the shim exists.
+    # Install the storage shims before the page's own scripts: an inline script
+    # that reads localStorage or opens IndexedDB would otherwise throw before
+    # the shim exists.
+    early = ARTICLE_INDEXEDDB_LOADER % json.dumps(
+        f"{base_path}/indexeddb-shim.js"
+    ) + ARTICLE_STORAGE_SHIM
     head_open = re.search(r"<head\b[^>]*>", document, re.IGNORECASE)
     if head_open:
         position = head_open.end()
-        document = (
-            document[:position]
-            + ARTICLE_STORAGE_SHIM
-            + document[position:]
-        )
+        document = document[:position] + early + document[position:]
     else:
-        document = ARTICLE_STORAGE_SHIM + document
+        document = early + document
     additions = (
         ARTICLE_COOKIE_SHIM
         + mobile_head
