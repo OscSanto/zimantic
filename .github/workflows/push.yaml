@@ -79,14 +79,7 @@ jobs:
                 python3-faiss \
                 python3-libzim \
                 python3-onnx
-              PYTHONPATH=/app /usr/bin/python3 -c "
-              import faiss
-              import onnx
-              from libzim.reader import Archive
-              from libzim.search import Searcher
-              from zimantic.search import Search
-              print(f\"armhf native dependencies loaded (onnx {onnx.__version__})\")
-              "
+              PYTHONPATH=/app /usr/bin/python3 -c "import faiss, onnx; from libzim.reader import Archive; from libzim.search import Searcher; from zimantic.search import Search; print(onnx.__version__)"
             '
 
   publish:
