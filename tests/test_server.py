@@ -116,6 +116,7 @@ class ServerTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertIn('href="app.css"', page.text)
+        self.assertIn('src="parent-nav.js"', page.text)
         self.assertIn('src="app.js"', page.text)
 
         css = self.client.get("/app.css")
@@ -130,8 +131,17 @@ class ServerTests(unittest.TestCase):
         self.assertIn("handleExternalLink", javascript.text)
         self.assertIn('credentials: "same-origin"', javascript.text)
 
+        parent_nav = self.client.get("/parent-nav.js")
+        self.assertEqual(parent_nav.status_code, 200)
+        self.assertTrue(
+            parent_nav.headers["content-type"].startswith("application/javascript")
+        )
+        self.assertIn("resolveParentNavigation", parent_nav.text)
+        self.assertIn('`${parentPath}/`', parent_nav.text)
+        self.assertIn("resolvedParentUrl", parent_nav.text)
+
     def test_debug_page_assets_are_not_cached(self):
-        for path in ("/", "/library", "/app.css", "/app.js"):
+        for path in ("/", "/library", "/app.css", "/app.js", "/parent-nav.js"):
             with self.subTest(path=path):
                 response = self.debug_client.get(path)
                 self.assertEqual(response.status_code, 200)
@@ -160,6 +170,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("/zimantic/article/manual/page", response.text)
         self.assertIn("/zimantic/content/manual/page", response.text)
+        self.assertIn('src="/zimantic/parent-nav.js"', response.text)
         self.assertIn('const appBasePath = "/zimantic";', response.text)
         self.assertIn('href="/zimantic/source-icon/manual"', response.text)
 
@@ -256,6 +267,10 @@ class ServerTests(unittest.TestCase):
         self.assertIn("const openOfflineArticle = (target, fallbackUrl) =>", shell.text)
         self.assertIn("if (location.hash) scrollArticleTo(location.hash)", shell.text)
         self.assertIn("zimantic-article-hash", shell.text)
+        self.assertIn('src="/parent-nav.js"', shell.text)
+        self.assertIn("loadStandaloneParentNavigation", shell.text)
+        self.assertIn("parentNavApi.resolveParentNavigation", shell.text)
+        self.assertIn("location.href = url;", shell.text)
         self.assertNotIn("data-zimantic-toolbar", raw.text)
 
     def test_content_shell_preserves_trailing_article_paths(self):

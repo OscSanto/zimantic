@@ -208,6 +208,8 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b"zimantic-article-ready", shell.content)
             self.assertIn(b"zimantic-article-navigate", shell.content)
             self.assertIn(b"zimantic-parent-article-navigate", shell.content)
+            self.assertIn(b'src="/parent-nav.js"', shell.content)
+            self.assertIn(b"loadStandaloneParentNavigation", shell.content)
             self.assertIn(b"/random?zim=manual", shell.content)
             self.assertIn(b"<div data-zimantic-capture-notice hidden>", shell.content)
             self.assertIn(b"data-zimantic-capture-notice-dismiss", shell.content)

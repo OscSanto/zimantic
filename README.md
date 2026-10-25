@@ -475,9 +475,11 @@ JSON API examples:
   ZIM's source icon); when the shell is embedded in the modal, the outer page mirrors them and restores
   its own title and favicon when the modal closes. HTML articles include a small navigation bar
   with Close, Home, Random, Copy link and Search controls. Modal articles also expose
-  icon-only navigation through visible search results and, for nested articles, the adjacent article
-  links listed on the article's parent page. When a modal article opens another modal article,
-  the preceding article can also provide the navigation context. Back navigation uses browser
+  icon-only navigation through visible search results. Both modal and directly loaded article shells
+  expose adjacent-article navigation (↑/↓) for nested articles, using the links listed on the
+  article's parent page; directory-index parents resolve with or without a trailing slash. When a
+  modal article opens another modal article, the preceding article can also provide the navigation
+  context. Back navigation uses browser
   history when available, otherwise the Close control attempts to close the tab. In a directly
   loaded `/content/` view, Close closes the tab or window when the browser allows it; otherwise it
   goes back through history, or opens the library when the article is the first history entry.

@@ -72,6 +72,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     static_routes = (
         ("/app.css", web_app.APP_CSS, "text/css"),
         ("/app.js", web_app.APP_JS, "application/javascript"),
+        ("/parent-nav.js", web_app.PARENT_NAV_JS, "application/javascript"),
         ("/favicon.ico", web_app.FAVICON, "image/x-icon"),
         ("/favicon-16x16.png", web_app.FAVICON_16, "image/png"),
         ("/favicon-32x32.png", web_app.FAVICON_32, "image/png"),

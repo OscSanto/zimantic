@@ -1267,102 +1267,10 @@
                 navigateArticleModal(new URL(link.href, location.href), "search");
             }
 
-            function articleRouteParts(articleUrl) {
-                const parts = stripBasePath(articleUrl.pathname).split("/").filter(Boolean);
-                return parts[0] === "article" && parts.length >= 3 ? parts : null;
-            }
+            const parentNavApi = window.ZimanticParentNavigation;
 
-            // The modal frame loads a /content/ toolbar shell; its inner iframe loads the
-            // raw entry from /article/. These helpers convert between the two so parent
-            // navigation and thumbnails can read the raw article while the UI keeps using
-            // the shell (toolbar-bearing) URLs.
             function rawArticleUrl(articleUrl) {
-                try {
-                    const url = new URL(articleUrl?.href || String(articleUrl), location.href);
-                    const pathname = stripBasePath(url.pathname);
-                    if (url.origin !== location.origin || !pathname.startsWith("/content/")) {
-                        return null;
-                    }
-                    const raw = new URL(url.href);
-                    raw.pathname = appPath(`/article${pathname.slice("/content".length)}`);
-                    return raw;
-                } catch (_) {
-                    return null;
-                }
-            }
-
-            function contentUrlFromRaw(rawUrl) {
-                try {
-                    const url = new URL(rawUrl, location.href);
-                    const pathname = stripBasePath(url.pathname);
-                    if (url.origin !== location.origin || !pathname.startsWith("/article/")) {
-                        return null;
-                    }
-                    const content = new URL(url.href);
-                    content.pathname = appPath(`/content${pathname.slice("/article".length)}`);
-                    return content;
-                } catch (_) {
-                    return null;
-                }
-            }
-
-            function parentArticleUrl(articleUrl) {
-                const pathname = stripBasePath(articleUrl.pathname);
-                const parts = pathname.split("/").filter(Boolean);
-                if (parts[0] !== "content" || parts.length < 3) return null;
-                const lastSlash = pathname.lastIndexOf("/");
-                if (lastSlash <= 0) return null;
-                return new URL(appPath(pathname.slice(0, lastSlash)), location.origin);
-            }
-
-            function articleRouteValue(articleUrl) {
-                return articleUrl.pathname + articleUrl.search;
-            }
-
-            function readParentArticleNavigation(html, rawParentUrl, articleUrl) {
-                const document = new DOMParser().parseFromString(html, "text/html");
-                const parentParts = articleRouteParts(rawParentUrl);
-                if (!parentParts) return null;
-                const zim = parentParts[1];
-                const parentContentUrl = contentUrlFromRaw(rawParentUrl);
-                if (!parentContentUrl) return null;
-                const parentValue = articleUrlValue(parentContentUrl);
-                const links = [];
-                const seen = new Set();
-                for (const link of document.querySelectorAll("a[href]")) {
-                    if (link.closest("[data-zimantic-toolbar]")) continue;
-                    const href = link.getAttribute("href");
-                    if (!href || href.startsWith("#")) continue;
-                    let linkUrl;
-                    try {
-                        linkUrl = new URL(href, rawParentUrl);
-                    } catch (_) {
-                        continue;
-                    }
-                    const linkParts = articleRouteParts(linkUrl);
-                    if (linkUrl.origin !== location.origin || !linkParts || linkParts[1] !== zim) {
-                        continue;
-                    }
-                    const contentUrl = contentUrlFromRaw(linkUrl);
-                    if (!contentUrl) continue;
-                    const value = articleUrlValue(contentUrl);
-                    if (value === parentValue) continue;
-                    if (seen.has(value)) continue;
-                    seen.add(value);
-                    links.push(contentUrl);
-                }
-                const currentValue = articleUrlValue(articleUrl);
-                const index = links.findIndex((link) => articleUrlValue(link) === currentValue);
-                if (index < 0) return null;
-                if (!links[index - 1] && !links[index + 1]) return null;
-                const urlAt = (offset) => {
-                    const link = links[index + offset];
-                    return link ? articleUrlValue(link) : null;
-                };
-                return {
-                    previous: urlAt(-1),
-                    next: urlAt(1),
-                };
+                return parentNavApi.rawArticleUrl(articleUrl, BASE_PATH);
             }
 
             async function loadParentArticleNavigation(
@@ -1373,48 +1281,18 @@
                 activeParentNavigation = null;
                 activeParentUrl = null;
                 postArticleModalNavigation();
-                const previousUrl = readModalUrl(previousModalArticleUrl);
-                const actualParentUrl = parentArticleUrl(articleUrl);
-                const preferredUrl = readModalUrl(preferredParentUrl);
-                const parentUrls = preferredUrl
-                    ? [preferredUrl]
-                    : fromManualLink && previousUrl
-                      ? [previousUrl, actualParentUrl]
-                      : [actualParentUrl];
-                const rawArticle = rawArticleUrl(articleUrl);
-                const seenParents = new Set();
-                for (const candidateParentUrl of parentUrls) {
-                    if (!candidateParentUrl) continue;
-                    const parentValue = articleRouteValue(candidateParentUrl);
-                    if (seenParents.has(parentValue)) continue;
-                    seenParents.add(parentValue);
-                    let navigation = null;
-                    const rawParentUrl = rawArticleUrl(candidateParentUrl);
-                    if (!rawParentUrl) continue;
-                    try {
-                        const response = await fetch(rawParentUrl);
-                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                        if (
-                            response.url &&
-                            rawArticle &&
-                            articleRouteValue(new URL(response.url)) === articleRouteValue(rawArticle)
-                        ) {
-                            continue;
-                        }
-                        const html = await response.text();
-                        if (request !== parentNavigationSequence || activeModalUrl !== articleUrl.href) {
-                            return;
-                        }
-                        navigation = readParentArticleNavigation(html, rawParentUrl, articleUrl);
-                    } catch (_) {
-                        if (request !== parentNavigationSequence) return;
-                    }
-                    if (!navigation) continue;
-                    activeParentNavigation = navigation;
-                    activeParentUrl = candidateParentUrl.href;
-                    break;
-                }
-                if (request !== parentNavigationSequence) return;
+                const result = await parentNavApi.resolveParentNavigation(articleUrl, {
+                    basePath: BASE_PATH,
+                    previousUrl: readModalUrl(previousModalArticleUrl),
+                    fromManualLink,
+                    preferredParentUrl: readModalUrl(preferredParentUrl),
+                    isCurrent: () =>
+                        request === parentNavigationSequence &&
+                        activeModalUrl === articleUrl.href,
+                });
+                if (request !== parentNavigationSequence || !result) return;
+                activeParentNavigation = result.navigation;
+                activeParentUrl = result.parentUrl;
                 postArticleModalNavigation();
             }
 
