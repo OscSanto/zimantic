@@ -27,6 +27,8 @@
             const THUMB_LIMIT = 128 * 1024;
             const THUMB_CONCURRENCY = 4;
             const SOURCE_FILTER_LIMIT = 10;
+            const SELECTIVE_SOURCE_LIMIT = 10;
+            const SELECTIVE_SOURCE_RATIO = 0.35;
             const SOURCE_CACHE_KEY = "zimantic.sources.v1";
             const LIBRARY_CACHE_KEY = "zimantic.library.v3";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -669,15 +671,45 @@
             }
 
             function activeSources() {
-                // Every available source is always searched; the source filters
-                // only narrow what is displayed (see renderView).
                 return sources.filter((source) => source.available);
             }
 
+            function selectionValues(values) {
+                if (values instanceof Set) return [...values].filter(Boolean);
+                return (Array.isArray(values) ? values : values ? [values] : []).filter(Boolean);
+            }
+
             function setSelectedSources(values) {
-                selectedSourceKeys = new Set(
-                    (Array.isArray(values) ? values : values ? [values] : []).filter(Boolean),
+                selectedSourceKeys = new Set(selectionValues(values));
+            }
+
+            function searchScope(values) {
+                // A small selection is searched on its own: the ranked pool is
+                // shared between fewer sources, so each selected source contributes
+                // deeper results. A larger selection uses one full search instead,
+                // because that pool can be cached and reused by every large
+                // selection. `[]` means "every available source".
+                const available = activeSources();
+                const availableKeys = new Set(available.map((source) => source.key));
+                const selected = [...new Set(selectionValues(values))].filter((key) =>
+                    availableKeys.has(key),
                 );
+                if (!selected.length) return [];
+                const limit = Math.min(
+                    SELECTIVE_SOURCE_LIMIT,
+                    Math.floor(available.length * SELECTIVE_SOURCE_RATIO),
+                );
+                return selected.length <= limit ? selected : [];
+            }
+
+            function sameSearchScope(left, right) {
+                if (left.length !== right.length) return false;
+                const keys = new Set(left);
+                return right.every((key) => keys.has(key));
+            }
+
+            function searchScopeParams(params, keys) {
+                keys.forEach((key) => params.append("zim", key));
             }
 
             function sourceFilterParams(params) {
@@ -2066,6 +2098,7 @@
                 const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
                 activeSearchResult = null;
                 setSelectedSources(selectedSources);
+                const searchKeys = searchScope(selectedSources);
                 current = {
                     question,
                     terms: queryTerms(question),
@@ -2078,6 +2111,7 @@
                     sourcesTotal: 0,
                     streaming: true,
                     page: pageIndex,
+                    searchKeys,
                 };
                 document.body.classList.add("search-active");
                 window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -2100,9 +2134,10 @@
                         offset: String(pageIndex * PAGE_SIZE),
                     });
                     sourceFilterParams(params);
-                    // Always query every source: no zim params means the server searches all
-                    // currently available sources. The server ranks one pool and sends only
-                    // this page; page size, offset and the display filter are not cached keys.
+                    searchScopeParams(params, searchKeys);
+                    // Small selections search only the selected sources; larger ones
+                    // send no zim params so one full, cached pool is reused. Page size,
+                    // offset and the display filter are not cached keys.
                     let busyRetries = 0;
                     while (true) {
                         const streamController = new AbortController();
@@ -2157,8 +2192,9 @@
             }
 
             async function loadPage(page) {
-                // Paging and source filtering reuse the server's cached ranked pool and
-                // return a single page. No full document reload, no re-stream.
+                // Paging and display filtering reuse the server's cached pool for
+                // the current search scope and return a single page. No document
+                // reload, no re-stream.
                 if (!current) return;
                 const sequence = searchSequence;
                 const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
@@ -2177,6 +2213,7 @@
                     offset: String(pageIndex * PAGE_SIZE),
                 });
                 sourceFilterParams(params);
+                searchScopeParams(params, current.searchKeys || []);
                 $("status").textContent = "Loading page…";
                 try {
                     const response = await fetch(appPath("/search") + "?" + params, {
@@ -2212,6 +2249,23 @@
                 } finally {
                     if (controller === pageController) pageController = null;
                 }
+            }
+
+            function applySourceSelection(question, selectedSources, page = 0) {
+                // Moving within a large selection reuses the full cached pool. A
+                // selection small enough to search on its own needs a new stream
+                // whenever its source set changes.
+                const searchKeys = searchScope(selectedSources);
+                if (
+                    current &&
+                    current.question === question &&
+                    sameSearchScope(searchKeys, current.searchKeys || [])
+                ) {
+                    setSelectedSources(selectedSources);
+                    loadPage(page);
+                    return;
+                }
+                runSearch(question, selectedSources, page);
             }
 
             function makeStateUrl(question, selectedSources, page, modal = null) {
@@ -2280,9 +2334,10 @@
                 } else {
                     selectedSourceKeys.add(key);
                 }
-                history.pushState(null, "", makeStateUrl(current.question, selectedSourceKeys, 0));
+                const selected = [...selectedSourceKeys];
+                history.pushState(null, "", makeStateUrl(current.question, selected, 0));
                 renderSourceFilters();
-                loadPage(0);
+                applySourceSelection(current.question, selected, 0);
             });
 
             $("results").addEventListener("click", (event) => {
@@ -2539,9 +2594,9 @@
                 }
                 $("question").value = state.question;
                 if (current && current.question === state.question) {
-                    // Same query: just move the page or display filter, no re-search.
-                    setSelectedSources(state.selectedSources);
-                    loadPage(state.page);
+                    // Same query: reuse the pool when the selection still uses the
+                    // same search scope; otherwise the scope itself changed.
+                    applySourceSelection(state.question, state.selectedSources, state.page);
                 } else {
                     runSearch(state.question, state.selectedSources, state.page);
                 }

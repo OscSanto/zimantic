@@ -25,7 +25,7 @@ Zero 2 W.
 - **Best of three searches**: meaning, title-word and full-text retrieval are fused into a single ranking.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. Every search covers **all** available sources; source filters control what is displayed, never what is searched.
+- **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. A small selection (at most `min(10, 35%)` of available sources) is searched on its own for deeper per-source results; a larger selection uses one full search whose ranked pool is cached, and the filters narrow what is displayed.
 - **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
@@ -188,7 +188,9 @@ whole server process and reloads all in-memory state.
 6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is treated as navigation, whether it writes `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
 Search ranks one pool of results (up to `max_results`, at least `candidate_count`) and caches it by
-query and source set. Paging and display filters reuse that pool.
+query and source set. A selection of at most `min(10, 35%)` of the available sources searches only
+those sources; a larger selection uses one full search over every available source, and the source
+filters narrow the displayed page. Paging and display filters reuse the cached pool.
 
 The streaming endpoint sends a provisional page as each source finishes. Pagination uses regular links
 and refreshes the page through the JSON endpoint without a full document reload.
@@ -496,8 +498,10 @@ Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic r
 `kill -HUP <pid>`.
 
 Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` (32 MiB per cache by default).
-The ranked pool is shared across pages and display filters, and invalidated when the set of searchable
-sources differs. For large libraries, `search_workers` controls how many ZIM indexes are searched in
+The ranked pool is shared across pages and display filters for a given search scope, and invalidated
+when the set of searchable sources differs. Small source selections get their own scope so each
+selected ZIM contributes a larger share of the pool; larger selections share the full-search pool.
+For large libraries, `search_workers` controls how many ZIM indexes are searched in
 parallel. `max_stream_ranks` limits intermediate progress-ranking passes; the final result still
 ranks every source, while a lower value reduces CPU use on small devices. The automatic profiles
 use 8 workers and 16 intermediate passes on desktops, and 2 workers and 8 passes on low-memory
