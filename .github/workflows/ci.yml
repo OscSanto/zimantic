@@ -19,24 +19,44 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest -q
 
-  arm:
-    name: test (${{ matrix.arch }})
+  arm64:
+    name: test (arm64, py3.14)
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
+  armhf:
+    name: native dependency check (armhf)
+    needs: test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Fully supported: libzim/onnxruntime/faiss publish aarch64 wheels.
-          - arch: arm64
-            platform: linux/arm64
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
-      - name: Run tests under emulation
+
+      - name: Install Debian native dependencies and smoke-test
         run: |
-          docker run --rm --platform ${{ matrix.platform }} \
+          docker run --rm --platform linux/arm/v7 \
             -v "$PWD:/app" -w /app \
-            python:3.14-slim \
-            sh -c "pip install uv \
-                   && uv sync --locked --no-build \
-                   && uv run pytest -q"
+            arm32v7/debian:bookworm-slim \
+            sh -euxc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                python3-faiss \
+                python3-libzim \
+                python3-onnx
+              PYTHONPATH=/app /usr/bin/python3 -c "
+              import faiss
+              import onnx
+              from libzim.reader import Archive
+              from libzim.search import Searcher
+              from zimantic.search import Search
+              print(f\"armhf native dependencies loaded (onnx {onnx.__version__})\")
+              "
+            '

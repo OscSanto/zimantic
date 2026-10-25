@@ -35,8 +35,31 @@ jobs:
       - name: Run tests
         run: uv run --locked pytest -q
 
-  arm:
-    name: test (arm64)
+  arm64:
+    name: test (arm64, py3.14)
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run --locked pytest -q
+
+  armhf:
+    name: native dependency check (armhf)
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -45,17 +68,29 @@ jobs:
       - uses: actions/checkout@v6
       - uses: docker/setup-qemu-action@v3
 
-      - name: Run tests under emulation
+      - name: Install Debian native dependencies and smoke-test
         run: |
-          docker run --rm --platform linux/arm64 \
+          docker run --rm --platform linux/arm/v7 \
             -v "$PWD:/app" -w /app \
-            python:3.14-slim \
-            sh -c "pip install uv \
-                   && uv sync --locked --no-build \
-                   && uv run --locked pytest -q"
+            arm32v7/debian:bookworm-slim \
+            sh -euxc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                python3-faiss \
+                python3-libzim \
+                python3-onnx
+              PYTHONPATH=/app /usr/bin/python3 -c "
+              import faiss
+              import onnx
+              from libzim.reader import Archive
+              from libzim.search import Searcher
+              from zimantic.search import Search
+              print(f\"armhf native dependencies loaded (onnx {onnx.__version__})\")
+              "
+            '
 
   publish:
-    needs: [test, arm]
+    needs: [test, arm64, armhf]
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
     environment: publish
