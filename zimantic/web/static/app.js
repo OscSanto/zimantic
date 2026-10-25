@@ -58,6 +58,7 @@
             const thumbnailControllers = new Set();
             let activeThumbnails = 0;
             let streamRenderTimer = null;
+            let lastStreamRenderAt = 0;
             let modalPreviousFocus = null;
             let libraryInfoPreviousFocus = null;
             let activeModalUrl = null;
@@ -89,15 +90,25 @@
             // Coalesce source/snapshot events into one full-view render per
             // STREAM_RENDER_DELAY. The status line is deliberately not handled
             // here — it is the fast path, updated directly as each event arrives.
+            //
+            // The wait is measured from the previous render, not from the latest
+            // event. Measuring from the event lets a snapshot that lands just
+            // after a render push the next one a full interval out, stretching
+            // the visible cadence to ~2x. Measuring from the last render keeps
+            // the cadence steady at STREAM_RENDER_DELAY while still painting the
+            // latest state within one interval of the last event.
             function scheduleStreamRender(sequence) {
                 if (streamRenderTimer !== null) return;
+                const now = performance.now();
+                const wait = Math.max(0, STREAM_RENDER_DELAY - (now - lastStreamRenderAt));
                 streamRenderTimer = setTimeout(() => {
                     streamRenderTimer = null;
+                    lastStreamRenderAt = performance.now();
                     if (sequence === searchSequence && current) {
                         renderView();
                         renderNotice();
                     }
-                }, STREAM_RENDER_DELAY);
+                }, wait);
             }
 
             function yieldToBrowser() {
@@ -2475,6 +2486,10 @@
                 if (requestController) requestController.abort();
                 if (pageController) pageController.abort();
                 cancelStreamRender();
+                // Start each search's slow-render cadence from now, so the first
+                // results paint one interval in rather than immediately after the
+                // previous search's last render.
+                lastStreamRenderAt = performance.now();
                 cancelThumbnails();
                 thumbnailCache.clear();
                 const controller = new AbortController();
