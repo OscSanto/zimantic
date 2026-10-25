@@ -2490,11 +2490,18 @@ class Search:
         offset: int,
         limit: int,
         matched_by: dict[str, int] | None = None,
+        include_results: bool = True,
     ) -> dict[str, Any]:
-        """One streamed snapshot/done event shaped from a page state."""
+        """One streamed snapshot/done event shaped from a page state.
+
+        ``include_results`` is False for an intermediate snapshot whose page is
+        unchanged from the previous one: the client keeps the page it already
+        has, so re-sending (and re-serializing) the result list would be pure
+        duplication. The final ``done`` event always includes it.
+        """
         event: dict[str, Any] = {
             "type": event_type,
-            "results": state["results"],
+            "results": state["results"] if include_results else None,
             "completed": completed,
             "total_sources": total_sources,
             "total": state["total"],
@@ -2511,6 +2518,16 @@ class Search:
         if matched_by is not None:
             event["matched_by"] = matched_by
         return event
+
+    @staticmethod
+    def _page_signature(state: dict[str, Any]) -> tuple[str, ...]:
+        """Identity of the displayed page, used to elide unchanged result lists.
+
+        Intermediate snapshots never change a result's content (leads are only
+        hydrated for the final ``done``), so the ordered ids are enough to tell
+        whether the page moved.
+        """
+        return tuple(doc.get("id", "") for doc in state["results"])
 
     @staticmethod
     def _unpack_cache(cached: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2847,6 +2864,9 @@ class Search:
             last_rank_at = started_at
             rank_passes = 0
             unranked = 0
+            # Ids of the page last sent to the client, so a snapshot that didn't
+            # move the page can omit its (large, unchanged) result list.
+            last_page_signature: tuple[str, ...] | None = None
             remaining = set(futures)
             while remaining:
                 timed_out = False
@@ -2910,6 +2930,9 @@ class Search:
                         }
                         if should_rank:
                             state = self._page_state(pool, source, offset, page_size, debug)
+                            signature = self._page_signature(state)
+                            include_results = debug or signature != last_page_signature
+                            last_page_signature = signature
                             yield self._event(
                                 "snapshot",
                                 state,
@@ -2918,6 +2941,7 @@ class Search:
                                 offset,
                                 page_size,
                                 self._matched_by(pool) if debug else None,
+                                include_results=include_results,
                             )
                 except TimeoutError:
                     timed_out = True
@@ -2935,6 +2959,9 @@ class Search:
                     last_rank_at = now
                     unranked = 0
                     state = self._page_state(pool, source, offset, page_size, debug)
+                    signature = self._page_signature(state)
+                    include_results = debug or signature != last_page_signature
+                    last_page_signature = signature
                     yield self._event(
                         "snapshot",
                         state,
@@ -2943,6 +2970,7 @@ class Search:
                         offset,
                         page_size,
                         self._matched_by(pool) if debug else None,
+                        include_results=include_results,
                     )
                 else:
                     # Nothing new to rank: keep the stream (and the status

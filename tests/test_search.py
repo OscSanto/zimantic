@@ -713,6 +713,76 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(events[-1]["page"], 0)
         self.assertEqual(events[-1]["page_count"], 2)
 
+    def test_snapshot_omits_unchanged_results(self):
+        # Two rank passes can leave the displayed page on the same docs. The
+        # second snapshot then omits `results` so the client keeps the list it
+        # already has, while the final `done` always carries the page.
+        from concurrent.futures import Future
+
+        import zimantic.search as search_module
+
+        sources = [
+            SourceInfo(f"source-{index}", f"Source {index}", f"source-{index}", "local")
+            for index in range(2)
+        ]
+        search = _bare_search({"candidate_count": 2})
+        search.semantic = False
+        search.sources = {source.key: source for source in sources}
+        search._search_slots = threading.BoundedSemaphore(1)
+        search.embedder = None
+
+        stable_doc = {
+            "id": "source-0:page",
+            "source_key": "source-0",
+            "source": "Source 0",
+            "title": "Stable",
+            "lead": "",
+            "path": "page",
+            "url": None,
+            "source_rank": 1,
+        }
+
+        def result_for(source):
+            doc = dict(stable_doc)
+            return SourceResult(source=source, items=[doc], fulltext=[(0, doc)])
+
+        order = []
+        by_source = {}
+        for source in sources:
+            future = Future()
+            future.set_result(result_for(source))
+            by_source[source.key] = future
+            order.append(future)
+
+        def submit(_fn, source, *_args, **_kwargs):
+            return by_source[source.key]
+
+        try:
+            with (
+                patch.object(search, "_executor") as executor,
+                patch.object(search_module, "as_completed", return_value=iter(order)),
+                # Every pass ranks to the same single page.
+                patch.object(search, "_rank_results", return_value=[dict(stable_doc)]),
+                patch.object(
+                    search, "_enrich_pool", lambda results, query, pool, limit: pool
+                ),
+                patch.object(search, "_hydrate_results", lambda docs: None),
+            ):
+                executor.submit.side_effect = submit
+                events = list(search.stream_search("query", limit=10))
+        finally:
+            search._executor.shutdown(wait=True)
+
+        snapshots = [event for event in events if event["type"] == "snapshot"]
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(len(snapshots[0]["results"]), 1)
+        # The page didn't move, so only the first snapshot carries the list.
+        self.assertIsNone(snapshots[1]["results"])
+        self.assertEqual(snapshots[1]["total"], 1)
+        done = events[-1]
+        self.assertEqual(done["type"], "done")
+        self.assertEqual(len(done["results"]), 1)
+
     def test_local_source_uses_batched_document_hydration(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(

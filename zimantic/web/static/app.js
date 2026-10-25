@@ -59,6 +59,7 @@
             let activeThumbnails = 0;
             let streamRenderTimer = null;
             let lastStreamRenderAt = 0;
+            let lastRenderedItems = null;
             let modalPreviousFocus = null;
             let libraryInfoPreviousFocus = null;
             let activeModalUrl = null;
@@ -2036,6 +2037,13 @@
             }
 
             function renderResults(items) {
+                // During a stream, `source` events only change counts and a
+                // snapshot whose page didn't move omits `results`, so the same
+                // items array can arrive again. Skip the reconciliation in that
+                // case; completion and paging always pass a fresh array and
+                // still render (and load thumbnails).
+                if (items === lastRenderedItems && current?.streaming) return;
+                lastRenderedItems = items;
                 if (!items.length) {
                     const oldList = resultList;
                     if (oldList) {
@@ -2393,7 +2401,9 @@
                 let busy = false;
                 const applyPage = (event) => {
                     current.completed = event.completed;
-                    current.pageItems = event.results || [];
+                    // A snapshot whose page didn't move omits `results`; keep the
+                    // page we already have instead of clearing it.
+                    if (Array.isArray(event.results)) current.pageItems = event.results;
                     current.total = event.total || 0;
                     syncPage(event.page);
                     if (event.counts) current.counts = event.counts;
