@@ -283,6 +283,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const articleFrame = document.querySelector("iframe[data-zimantic-article]");
     let selectedSearchText = "";
     let articleSelection = "";
+    let offlineRequest = 0;
     const normalizeSelection = value =>
       String(value || "").replace(/\\s+/g, " ").trim().slice(0, 2048);
     const shareUrl = value => {
@@ -305,6 +306,19 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         history.replaceState(history.state, "", shareUrl(articleSelection));
       }
     };
+    const scrollArticleTo = hash => {
+      const value = String(hash || "");
+      if (!value || !articleFrame || !articleFrame.contentWindow) return;
+      articleFrame.contentWindow.postMessage({
+        type: "zimantic-article-hash",
+        hash: value,
+      }, "*");
+    };
+    if (articleFrame) {
+      articleFrame.addEventListener("load", () => {
+        if (location.hash) scrollArticleTo(location.hash);
+      });
+    }
     const contextControls = [
       [previous, "previous"],
       [next, "next"],
@@ -356,6 +370,10 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     });
     window.addEventListener("message", event => {
       if (!articleFrame || event.source !== articleFrame.contentWindow) return;
+      if (event.data?.type === "zimantic-article-ready" && location.hash) {
+        scrollArticleTo(location.hash);
+        return;
+      }
       if (event.data?.type !== "zimantic-article-selection") return;
       setArticleSelection(event.data.text);
     });
@@ -365,8 +383,60 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     window.addEventListener("message", event => {
       if (event.data?.type !== "zimantic-shell-navigate") return;
       const url = String(event.data.url || "");
-      if (url.startsWith(`${appBasePath}/content/`)) location.href = url;
+      if (url.startsWith(`${appBasePath}/content/`)) {
+        offlineRequest += 1;
+        location.href = url;
+      }
     });
+    const offlineArticleUrl = value => {
+      const text = String(value || "");
+      if (!text) return null;
+      let url;
+      try {
+        url = new URL(text, location.href);
+      } catch (_) {
+        return null;
+      }
+      if (url.origin !== location.origin) return null;
+      if (
+        url.pathname !== `${appBasePath}/content` &&
+        !url.pathname.startsWith(`${appBasePath}/content/`)
+      ) {
+        return null;
+      }
+      return url;
+    };
+    // A directly loaded /content/ view should make the same choice as the
+    // modal: use the captured copy when it exists, and only go online when the
+    // article is not in the ZIM.
+    const openOfflineArticle = (target, fallbackUrl) => {
+      if (
+        target.pathname === location.pathname &&
+        (target.search === location.search ||
+          (target.hash && !target.search))
+      ) {
+        scrollArticleTo(target.hash);
+        return;
+      }
+      const request = ++offlineRequest;
+      const hash = target.hash;
+      const probe = new URL(target.href);
+      probe.hash = "";
+      fetch(probe.href, {cache: "no-store", credentials: "same-origin"})
+        .then(response => {
+          if (request !== offlineRequest) return;
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const resolved = new URL(response.url || probe.href);
+          if (resolved.origin !== location.origin) throw new Error("moved");
+          resolved.search = target.search;
+          resolved.hash = hash;
+          location.href = resolved.href;
+        })
+        .catch(() => {
+          if (request !== offlineRequest) return;
+          location.href = fallbackUrl;
+        });
+    };
     window.addEventListener("message", event => {
       if (event.data?.type !== "zimantic-external-link") return;
       let url;
@@ -376,16 +446,89 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         return;
       }
       if (url.protocol !== "http:" && url.protocol !== "https:") return;
+      const offlineUrl = offlineArticleUrl(event.data.offlineUrl);
       if (window.parent !== window) {
         window.parent.postMessage({
           type: "zimantic-external-link",
           url: url.href,
-          offlineUrl: String(event.data.offlineUrl || "") || null,
+          offlineUrl: offlineUrl ? offlineUrl.href : null,
         }, "*");
-      } else {
-        location.href = url.href;
+        return;
       }
+      if (offlineUrl) {
+        openOfflineArticle(offlineUrl, url.href);
+        return;
+      }
+      location.href = url.href;
     });
+    // A capture can finish loading with nothing to show: a JavaScript shell that
+    // renders content it never saved, a redirect to a page whose assets 404, or
+    // a parked domain. An empty iframe looks broken, so explain it in the shell.
+    const captureNotice = document.querySelector("[data-zimantic-capture-notice]");
+    const captureNoticeDismiss = document.querySelector(
+      "[data-zimantic-capture-notice-dismiss]"
+    );
+    let captureNoticeTimer = null;
+    let captureNoticeDismissed = false;
+    const captureHasVisibleContent = () => {
+      if (!articleFrame) return true;
+      let frameDocument = null;
+      try {
+        frameDocument = articleFrame.contentDocument;
+      } catch (_) {
+        return true;
+      }
+      // A cross-origin document is not ours to judge.
+      if (!frameDocument || !frameDocument.body) return true;
+      const body = frameDocument.body;
+      if (String(body.innerText || "").trim()) return true;
+      const media = body.querySelectorAll(
+        "img, svg, canvas, video, audio, iframe, object, embed, " +
+        "input, textarea, select"
+      );
+      for (const node of media) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        if (node.tagName === "IMG" && !node.naturalWidth) continue;
+        return true;
+      }
+      return false;
+    };
+    const hideCaptureNotice = () => {
+      clearTimeout(captureNoticeTimer);
+      captureNoticeTimer = null;
+      if (captureNotice) captureNotice.hidden = true;
+    };
+    const scheduleCaptureCheck = () => {
+      clearTimeout(captureNoticeTimer);
+      if (!captureNotice || captureNoticeDismissed) return;
+      let attempts = 0;
+      const check = () => {
+        attempts += 1;
+        if (captureHasVisibleContent()) {
+          hideCaptureNotice();
+          return;
+        }
+        if (attempts >= 3) {
+          captureNotice.hidden = false;
+          return;
+        }
+        // Give a script-rendered page a moment to paint before deciding.
+        captureNoticeTimer = setTimeout(check, attempts === 1 ? 700 : 1500);
+      };
+      captureNoticeTimer = setTimeout(check, 400);
+    };
+    if (captureNoticeDismiss) {
+      captureNoticeDismiss.addEventListener("click", () => {
+        captureNoticeDismissed = true;
+        hideCaptureNotice();
+      });
+    }
+    if (articleFrame) {
+      // Every navigation in the frame fires load, including a page's own
+      // script redirect, so a blank redirect target still gets an explanation.
+      articleFrame.addEventListener("load", scheduleCaptureCheck);
+    }
     const fitToolbarLabels = () => {
       if (!actions) return;
       for (const control of [home, permalink]) {
@@ -623,6 +766,32 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
       local.hash = url.hash;
       return local.href;
     };
+    const contentPathFor = url => {
+      const path = url.pathname;
+      if (path === contentHome || path.startsWith(contentPrefix)) return path;
+      if (path === articleHome || path.startsWith(articlePrefix)) {
+        return `${prefix}/content` + path.slice(`${prefix}/article`.length);
+      }
+      return null;
+    };
+    const currentContentUrl = () => {
+      const contentPath = contentPathFor(context);
+      return contentPath ? new URL(contentPath + context.search, context) : null;
+    };
+    const hasBaseUrl = () => Boolean(document.querySelector("base[href]"));
+    const hrefFor = anchor => {
+      // Wombat, used by zimit captures, rewrites the `href` property to the
+      // original site URL. The attribute still carries the link the page
+      // authored, so prefer it and keep relative links on this server. A
+      // capture that declares a real <base> needs the browser's resolution.
+      try {
+        if (!hasBaseUrl()) {
+          const attribute = anchor.getAttribute("href");
+          if (attribute) return attribute;
+        }
+      } catch (_) {}
+      return anchor.href;
+    };
     const normalizeText = value =>
       String(value || "").replace(/\\s+/g, " ").trim();
     const escapeRegExp = value =>
@@ -749,10 +918,26 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
     // Copy link cannot race the debounce and drop the selected text.
     window.addEventListener("mouseup", publishSelection);
     window.addEventListener("keyup", publishSelection);
+    const fromParent = event => {
+      // Wombat wraps window.parent in a proxy on zimit captures, so a strict
+      // reference comparison with event.source drops real parent messages.
+      // These messages only scroll and highlight the article, so accepting
+      // them by type is preferable to losing them behind the proxy.
+      return event.source !== window;
+    };
     window.addEventListener("message", event => {
-      if (event.source !== window.parent) return;
+      if (!fromParent(event)) return;
       if (event.data?.type !== "zimantic-article-highlight") return;
       applyHighlight(event.data.text);
+    });
+    window.addEventListener("message", event => {
+      if (!fromParent(event)) return;
+      if (event.data?.type !== "zimantic-article-hash") return;
+      const hash = String(event.data.hash || "");
+      if (!hash) return;
+      try {
+        location.hash = hash;
+      } catch (_) {}
     });
     const requestedHighlight = (() => {
       try {
@@ -776,7 +961,9 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
       const anchor = event.target && event.target.closest
         ? event.target.closest("a[href]")
         : null;
-      if (!anchor || !anchor.href) return;
+      if (!anchor) return;
+      const href = hrefFor(anchor);
+      if (!href) return;
       if (
         event.button !== 0 ||
         event.metaKey ||
@@ -788,22 +975,39 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
       }
       let url;
       try {
-        url = new URL(anchor.href, context);
+        url = new URL(href, context);
       } catch (_) {
         return;
       }
       if (url.protocol !== "http:" && url.protocol !== "https:") return;
       if (anchor.hasAttribute("download")) return;
       if (url.origin !== context.origin) {
+        const offlineUrl = offlineUrlFor(url);
+        const offline = offlineUrl ? new URL(offlineUrl, context) : null;
+        const current = currentContentUrl();
+        // Wombat also rewrites link properties to the original site URL, so a
+        // relative in-page fragment can arrive here looking external. When the
+        // mapped URL is the article we already show, keep it a fragment jump.
+        if (
+          offline &&
+          current &&
+          offline.pathname === current.pathname &&
+          (offline.search === current.search ||
+            (offline.hash && !offline.search))
+        ) {
+          event.preventDefault();
+          if (offline.hash) location.hash = offline.hash;
+          return;
+        }
         event.preventDefault();
         if (window.parent !== window) {
           window.parent.postMessage({
             type: "zimantic-external-link",
             url: url.href,
-            offlineUrl: offlineUrlFor(url),
+            offlineUrl,
           }, "*");
         } else {
-          location.href = url.href;
+          location.href = offlineUrl || url.href;
         }
         return;
       }
@@ -817,13 +1021,7 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
         return;
       }
       if (event.defaultPrevented) return;
-      const path = url.pathname;
-      let contentPath = null;
-      if (path === contentHome || path.startsWith(contentPrefix)) {
-        contentPath = path;
-      } else if (path === articleHome || path.startsWith(articlePrefix)) {
-        contentPath = `${prefix}/content` + path.slice(`${prefix}/article`.length);
-      }
+      const contentPath = contentPathFor(url);
       // Same-origin app pages and assets are left to the iframe.
       if (!contentPath) return;
       // Same-document fragment links must scroll in place, not reload the shell.
@@ -831,10 +1029,15 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
         return;
       }
       event.preventDefault();
-      window.parent.postMessage({
-        type: "zimantic-shell-navigate",
-        url: contentPath + url.search,
-      }, "*");
+      const shellUrl = contentPath + url.search + url.hash;
+      if (window.parent !== window) {
+        window.parent.postMessage({
+          type: "zimantic-shell-navigate",
+          url: shellUrl,
+        }, "*");
+      } else {
+        location.href = shellUrl;
+      }
     }, true);
   };
   if (document.readyState === "loading") {
@@ -1188,6 +1391,34 @@ nav[data-zimantic-toolbar] {
   margin: 0 !important;
   position: static !important;
 }
+[data-zimantic-capture-notice] {
+  align-items: center;
+  background: #fff8e1;
+  border-bottom: 1px solid #ead9a1;
+  color: #4a3b00;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  font: 13px/1.45 system-ui, sans-serif;
+  gap: 8px 12px;
+  padding: 8px 12px;
+}
+[data-zimantic-capture-notice][hidden] { display: none; }
+[data-zimantic-capture-notice] p {
+  flex: 1 1 260px;
+  margin: 0;
+}
+[data-zimantic-capture-notice] button {
+  background: #fff;
+  border: 1px solid #cbb877;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  padding: 3px 10px;
+}
+[data-zimantic-capture-notice] button:hover { background: #f6ecc8; }
 iframe[data-zimantic-article] {
   background: #fff;
   border: 0;
@@ -1202,7 +1433,13 @@ iframe[data-zimantic-article] {
 <body>
 """
         + toolbar
-        + f'\n<iframe data-zimantic-article title="{title}" '
+        + "\n<div data-zimantic-capture-notice hidden>"
+        "<p>This capture has no readable content. The archived page may have "
+        "been empty (for example, a parked domain), or its scripts and styles "
+        "may not have been saved.</p>"
+        '<button type="button" data-zimantic-capture-notice-dismiss>Dismiss</button>'
+        "</div>\n"
+        + f'<iframe data-zimantic-article title="{title}" '
         f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
         + (ARTICLE_TOOLBAR_SCRIPT % json.dumps(base_path))
         + "\n</body>\n</html>"

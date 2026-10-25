@@ -484,10 +484,13 @@ JSON API examples:
   Article views keep the current ZIM and path in the address bar, including from `/library`, so the
   URL can be shared.
   Selecting text adds the passage to that URL and to the toolbar's Copy link action; reopening the
-  link scrolls to and highlights the passage. `GET /random?zim=<name>`
+  link scrolls to and highlights the passage. Fragment links scroll inside the article without
+  reloading the shell. `GET /random?zim=<name>`
   redirects to a random indexed article's shell. Links from an offline article to an external
   `http` or `https` site show an in-modal notice identifying the destination as online and offer
-  to open it in a new tab, avoiding failures from sites that disallow iframe embedding.
+  to open it in a new tab, avoiding failures from sites that disallow iframe embedding. A directly
+  loaded `/content/` view tries the captured copy for same-site links before leaving for the live
+  site, so only links that are missing from the ZIM go online.
 - Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
   search endpoints. Debug result objects additionally include a `ranking` breakdown with each
   semantic/title/full-text rank and contribution, title-match signals, intent and
