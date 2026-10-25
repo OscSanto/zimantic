@@ -416,9 +416,16 @@
                     return;
                 }
                 const query = $("libraryFilter").value.trim().toLocaleLowerCase();
+                const terms = query.split(/\s+/).filter(Boolean);
+                const excludedTerms = terms
+                    .filter((term) => term.startsWith("-") && term.length > 1)
+                    .map((term) => term.slice(1));
+                const includedQuery = terms
+                    .filter((term) => !term.startsWith("-") || term.length === 1)
+                    .join(" ");
                 const visibleSources = query
-                    ? librarySources.filter((source) =>
-                          [
+                    ? librarySources.filter((source) => {
+                          const searchable = [
                               source.title,
                               source.name,
                               source.description,
@@ -428,9 +435,12 @@
                           ]
                               .filter(Boolean)
                               .join(" ")
-                              .toLocaleLowerCase()
-                              .includes(query),
-                      )
+                              .toLocaleLowerCase();
+                          return (
+                              (!includedQuery || searchable.includes(includedQuery)) &&
+                              excludedTerms.every((term) => !searchable.includes(term))
+                          );
+                      })
                     : librarySources;
                 status.textContent = query
                     ? `${visibleSources.length} of ${librarySources.length} installed ZIMs`

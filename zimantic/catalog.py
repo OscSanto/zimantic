@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 CATALOG_FILENAME = "catalog.sqlite"
 # Bump when the table layout or the metadata derivation changes.  The catalog is
 # disposable, so a mismatch triggers a full rescan instead of a migration.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_FAVICON_BYTES = 1 << 20
 
 META_KEYS = (
@@ -61,6 +61,12 @@ def _text(value: Any) -> str:
     if isinstance(value, bytes):
         value = value.decode("utf-8", "replace")
     return str(value).strip()
+
+
+def normalize_creator(value: Any) -> str:
+    """Treat placeholder creator metadata as missing."""
+    value = _text(value)
+    return "" if value == "-" else value
 
 
 def _norm_date(value: Any) -> str:
@@ -228,6 +234,7 @@ def metadata_from_archive(archive: Any, zim_path: Path | str) -> dict[str, Any]:
         has_fulltext_index = 0
 
     homepage = resolve_homepage(archive)
+    creator = normalize_creator(metadata.get("Creator", ""))
 
     favicon = None
     favicon_mime = ""
@@ -280,7 +287,7 @@ def metadata_from_archive(archive: Any, zim_path: Path | str) -> dict[str, Any]:
         "description": metadata.get("Description", ""),
         "long_description": metadata.get("LongDescription", ""),
         "language": metadata.get("Language", ""),
-        "creator": metadata.get("Creator", ""),
+        "creator": creator,
         "publisher": metadata.get("Publisher", ""),
         "date": _norm_date(metadata.get("Date", "")),
         "tags": tags,

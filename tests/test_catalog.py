@@ -45,12 +45,14 @@ class _Page(Item):
         return {Hint.FRONT_ARTICLE: True}
 
 
-def _create_zim(path):
-    creator = Creator(path)
-    creator.config_indexing(True, "eng")
-    creator.set_mainpath("Alpha")
-    with creator:
-        creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+def _create_zim(path, *, creator_metadata=None):
+    zim_creator = Creator(path)
+    zim_creator.config_indexing(True, "eng")
+    zim_creator.set_mainpath("Alpha")
+    with zim_creator:
+        if creator_metadata is not None:
+            zim_creator.add_metadata("Creator", creator_metadata)
+        zim_creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
 
 
 class CatalogTests(unittest.TestCase):
@@ -118,6 +120,22 @@ class CatalogTests(unittest.TestCase):
                 self.assertEqual(record.available, 1)
                 self.assertEqual(record.last_error, "")
                 self.assertEqual(len(read_catalog(root / "indexes" / "catalog.sqlite")), 1)
+
+    def test_placeholder_creator_is_stored_as_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            zims.mkdir()
+            zim_path = zims / "manual.zim"
+            _create_zim(zim_path, creator_metadata="-")
+
+            with ZimCatalog(root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive) as catalog:
+                catalog.scan()
+                record = catalog.get_stem("manual")
+
+            self.assertIsNotNone(record)
+            self.assertEqual(record.creator, "")
+            self.assertIsNone(record.to_source_metadata()["creator"])
 
     def test_tag_normalization_and_perma_ref(self):
         self.assertEqual(

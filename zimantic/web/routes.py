@@ -21,6 +21,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     # Serialized-JSON memo owned by this app instance (see _json_response).
     memos: dict = {}
     base_path = web_app._search_base_path(search_class)
+    dev_cache_headers = {"Cache-Control": "no-store"} if debug else None
 
     def paged_json_response(
         request: Request,
@@ -62,11 +63,11 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/", include_in_schema=False)
     def page():
-        return FileResponse(web_app.PAGE)
+        return FileResponse(web_app.PAGE, headers=dev_cache_headers)
 
     @app.get("/library", include_in_schema=False)
     def library_page():
-        return FileResponse(web_app.PAGE)
+        return FileResponse(web_app.PAGE, headers=dev_cache_headers)
 
     static_routes = (
         ("/app.css", web_app.APP_CSS, "text/css"),
@@ -81,7 +82,11 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     )
     for route, file, mime in static_routes:
         app.get(route, include_in_schema=False)(
-            lambda file=file, mime=mime: FileResponse(file, media_type=mime)
+            lambda file=file, mime=mime: FileResponse(
+                file,
+                media_type=mime,
+                headers=dev_cache_headers,
+            )
         )
 
     @app.get("/source-icon/{zim}", include_in_schema=False)
@@ -192,7 +197,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         ) as error:
             raise web_app._article_http_error(error) from error
 
-        requested_path = None if path is None else path.strip("/")
+        requested_path = None if path is None else path
         if requested_path != article["path"]:
             return Response(
                 status_code=307,
@@ -228,7 +233,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         return None
 
     def content_shell_response(zim: str, path: str | None = None):
-        requested_path = None if path is None else path.strip("/")
+        requested_path = None if path is None else path
         fallback_icon = zim_icon_url(zim)
         read_head = getattr(search_class, "read_article_head", None)
         try:

@@ -128,6 +128,13 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(javascript.headers["content-type"].startswith("application/javascript"))
         self.assertIn("initialize();", javascript.text)
 
+    def test_debug_page_assets_are_not_cached(self):
+        for path in ("/", "/library", "/app.css", "/app.js"):
+            with self.subTest(path=path):
+                response = self.debug_client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["cache-control"], "no-store")
+
     def test_library_view_is_served(self):
         page = self.client.get("/library")
         self.assertEqual(page.status_code, 200)
@@ -237,6 +244,42 @@ class ServerTests(unittest.TestCase):
         self.assertIn("data-zimantic-bridge", raw.text)
         self.assertIn("zimantic-external-link", raw.text)
         self.assertNotIn("data-zimantic-toolbar", raw.text)
+
+    def test_content_shell_preserves_trailing_article_paths(self):
+        self.search.read_article = lambda zim, path: {
+            "path": "docs/home/",
+            "title": "Home",
+            "mimetype": "text/html",
+            "content": b"<html><head></head><body>Home</body></html>",
+        }
+        try:
+            response = self.client.get("/content/manual/docs/home/")
+        finally:
+            del self.search.read_article
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('src="/article/manual/docs/home/"', response.text)
+        self.assertIn('href="/content/manual/docs/home/"', response.text)
+
+    def test_raw_article_assets_allow_sandboxed_fetches(self):
+        search = FakeSearch()
+        search.read_article = lambda zim, path: {
+            "path": path,
+            "title": "Shared data",
+            "mimetype": "application/json",
+            "content": b'{"pages":[]}',
+        }
+        client = TestClient(create_app(search))
+
+        response = client.get("/article/manual/content/shared.json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"pages": []})
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
+
+    def test_raw_html_shims_cookie_access_in_opaque_sandboxes(self):
+        raw = self._raw_article(b"<html><head></head><body>Article</body></html>")
+        self.assertIn("data-zimantic-cookie-shim", raw.text)
 
     def _raw_article(self, body: bytes):
         with patch.object(

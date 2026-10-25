@@ -401,7 +401,7 @@ ol.results {
     width: 100%;
 }
 .library-heading {
-    align-items: end;
+    align-items: start;
     display: flex;
     justify-content: space-between;
     gap: 16px;
@@ -421,7 +421,14 @@ ol.results {
 .library-toolbar {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
+    justify-content: flex-end;
+}
+.library-toolbar .status {
+    flex-basis: 100%;
+    margin: 0;
+    text-align: right;
 }
 .library-toolbar button {
     background: var(--panel);
@@ -559,7 +566,7 @@ ol.results {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-top: 8px;
+    margin-top: auto;
 }
 .library-card-actions .library-card-action {
     margin-top: 0;
@@ -897,6 +904,10 @@ summary {
         flex-direction: column;
         gap: 4px;
         margin-top: 4px;
+    }
+    .library-toolbar .status {
+        flex-basis: auto;
+        text-align: left;
     }
     .library-toolbar input {
         max-width: none;

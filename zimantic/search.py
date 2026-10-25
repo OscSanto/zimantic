@@ -23,7 +23,7 @@ from libzim.reader import Archive
 from libzim.search import Query
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
-from .catalog import CATALOG_FILENAME, ZimCatalog
+from .catalog import CATALOG_FILENAME, ZimCatalog, normalize_creator
 from .contracts import SourceInfo, SourceResult
 from .searching.config import _file_signature, _float_config, _int_config
 from .searching.index import _LocalIndex, _nprobe
@@ -124,6 +124,8 @@ def _archive_metadata(archive: Archive) -> dict[str, Any]:
         if isinstance(value, bytes):
             value = value.decode("utf-8", "replace")
         value = str(value).strip()
+        if key == "Creator":
+            value = normalize_creator(value)
         if value:
             values[key] = value
     tags = tuple(
@@ -1770,10 +1772,12 @@ class Search:
             raise ArticleNotFoundError("invalid article path")
         if any(part == ".." for part in path.split("/")):
             raise ArticleNotFoundError("invalid article path")
-        normalized = posixpath.normpath(path)
-        if normalized in {"", "."} or normalized != path:
+        trailing_slash = path.endswith("/")
+        candidate = path[:-1] if trailing_slash else path
+        normalized = posixpath.normpath(candidate)
+        if normalized in {"", "."} or normalized != candidate:
             raise ArticleNotFoundError("invalid article path")
-        return path
+        return normalized + "/" if trailing_slash else normalized
 
     @staticmethod
     def _resolve_article_entry(archive: Archive, path: str | None = None):

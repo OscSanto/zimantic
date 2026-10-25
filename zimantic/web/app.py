@@ -51,6 +51,25 @@ ARTICLE_STREAM_CHUNK = 64 * 1024
 # explicit CORS access to the public raw-entry route.
 ARTICLE_CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
 
+# Some JavaScript applications read ``document.cookie`` even when they do not
+# use cookies. The browser throws for that getter in the opaque-origin article
+# sandbox; expose the honest empty value so those applications can start.
+ARTICLE_COOKIE_SHIM = """<script data-zimantic-cookie-shim>
+(() => {
+  try {
+    void document.cookie;
+  } catch (_) {
+    try {
+      Object.defineProperty(document, "cookie", {
+        configurable: true,
+        get: () => "",
+        set: () => {},
+      });
+    } catch (_) {}
+  }
+})();
+</script>"""
+
 
 ARTICLE_TOOLBAR_STYLE = """<style data-zimantic-toolbar>
 nav[data-zimantic-toolbar] {
@@ -119,11 +138,20 @@ script[data-zimantic-toolbar] { display: none !important; }
   cursor: default !important;
   opacity: .45 !important;
 }
+[data-zimantic-toolbar] .zimantic-toolbar-context-nav button {
+  font-size: 18px !important;
+  line-height: 1 !important;
+  min-width: 32px !important;
+  padding: 3px 7px !important;
+}
 [data-zimantic-toolbar] .zimantic-toolbar-parent-nav {
   flex: 0 0 auto !important;
+  font-size: 15px !important;
+  height: 30px !important;
+  line-height: 1 !important;
   min-width: 30px !important;
-  padding-left: 6px !important;
-  padding-right: 6px !important;
+  padding: 4px !important;
+  width: 30px !important;
 }
 [data-zimantic-toolbar] .zimantic-toolbar-home {
   max-width: min(32vw, 360px) !important;
@@ -634,9 +662,15 @@ def _article_toolbar(zim: str, article: dict, base_path: str = "") -> str:
     zim_url = _content_url(zim, base_path=base_path)
     random_url = f"{base_path}/random?zim={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
-    article_path = str(article.get("path") or "").strip("/")
+    article_url_path = str(article.get("path") or "").strip()
+    trailing_slash = article_url_path.endswith("/")
+    article_path = article_url_path.strip("/")
     path_parts = [part for part in article_path.split("/") if part]
-    permalink_url = _content_url(zim, article_path, base_path)
+    permalink_url = _content_url(
+        zim,
+        article_path + "/" if trailing_slash and article_path else article_path,
+        base_path,
+    )
     article_title = html_escape(
         str(article.get("title") or article_path or "Permalink"),
         quote=False,
@@ -644,6 +678,8 @@ def _article_toolbar(zim: str, article: dict, base_path: str = "") -> str:
     breadcrumbs = []
     for depth in range(1, len(path_parts)):
         parent_path = "/".join(path_parts[:depth])
+        if trailing_slash:
+            parent_path += "/"
         parent_url = _content_url(zim, parent_path, base_path)
         breadcrumbs.append(
             f'<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
@@ -683,11 +719,11 @@ def _article_toolbar(zim: str, article: dict, base_path: str = "") -> str:
       <button type="button" class="zimantic-toolbar-parent-nav"
         data-zimantic-action="parent-previous" data-zimantic-parent-previous
         hidden disabled aria-label="Previous link in parent page"
-        title="Open the previous link in the parent page">←</button>
+        title="Open the previous link in the parent page">↑</button>
       <button type="button" class="zimantic-toolbar-parent-nav"
         data-zimantic-action="parent-next" data-zimantic-parent-next
         hidden disabled aria-label="Next link in parent page"
-        title="Open the next link in the parent page">→</button>
+        title="Open the next link in the parent page">↓</button>
     </span>
     <a href="{base_path}/" data-zimantic-action="home" title="Search your library">Zimantic</a>
   </div>
@@ -713,7 +749,11 @@ def _decorate_article_bridge(
         return content
 
     document, mobile_head = _mobile_article_head(document)
-    additions = mobile_head + (ARTICLE_NAV_BRIDGE_SCRIPT % json.dumps(base_path))
+    additions = (
+        ARTICLE_COOKIE_SHIM
+        + mobile_head
+        + (ARTICLE_NAV_BRIDGE_SCRIPT % json.dumps(base_path))
+    )
     head_close = re.search(r"</head\s*>", document, re.IGNORECASE)
     if head_close:
         position = head_close.start()
@@ -800,15 +840,16 @@ def _content_shell(
     use them for the browser tab, and embedded shells forward them to the host
     so the modal's tab follows the article too.
     """
-    article_path = str(article.get("path") or "").strip("/")
-    iframe_url = _article_url(zim, article_path, base_path)
+    article_url_path = str(article.get("path") or "").strip()
+    article_path = article_url_path.strip("/")
+    iframe_url = _article_url(zim, article_url_path, base_path)
     toolbar = _article_toolbar(zim, article, base_path)
     entry_title = str(article.get("title") or article_path or zim)
     parsed_title = None
     icon = fallback_icon
     if article.get("mimetype") == "text/html" and article.get("content") is not None:
         parsed_title, parsed_icon = _article_head_meta(
-            article["content"], zim, article_path or None, base_path
+            article["content"], zim, article_url_path or None, base_path
         )
         icon = parsed_icon or fallback_icon
     # quote=True so an article title containing a quote cannot break out of the

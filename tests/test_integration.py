@@ -197,6 +197,10 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b'data-zimantic-action="next"', shell.content)
             self.assertIn(b'data-zimantic-action="parent-previous"', shell.content)
             self.assertIn(b'data-zimantic-action="parent-next"', shell.content)
+            self.assertIn(">←</button>".encode(), shell.content)
+            self.assertIn(">→</button>".encode(), shell.content)
+            self.assertIn(">↑</button>".encode(), shell.content)
+            self.assertIn(">↓</button>".encode(), shell.content)
             self.assertIn(b"zimantic-modal-navigation", shell.content)
             self.assertIn(b"zimantic-shell-navigate", shell.content)
             self.assertIn(b"zimantic-article-ready", shell.content)
@@ -291,6 +295,25 @@ class LocalIntegrationTests(unittest.TestCase):
                 ["started", "source", "snapshot", "done"],
             )
             self.assertEqual(json.loads(stream.text.splitlines()[-1])["results"][0]["title"], "Beta")
+
+    def test_homepage_with_trailing_slash_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._build_fixture(
+                root,
+                pages=[("docs/", "Docs", ALPHA_HTML)],
+            )
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+
+            homepage = client.get("/content/manual", follow_redirects=False)
+            self.assertEqual(homepage.status_code, 307)
+            self.assertEqual(homepage.headers["location"], "/content/manual/docs/")
+            shell = client.get(homepage.headers["location"], follow_redirects=True)
+            self.assertEqual(shell.status_code, 200)
+            self.assertNotIn(b'{"detail":"article not found"}', shell.content)
+            raw = client.get("/article/manual/docs/", follow_redirects=True)
+            self.assertEqual(raw.status_code, 200)
 
     def test_unindexed_zim_uses_native_fulltext_before_build(self):
         with tempfile.TemporaryDirectory() as tmp:
