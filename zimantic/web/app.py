@@ -27,7 +27,6 @@ ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"
 APP_CSS = ASSET_DIR / "app.css"
 APP_JS = ASSET_DIR / "app.js"
-PARENT_NAV_JS = ASSET_DIR / "parent-nav.js"
 FAVICON = ASSET_DIR / "favicon.ico"
 FAVICON_16 = ASSET_DIR / "favicon-16x16.png"
 FAVICON_32 = ASSET_DIR / "favicon-32x32.png"
@@ -600,16 +599,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         }, "*");
       } else if (action === "parent-previous" || action === "parent-next") {
         const url = control.dataset.zimanticUrl;
-        if (!url || control.disabled) return;
+        if (!url || control.disabled || window.parent === window) return;
         event.preventDefault();
-        if (window.parent !== window) {
-          window.parent.postMessage({
-            type: "zimantic-parent-article-navigate",
-            url,
-          }, "*");
-        } else {
-          location.href = url;
-        }
+        window.parent.postMessage({
+          type: "zimantic-parent-article-navigate",
+          url,
+        }, "*");
       } else if (action === "copy") {
         if (
           event.button !== 0 ||
@@ -639,24 +634,6 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     if (window.ResizeObserver) {
       new ResizeObserver(fitToolbarLabels).observe(toolbar);
     }
-    // A directly loaded /content/ page has no host app to compute parent
-    // navigation, so do it here. Embedded (modal) shells get the same data
-    // through the zimantic-modal-navigation message instead.
-    let standaloneParentRequest = 0;
-    const loadStandaloneParentNavigation = () => {
-      if (window.parent !== window) return;
-      const parentNavApi = window.ZimanticParentNavigation;
-      if (!parentNavApi) return;
-      const request = ++standaloneParentRequest;
-      parentNavApi.resolveParentNavigation(new URL(location.href), {
-        basePath: appBasePath,
-        isCurrent: () => request === standaloneParentRequest,
-      }).then(result => {
-        if (request !== standaloneParentRequest || !result) return;
-        setContextNavigation({parent: result.navigation});
-      });
-    };
-    loadStandaloneParentNavigation();
     if (window.parent !== window) {
       const iconLink = document.querySelector("link[data-zimantic-article-icon]");
       window.parent.postMessage({
@@ -1464,7 +1441,6 @@ iframe[data-zimantic-article] {
         "</div>\n"
         + f'<iframe data-zimantic-article title="{title}" '
         f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
-        + f'<script src="{base_path}/parent-nav.js"></script>\n'
         + (ARTICLE_TOOLBAR_SCRIPT % json.dumps(base_path))
         + "\n</body>\n</html>"
     )
