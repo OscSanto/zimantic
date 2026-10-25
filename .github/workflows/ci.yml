@@ -44,12 +44,13 @@ jobs:
         run: |
           docker run --rm --platform linux/arm/v7 \
             -v "$PWD:/app" -w /app \
-            arm32v7/debian:bookworm-slim \
+            arm32v7/debian:trixie-slim \
             sh -euxc '
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 python3-faiss \
                 python3-libzim \
-                python3-onnx
-              PYTHONPATH=/app /usr/bin/python3 -c "import faiss, onnx; from libzim.reader import Archive; from libzim.search import Searcher; from zimantic.search import Search; print(onnx.__version__)"
+                python3-onnxruntime \
+                python3-sentencepiece
+              PYTHONPATH=/app /usr/bin/python3 -c "import faiss, onnxruntime, sentencepiece; from libzim.reader import Archive; from libzim.search import Searcher; from zimantic.embed import Embedder; from zimantic.search import Search; print(onnxruntime.__version__)"
             '

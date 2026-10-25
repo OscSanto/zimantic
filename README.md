@@ -286,9 +286,12 @@ translations, so less common languages may contain mistakes.
   wheels for specific Python ABIs and platforms, so choose an interpreter
   with a compatible wheel; update this range when the native dependencies add
   support for a newer Python version.
-- 32-bit Linux platforms (such as armhf/armv7) are not supported because required native
-  dependencies do not publish compatible wheels. On a Raspberry Pi Zero 2 W this means running 64-bit
-  Raspberry Pi OS (aarch64) is required.
+- 32-bit Linux platforms (such as armhf/armv7) have no prebuilt wheels for the
+  native dependencies. They work when those dependencies are installed as
+  distribution packages instead; Debian 13/trixie or newer ships
+  `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`
+  and `python3-pymupdf` for armhf. Create the environment with
+  `--system-site-packages` so Zimantic can use them.
 - About 120 MB for the default embedding model, plus your ZIM files (the English-only `e5-small-v2`
   is about 35 MB on disk)
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
@@ -333,6 +336,18 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    ```
 
    For development, use `uv sync` and `. .venv/bin/activate` instead.
+
+   On 32-bit armhf, where the native dependencies have no wheels, install the
+   Debian packages instead and let the environment use them:
+
+   ```bash
+   sudo apt install python3-venv python3-numpy python3-tqdm python3-onnxruntime \
+       python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
+       python3-fastapi python3-uvicorn
+   python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install --no-deps .
+   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
+   ```
 
 3. **Download the default multilingual model into `model/`:**
 
