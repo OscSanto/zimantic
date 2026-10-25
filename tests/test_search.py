@@ -1596,6 +1596,40 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual(first[-1]["results"], second[-1]["results"])
             search._executor.shutdown(wait=True)
 
+    def test_disconnected_stream_finishes_shared_search(self):
+        search = _bare_search({})
+        quick = SourceInfo("quick", "Quick", "quick", "local", local_name="quick")
+        slow = SourceInfo("slow", "Slow", "slow", "local", local_name="slow")
+        search.sources = {source.key: source for source in (quick, slow)}
+        release = threading.Event()
+        slow_started = threading.Event()
+
+        def search_source(source, *_args):
+            if source.key == "slow":
+                slow_started.set()
+                release.wait(timeout=5)
+            return SourceResult(source=source)
+
+        search._search_source = search_source
+        stream = search.stream_search("anything", limit=1)
+        try:
+            self.assertEqual(next(stream)["type"], "started")
+            self.assertEqual(next(stream)["type"], "source")
+            self.assertTrue(slow_started.wait(timeout=5))
+            stream.close()
+
+            self.assertTrue(search._inflight)
+            release.set()
+            deadline = time.monotonic() + 5
+            while search._inflight and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(search._inflight)
+            cached = list(search.stream_search("anything", limit=1))
+            self.assertEqual(cached[-1]["type"], "done")
+        finally:
+            release.set()
+            search._executor.shutdown(wait=True)
+
     def test_debug_flag_gates_ranking_explanation(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

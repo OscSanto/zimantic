@@ -351,15 +351,21 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
         def events():
             source_filter = source[0] if source and len(source) == 1 else source
-            for event in search_class.stream_search(
+            stream = search_class.stream_search(
                 q,
                 zim,
                 limit,
                 offset,
                 source_filter,
                 debug,
-            ):
-                yield json.dumps(event, separators=(",", ":")) + "\n"
+            )
+            try:
+                for event in stream:
+                    yield json.dumps(event, separators=(",", ":")) + "\n"
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    close()
 
         return StreamingResponse(
             events(),

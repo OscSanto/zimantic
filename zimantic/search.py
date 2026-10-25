@@ -2587,9 +2587,11 @@ class Search:
         inflight_key = (generation, cache_key)
         acquired = False
         futures: list[Future[SourceResult]] = []
+        completed_futures: set[Future[SourceResult]] = set()
         completed: list[SourceResult] = []
         reported_counts: dict[str, int | None] = {}
         cache_value: Any = None
+        abandoned = False
         try:
             # Wait briefly for a slot so a burst of retries can be absorbed;
             # only give up (busy) when nothing frees within the budget. Done
@@ -2678,6 +2680,7 @@ class Search:
                         error=f"search failed: {error}",
                         status="error",
                     )
+                completed_futures.add(future)
                 completed.append(result)
                 should_rank = (
                     len(completed) == 1
@@ -2752,16 +2755,114 @@ class Search:
                 page_size,
                 matched_by,
             )
+        except GeneratorExit:
+            # A disconnected streaming response closes this generator while
+            # source workers are still running. Let a background finalizer drain
+            # them and populate the shared cache instead of starting duplicate
+            # searches for the next page reload.
+            abandoned = True
+            raise
         finally:
+            if abandoned and futures:
+                threading.Thread(
+                    target=self._finish_abandoned_search,
+                    args=(
+                        query,
+                        cache_key,
+                        generation,
+                        pending,
+                        sources,
+                        source,
+                        offset,
+                        page_size,
+                        debug,
+                        futures,
+                        completed_futures,
+                        completed,
+                        reported_counts,
+                        acquired,
+                    ),
+                    name="zimantic-abandoned-search",
+                    daemon=True,
+                ).start()
+            else:
+                for future in futures:
+                    future.cancel()
+                if acquired:
+                    self._release_search_slot()
+                self._finish_inflight(inflight_key, pending, cache_value)
+
+    def _finish_abandoned_search(
+        self,
+        query: str,
+        cache_key: Any,
+        generation: int,
+        pending: Future,
+        sources: list[SourceInfo],
+        source: str | list[str] | None,
+        offset: int,
+        page_size: int,
+        debug: bool,
+        futures: list[Future[SourceResult]],
+        completed_futures: set[Future[SourceResult]],
+        completed: list[SourceResult],
+        reported_counts: dict[str, int | None],
+        acquired: bool,
+    ) -> None:
+        """Finish a search after its streaming client has disconnected."""
+        inflight_key = (generation, cache_key)
+        cache_value: Any = None
+        try:
+            future_sources = dict(zip(futures, sources))
             for future in futures:
-                future.cancel()
+                if future in completed_futures:
+                    continue
+                src = future_sources[future]
+                try:
+                    result = future.result()
+                except Exception as error:
+                    result = SourceResult(
+                        source=src,
+                        error=f"search failed: {error}",
+                        status="error",
+                    )
+                completed.append(result)
+
+            pool_target = self._pool_target()
+            pool = self._rank_results(completed, query, pool_target)
+            pool = self._enrich_pool(completed, query, pool, pool_target)
+            state = self._page_state(pool, source, offset, page_size, debug)
+            self._hydrate_results(state["results"])
+            hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
+            for doc in pool:
+                if doc["id"] in hydrated:
+                    doc["lead"] = hydrated[doc["id"]]
+            cache_value = {
+                "generation": generation,
+                "pool": pool,
+                "sources": [
+                    result.to_event(reported_counts.get(result.source.key))
+                    for result in completed
+                ],
+                "pool_target": pool_target,
+            }
+            with self._state_lock:
+                current_generation = getattr(self, "_cache_generation", 0)
+            if current_generation == generation:
+                self.cache.put(cache_key, cache_value)
+        except Exception:
+            logger.exception("zimantic: abandoned search finalization failed")
+        finally:
             if acquired:
-                self._search_slots.release()
-                condition = getattr(self, "_slot_condition", None)
-                if condition is not None:
-                    with condition:
-                        condition.notify_all()
+                self._release_search_slot()
             self._finish_inflight(inflight_key, pending, cache_value)
+
+    def _release_search_slot(self) -> None:
+        self._search_slots.release()
+        condition = getattr(self, "_slot_condition", None)
+        if condition is not None:
+            with condition:
+                condition.notify_all()
 
     def _acquire_search_slot(self) -> bool:
         """Take a search slot, waiting up to ``SLOT_WAIT_SECONDS`` for one.
