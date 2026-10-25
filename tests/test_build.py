@@ -56,7 +56,8 @@ def _meta(path: Path) -> dict[str, str]:
 class BuildUpgradeTests(unittest.TestCase):
     def test_fast_index_stays_searchable_until_full_upgrade_is_published(self):
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
             db_path = directory / "manual.sqlite"
             faiss_path = directory / "manual.faiss"
             _create_fast_index(db_path)
@@ -107,7 +108,8 @@ class BuildUpgradeTests(unittest.TestCase):
 
     def test_force_fast_rebuild_replaces_sqlite_and_removes_faiss(self):
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
             db_path = directory / "manual.sqlite"
             faiss_path = directory / "manual.faiss"
             _create_done_index(db_path)
@@ -133,7 +135,8 @@ class BuildUpgradeTests(unittest.TestCase):
 
     def test_force_full_rebuild_replaces_existing_faiss(self):
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
             db_path = directory / "manual.sqlite"
             faiss_path = directory / "manual.faiss"
             _create_done_index(db_path)
@@ -161,7 +164,8 @@ class BuildUpgradeTests(unittest.TestCase):
             entry_count = 1
 
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
             db_path = directory / "manual.sqlite"
             zim_path = directory / "manual.zim"
             zim_path.write_bytes(b"x" * 200)
@@ -243,7 +247,8 @@ class BuildBatchTests(unittest.TestCase):
         saved = []
 
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
 
             def save(_db, _embedder, batch, next_entry):
                 saved.append((len(batch), next_entry))
@@ -359,7 +364,8 @@ class EmbeddingPipelineTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
             pipeline = build_module.EmbeddingPipeline(_FakeEmbedder(), workers=1)
 
             def write_fake_faiss(db, path):
@@ -396,7 +402,8 @@ class FaissTrainingSamplingTests(unittest.TestCase):
                 pass
 
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
             db = sqlite3.connect(directory / "manual.sqlite")
             db.execute("CREATE TABLE vecs(id INTEGER PRIMARY KEY, v BLOB)")
             vector = np.array([1.0, 2.0], dtype=np.float16).tobytes()
@@ -444,7 +451,8 @@ class BuildInterruptTests(unittest.TestCase):
             path.write_bytes(b"vectors")
 
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
             db_path = directory / "manual.sqlite"
             faiss_path = directory / "manual.faiss"
 

@@ -1,8 +1,8 @@
 """Single-file catalog of the local ZIM archives.
 
-Zimantic stores one SQLite search index per ZIM.  This module adds a separate,
-single ``catalog.sqlite`` in ``index_dir`` that holds the metadata shared by all
-local archives.  It is a disposable cache: the ZIM files under ``zim_dir`` are
+Zimantic stores one SQLite search index per ZIM. This module adds a separate,
+single ``catalog.sqlite`` beside ``index_dir`` that holds the metadata shared by all
+local archives. It is a disposable cache: the ZIM files under ``zim_dir`` are
 the source of truth, and deleting the catalog simply makes the next scan
 rebuild it.
 
@@ -28,16 +28,30 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from .redirects import resolve_redirect_entry
 
 logger = logging.getLogger(__name__)
 
 CATALOG_FILENAME = "catalog.sqlite"
-# Bump when the table layout or the metadata derivation changes.  The catalog is
+
+
+def catalog_path(index_dir: Path | str) -> Path:
+    """Default location of the shared catalog, beside an ``indexes/`` directory.
+
+    Keeping the catalog outside ``index_dir`` avoids colliding with a ZIM whose
+    filename stem is ``catalog`` (whose index is ``catalog.sqlite``) and makes
+    the index directory contain only per-ZIM files.
+    """
+    return Path(index_dir).parent / CATALOG_FILENAME
+
+
+# Bump when the table layout or the metadata derivation changes. The catalog is
 # disposable, so a mismatch triggers a full rescan instead of a migration.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MAX_FAVICON_BYTES = 1 << 20
-# Library thumbnail size.  libzim's default is also 48, but passing it keeps
+# Library thumbnail size. libzim's default is also 48, but passing it keeps
 # the on-disk catalog identical to IIAB's iiab_zim_catalog.py.
 ILLUSTRATION_SIZE = 48
 
@@ -52,21 +66,36 @@ def is_zim_filename(name: str) -> bool:
     return name.lower().endswith(".zim")
 
 
-# Serializes schema creation between threads in one process.  Cross-process
+def iter_zim_files(root: Path | str, on_error=None) -> Iterator[Path]:
+    """Yield ``*.zim`` files below ``root`` in a stable order.
+
+    Build, catalog, and serve discovery all need the same traversal rules
+    (recursive, no symlinked-directory following). Keeping one enumerator here
+    prevents their directory filters from drifting apart. ``on_error`` receives
+    the ``OSError`` for unreadable directories, like ``os.walk``.
+    """
+    for directory, dirnames, filenames in os.walk(root, onerror=on_error):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if is_zim_filename(name):
+                yield Path(directory, name)
+
+
+# Serializes schema creation between threads in one process. Cross-process
 # callers are serialized by BEGIN IMMEDIATE below.
 _SCHEMA_LOCK = threading.Lock()
 
-# Columns of the zims table.  Verified before trusting ``user_version``, so a
-# catalog written by a different schema (e.g. IIAB's iiab_zim_catalog.py, which
-# reuses the filename and SCHEMA_VERSION but not the layout) is rebuilt instead
-# of failing every query with "no such column".
+# Columns of the zims table. Verified before trusting ``user_version``, so a
+# catalog written by a different schema (for example IIAB's iiab_zim_catalog.py,
+# which reuses the filename and SCHEMA_VERSION but not the layout) is rebuilt
+# instead of failing every query with "no such column".
 _SCHEMA_COLUMNS = (
     "path", "stem", "uuid", "size", "mtime", "title", "description",
     "long_description", "language", "creator", "publisher", "date", "tags",
     "public_tags", "name", "flavour", "category", "article_count",
     "media_count", "entry_count", "license", "scraper", "source",
     "attribution", "relation", "counter", "homepage", "has_fulltext_index",
-    "favicon", "favicon_mime", "icon_path", "has_illustration", "available",
+    "favicon", "favicon_mime", "icon_path", "available",
     "last_error", "scanned_at",
 )
 
@@ -134,18 +163,9 @@ def resolve_homepage(archive: Any) -> str:
     try:
         if not _call_maybe(getattr(archive, "has_main_entry", False)):
             return ""
-        entry = archive.main_entry
-        seen: set[str] = set()
-        for _ in range(32):
-            if not entry.is_redirect:
-                return entry.path or ""
-            if entry.path in seen:
-                return ""
-            seen.add(entry.path)
-            entry = entry.get_redirect_entry()
+        return resolve_redirect_entry(archive.main_entry).path or ""
     except Exception:
         return ""
-    return ""
 
 
 def parse_tags(tags: str) -> dict[str, str]:
@@ -163,7 +183,7 @@ def normalize_tags(tags: str) -> str:
     """Normalize tags exactly like libkiwix's ``convertTags()``.
 
     Old bare tags (nopic/novid/nodet) become ``_pictures:no`` etc., and missing
-    defaults are appended.  This keeps Zimantic's view of a ZIM consistent with
+    defaults are appended. This keeps Zimantic's view of a ZIM consistent with
     Kiwix/OPDS consumers.
     """
     parts = [tag.strip() for tag in _text(tags).split(";") if tag.strip()]
@@ -271,14 +291,12 @@ def metadata_from_archive(archive: Any, zim_path: Path | str) -> dict[str, Any]:
 
     favicon = None
     favicon_mime = ""
-    has_illustration = 0
     try:
         item = archive.get_illustration_item(ILLUSTRATION_SIZE)
         data = bytes(item.content)
         if len(data) <= MAX_FAVICON_BYTES:
             favicon = data
             favicon_mime = item.mimetype or ""
-            has_illustration = 1
         else:
             logger.warning(
                 "ignoring %s illustration of %d bytes (limit %d)",
@@ -342,7 +360,6 @@ def metadata_from_archive(archive: Any, zim_path: Path | str) -> dict[str, Any]:
         "favicon": favicon,
         "favicon_mime": favicon_mime,
         "icon_path": icon_path,
-        "has_illustration": has_illustration,
         "available": 1,
         "last_error": "",
         "scanned_at": time.time(),
@@ -382,7 +399,6 @@ class CatalogRecord:
     favicon: bytes | None
     favicon_mime: str
     icon_path: str
-    has_illustration: int
     available: int
     last_error: str
     scanned_at: float
@@ -464,7 +480,7 @@ class ZimCatalog:
             current, _version = self._schema_current()
             if current:
                 return
-            # Serialize the rebuild with other processes (e.g. parallel
+            # Serialize the rebuild with other processes (for example, parallel
             # ``zimantic build`` workers), then re-check: another process may
             # have rebuilt the catalog while we waited for the lock.
             self.db.execute("BEGIN IMMEDIATE")
@@ -525,7 +541,6 @@ class ZimCatalog:
                 favicon BLOB,
                 favicon_mime TEXT NOT NULL DEFAULT '',
                 icon_path TEXT NOT NULL DEFAULT '',
-                has_illustration INTEGER NOT NULL DEFAULT 0,
                 available INTEGER NOT NULL DEFAULT 1,
                 last_error TEXT NOT NULL DEFAULT '',
                 scanned_at REAL NOT NULL
@@ -562,7 +577,7 @@ class ZimCatalog:
             "article_count", "media_count", "entry_count", "license", "scraper",
             "source", "attribution", "relation", "counter",
             "homepage", "has_fulltext_index", "favicon", "favicon_mime",
-            "icon_path", "has_illustration", "available", "last_error",
+            "icon_path", "available", "last_error",
             "scanned_at",
         ]
         values = {key: record.get(key) for key in columns}
@@ -627,14 +642,14 @@ class ZimCatalog:
             self._revision += 1
             self.db.commit()
 
-    def scan(self, force: bool = False) -> dict[str, int]:
+    def scan(self) -> dict[str, int]:
         """Reconcile the catalog with ``zim_dir``.
 
-        Only new, resized, retimed or previously failing archives are opened.  A
+        Only new, resized, retimed or previously failing archives are opened. A
         ZIM that cannot be read keeps its old metadata (if any) but is marked
-        unavailable; it is retried on every scan.  A missing or unreadable
+        unavailable; it is retried on every scan. A missing or unreadable
         ``zim_dir`` raises instead of treating every row as removed, so an
-        unmounted drive keeps the previous cache and library.  A subdirectory
+        unmounted drive keeps the previous cache and library. A subdirectory
         that cannot be listed keeps its rows but does not block updates to the
         rest of the tree.
         """
@@ -666,21 +681,17 @@ class ZimCatalog:
                 unreadable_roots.add(str(target))
             logger.warning("zimantic: cannot list %s (%s)", target, error)
 
-        for root, _dirs, names in os.walk(self.zim_dir, onerror=remember_error):
-            for name in names:
-                if not is_zim_filename(name):
-                    continue
-                path = Path(root, name)
-                try:
-                    files[str(path.resolve())] = path.stat()
-                except OSError as error:
-                    # A transient stat failure must not look like a deletion.
-                    stat_failed.add(str(path.resolve()))
-                    logger.warning(
-                        "zimantic: cannot stat %s (%s); keeping its row",
-                        path,
-                        error,
-                    )
+        for path in iter_zim_files(self.zim_dir, on_error=remember_error):
+            try:
+                files[str(path.resolve())] = path.stat()
+            except OSError as error:
+                # A transient stat failure must not look like a deletion.
+                stat_failed.add(str(path.resolve()))
+                logger.warning(
+                    "zimantic: cannot stat %s (%s); keeping its row",
+                    path,
+                    error,
+                )
         if top_error is not None:
             # The tree itself could not be listed; a scan would look like every
             # ZIM was removed, so fail and keep the previous catalog instead.
@@ -714,7 +725,7 @@ class ZimCatalog:
             )
 
         # Unit tests replace libzim.reader.Archive with ``object`` to prevent
-        # accidental archive access.  In that environment the catalog cannot
+        # accidental archive access. In that environment the catalog cannot
         # inspect ZIMs; leave it empty so Search's archive fallback still works.
         _Archive = self.archive_factory
         if _Archive is None:
@@ -729,8 +740,7 @@ class ZimCatalog:
         for path_str, stat in files.items():
             row = existing.get(path_str)
             if (
-                not force
-                and row is not None
+                row is not None
                 and row["available"]
                 and row["size"] == stat.st_size
                 and abs(float(row["mtime"]) - stat.st_mtime) < 1e-6
@@ -771,10 +781,6 @@ class ZimCatalog:
         with self._lock:
             return [CatalogRecord.from_row(row) for row in self.db.execute(query)]
 
-    def get_path(self, path: Path | str) -> sqlite3.Row | None:
-        with self._lock:
-            return self._get_path_locked(path)
-
     def get_stem(self, stem: str) -> CatalogRecord | None:
         with self._lock:
             row = self.db.execute(
@@ -797,15 +803,6 @@ class ZimCatalog:
             return CatalogRecord.from_row(row)
         return self.get_stem(stem)
 
-    def by_stem(self) -> dict[str, CatalogRecord]:
-        records: dict[str, CatalogRecord] = {}
-        with self._lock:
-            rows = self.db.execute("SELECT * FROM zims ORDER BY size DESC").fetchall()
-        for row in rows:
-            record = CatalogRecord.from_row(row)
-            records.setdefault(record.stem, record)
-        return records
-
     def favicon(self, stem: str) -> tuple[bytes | None, str]:
         with self._lock:
             row = self.db.execute(
@@ -816,12 +813,3 @@ class ZimCatalog:
         if not row:
             return None, ""
         return row["favicon"], row["favicon_mime"] or ""
-
-
-def read_catalog(db_path: Path | str) -> list[CatalogRecord]:
-    """Read an existing catalog; return ``[]`` when it is absent."""
-    path = Path(db_path)
-    if not path.exists():
-        return []
-    with ZimCatalog(path) as catalog:
-        return catalog.rows()

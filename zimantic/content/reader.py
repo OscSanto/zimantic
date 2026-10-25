@@ -1,12 +1,17 @@
 import codecs
 import json
+import logging
 import posixpath
 import re
 import time
 from html.parser import HTMLParser
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from typing import Any, Iterator, NamedTuple, Protocol, cast
 from libzim.reader import Archive
+
+from ..redirects import RedirectError, resolve_redirect_entry
+
+logger = logging.getLogger(__name__)
 
 try:
     from libzim.reader import set_cluster_cache_max_size
@@ -75,7 +80,7 @@ _READABLE_MIMETYPES = frozenset({
 _PLAIN_TEXT_ASSET = re.compile(
     r"(^|/)\.[^/]*$"  # dotfiles such as .gitignore
     # Non-prose, machine-readable or media files (with an optional ?query/#frag).
-    r"|(?i:\.(?:md|markdown|rst|json|jsonl|ya?ml|toml|ini|cfg|conf|js|mjs|cjs"
+    r"|(?i:\.(?:json|jsonl|ya?ml|toml|ini|cfg|conf|js|mjs|cjs"
     r"|css|scss|less|xml|svg|png|jpe?g|gif|webp|ico|csv|tsv|log|lock|map"
     r"|handlebars|hbs|mustache|twig|liquid|jade|pug|ejs|tmpl|tpl))"
     r"(?:[?#][^/]*)?$"
@@ -523,12 +528,31 @@ def extract_excerpt(
     return _join_blocks(candidates, max_chars)
 
 
-def _json_body(zim: Archive, path: str) -> bytes | None:
-    """Return a text body from the JSON entry at ``path``, or None."""
+def _json_body(
+    zim: Archive,
+    path: str,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
+) -> bytes | None:
+    """Return a text body from the JSON entry at ``path``, or None.
+
+    Companion bodies are subject to the same decompressed-size ceiling as the
+    article that references them; otherwise a shell stub could bypass the
+    build's memory guard through its JSON payload.
+    """
     if not path or not zim.has_entry_by_path(path):
         return None
     try:
-        payload = json.loads(bytes(zim.get_entry_by_path(path).get_item().content))
+        item = zim.get_entry_by_path(path).get_item()
+        size = int(getattr(item, "size", 0) or 0)
+        if size > max_entry_bytes:
+            logger.warning(
+                "ignoring %s companion of %d bytes (limit %d)",
+                path,
+                size,
+                max_entry_bytes,
+            )
+            return None
+        payload = json.loads(bytes(item.content))
     except (LookupError, RuntimeError, TypeError, ValueError):
         return None
     if not isinstance(payload, dict):
@@ -563,15 +587,29 @@ MARKDOWN_MIME_TYPES = frozenset({
 })
 
 
-def _markdown_source(zim: Archive, path: str) -> bytes | None:
+def _markdown_source(
+    zim: Archive,
+    path: str,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
+) -> bytes | None:
     """Return the entry at ``path`` when it is a Markdown source, else None.
 
     Companions are recognized by their common Markdown extension or MIME type;
-    ZIM packaging does not always keep those signals consistent.
+    ZIM packaging does not always keep those signals consistent. The
+    decompressed-size ceiling applies to the companion, not just its stub.
     """
     if not path or not zim.has_entry_by_path(path):
         return None
     item = zim.get_entry_by_path(path).get_item()
+    size = int(getattr(item, "size", 0) or 0)
+    if size > max_entry_bytes:
+        logger.warning(
+            "ignoring %s companion of %d bytes (limit %d)",
+            path,
+            size,
+            max_entry_bytes,
+        )
+        return None
     mimetype = item.mimetype.split(";", 1)[0].strip().lower()
     extension = posixpath.splitext(path)[1].lower()
     if extension in MARKDOWN_EXTENSIONS or mimetype in MARKDOWN_MIME_TYPES:
@@ -579,7 +617,12 @@ def _markdown_source(zim: Archive, path: str) -> bytes | None:
     return None
 
 
-def _companion(zim: Archive, entry, fragment: str):
+def _companion(
+    zim: Archive,
+    entry,
+    fragment: str,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
+):
     """Return an app-shell stub's companion body, or None.
 
     Returns ``("body", bytes)`` for a JSON companion whose text may be HTML or
@@ -607,7 +650,7 @@ def _companion(zim: Archive, entry, fragment: str):
             )
         json_candidates.append(posixpath.join(base, slug + ".json"))
     for candidate in json_candidates:
-        body = _json_body(zim, candidate)
+        body = _json_body(zim, candidate, max_entry_bytes)
         if body is not None:
             return ("body", body)
 
@@ -633,7 +676,7 @@ def _companion(zim: Archive, entry, fragment: str):
     )
     markdown_candidates.append(posixpath.join(base, names[1]))
     for candidate in markdown_candidates:
-        source = _markdown_source(zim, candidate)
+        source = _markdown_source(zim, candidate, max_entry_bytes)
         if source is not None:
             return ("markdown", source)
     return None
@@ -846,6 +889,46 @@ def _read_plain_text_entry(
     return EntryRecord(entry_id, title, excerpt, entry.path, None)
 
 
+def _redirect_target(entry):
+    """Follow a redirect chain to its final article, or None when it cannot be resolved.
+
+    Serving resolves redirects recursively (``resolve_redirect_entry``), so
+    indexing must store the same final target instead of only the first hop. A
+    cycle, an error, or an over-long chain yields None.
+    """
+    try:
+        return resolve_redirect_entry(entry)
+    except RedirectError:
+        return None
+
+
+def _refresh_target(entry_path: str, refresh_url: str) -> tuple[str, str] | None:
+    """Resolve a meta-refresh URL to ``(archive path, fragment)``.
+
+    Meta refresh targets may be relative or site-absolute (``/index.html``),
+    and may carry a query string before the fragment. Only the path identifies
+    an archive entry; the query is not part of the ZIM path.
+    """
+    parsed = urlsplit(unquote(refresh_url))
+    fragment = parsed.fragment
+    path_part = parsed.path
+    if not path_part:
+        if parsed.scheme or parsed.netloc:
+            return None
+        # A fragment-only refresh stays on the current entry; its companion may
+        # still supply the real body.
+        return entry_path, fragment
+    if path_part.startswith("/"):
+        path = posixpath.normpath(path_part).lstrip("/")
+    else:
+        path = posixpath.normpath(
+            posixpath.join(posixpath.dirname(entry_path), path_part)
+        )
+    if not path or path == "." or any(part == ".." for part in path.split("/")):
+        return None
+    return path, fragment
+
+
 def _read_html_entry(
     zim: Archive,
     entry,
@@ -853,6 +936,8 @@ def _read_html_entry(
     html: bytes,
     max_preview_chars: int,
     deadline: float | None = None,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
+    truncated: bool = False,
 ) -> EntryRecord | None:
     if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(html):
         # A script/data file served as HTML (zimit crawls do this for <site>.js)
@@ -862,12 +947,17 @@ def _read_html_entry(
     refresh_url = _refresh_url(html)
 
     if refresh_url:
-        url = unquote(refresh_url)
-        base, _, fragment = url.partition("#")
-        path = posixpath.normpath(posixpath.join(posixpath.dirname(entry.path), base))
+        target = _refresh_target(entry.path, refresh_url)
+        if target is None:
+            return None
+        path, fragment = target
         if not zim.has_entry_by_path(path):
             return None
-        companion = _companion(zim, entry, fragment) if fragment else None
+        companion = (
+            _companion(zim, entry, fragment, max_entry_bytes)
+            if fragment
+            else None
+        )
         if companion is not None:
             kind, body = companion
             if kind == "markdown":
@@ -907,13 +997,15 @@ def _read_html_entry(
                         entry.path,
                         None,
                     )
-        target = zim.get_entry_by_path(path)
+        redirect = _redirect_target(zim.get_entry_by_path(path))
+        if redirect is None or redirect.path == entry.path:
+            return None
         return EntryRecord(
             entry_id,
             entry.title,
             "",
-            target.path,
-            target._index,
+            redirect.path,
+            redirect._index,
         )
 
     excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars, deadline=deadline)
@@ -932,11 +1024,14 @@ def _read_html_entry(
             # every article onto the shell.
             return EntryRecord(entry_id, entry.title, "", entry.path, None)
         excerpt = truncate_at_word_boundary(_meta_description(html), max_preview_chars)
-    title = (
-        disambiguation_title(entry.title)
-        if is_disambiguation(entry.title, excerpt, html)
-        else entry.title
-    )
+        if not excerpt:
+            # Empty page: no visible text and no usable metadata. Loader shells
+            # and truncation-limited parses were handled above; a disambiguation
+            # hub still needs its stored title suffix.
+            if not truncated and not is_disambiguation(entry.title, "", html):
+                return None
+    disambiguation = is_disambiguation(entry.title, excerpt, html)
+    title = disambiguation_title(entry.title) if disambiguation else entry.title
     return EntryRecord(entry_id, title, excerpt, entry.path, None)
 
 
@@ -949,7 +1044,7 @@ def read_entry(
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     timeout: float | None = None,
 ) -> EntryRecord | None:
-    """Return (id, title, excerpt, path, target_id), or None.
+    """Return an ``EntryRecord`` for the entry, or None when it is not indexable.
 
     Redirects (real ones, and small meta refresh pages) get empty excerpts and the
     path and id of the page they point to, so they are searchable by title only.
@@ -965,7 +1060,9 @@ def read_entry(
     """
     entry = zim._get_entry_by_id(i)
     if entry.is_redirect:
-        target = entry.get_redirect_entry()
+        target = _redirect_target(entry)
+        if target is None:
+            return None
         return EntryRecord(i, entry.title, "", target.path, target._index)
 
     item = entry.get_item()
@@ -996,6 +1093,7 @@ def read_entry(
     # A PDF cannot be parsed from a prefix (its cross-reference table sits at the
     # end), and libzim has already decompressed the whole entry, so read it whole.
     raw = bytes(content) if mimetype == "application/pdf" else bytes(content[:html_limit])
+    truncated = mimetype != "application/pdf" and len(content) > html_limit
     del content, item
 
     if mimetype == "application/pdf":
@@ -1003,5 +1101,12 @@ def read_entry(
     if mimetype == "text/plain":
         return _read_plain_text_entry(entry, i, raw, max_preview_chars)
     return _read_html_entry(
-        cast(Archive, zim), entry, i, raw, max_preview_chars, deadline=deadline
+        cast(Archive, zim),
+        entry,
+        i,
+        raw,
+        max_preview_chars,
+        deadline=deadline,
+        max_entry_bytes=entry_limit,
+        truncated=truncated,
     )

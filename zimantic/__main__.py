@@ -76,11 +76,6 @@ def _wait_for_stable_sizes(paths: set[Path]) -> None:
         sizes = downloading
 
 
-def _wait_for_stable_size(path: Path) -> None:
-    """Wait for one ZIM to finish being written before indexing it."""
-    _wait_for_stable_sizes({path})
-
-
 def _find_downloading_sizes(zim_sizes: dict[Path, int]) -> set[Path]:
     """Find ZIMs whose sizes changed during the initial polling interval."""
     time.sleep(STABLE_POLL_SECONDS)
@@ -118,7 +113,7 @@ def _make_parser() -> argparse.ArgumentParser:
         "--dev",
         dest="debug",
         action="store_true",
-        help="include ranking scores and explanations; --dev is an alias and SIGHUP restarts",
+        help="include ranking scores in results; in this mode SIGHUP restarts",
     )
 
     build = commands.add_parser("build", help="index ZIM files")
@@ -171,17 +166,13 @@ def _make_parser() -> argparse.ArgumentParser:
 
 def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
     """Expand CLI files and folders into unique ZIM paths."""
-    from .catalog import is_zim_filename
+    from .catalog import iter_zim_files
 
     zims: list[Path] = []
     seen: set[Path] = set()
     for source in (paths or [Path(default_dir)]):
         if source.is_dir():
-            matches = sorted(
-                zim
-                for zim in source.rglob("*")
-                if is_zim_filename(zim.name) and zim.is_file()
-            )
+            matches = [zim for zim in iter_zim_files(source) if zim.is_file()]
         elif source.is_file():
             matches = [source]
         else:
@@ -192,6 +183,35 @@ def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
                 seen.add(resolved)
                 zims.append(zim)
     return zims
+
+
+def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path]:
+    """Choose one archive per index identity, preferring the largest copy."""
+    by_stem: dict[str, list[Path]] = {}
+    for zim in zims:
+        by_stem.setdefault(zim.stem, []).append(zim)
+    accepted: list[Path] = []
+    for stem, paths in sorted(by_stem.items()):
+        sizes = {zim_sizes[path] for path in paths}
+        # Build and serve use the largest copy for an ambiguous stem. The
+        # catalog keeps every row but resolves the stem to its largest file, so
+        # all three agree on which archive wins.
+        chosen = max(paths, key=zim_sizes.__getitem__)
+        if len(sizes) > 1:
+            logger.warning(
+                "zimantic: ZIM files share index identity %r with different sizes; "
+                "using the largest %s",
+                stem,
+                chosen,
+            )
+        elif len(paths) > 1:
+            logger.warning(
+                "zimantic: ignoring duplicate ZIM files with index identity %r: %s",
+                stem,
+                ", ".join(str(path) for path in paths if path != chosen),
+            )
+        accepted.append(chosen)
+    return sorted(accepted, key=zim_sizes.__getitem__)
 
 
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
@@ -220,30 +240,9 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
 
     zim_sizes = {zim: zim.stat().st_size for zim in zims}
     downloading = _find_downloading_sizes(zim_sizes)
-
-    by_stem: dict[str, list[Path]] = {}
-    for zim in zims:
-        by_stem.setdefault(zim.stem, []).append(zim)
-    accepted: list[Path] = []
-    for stem, paths in sorted(by_stem.items()):
-        sizes = {zim_sizes[path] for path in paths}
-        if len(sizes) > 1:
-            logger.warning(
-                "zimantic: ignoring ZIM files with conflicting index identity %r: %s",
-                stem,
-                ", ".join(f"{path} ({zim_sizes[path]} bytes)" for path in paths),
-            )
-            continue
-        if len(paths) > 1:
-            logger.warning(
-                "zimantic: ignoring duplicate ZIM files with index identity %r: %s",
-                stem,
-                ", ".join(str(path) for path in paths[1:]),
-            )
-        accepted.append(paths[0])
-    zims = sorted(accepted, key=zim_sizes.__getitem__)
+    zims = _select_zim_paths(zims, zim_sizes)
     if not zims:
-        logger.info("zimantic: no non-conflicting .zim files to index")
+        logger.info("zimantic: no .zim files to index")
         return
 
     if downloading:

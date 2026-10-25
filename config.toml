@@ -12,7 +12,7 @@ zim_dir = "./zims"
 model_dir = "./model"
 
 # Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.
-# Created automatically. 
+# catalog.sqlite lives beside this directory
 # (Recommended; for large ZIMs, build the index on a faster machine and copy both files here)
 index_dir = "./indexes"
 
@@ -24,16 +24,13 @@ port = 8090
 # Optional URL path prefix when a reverse proxy strips it before forwarding.
 # web_base_path = "/zimantic"
 
-# Optional Kiwix compatibility for remote-only results. Start kiwix-serve separately, for example:
-#   kiwix-serve --port=8085 ./zims/*.zim
-# Then uncomment this setting. Use this machine's address instead of localhost if results are
-# opened by other devices. Local indexed results are served directly by Zimantic at /content.
-# kiwix_url = "http://localhost:8085/content"
-
 # Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
 # sources that do not have a local Zimantic index. Leave blank to use local
 # indexes only. Point this at a running kiwix-serve HTTP API (not a ZIM folder);
 # with the standard local setup this is often http://localhost:8085.
+#
+# Remote Kiwix result links come from kiwix-serve's own search response, so no
+# separate content URL is needed.
 kiwix_server = ""
 kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=50000"
 kiwix_catalog_limit = 50000
@@ -41,22 +38,24 @@ max_kiwix_response_bytes = 67108864
 
 # TUNING
 
-# Results per page in the UI and API.
-page_size = 10
+# Results per page in the UI and API. Values above max_results are clamped to
+# max_results because a page is sliced from the ranked pool.
+# page_size = 10
 
-# Largest ranked result pool kept and served. Pages are drawn from this pool,
-# so 100 means pagination reaches the top 100 matches. Searching still ranks
-# the whole pool once; larger values cost a little more per search and cache.
-max_results = 100
+# Largest ranked result pool kept and served. Pages are drawn from this pool.
+# Desktop 100, mobile 50, supercomputer 200.
+# max_results = 100
 
-# Articles embedded per batch. Larger batches use more memory; use about 8 on a Pi Zero 2 W.
-batch_size = 32
+# Articles embedded per batch. Desktop 32, mobile 8, supercomputer 128.
+# Larger batches use more memory; use about 8 on a Pi Zero 2 W.
+# batch_size = 32
 
 # Independent ZIMs can be built concurrently. When unset, the default scales with
 # available CPU and RAM; set it explicitly to override the automatic worker count.
 # build_workers = 2
 
 # ONNX Runtime threads for embedding. Unset leaves a core for search and the web server.
+# Desktop auto, mobile 2, supercomputer 8.
 # embed_threads = 3
 
 # Maximum simultaneous embedding calls when multiple ZIMs are being built. When
@@ -64,47 +63,53 @@ batch_size = 32
 # embedding_workers = 2
 
 # Maximum HTML read per article.
-max_html_bytes = 4_194_304
+# max_html_bytes = 4_194_304
 
-# Maximum decompressed entry materialized while building. This is intentionally
-# high for large, friendly ZIM articles; lower it on memory-constrained hosts.
-max_entry_bytes = 1073741824
+# Maximum decompressed entry materialized while building. Desktop 1 GiB,
+# mobile 256 MiB, supercomputer 4 GiB. This is intentionally high for large,
+# friendly ZIM articles; lower it on memory-constrained hosts.
+# max_entry_bytes = 1073741824
 
-# Maximum uncompressed local ZIM entry served by /content. This caps per-request memory use for
-# HTML and binary assets alike; max_html_bytes is the separate indexing/parser limit.
-max_article_bytes = 33_554_432
+# Maximum uncompressed local ZIM entry served or previewed. This caps per-request memory use for
+# HTML and binary assets alike; max_html_bytes is the separate parser limit.
+# max_article_bytes = 33_554_432
 
 # Maximum preview characters extracted for displayed results; build-time extraction is transient.
-max_preview_chars = 1_000
+# max_preview_chars = 1_000
 
-# Large ZIMs only (10,000+ articles): how many groups of vectors each search scans.
-# By default, searches scan about 6% of the groups, scaling automatically with ZIM size.
+# Large ZIMs only (10,000+ articles): how many IVF clusters each search scans.
+# By default, searches scan about 6% of the clusters, scaling automatically with ZIM size.
 # Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
 # nprobe = 64
 
 # Meaning matches below this cosine similarity are discarded. Cross-language
 # queries (for example Chinese, Hindi or Arabic against an English ZIM) score
 # lower; 0.80 often recovers them at the cost of more weak matches.
-min_cosine_similarity = 0.85
+# min_cosine_similarity = 0.85
 
-# Search workers. More workers reduce wall-clock time when many ZIMs are on
-# separate storage, but increase concurrent I/O and SQLite connections.
-search_workers = 8
-# Maximum simultaneous user searches. Several people can search at once up to
-# this many; each search may still use all source workers. Lower it on a Pi.
-max_concurrent_searches = 4
-# Minimum candidates requested from each source before fusion. The actual
-# per-source count scales with the number of sources searched, so a single
-# source still returns the whole pool while hundreds of sources each fetch only
-# their share. Raise it to trade speed for recall.
-candidate_count = 16
+# Search workers. Desktop 8, mobile 2, supercomputer 16. More workers reduce
+# wall-clock time when many ZIMs are on separate storage, but increase
+# concurrent I/O and SQLite connections.
+# search_workers = 8
+# Maximum simultaneous user searches. Desktop 4, mobile 2, supercomputer 8.
+# Several people can search at once up to this many; each search may still use
+# all source workers. Lower it on a Pi.
+# max_concurrent_searches = 4
+# Minimum candidates requested from each source before fusion. Desktop/mobile
+# 16, supercomputer 32. The per-source count scales with the number of sources;
+# this is the floor, so a single source still returns the whole pool. Raise it
+# to trade speed for recall.
+# candidate_count = 16
 # Maximum completion-spaced intermediate ranking passes during a streamed
-# search. Timed snapshots are still emitted about every 700ms, and the final
-# ranking always includes every source; lower this on slow CPUs.
-max_stream_ranks = 8
+# search. Desktop 16, mobile 8, supercomputer 32. Timed snapshots are still
+# emitted about every 700 ms, and the final ranking always includes every source;
+# lower this on slow CPUs.
+# max_stream_ranks = 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
-source_timeout = 12
+# source_timeout = 12
 # Exact-query LRU cache. Set cache_size to 0 to disable.
-cache_size = 256
+# Desktop 256, mobile 64, supercomputer 1024.
+# cache_size = 256
 # The byte budget applies independently to the search and preview caches.
-cache_bytes = 33_554_432  # 32 MiB per cache
+# Desktop 32 MiB, mobile 8 MiB, supercomputer 256 MiB.
+# cache_bytes = 33_554_432

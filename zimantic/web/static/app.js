@@ -18,9 +18,12 @@
             };
             let PAGE_SIZE = 10; // replaced with the server's page_size at startup
             let debugMode = false;
+            // Filled from /config so highlighting uses the same stopword list as
+            // the server instead of maintaining a second copy here.
+            let HIGHLIGHT_STOPWORDS = new Set();
             const AUTO_SUBMIT_DELAY = 800;
             const AUTO_HISTORY_DELAY = 3000;
-            const MAX_QUERY_LENGTH = 4096;
+            let MAX_QUERY_LENGTH = 4096;
             // Streaming renders at two cadences:
             //  - Fast: the status line ("n/m sources complete") is updated
             //    immediately on every event, straight from the event handler.
@@ -35,9 +38,9 @@
             const BUSY_RETRY_LIMIT = 5;
             const THUMB_LIMIT = 128 * 1024;
             const THUMB_CONCURRENCY = 4;
-            const SOURCE_FILTER_LIMIT = 10;
-            const SOURCE_CACHE_KEY = "zimantic.sources.v1";
-            const LIBRARY_CACHE_KEY = "zimantic.library.v4";
+            let SOURCE_FILTER_LIMIT = 10;
+            const SOURCE_CACHE_KEY = "zimantic.sources.v2";
+            const LIBRARY_CACHE_KEY = "zimantic.library.v5";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let librarySources = [];
@@ -69,11 +72,11 @@
             let pendingModalArticleUrl = null;
             let pendingModalNavigation = null;
             let offlineLinkRequest = 0;
-            let closingModalHistory = false;
-            let closeHistoryAttempts = 0;
             let activeParentNavigation = null;
             let activeParentUrl = null;
             let parentNavigationSequence = 0;
+            const parentNavigationCache = new Map();
+            const articleAliases = new Map();
             const defaultDocumentTitle = document.title;
             const defaultIconLinks = [
                 ...document.querySelectorAll("link[rel~='icon'], link[rel='apple-touch-icon']"),
@@ -214,6 +217,11 @@
                     source.attribution,
                     source.relation,
                     source.perma_ref,
+                    source.uuid,
+                    source.homepage,
+                    source.has_fulltext_index,
+                    source.searchable,
+                    source.icon_url,
                     source.mode,
                     source.error,
                     source.counter,
@@ -229,9 +237,15 @@
 
             function libraryHomepageUrl(source) {
                 const zim = source.local_name || source.book || source.name;
-                // No path: the server resolves the ZIM's main entry.  This also
-                // avoids broken "mainPage" links from older catalogs.
-                return contentUrl(zim);
+                if (!zim) return "";
+                if (source.homepage) return contentUrl(zim, source.homepage);
+                // A readable archive can lack a resolvable main entry. If it is
+                // searchable, open a random article instead of a broken
+                // homepage link; otherwise the card has Details only.
+                if (source.searchable !== false) {
+                    return appPath(`/random?zim=${encodeURIComponent(zim)}`);
+                }
+                return "";
             }
 
             function libraryLanguage(source, join = false) {
@@ -293,6 +307,7 @@
             }
 
             function searchWithinLibrarySource(source) {
+                if (source.searchable === false) return;
                 closeLibraryInfo();
                 const key = source.key || source.local_name || source.book || source.name;
                 if (!key) return;
@@ -371,26 +386,38 @@
                     content.appendChild(text);
                 }
 
-                if (available && homepage) {
+                const searchable = source.searchable !== false;
+                if (available && (homepage || searchable)) {
                     const actions = document.createElement("div");
                     actions.className = "library-info-actions";
-                    const open = document.createElement("a");
-                    open.className = "library-button library-info-action";
-                    open.href = homepage;
-                    open.dataset.libraryArticle = "true";
-                    open.textContent = "Open";
-                    const search = document.createElement("button");
-                    search.type = "button";
-                    search.className = "library-button library-info-action";
-                    search.textContent = "Search";
-                    search.addEventListener("click", () => searchWithinLibrarySource(source));
-                    actions.append(open, search);
+                    if (homepage) {
+                        const open = document.createElement("a");
+                        open.className = "library-button library-info-action";
+                        open.href = homepage;
+                        open.dataset.libraryArticle = "true";
+                        open.textContent = source.homepage ? "Open" : "Random article";
+                        actions.append(open);
+                    }
+                    if (searchable) {
+                        const search = document.createElement("button");
+                        search.type = "button";
+                        search.className = "library-button library-info-action";
+                        search.textContent = "Search";
+                        search.addEventListener("click", () => searchWithinLibrarySource(source));
+                        actions.append(search);
+                    }
                     content.appendChild(actions);
                 } else if (!available) {
                     const unavailable = document.createElement("p");
                     unavailable.className = "library-info-unavailable";
                     unavailable.textContent =
                         source.error || "This ZIM is currently unavailable.";
+                    content.appendChild(unavailable);
+                } else {
+                    const unavailable = document.createElement("p");
+                    unavailable.className = "library-info-unavailable";
+                    unavailable.textContent =
+                        "This ZIM has no homepage and cannot be searched yet.";
                     content.appendChild(unavailable);
                 }
 
@@ -442,19 +469,6 @@
                 const wrap = document.querySelector(".wrap");
                 if (wrap) wrap.inert = true;
                 $("libraryInfoClose")?.focus();
-            }
-
-            function openableLibrarySources() {
-                return librarySources.filter(
-                    (source) => source.available !== false && source.homepage,
-                );
-            }
-
-            function openRandomLibraryArticle() {
-                const openable = openableLibrarySources();
-                if (!openable.length) return;
-                const source = openable[Math.floor(Math.random() * openable.length)];
-                navigateArticleModal(new URL(libraryHomepageUrl(source), location.href), "library");
             }
 
             function shuffleLibrary() {
@@ -548,20 +562,21 @@
                 }
                 visibleSources.forEach((source) => {
                     const title = libraryTitle(source);
-                    const homepage = libraryHomepageUrl(source);
+                    const openUrl = libraryHomepageUrl(source);
                     const stem = sourceStemName(source);
                     const card = document.createElement("article");
                     card.className = "library-card";
                     const available = source.available !== false;
+                    const linkable = available && Boolean(openUrl);
 
-                    const preview = document.createElement(available ? "a" : "div");
+                    const preview = document.createElement(linkable ? "a" : "div");
                     preview.className = "library-card-preview";
                     if (stem) preview.title = stem;
-                    if (available) {
-                        preview.href = homepage;
+                    if (linkable) {
+                        preview.href = openUrl;
                         preview.dataset.libraryArticle = "true";
                         preview.setAttribute("aria-label", `Open ${title}`);
-                    } else {
+                    } else if (!available) {
                         // The card explains the problem next to an "Unavailable"
                         // badge, so dim the artwork instead of replacing it with
                         // text (an unreadable ZIM usually still has a favicon).
@@ -588,12 +603,12 @@
                     const body = document.createElement("div");
                     body.className = "library-card-body";
                     const heading = document.createElement("h3");
-                    const titleLink = document.createElement(available ? "a" : "span");
+                    const titleLink = document.createElement(linkable ? "a" : "span");
                     titleLink.className = "library-card-title";
                     titleLink.textContent = title;
                     if (stem) titleLink.title = stem;
-                    if (available) {
-                        titleLink.href = homepage;
+                    if (linkable) {
+                        titleLink.href = openUrl;
                         titleLink.dataset.libraryArticle = "true";
                         titleLink.setAttribute("aria-label", `Open ${title}`);
                     }
@@ -602,7 +617,11 @@
                     const description =
                         source.long_description ||
                         source.description ||
-                        (available ? "" : source.error || "This ZIM cannot be opened.");
+                        (available
+                            ? linkable
+                                ? ""
+                                : "This ZIM has no homepage and cannot be searched yet."
+                            : source.error || "This ZIM cannot be opened.");
                     if (description) {
                         const text = document.createElement("p");
                         text.className = "library-card-description";
@@ -657,58 +676,8 @@
             }
 
             function queryTerms(text) {
-                const stopwords = new Set([
-                    "a",
-                    "an",
-                    "the",
-                    "is",
-                    "are",
-                    "was",
-                    "were",
-                    "be",
-                    "been",
-                    "being",
-                    "how",
-                    "what",
-                    "where",
-                    "when",
-                    "why",
-                    "who",
-                    "which",
-                    "can",
-                    "could",
-                    "do",
-                    "does",
-                    "did",
-                    "i",
-                    "you",
-                    "my",
-                    "me",
-                    "to",
-                    "of",
-                    "in",
-                    "on",
-                    "at",
-                    "for",
-                    "with",
-                    "about",
-                    "find",
-                    "some",
-                    "any",
-                    "there",
-                    "it",
-                    "that",
-                    "this",
-                    "and",
-                    "or",
-                    "if",
-                    "so",
-                    "will",
-                    "would",
-                    "should",
-                ]);
                 return (String(text).toLocaleLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) || []).filter(
-                    (word) => !stopwords.has(word),
+                    (word) => !HIGHLIGHT_STOPWORDS.has(word),
                 );
             }
 
@@ -1074,9 +1043,14 @@
                 url.hidden = !label;
             }
 
+            function isHtmlMimetype(mimetype) {
+                const mime = String(mimetype || "").toLowerCase();
+                return mime === "text/html" || mime === "application/xhtml+xml";
+            }
+
             function mediaBadge(mimetype) {
                 const mime = String(mimetype || "").toLowerCase();
-                if (!mime || mime === "text/html") return null;
+                if (!mime || mime === "text/html" || mime === "application/xhtml+xml") return null;
                 if (mime.startsWith("video/")) return { icon: "▶", label: "Video" };
                 if (mime.startsWith("audio/")) return { icon: "♪", label: "Audio" };
                 if (mime.startsWith("image/")) return { icon: "IMG", label: "Image" };
@@ -1108,9 +1082,14 @@
                 if (!value) return null;
                 try {
                     const articleUrl = new URL(value, location.href);
+                    const isContent = articleUrl.pathname.startsWith(appPath("/content/"));
+                    // /random?zim=... redirects to a /content/ shell. Accept it
+                    // while the iframe resolves so a library card without a
+                    // homepage can open a random article.
+                    const isRandom = articleUrl.pathname === appPath("/random");
                     if (
                         articleUrl.origin !== location.origin ||
-                        !articleUrl.pathname.startsWith(appPath("/content/"))
+                        (!isContent && !isRandom)
                     ) {
                         return null;
                     }
@@ -1229,7 +1208,7 @@
                 notice.focus();
             }
 
-            async function handleExternalLink(value, offlineValue) {
+            async function handleExternalLink(value, offlineValue, parentValue = null) {
                 const url = readExternalUrl(value);
                 const offlineUrl = readModalUrl(offlineValue);
                 if (!url) return;
@@ -1255,21 +1234,20 @@
                     const resolvedUrl = readModalUrl(response.url) || offlineUrl;
                     resolvedUrl.search = offlineUrl.search;
                     resolvedUrl.hash = offlineUrl.hash;
-                    const navigationKind =
-                        location.pathname === appPath("/library") && !activeSearchResult
-                            ? "library"
-                            : "search";
-                    navigateArticleModal(resolvedUrl, navigationKind);
+                    navigateArticleModal(resolvedUrl, "follow", {
+                        parentUrl: readModalUrl(parentValue),
+                    });
                 } catch (_) {
                     if (request === offlineLinkRequest) showExternalLinkNotice(url.href);
                 }
             }
 
-            function showArticleModal(articleUrl, navigationKind = "manual") {
+            function showArticleModal(articleUrl, navigationKind = "manual", parentUrl = null) {
                 const modal = $("articleModal");
                 const frame = $("articleModalFrame");
                 if (!modal || !frame) return;
                 const wasHidden = modal.hidden;
+                const fixedParentUrl = readModalUrl(parentUrl);
                 if (navigationKind === "library") {
                     activeLibraryArticleUrl = articleUrl;
                 } else if (navigationKind !== "parent") {
@@ -1288,7 +1266,7 @@
                     pendingModalNavigation = {
                         url: articleUrl,
                         kind: navigationKind,
-                        parentUrl: navigationKind === "parent" ? activeParentUrl : null,
+                        parentUrl: fixedParentUrl ? fixedParentUrl.href : null,
                     };
                     if (navigationKind !== "parent") {
                         activeParentNavigation = null;
@@ -1312,39 +1290,55 @@
                 frame.focus();
             }
 
-            function navigateArticleModal(articleUrl, navigationKind = "search") {
+            function modalStateEntry(articleUrl, navigationKind, parentUrl = null) {
                 const locationState = readLocationState();
-                commitAutoSearchHistory();
-                const modalOpen = !$("articleModal").hidden;
-                const managed = Boolean(history.state?.zimanticModal);
                 const state = {
                     ...(history.state || {}),
                     zimanticModal: true,
                     zimanticModalNavigation: navigationKind,
+                    zimanticLinkedArticle: articleRouteValue(articleUrl),
                 };
-                const url = makeStateUrl(
-                    current?.question || locationState.question,
-                    current ? selectedSourceKeys : locationState.selectedSources,
-                    current?.page ?? locationState.page,
-                    articleUrlValue(articleUrl),
-                );
-                if (!modalOpen) {
-                    // One history entry per viewer session. Article-to-article
-                    // navigation reuses it, so Close/Back returns straight to the
-                    // page underneath without a stack of same-view entries.
-                    state.zimanticModalDepth = 1;
-                    history.pushState(state, "", url);
-                } else if (managed) {
-                    state.zimanticModalDepth = 1;
-                    history.replaceState(state, "", url);
+                const parent = readModalUrl(parentUrl);
+                if (parent) {
+                    state.zimanticParent = articleUrlValue(parent);
                 } else {
-                    // A deep link opened the modal without an app-managed history
-                    // entry; keep a single shareable entry instead of growing a
-                    // stack we cannot safely unwind.
-                    delete state.zimanticModalDepth;
-                    history.replaceState(state, "", url);
+                    delete state.zimanticParent;
                 }
-                showArticleModal(articleUrl.href, navigationKind);
+                return {
+                    state,
+                    url: makeStateUrl(
+                        current?.question || locationState.question,
+                        current ? selectedSourceKeys : locationState.selectedSources,
+                        current?.page ?? locationState.page,
+                        articleUrlValue(articleUrl),
+                    ),
+                };
+            }
+
+            function navigateArticleModal(
+                articleUrl,
+                navigationKind = "search",
+                { parentUrl = null } = {},
+            ) {
+                commitAutoSearchHistory();
+                const modalOpen = !$("articleModal").hidden;
+                const activeArticleUrl = readModalUrl(activeModalUrl);
+                const fixedParentUrl =
+                    readModalUrl(navigationKind === "parent" ? parentUrl || activeParentUrl : parentUrl);
+                const entry = modalStateEntry(articleUrl, navigationKind, fixedParentUrl);
+                // Each article gets its own history entry, so Back/Forward walks
+                // through everything the reader visited. Close only drops the
+                // modal from the current entry; it does not discard that trail.
+                const newArticle =
+                    !modalOpen ||
+                    !activeArticleUrl ||
+                    articleUrlValue(activeArticleUrl) !== articleUrlValue(articleUrl);
+                if (newArticle) {
+                    history.pushState(entry.state, "", entry.url);
+                } else {
+                    history.replaceState(entry.state, "", entry.url);
+                }
+                showArticleModal(articleUrl.href, navigationKind, fixedParentUrl);
             }
 
             function openArticleModal(link) {
@@ -1355,7 +1349,7 @@
 
             function articleResultLinks() {
                 return [...$("results").querySelectorAll(".result-title a[href]")].filter((link) => {
-                    if (link.dataset.mimetype && link.dataset.mimetype !== "text/html") return false;
+                    if (link.dataset.mimetype && !isHtmlMimetype(link.dataset.mimetype)) return false;
                     try {
                         const articleUrl = new URL(link.href, location.href);
                         return (
@@ -1549,20 +1543,26 @@
                 }
             }
 
-            function parentArticleUrl(articleUrl) {
+            function parentArticleUrls(articleUrl) {
                 const pathname = stripBasePath(articleUrl.pathname);
                 const parts = pathname.split("/").filter(Boolean);
-                if (parts[0] !== "content" || parts.length < 3) return null;
-                const lastSlash = pathname.lastIndexOf("/");
-                if (lastSlash <= 0) return null;
-                return new URL(appPath(pathname.slice(0, lastSlash)), location.origin);
+                if (parts[0] !== "content" || parts.length < 3) return [];
+                // A capture's article URL can end in a slug (questions/2219/title)
+                // or any other nested path. Walk up toward the ZIM root until a
+                // page is found that actually links to this article.
+                const parents = [];
+                while (parts.length > 2) {
+                    parts.pop();
+                    parents.push(new URL(appPath(parts.join("/")), location.origin));
+                }
+                return parents;
             }
 
             function articleRouteValue(articleUrl) {
                 return articleUrl.pathname + articleUrl.search;
             }
 
-            function readParentArticleNavigation(html, rawParentUrl, articleUrl) {
+            function readParentArticleLinks(html, rawParentUrl) {
                 const document = new DOMParser().parseFromString(html, "text/html");
                 const parentParts = articleRouteParts(rawParentUrl);
                 if (!parentParts) return null;
@@ -1594,8 +1594,41 @@
                     seen.add(value);
                     links.push(contentUrl);
                 }
-                const currentValue = articleUrlValue(articleUrl);
-                const index = links.findIndex((link) => articleUrlValue(link) === currentValue);
+                return links;
+            }
+
+            function rememberArticleAlias(articleUrl, linkedUrl) {
+                const article = readModalUrl(articleUrl);
+                const linked = readModalUrl(linkedUrl);
+                if (!article || !linked) return;
+                const articleValue = articleRouteValue(article);
+                const linkedValue = articleRouteValue(linked);
+                if (articleValue === linkedValue) return;
+                let aliases = articleAliases.get(articleValue);
+                if (!aliases) {
+                    aliases = new Set();
+                    articleAliases.set(articleValue, aliases);
+                }
+                aliases.add(linkedValue);
+            }
+
+            function parentNavigationAt(links, articleUrl) {
+                if (!links) return null;
+                const currentValue = articleRouteValue(articleUrl);
+                let index = links.findIndex(
+                    (link) => articleRouteValue(link) === currentValue,
+                );
+                if (index < 0) {
+                    // Parent links use the URL the capture authored, which can
+                    // redirect (Internet_connection → Internet_access). Match via
+                    // the link that actually got us here when that happened.
+                    const aliases = articleAliases.get(currentValue);
+                    if (aliases) {
+                        index = links.findIndex((link) =>
+                            aliases.has(articleRouteValue(link)),
+                        );
+                    }
+                }
                 if (index < 0) return null;
                 if (!links[index - 1] && !links[index + 1]) return null;
                 const urlAt = (offset) => {
@@ -1608,49 +1641,64 @@
                 };
             }
 
+            async function fetchParentArticleLinks(parentUrl) {
+                const key = articleRouteValue(parentUrl);
+                const cached = parentNavigationCache.get(key);
+                if (cached) return cached;
+                const rawParentUrl = rawArticleUrl(parentUrl);
+                if (!rawParentUrl) return null;
+                const pending = (async () => {
+                    try {
+                        const response = await fetch(rawParentUrl);
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        const html = await response.text();
+                        return {
+                            responseUrl: response.url ? new URL(response.url) : null,
+                            links: readParentArticleLinks(html, rawParentUrl),
+                        };
+                    } catch (_) {
+                        parentNavigationCache.delete(key);
+                        return null;
+                    }
+                })();
+                parentNavigationCache.set(key, pending);
+                return pending;
+            }
+
+            async function parentNavigationFor(parentUrl, articleUrl) {
+                const info = await fetchParentArticleLinks(parentUrl);
+                if (!info) return null;
+                const rawArticle = rawArticleUrl(articleUrl);
+                if (
+                    info.responseUrl &&
+                    rawArticle &&
+                    articleRouteValue(info.responseUrl) === articleRouteValue(rawArticle)
+                ) {
+                    return null;
+                }
+                return parentNavigationAt(info.links, articleUrl);
+            }
+
             async function loadParentArticleNavigation(
                 articleUrl,
-                { fromManualLink = false, preferredParentUrl = null } = {},
+                { parentUrl = null, allowFallback = true } = {},
             ) {
                 const request = ++parentNavigationSequence;
                 activeParentNavigation = null;
                 activeParentUrl = null;
                 postArticleModalNavigation();
-                const previousUrl = readModalUrl(previousModalArticleUrl);
-                const actualParentUrl = parentArticleUrl(articleUrl);
-                const preferredUrl = readModalUrl(preferredParentUrl);
-                const parentUrls = preferredUrl
-                    ? [preferredUrl]
-                    : fromManualLink && previousUrl
-                      ? [previousUrl, actualParentUrl]
-                      : [actualParentUrl];
-                const rawArticle = rawArticleUrl(articleUrl);
+                const preferredUrl = readModalUrl(parentUrl);
+                const candidates = preferredUrl ? [preferredUrl] : [];
+                if (allowFallback) candidates.push(...parentArticleUrls(articleUrl));
                 const seenParents = new Set();
-                for (const candidateParentUrl of parentUrls) {
+                for (const candidateParentUrl of candidates) {
                     if (!candidateParentUrl) continue;
                     const parentValue = articleRouteValue(candidateParentUrl);
                     if (seenParents.has(parentValue)) continue;
                     seenParents.add(parentValue);
-                    let navigation = null;
-                    const rawParentUrl = rawArticleUrl(candidateParentUrl);
-                    if (!rawParentUrl) continue;
-                    try {
-                        const response = await fetch(rawParentUrl);
-                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                        if (
-                            response.url &&
-                            rawArticle &&
-                            articleRouteValue(new URL(response.url)) === articleRouteValue(rawArticle)
-                        ) {
-                            continue;
-                        }
-                        const html = await response.text();
-                        if (request !== parentNavigationSequence || activeModalUrl !== articleUrl.href) {
-                            return;
-                        }
-                        navigation = readParentArticleNavigation(html, rawParentUrl, articleUrl);
-                    } catch (_) {
-                        if (request !== parentNavigationSequence) return;
+                    const navigation = await parentNavigationFor(candidateParentUrl, articleUrl);
+                    if (request !== parentNavigationSequence || activeModalUrl !== articleUrl.href) {
+                        return;
                     }
                     if (!navigation) continue;
                     activeParentNavigation = navigation;
@@ -1807,39 +1855,12 @@
                 modalPreviousFocus = null;
             }
 
-            function stepCloseArticleHistory() {
-                if (!closingModalHistory) return;
-                closeHistoryAttempts += 1;
-                const stillModal = new URL(location.href).searchParams.has("modal");
-                if (!stillModal || closeHistoryAttempts > 8) {
-                    closingModalHistory = false;
-                    if (stillModal) {
-                        const url = new URL(location.href);
-                        url.searchParams.delete("modal");
-                        history.replaceState(history.state, "", url.pathname + url.search + url.hash);
-                    }
-                    hideArticleModal();
-                    return;
-                }
-                history.back();
-                setTimeout(stepCloseArticleHistory, 120);
-            }
-
             function closeArticleModal({ navigateHistory = true } = {}) {
                 const modal = $("articleModal");
-                if (!modal || modal.hidden || closingModalHistory) return;
+                if (!modal || modal.hidden) return;
                 if (navigateHistory && new URL(location.href).searchParams.has("modal")) {
-                    const depth = Number(history.state?.zimanticModalDepth) || 0;
-                    if (history.state?.zimanticModal && depth > 0) {
-                        // Walk back over the modal entry and any joint iframe
-                        // entries it left behind. Keeping the viewer up while the
-                        // history unwinds avoids a blank flash; popstate is
-                        // ignored until the URL is the page underneath.
-                        closingModalHistory = true;
-                        closeHistoryAttempts = 0;
-                        stepCloseArticleHistory();
-                        return;
-                    }
+                    // Close is a local action: clear the modal from this entry
+                    // while leaving the reader's earlier articles in history.
                     const url = new URL(location.href);
                     url.searchParams.delete("modal");
                     history.replaceState(history.state, "", url.pathname + url.search + url.hash);
@@ -1883,7 +1904,7 @@
                     return;
                 }
                 if (event.data?.type === "zimantic-external-link") {
-                    handleExternalLink(event.data.url, event.data.offlineUrl);
+                    handleExternalLink(event.data.url, event.data.offlineUrl, event.data.parent);
                     return;
                 }
                 if (event.data?.type === "zimantic-open-article") {
@@ -1899,30 +1920,51 @@
                         const activeArticleUrl = readModalUrl(activeModalUrl);
                         const pendingArticleUrl = readModalUrl(pendingModalArticleUrl);
                         const pendingNavigation = pendingModalNavigation;
-                        const isPendingNavigation =
-                            pendingNavigation &&
-                            pendingArticleUrl &&
-                            articleUrlValue(pendingArticleUrl) === articleUrlValue(articleUrl);
+                        const isPendingNavigation = Boolean(pendingNavigation);
+                        const pendingParentUrl = readModalUrl(pendingNavigation?.parentUrl);
                         const navigationKind = isPendingNavigation ? pendingNavigation.kind : "manual";
-                        if (
+                        if (pendingArticleUrl) {
+                            rememberArticleAlias(articleUrl, pendingArticleUrl);
+                        }
+                        const changedArticle =
                             activeArticleUrl &&
-                            articleUrlValue(activeArticleUrl) !== articleUrlValue(articleUrl) &&
-                            (!pendingArticleUrl ||
-                                articleUrlValue(pendingArticleUrl) !== articleUrlValue(articleUrl))
-                        ) {
+                            articleUrlValue(activeArticleUrl) !== articleUrlValue(articleUrl);
+                        if (!isPendingNavigation && changedArticle) {
                             previousModalArticleUrl = activeArticleUrl.href;
                         }
                         activeModalUrl = articleUrl.href;
-                        syncModalStateUrl(articleUrl);
+                        if (!isPendingNavigation && changedArticle) {
+                            // A page inside the article navigated its own shell.
+                            // Add a history entry for it, remembering that page as
+                            // the referrer for parent navigation.
+                            const referrer = readModalUrl(previousModalArticleUrl);
+                            const entry = modalStateEntry(
+                                articleUrl,
+                                referrer ? "follow" : "manual",
+                                referrer,
+                            );
+                            history.pushState(entry.state, "", entry.url);
+                        } else {
+                            syncModalStateUrl(articleUrl);
+                        }
                         pendingModalArticleUrl = null;
                         pendingModalNavigation = null;
-                        if (navigationKind === "parent" && isPendingNavigation && pendingNavigation.parentUrl) {
+                        if (pendingParentUrl && navigationKind === "parent") {
                             loadParentArticleNavigation(articleUrl, {
-                                preferredParentUrl: pendingNavigation.parentUrl,
+                                parentUrl: pendingParentUrl,
+                                allowFallback: false,
                             });
-                        } else if (navigationKind !== "parent") {
+                        } else if (pendingParentUrl && navigationKind === "follow") {
                             loadParentArticleNavigation(articleUrl, {
-                                fromManualLink: navigationKind === "manual",
+                                parentUrl: pendingParentUrl,
+                            });
+                        } else if (navigationKind === "manual") {
+                            loadParentArticleNavigation(articleUrl, {
+                                parentUrl: readModalUrl(previousModalArticleUrl),
+                            });
+                        } else {
+                            loadParentArticleNavigation(articleUrl, {
+                                parentUrl: pendingParentUrl,
                             });
                         }
                     }
@@ -1940,6 +1982,13 @@
                     syncModalStateUrl(articleUrl);
                     return;
                 }
+                if (event.data?.type === "zimantic-article-follow") {
+                    const articleUrl = readModalUrl(event.data.url);
+                    if (!articleUrl) return;
+                    navigateArticleModal(articleUrl, "follow", {
+                        parentUrl: readModalUrl(event.data.parent),
+                    });
+                }
                 if (event.data?.type === "zimantic-article-navigate") {
                     const direction = event.data.direction;
                     if (direction !== "previous" && direction !== "next") return;
@@ -1953,7 +2002,7 @@
                     if (target !== activeParentNavigation.previous && target !== activeParentNavigation.next) {
                         return;
                     }
-                    navigateArticleModal(articleUrl, "parent");
+                    navigateArticleModal(articleUrl, "parent", { parentUrl: activeParentUrl });
                 }
             });
 
@@ -2711,7 +2760,7 @@
                           : selectedSources
                             ? [selectedSources]
                             : [];
-                sourceValues.forEach((source) => url.searchParams.append("src", source));
+                sourceValues.forEach((source) => url.searchParams.append("zim", source));
                 if (page > 0) url.searchParams.set("page", String(page + 1));
                 if (modal) url.searchParams.set("modal", modal);
                 return url.pathname + url.search;
@@ -2744,7 +2793,16 @@
                 const pageNumber = Number.parseInt(params.get("page") || "1", 10);
                 return {
                     question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
-                    selectedSources: [...new Set(params.getAll("src").filter(Boolean))],
+                    // `zim` is the canonical source-selection parameter. Keep
+                    // reading legacy `src` links so shared URLs keep working.
+                    selectedSources: [
+                        ...new Set(
+                            [
+                                ...params.getAll("zim"),
+                                ...params.getAll("src"),
+                            ].filter(Boolean),
+                        ),
+                    ],
                     page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0,
                     modal: params.get("modal") || null,
                 };
@@ -2758,7 +2816,15 @@
                     const navigationKind =
                         history.state?.zimanticModalNavigation ||
                         (location.pathname === appPath("/library") ? "library" : "search");
-                    showArticleModal(articleUrl.href, navigationKind);
+                    rememberArticleAlias(
+                        articleUrl,
+                        readModalUrl(history.state?.zimanticLinkedArticle),
+                    );
+                    showArticleModal(
+                        articleUrl.href,
+                        navigationKind,
+                        readModalUrl(history.state?.zimanticParent),
+                    );
                 } else {
                     closeArticleModal({ navigateHistory: false });
                 }
@@ -2819,7 +2885,7 @@
                 const link = target?.closest(".result-title a[href]");
                 if (!link || modifiedClick(event)) return;
                 if (new URL(link.href, location.href).origin !== location.origin) return;
-                if (link.dataset.mimetype !== "text/html") return;
+                if (!isHtmlMimetype(link.dataset.mimetype)) return;
                 event.preventDefault();
                 openArticleModal(link);
             });
@@ -2869,13 +2935,7 @@
                 }
             });
             $("libraryFilter").addEventListener("input", renderLibrary);
-            $("libraryShuffle").addEventListener("click", (event) => {
-                if (event.ctrlKey || event.shiftKey) {
-                    openRandomLibraryArticle();
-                    return;
-                }
-                shuffleLibrary();
-            });
+            $("libraryShuffle").addEventListener("click", shuffleLibrary);
 
             $("pager").addEventListener("click", (event) => {
                 const link = event.target.closest("a[data-page]");
@@ -3169,7 +3229,6 @@
             $("homeHeading").addEventListener("click", activateHomeHeading);
 
             window.addEventListener("popstate", () => {
-                if (closingModalHistory) return;
                 cancelAutoSearchHistory();
                 const state = readLocationState();
                 syncArticleModal(state.modal);
@@ -3214,13 +3273,31 @@
                         if (Number.isInteger(config.page_size) && config.page_size > 0) {
                             PAGE_SIZE = config.page_size;
                         }
+                        if (Array.isArray(config.stopwords)) {
+                            HIGHLIGHT_STOPWORDS = new Set(
+                                config.stopwords.map((word) => String(word)),
+                            );
+                        }
+                        if (
+                            Number.isInteger(config.source_filter_limit) &&
+                            config.source_filter_limit > 0
+                        ) {
+                            SOURCE_FILTER_LIMIT = config.source_filter_limit;
+                        }
+                        if (
+                            Number.isInteger(config.max_query_length) &&
+                            config.max_query_length > 0
+                        ) {
+                            MAX_QUERY_LENGTH = config.max_query_length;
+                            $("question").maxLength = MAX_QUERY_LENGTH;
+                        }
                     }
                     if (libraryView) {
                         // Unreadable ZIMs stay visible so the card can explain
-                        // why they cannot be opened; see renderLibrary().
-                        librarySources = data.payload.filter(
-                            (source) => source.available === false || source.homepage,
-                        );
+                        // why they cannot be opened. Readable archives without a
+                        // homepage are also kept; the card can offer a random
+                        // article when the source is searchable.
+                        librarySources = data.payload;
                         renderLibrary();
                     } else {
                         sources = data.payload;

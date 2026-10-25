@@ -71,7 +71,7 @@ class StableSizeTests(unittest.TestCase):
                 "sleep",
                 side_effect=advance_download,
             ) as sleep:
-                main_module._wait_for_stable_size(path)
+                main_module._wait_for_stable_sizes({path})
 
         self.assertEqual(sleep.call_count, 2)
         sleep.assert_called_with(main_module.STABLE_POLL_SECONDS)
@@ -127,6 +127,27 @@ class StableSizeTests(unittest.TestCase):
 
 
 class BuildWorkerTests(unittest.TestCase):
+    def test_collect_zims_prefers_the_largest_conflicting_stem(self):
+        import zimantic.__main__ as main_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "one" / "manual.zim"
+            second = root / "two" / "manual.zim"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"small")
+            second.write_bytes(b"a much larger copy")
+
+            zims = main_module._collect_zims([first, second], root)
+            selected = main_module._select_zim_paths(
+                zims,
+                {path: path.stat().st_size for path in zims},
+            )
+
+            self.assertEqual([path.name for path in selected], ["manual.zim"])
+            self.assertEqual(selected[0].read_bytes(), b"a much larger copy")
+
     def test_build_workers_process_independent_zims_concurrently(self):
         import zimantic.__main__ as main_module
         from zimantic import settings

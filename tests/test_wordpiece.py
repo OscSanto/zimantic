@@ -148,6 +148,29 @@ class WordPieceEmbedderTests(unittest.TestCase):
         self.assertTrue(truncated)
         self.assertLessEqual(embedder.token_count(truncated, prefix="query: "), 6)
 
+    def test_padding_uses_wordpiece_pad_id(self):
+        self.session.run.return_value = [
+            np.ones((2, 4, 4), dtype=np.float32)
+        ]
+        embedder = self._embedder()
+        embedder.embed(["hello", "hello world"])
+        inputs = self.session.run.call_args.args[1]
+        # BERT's [PAD] is 0. The shorter row must not be padded with XLM-R's 1.
+        self.assertEqual(inputs["input_ids"][0][-1], 0)
+        self.assertEqual(inputs["attention_mask"][0][-1], 0)
+
+    def test_unknown_token_is_not_masked_as_padding(self):
+        self.session.run.return_value = [
+            np.ones((2, 3, 3), dtype=np.float32)
+        ]
+        embedder = self._embedder()
+        # In this vocabulary [UNK] is id 1, which the old hardcoded XLM-R mask
+        # would have treated as padding.
+        embedder.embed(["hello", "zzz"])
+        inputs = self.session.run.call_args.args[1]
+        self.assertEqual(inputs["input_ids"][1][1], 1)
+        self.assertEqual(inputs["attention_mask"][1][1], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

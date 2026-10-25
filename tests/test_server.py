@@ -37,12 +37,27 @@ class FakeSearch:
             "mode": "local",
             "local_name": "manual",
             "available": True,
+            "searchable": True,
             "homepage": "Main_Page",
+            "description": "Manual description",
+            "uuid": "00000000-0000-0000-0000-000000000001",
         }]
 
     def refresh_sources(self):
         self.refresh_calls += 1
         return self.source_dicts()
+
+    def random_local_source(self):
+        from zimantic.contracts import SourceInfo
+
+        return SourceInfo(
+            "manual",
+            "Manual",
+            "manual",
+            "local",
+            local_name="manual",
+            homepage="Main_Page",
+        )
 
     @staticmethod
     def _validate_query(query):
@@ -100,13 +115,32 @@ class ServerTests(unittest.TestCase):
         cls.debug_client = TestClient(create_app(cls.debug_search, debug=True))
 
     def test_sources_and_json_search(self):
-        self.assertEqual(self.client.get("/sources").json()[0]["key"], "manual")
+        sources = self.client.get("/sources").json()
+        self.assertEqual(sources[0]["key"], "manual")
+        self.assertEqual(sources[0]["description"], "Manual description")
         self.assertEqual(self.client.get("/library.json").json()[0]["name"], "Manual")
         response = self.client.get("/search?q=page")
         self.assertEqual(response.json()[0]["title"], "Page")
         # Totals travel as headers so the body stays a plain list.
         self.assertEqual(response.headers["x-total-count"], "1")
         self.assertEqual(response.headers["x-has-more"], "false")
+        self.assertNotIn("x-page-size", response.headers)
+
+    def test_zims_endpoint_is_gone(self):
+        self.assertEqual(self.client.get("/zims").status_code, 404)
+
+    def test_config_reports_page_and_pool_sizes(self):
+        config = self.client.get("/config").json()
+        self.assertEqual(config["page_size"], 10)
+        self.assertEqual(config["max_results"], 100)
+        self.assertEqual(config["source_filter_limit"], 10)
+        self.assertIn("the", config["stopwords"])
+        self.assertGreater(config["max_query_length"], 0)
+
+    def test_random_without_zim_opens_a_random_local_source(self):
+        response = self.client.get("/random", follow_redirects=False)
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], "/content/manual")
 
     def test_sources_supports_optional_pagination(self):
         response = self.client.get("/sources", params={"limit": 1})
@@ -116,11 +150,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.headers["x-offset"], "0")
         self.assertEqual(response.headers["x-has-more"], "false")
 
+    def test_pagination_clamps_an_out_of_range_offset(self):
+        response = self.client.get("/sources", params={"limit": 1, "offset": 99})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-offset"], "0")
+        self.assertEqual(response.json()[0]["key"], "manual")
+
     def test_page_assets_are_served(self):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertIn('href="app.css"', page.text)
         self.assertIn('src="app.js"', page.text)
+        self.assertNotIn('id="libraryRandom"', page.text)
         self.assertIn('id="articleModalFrame"', page.text)
         # Same-origin target="_blank" links (for example PDFs) must be able to
         # open outside the article modal's sandbox.

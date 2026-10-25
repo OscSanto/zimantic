@@ -29,6 +29,11 @@ class HardwareProfileTests(unittest.TestCase):
         with patch("os.cpu_count", return_value=4):
             self.assertEqual(profile_for_hardware(), "mobile")
 
+    @patch.object(settings, "_system_memory_gb", return_value=2.0)
+    def test_two_gb_hosts_use_mobile_profile(self, _memory):
+        with patch("os.cpu_count", return_value=4):
+            self.assertEqual(profile_for_hardware(), "mobile")
+
     @patch.object(settings, "_system_memory_gb", return_value=8.0)
     def test_mid_memory_is_desktop(self, _memory):
         with patch("os.cpu_count", return_value=8):
@@ -134,6 +139,39 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(cfg["port"], 9999)
             self.assertTrue(any("bath_size" in message for message in warnings))
             self.assertNotIn("bath_size", cfg)
+
+    def test_bad_value_types_warn_and_keep_profile_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                'port = "not a port"\n'
+                'batch_size = "8"\n'
+                'min_cosine_similarity = "high"\n'
+                'cache_size = 7\n'
+                'build_workers = "two"\n',
+                encoding="utf-8",
+            )
+            warnings = []
+            with patch.object(settings, "profile_for_hardware", return_value="desktop"):
+                cfg = load_config(path, warn=warnings.append)
+            self.assertEqual(cfg["port"], PROFILES["desktop"]["port"])
+            self.assertEqual(cfg["batch_size"], PROFILES["desktop"]["batch_size"])
+            self.assertEqual(
+                cfg["min_cosine_similarity"],
+                PROFILES["desktop"]["min_cosine_similarity"],
+            )
+            self.assertEqual(cfg["cache_size"], 7)
+            self.assertGreaterEqual(cfg["build_workers"], 1)
+            self.assertTrue(any("port" in message for message in warnings))
+            self.assertTrue(any("batch_size" in message for message in warnings))
+            self.assertTrue(any("min_cosine_similarity" in message for message in warnings))
+
+    def test_shipped_config_leaves_tuning_to_the_hardware_profile(self):
+        root_config = Path(__file__).resolve().parents[1] / "config.toml"
+        with patch.object(settings, "profile_for_hardware", return_value="mobile"):
+            cfg = load_config(root_config, warn=lambda _message: None)
+        for key in ("batch_size", "max_entry_bytes", "search_workers", "cache_size"):
+            self.assertEqual(cfg[key], PROFILES["mobile"][key])
 
 
 if __name__ == "__main__":

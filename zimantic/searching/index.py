@@ -59,7 +59,7 @@ class _LocalIndex:
             return self.archive
         if self.open_failed:
             # Remember the failure: retrying on every search would reopen a
-            # missing or corrupt archive each time.  reload() calls
+            # missing or corrupt archive each time. reload() calls
             # allow_reopen() so an explicit rescan retries.
             return None
         with self.lock:

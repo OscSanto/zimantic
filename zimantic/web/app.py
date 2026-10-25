@@ -51,6 +51,9 @@ ARTICLE_STREAM_CHUNK = 64 * 1024
 # Sandboxed article frames have an opaque origin, so in-article fetches need
 # explicit CORS access to the public raw-entry route.
 ARTICLE_CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
+# Both HTML flavors receive the article bridge, mobile fallback, and head
+# metadata handling.
+HTML_MIMETYPES = frozenset({"text/html", "application/xhtml+xml"})
 
 # Some JavaScript applications read ``document.cookie`` even when they do not
 # use cookies. The browser throws for that getter in the opaque-origin article
@@ -557,17 +560,48 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     // The raw article iframe cannot see or update this toolbar, so its bridge
     // asks us to navigate the whole shell. Reloading keeps breadcrumbs, the
     // permalink and the modal URL in sync, exactly like a normal page load.
+    const contentUrl = value => {
+      let target;
+      try {
+        target = new URL(String(value || ""), location.href);
+      } catch (_) {
+        return null;
+      }
+      if (target.origin !== location.origin) return null;
+      if (
+        target.pathname !== `${appBasePath}/content` &&
+        !target.pathname.startsWith(`${appBasePath}/content/`)
+      ) return null;
+      return target;
+    };
     window.addEventListener("message", event => {
       if (event.data?.type !== "zimantic-shell-navigate") return;
-      const url = String(event.data.url || "");
-      if (url.startsWith(`${appBasePath}/content/`)) {
-        offlineRequest += 1;
-        if (window.parent !== window) {
-          location.replace(url);
-        } else {
-          location.href = url;
-        }
+      const target = contentUrl(event.data.url);
+      if (!target) return;
+      offlineRequest += 1;
+      if (window.parent !== window) {
+        location.replace(target.href);
+      } else {
+        location.href = target.href;
       }
+    });
+    // A link click in the raw article knows the page it came from. In the modal
+    // the host owns history and parent navigation, so forward both URLs to it.
+    window.addEventListener("message", event => {
+      if (event.data?.type !== "zimantic-article-follow") return;
+      const target = contentUrl(event.data.url);
+      if (!target) return;
+      if (window.parent !== window) {
+        const parent = contentUrl(event.data.parent);
+        window.parent.postMessage({
+          type: "zimantic-article-follow",
+          url: target.href,
+          parent: parent ? parent.href : null,
+        }, "*");
+        return;
+      }
+      offlineRequest += 1;
+      location.href = target.href;
     });
     const offlineArticleUrl = value => {
       const text = String(value || "");
@@ -629,10 +663,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       if (url.protocol !== "http:" && url.protocol !== "https:") return;
       const offlineUrl = offlineArticleUrl(event.data.offlineUrl);
       if (window.parent !== window) {
+        const parent = contentUrl(event.data.parent);
         window.parent.postMessage({
           type: "zimantic-external-link",
           url: url.href,
           offlineUrl: offlineUrl ? offlineUrl.href : null,
+          parent: parent ? parent.href : null,
         }, "*");
         return;
       }
@@ -769,6 +805,13 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           event.preventDefault();
           location.href = `${appBasePath}/?q=${encodeURIComponent(query)}`;
         }
+      } else if (action === "random") {
+        // A plain click follows the href (random article in this ZIM).
+        // Alt-click opens the homepage of a random available ZIM instead.
+        if (!event.altKey) return;
+        event.preventDefault();
+        const randomZimUrl = control.dataset.zimanticRandomZimUrl;
+        if (randomZimUrl) location.href = randomZimUrl;
       } else if (action === "previous" || action === "next") {
         const url = control.dataset.zimanticUrl;
         if (control.disabled || window.parent === window) return;
@@ -915,7 +958,7 @@ MOBILE_LAYOUT_SCRIPT = """<script data-zimantic-mobile>
 
 # Injected into raw HTML articles served under /article/. The article itself
 # has no toolbar (that lives in the /content/ shell), so this tiny bridge turns
-# in-article link clicks into shell navigations. Without it, following a link
+# in-article link clicks into shell navigation. Without it, following a link
 # would leave the shell's breadcrumbs and modal URL pointing at the old article.
 ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
 (() => {
@@ -1201,10 +1244,12 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
         }
         event.preventDefault();
         if (window.parent !== window) {
+          const parentPath = contentPathFor(context);
           window.parent.postMessage({
             type: "zimantic-external-link",
             url: url.href,
             offlineUrl,
+            parent: parentPath ? parentPath + context.search : null,
           }, "*");
         } else {
           location.href = offlineUrl || url.href;
@@ -1231,9 +1276,11 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
       event.preventDefault();
       const shellUrl = contentPath + url.search + url.hash;
       if (window.parent !== window) {
+        const parentPath = contentPathFor(context);
         window.parent.postMessage({
-          type: "zimantic-shell-navigate",
+          type: "zimantic-article-follow",
           url: shellUrl,
+          parent: parentPath ? parentPath + context.search : null,
         }, "*");
       } else {
         location.href = shellUrl;
@@ -1404,7 +1451,11 @@ def _article_toolbar(
             '<span class="zimantic-toolbar-article-short">'
             "Permalink</span></a>"
         )
-        random_html = f'<a href="{random_url}" title="Open a random article">Random</a>'
+        random_html = (
+            f'<a href="{random_url}" data-zimantic-action="random" '
+            f'data-zimantic-random-zim-url="{html_escape(base_path + "/random", quote=True)}" '
+            f'title="Open a random article (Alt-click for a random ZIM)">Random</a>'
+        )
 
     home_html = ""
     if error is None or error.get("zim_found"):
@@ -1611,7 +1662,7 @@ def _content_shell(
     entry_title = str((error or {}).get("title") or article.get("title") or article_path or zim)
     parsed_title = None
     icon = fallback_icon
-    if not error and article.get("mimetype") == "text/html" and article.get("content") is not None:
+    if not error and article.get("mimetype") in HTML_MIMETYPES and article.get("content") is not None:
         parsed_title, parsed_icon = _article_head_meta(
             article["content"], zim, article_url_path or None, base_path
         )
@@ -1816,7 +1867,7 @@ def _article_content_response(content: bytes | memoryview, mimetype: str) -> Res
 
 
 def _memoized_json(memo_key: str, version, payload_factory, memos):
-    """Return a memoized JSON payload, body, and ETag for one app instance."""
+    """Return a memoized ``(version, payload, body, ETag)`` tuple for one app instance."""
     cached = memos.get(memo_key)
     if cached is None or cached[0] != version:
         payload = payload_factory()
@@ -1842,7 +1893,7 @@ def _json_response(request: Request, memo_key: str, version, payload_factory, me
 
 
 def create_app(searchClass, debug: bool = False) -> FastAPI:
-    app = FastAPI(title="zimantic")
+    app = FastAPI(title="Zimantic")
     app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
     from .routes import register_routes
 

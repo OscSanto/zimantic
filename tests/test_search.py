@@ -153,7 +153,7 @@ def _title_search(rows, query, limit=1):
         rows,
     )
     source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
-    search = _bare_search({"candidate_count": 2, "kiwix_url": "http://example/content"})
+    search = _bare_search({"candidate_count": 2})
     search.semantic = False
     search.sources = {"manual": source}
     search.indexes = {"manual": _LocalIndex(db, None, None, None, threading.Lock())}
@@ -190,7 +190,7 @@ class SearchContractTests(unittest.TestCase):
             _phrase_in_word_stream(text.casefold(), _phrase_words("very good very"))
         )
 
-    def test_phrase_read_supplies_mimetype_and_preview_to_later_stages(self):
+    def test_phrase_read_supplies_mimetype_and_phrase_flag(self):
         class _Item:
             mimetype = "text/html"
             content = (
@@ -202,13 +202,20 @@ class SearchContractTests(unittest.TestCase):
             def get_item(self):
                 return _Item()
 
+        class _UnrelatedItem(_Item):
+            content = b"<p>Something else entirely.</p>"
+
+        class _UnrelatedEntry:
+            def get_item(self):
+                return _UnrelatedItem()
+
         class _Archive:
             def __init__(self):
                 self.calls = 0
 
-            def get_entry_by_path(self, _path):
+            def get_entry_by_path(self, path):
                 self.calls += 1
-                return _Entry()
+                return _Entry() if path == "Ampiroxicam" else _UnrelatedEntry()
 
         source = SourceInfo(
             "manual",
@@ -258,9 +265,12 @@ class SearchContractTests(unittest.TestCase):
         pool = search._enrich_pool([result], query, pool, 10)
 
         self.assertEqual(pool[0]["id"], "manual:exact")
-        self.assertTrue(pool[0]["lead"])
+        self.assertTrue(pool[0]["ranking"]["content_phrase"])
         self.assertEqual(pool[0]["mimetype"], "text/html")
-        self.assertEqual(archive.calls, 1)
+        # Previews are hydrated only for the final displayed page, not while
+        # enriching the whole candidate pool.
+        self.assertFalse(pool[0]["lead"])
+        self.assertEqual(archive.calls, 2)
 
     def test_source_icon_prefers_zim_metadata(self):
         homepage = _IconEntry(
@@ -454,7 +464,48 @@ class SearchContractTests(unittest.TestCase):
 
         self.assertEqual(ranked[0]["id"], "titles:intuition")
         self.assertEqual(ranked[0]["rank"], 3)
-        self.assertEqual(ranked[1]["score"], 0.016666666666666666)
+        self.assertEqual(ranked[1]["score"], 1 / 61)
+
+    def test_semantic_hit_wins_an_exact_ranking_tie(self):
+        source = SourceInfo("manual", "Manual", "manual", "local")
+        semantic_doc = {
+            "id": "manual:semantic",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Same title",
+            "path": "semantic",
+            "source_rank": 1,
+        }
+        title_doc = {
+            "id": "manual:title-only",
+            "source_key": "manual",
+            "source": "Manual",
+            "title": "Same title",
+            "path": "title-only",
+            "source_rank": 1,
+        }
+        search = object.__new__(Search)
+        search.candidate_count = 16
+        ranked = search._rank_results(
+            [
+                SourceResult(
+                    source=source,
+                    items=[semantic_doc],
+                    semantic=[(0.9, semantic_doc)],
+                ),
+                SourceResult(
+                    source=source,
+                    items=[title_doc],
+                    keyword=[(-1.0, title_doc)],
+                ),
+            ],
+            "same title",
+            10,
+        )
+
+        self.assertEqual(ranked[0]["id"], "manual:semantic")
+        self.assertTrue(ranked[0]["ranking"]["semantic_hit"])
+        self.assertFalse(ranked[1]["ranking"]["semantic_hit"])
 
     def test_compact_title_with_all_query_words_beats_longer_title(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
@@ -800,7 +851,7 @@ class SearchContractTests(unittest.TestCase):
 
         source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
         search = object.__new__(Search)
-        search.cfg = {"candidate_count": 2, "kiwix_url": "http://example/content"}
+        search.cfg = {"candidate_count": 2}
         search.candidate_count = 2
         search.semantic = True
         search.sources = {"manual": source}
@@ -823,6 +874,31 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(result["title"], "Tire Change")
         self.assertEqual(result["path"], "tire-change")
 
+    def test_document_hydration_follows_redirect_chains(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, path UNINDEXED, target UNINDEXED)"
+        )
+        db.executemany(
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+            [
+                (0, "Alias", "B", 1),
+                (1, "Intermediate", "C", 2),
+                (2, "Final title", "C", None),
+            ],
+        )
+        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        search = object.__new__(Search)
+        search.cfg = {}
+        try:
+            docs = search._fetch_docs(db=db, source=source, rowids={0})
+        finally:
+            db.close()
+
+        self.assertEqual(docs[0]["title"], "Final title")
+        self.assertEqual(docs[0]["path"], "C")
+
     def test_document_hydration_batches_large_rowid_sets(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
@@ -842,7 +918,7 @@ class SearchContractTests(unittest.TestCase):
 
         source = SourceInfo("manual", "Manual", "manual", "local")
         search = object.__new__(Search)
-        search.cfg = {"kiwix_url": "http://example/content"}
+        search.cfg = {}
         search.preview_chars = 100
         try:
             docs = search._fetch_docs(db=db, source=source, rowids=set(range(1, 1802)))
@@ -883,7 +959,6 @@ class SearchContractTests(unittest.TestCase):
         search = object.__new__(Search)
         search.cfg = {
             "candidate_count": 2,
-            "kiwix_url": "http://example/content",
             "min_cosine_similarity": 0.85,
         }
         search.candidate_count = 2
@@ -1107,7 +1182,6 @@ class GracefulDegradationTests(unittest.TestCase):
         return {
             "index_dir": str(tmp),
             "zim_dir": str(tmp),
-            "kiwix_url": "http://example/content",
             "candidate_count": 16,
         }
 
@@ -1162,7 +1236,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIsNone(report["indexes"][0]["homepage"])
             search._executor.shutdown(wait=True)
 
-    def test_library_hides_sources_without_a_homepage(self):
+    def test_library_includes_sources_without_a_homepage(self):
         search = _bare_search({})
         search.sources = {
             "readable": SourceInfo(
@@ -1179,6 +1253,7 @@ class GracefulDegradationTests(unittest.TestCase):
                 "unreadable",
                 "local",
                 local_name="unreadable",
+                searchable=False,
             ),
         }
         with patch.object(
@@ -1191,7 +1266,11 @@ class GracefulDegradationTests(unittest.TestCase):
         ):
             library = search.library_dicts()
 
-        self.assertEqual([source["name"] for source in library], ["Readable"])
+        self.assertEqual(
+            [source["name"] for source in library], ["Readable", "Unreadable"]
+        )
+        self.assertTrue(library[0]["searchable"])
+        self.assertFalse(library[1]["searchable"])
         search._executor.shutdown(wait=True)
 
     def test_library_lists_an_unreadable_source(self):
@@ -1786,13 +1865,89 @@ class CatalogRefreshTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(1.0)
 
+    def test_catalog_refresh_does_not_retry_invalid_responses(self):
+        search = _bare_search({})
+        with (
+            patch("zimantic.search.urlopen", side_effect=ValueError("bad XML")) as urlopen,
+            patch("zimantic.search.time.sleep") as sleep,
+        ):
+            entries = search._catalog_entries("http://kiwix")
+
+        self.assertIsNone(entries)
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+
+    def test_catalog_limit_is_enforced_after_parsing(self):
+        class _Response:
+            headers = {}
+
+            def __init__(self):
+                self._read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                if self._read:
+                    return b""
+                self._read = True
+                return (
+                    b"<feed>"
+                    b'<entry><title>One</title><link href="/content/one" /></entry>'
+                    b'<entry><title>Two</title><link href="/content/two" /></entry>'
+                    b'<entry><title>Three</title><link href="/content/three" /></entry>'
+                    b"</feed>"
+                )
+
+        search = _bare_search({"kiwix_catalog_limit": 2})
+        with patch("zimantic.search.urlopen", return_value=_Response()):
+            entries = search._catalog_entries("http://kiwix")
+
+        self.assertEqual([entry["book"] for entry in entries], ["one", "three"])
+
+
+class KiwixSearchTests(unittest.TestCase):
+    def test_relative_result_links_are_resolved_against_the_server(self):
+        class _Response:
+            headers = {}
+
+            def __init__(self):
+                self.payload = (
+                    b"<rss><item><title>Relative</title>"
+                    b"<link>manual/page</link><description>snippet</description>"
+                    b"</item></rss>"
+                )
+                self._read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                if self._read:
+                    return b""
+                self._read = True
+                return self.payload
+
+        search = _bare_search({"candidate_count": 4, "kiwix_server": "http://kiwix"})
+        source = SourceInfo("remote", "Remote", "manual", "kiwix")
+        with patch("zimantic.search.urlopen", return_value=_Response()):
+            result = search._search_kiwix(source, "query", 4)
+
+        self.assertEqual(result.items[0]["url"], "http://kiwix/manual/page")
+
 
 class PaginationTests(unittest.TestCase):
     def _cfg(self, tmp):
         return {
             "index_dir": str(tmp),
             "zim_dir": str(tmp),
-            "kiwix_url": "http://example/content",
             "candidate_count": 16,
             "page_size": 2,
             "max_results": 5,
@@ -2004,6 +2159,36 @@ class SourceScopeTests(unittest.TestCase):
         self.assertEqual(Search._selective_source_limit(100), 10)
         self.assertEqual(Search._selective_source_limit(1_000), 10)
 
+    def test_unknown_source_selection_falls_back_to_all_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            search = self._search(tmp)
+            try:
+                sources, selective, scope = search._search_scope(["removed-source"])
+                self.assertEqual(len(sources), 6)
+                self.assertFalse(selective)
+                self.assertIsNone(scope)
+            finally:
+                search._executor.shutdown(wait=True)
+
+    def test_unknown_display_filter_falls_back_to_the_full_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            search = self._search(tmp)
+            try:
+                events = list(
+                    search.stream_search(
+                        "tire change",
+                        zim=["removed-source"],
+                        source=["removed-source"],
+                        limit=2,
+                    )
+                )
+                self.assertTrue(events[-1]["results"])
+                self.assertEqual(events[-1]["total"], 6)
+            finally:
+                search._executor.shutdown(wait=True)
+
     def test_small_selection_searches_only_those_sources_and_is_not_cached(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -2087,10 +2272,10 @@ class ProductionHardeningTests(unittest.TestCase):
         )
         return db
 
-    def test_local_results_do_not_require_kiwix_url(self):
+    def test_local_results_use_content_route(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
         search = object.__new__(Search)
-        search.cfg = {}  # no kiwix_url
+        search.cfg = {}
         search.preview_chars = 100
         db = self._db()
         try:
@@ -2114,13 +2299,13 @@ class ProductionHardeningTests(unittest.TestCase):
 
     def test_source_icon_urls_use_web_base_path(self):
         self.assertEqual(
-            _source_icon_url("manual", "-/icon", "/zimantic"),
+            _source_icon_url("manual", True, "/zimantic"),
             "/zimantic/source-icon/manual",
         )
-        self.assertIsNone(_source_icon_url("manual", None, "/zimantic"))
+        self.assertIsNone(_source_icon_url("manual", False, "/zimantic"))
 
     def test_exhausted_search_slots_report_busy_without_blocking(self):
-        search = _bare_search({"kiwix_url": "http://example/content"})
+        search = _bare_search({})
         search._search_slots = threading.BoundedSemaphore(1)
         self.assertTrue(search._search_slots.acquire(blocking=False))
         try:
@@ -2132,6 +2317,46 @@ class ProductionHardeningTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
         self.assertEqual(events[-1]["type"], "error")
         self.assertTrue(events[-1]["busy"])
+
+
+class CatalogLocationTests(unittest.TestCase):
+    def test_page_size_is_clamped_to_the_result_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_dir = root / "indexes"
+            index_dir.mkdir()
+            cfg = {
+                "index_dir": str(index_dir),
+                "zim_dir": str(root / "zims"),
+                "candidate_count": 16,
+                "page_size": 50,
+                "max_results": 10,
+            }
+            search = Search(cfg, semantic=False, archive_factory=object)
+            self.addCleanup(search.close)
+            self.assertEqual(search.page_size, 10)
+
+    def test_search_puts_catalog_beside_the_index_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_dir = root / "indexes"
+            index_dir.mkdir()
+            _write_index(
+                index_dir,
+                "manual",
+                rows=[(1, "Tire Change", "tire-change", None)],
+            )
+            cfg = {
+                "index_dir": str(index_dir),
+                "zim_dir": str(index_dir),
+                "candidate_count": 16,
+                "page_size": 10,
+                "max_results": 100,
+            }
+            search = Search(cfg, semantic=False, archive_factory=object)
+            self.addCleanup(search.close)
+            self.assertTrue((root / "catalog.sqlite").exists())
+            self.assertFalse((index_dir / "catalog.sqlite").exists())
 
 
 class QueryCacheTests(unittest.TestCase):

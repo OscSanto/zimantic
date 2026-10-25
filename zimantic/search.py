@@ -5,7 +5,6 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 import logging
 import math
-import os
 import posixpath
 from pathlib import Path
 import re
@@ -15,7 +14,7 @@ import threading
 import time
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, unquote, urlparse
+from urllib.parse import quote, urlencode, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -24,12 +23,14 @@ from libzim.search import Query
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .catalog import (
-    CATALOG_FILENAME,
     ZimCatalog,
-    is_zim_filename,
-    normalize_creator,
+    catalog_path,
+    iter_zim_files,
+    metadata_from_archive,
+    perma_ref,
 )
 from .contracts import SourceInfo, SourceResult
+from .redirects import RedirectError, resolve_redirect_entry
 from .searching.config import _file_signature, _float_config, _int_config
 from .searching.index import _LocalIndex, _nprobe
 from .searching.query import (
@@ -68,7 +69,6 @@ from .content.reader import (
     DEFAULT_PARSE_TIMEOUT,
     DEFAULT_PREVIEW_CHARS,
     _READABLE_MIMETYPES,
-    extract_excerpt,
     read_entry,
     truncate_at_word_boundary,
 )
@@ -99,7 +99,7 @@ DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF = 1.0
 MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
 DEFAULT_KIWIX_RESULT_LIMIT = 1_000
 DEFAULT_LONG_QUERY = 10
-MAX_PHRASE_CANDIDATES = 16
+MAX_PHRASE_CANDIDATES = 32
 # How many uniform rowid/entry-id probes /random tries before falling back to a
 # guaranteed pick. Probes give every eligible article equal weight and usually
 # succeed on the first try; the budget only matters for a moderately sparse
@@ -111,6 +111,10 @@ RANDOM_ARTICLE_ATTEMPTS = 128
 SLOT_WAIT_SECONDS = 2.0
 # Leading bytes returned by a head-only article read (shell title/favicon).
 HEAD_READ_BYTES = 256 << 10
+# The installed-library view recomputes its version on every conditional
+# request. A short cache keeps that from walking the whole ZIM tree each time
+# while still noticing files added or removed without a reload.
+LIBRARY_SCAN_TTL_SECONDS = 120.0
 
 
 _HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
@@ -119,36 +123,41 @@ _HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
 _PHRASE_MIMETYPES = frozenset({"text/plain", "text/html", "application/xhtml+xml"})
 
 
-def _archive_metadata(archive: Archive) -> dict[str, Any]:
-    """Read the small set of metadata used by the installed-library view."""
-    values: dict[str, Any] = {}
-    for key in (
-        "Title",
-        "Description",
-        "LongDescription",
-        "Creator",
-        "Language",
-        "Date",
-        "Tags",
-    ):
-        try:
-            value = archive.get_metadata(key)
-        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
-            continue
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", "replace")
-        value = str(value).strip()
-        if key == "Creator":
-            value = normalize_creator(value)
-        if value:
-            values[key] = value
-    tags = tuple(
-        tag
-        for tag in (value.strip() for value in values.get("Tags", "").split(";"))
-        if tag and not tag.startswith("_")
-    )
-    values["Tags"] = tags
-    return values
+def _archive_metadata(archive: Archive, zim_path: Path) -> dict[str, Any]:
+    """Read archive metadata through the shared catalog extractor.
+
+    The catalog and the archive-scan fallback used to maintain separate field
+    lists. Keeping the fallback on ``metadata_from_archive`` means both paths
+    expose the same names, normalization, and tag handling.
+    """
+    try:
+        record = metadata_from_archive(archive, zim_path)
+    except (OSError, AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        logger.warning("zimantic: metadata unavailable for %s (%s)", zim_path, error)
+        return {}
+    tags = tuple(tag for tag in record["public_tags"].split(";") if tag)
+    return {
+        "Title": record["title"],
+        "Description": record["description"],
+        "LongDescription": record["long_description"],
+        "Creator": record["creator"],
+        "Publisher": record["publisher"],
+        "Language": record["language"],
+        "Date": record["date"],
+        "Tags": tags,
+        "Name": record["name"],
+        "Flavour": record["flavour"],
+        "License": record["license"],
+        "Scraper": record["scraper"],
+        "Source": record["source"],
+        "Attribution": record["attribution"],
+        "Relation": record["relation"],
+        "Counter": record["counter"],
+        "Homepage": record["homepage"],
+        "HasFulltextIndex": record["has_fulltext_index"],
+        "IconPath": record["icon_path"],
+        "UUID": record["uuid"],
+    }
 
 
 def _archive_has_illustration(archive: Archive) -> bool:
@@ -320,7 +329,8 @@ def _rrf_scores(
         (ranked_lists[2], "fulltext", fulltext_weight),
     ):
         for rank, (raw_score, _, doc) in enumerate(ranked[:candidate_limit]):
-            contribution = weight / (60 + rank)
+            # Reciprocal Rank Fusion uses one-based positions.
+            contribution = weight / (60 + rank + 1)
             scores[doc["id"]] = scores.get(doc["id"], 0.0) + contribution
             details.setdefault(doc["id"], {})[method] = {
                 "rank": rank + 1,
@@ -358,6 +368,7 @@ class _RankedAssessment:
     path: str
     rrf_score: float
     rrf_details: dict[str, dict[str, dict[str, Any]]]
+    semantic_hit: bool
     fulltext_weight: float
     disambig: dict[str, Any]
     user_page: dict[str, Any]
@@ -395,6 +406,7 @@ def _assess_ranked_document(
     lexical = (5.0 * title_quality + 2.0 * phrase_hit + intent) / 8.0
     source_rank = int(doc.get("source_rank", 100000))
     rrf_score = scores.get(identity, 0.0)
+    semantic_hit = "semantic" in rrf_details.get(identity, {})
     base_score = rrf_score + 0.02 * lexical
     total = base_score
     disambig = {
@@ -446,6 +458,7 @@ def _assess_ranked_document(
         path=doc["path"],
         rrf_score=rrf_score,
         rrf_details=rrf_details,
+        semantic_hit=semantic_hit,
         fulltext_weight=fulltext_weight,
         disambig=disambig,
         user_page={
@@ -511,6 +524,7 @@ def _render_ranked_document(assessment: _RankedAssessment) -> dict[str, Any]:
             },
             "phrase": bool(phrase_hit),
             "content_phrase": a.content_phrase_hit,
+            "semantic_hit": a.semantic_hit,
             "intent": bool(a.intent),
             "lexical_score": round(a.lexical, 6),
             "disambiguation": a.disambig,
@@ -544,8 +558,14 @@ class Search:
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
         self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
-        self.page_size = _int_config(cfg, "page_size", DEFAULT_PAGE_SIZE)
         self.max_results = _int_config(cfg, "max_results", DEFAULT_MAX_RESULTS)
+        # A page can never be larger than the ranked pool it is sliced from.
+        # Clamping once here keeps /config, the page headers, and the frontend
+        # pager consistent even if a hand-edited config sets page_size higher.
+        self.page_size = min(
+            _int_config(cfg, "page_size", DEFAULT_PAGE_SIZE),
+            self.max_results,
+        )
         self.max_concurrent_searches = _int_config(
             cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
         )
@@ -572,7 +592,7 @@ class Search:
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
         )
-        # Single metadata catalog.  It is a disposable cache: the ZIM directory
+        # Single metadata catalog. It is a disposable cache: the ZIM directory
         # remains the source of truth, and a missing/corrupt catalog falls back
         # to the archive-scanning behavior below.
         self.catalog: ZimCatalog | None = None
@@ -580,7 +600,7 @@ class Search:
         if index_dir:
             try:
                 catalog = ZimCatalog(
-                    Path(index_dir) / CATALOG_FILENAME,
+                    catalog_path(index_dir),
                     zim_dir=cfg.get("zim_dir"),
                     archive_factory=self.archive_factory,
                 )
@@ -647,8 +667,7 @@ class Search:
             return None, False
         try:
             candidates = sorted(
-                path for path in Path(zim_dir).rglob("*")
-                if path.stem == stem and is_zim_filename(path.name)
+                path for path in iter_zim_files(zim_dir) if path.stem == stem
             )
         except OSError:
             return None, False
@@ -674,12 +693,11 @@ class Search:
     def _scan_zim_paths(self) -> dict[str, Path]:
         """Find local archives without requiring a SQLite index.
 
-        ``os.scandir`` keeps this startup probe cheap, while the recursive walk
-        preserves the same nested-directory behavior as ``build``. File sizes are
-        read only when a stem repeats, so a normal library never pays for a
-        ``stat``. When a stem repeats with different sizes (for example a
-        truncated download beside the complete file), the larger file is kept
-        rather than discarding the stem.
+        The shared recursive enumerator keeps this startup probe consistent with
+        the catalog and ``build``. File sizes are read only when a stem repeats,
+        so a normal library never pays for a ``stat``. When a stem repeats with
+        different sizes (for example a truncated download beside the complete
+        file), the larger file is kept rather than discarding the stem.
         """
         zim_dir = self.cfg.get("zim_dir")
         if not zim_dir:
@@ -687,7 +705,7 @@ class Search:
 
         found: dict[str, Path] = {}
         # Sizes of stems seen more than once; absent for unique stems so they are
-        # never stat'ed.
+        # never read with ``stat``.
         sizes: dict[str, int] = {}
         contested: set[str] = set()
 
@@ -714,21 +732,12 @@ class Search:
             if incoming_size != kept_size:
                 contested.add(stem)
 
-        def scan(directory: str) -> None:
+        for path in iter_zim_files(zim_dir):
             try:
-                with os.scandir(directory) as entries:
-                    for entry in sorted(entries, key=lambda item: item.name):
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                scan(entry.path)
-                            elif entry.is_file() and is_zim_filename(entry.name):
-                                record(Path(entry.path))
-                        except OSError:
-                            continue
+                if path.is_file():
+                    record(path)
             except OSError:
-                return
-
-        scan(str(zim_dir))
+                continue
         for stem in sorted(contested):
             logger.warning(
                 "zimantic: %r has ZIM files of different sizes; using the largest %s",
@@ -803,8 +812,6 @@ class Search:
         finished: dict[str, Path] = {}
         recorded_sizes: dict[str, int | None] = {}
         for path in db_paths:
-            if path.name == CATALOG_FILENAME:
-                continue
             done, source_size = self._read_index_state(path)
             if done:
                 finished[path.stem] = path
@@ -840,8 +847,8 @@ class Search:
             if stem not in finished:
                 found[stem] = ("zim", path)
 
-        # The UUID is the book identity.  Two copies of the same ZIM (same
-        # UUID, different filename/path) must not appear as two sources.  Keep
+        # The UUID is the book identity. Two copies of the same ZIM (same
+        # UUID, different filename/path) must not appear as two sources. Keep
         # one deterministic copy, preferring a readable one, then an indexed
         # one, then the larger file, then the shorter path.
         if self._catalog:
@@ -951,7 +958,7 @@ class Search:
                     source_size = record.size
             else:
                 zim_path = self._find_zim_path(db_path.stem, source_size)
-            # The archive and its libzim Searcher are opened on first use.  A
+            # The archive and its libzim Searcher are opened on first use. A
             # 5000-ZIM library therefore no longer opens 5000 archives (or
             # creates 5000 Searchers) at startup.
             db.close()
@@ -1240,6 +1247,8 @@ class Search:
             if any_changed:
                 # Index content, and therefore what is searchable, changed;
                 # cached answers under the same names can no longer be fresh.
+                self._library_scan_at = 0.0
+                self._library_version_at = 0.0
                 with self._state_lock:
                     self._cache_generation = getattr(self, "_cache_generation", 0) + 1
                 self.cache.clear()
@@ -1373,6 +1382,71 @@ class Search:
 
         threading.Thread(target=_refresh, name="zimantic-catalog", daemon=True).start()
 
+    def _source_from_catalog(
+        self,
+        record,
+        *,
+        key: str,
+        local_name: str,
+        searchable: bool | None = None,
+    ) -> SourceInfo:
+        """Build one local ``SourceInfo`` from a catalog row.
+
+        Used by both the searchable-source rebuild and the installed-library
+        view so metadata, availability, icon, and perma-ref handling cannot
+        drift between the two.
+        """
+        meta = record.to_source_metadata()
+        available = bool(record.available)
+        error = None
+        if not available:
+            error = record.last_error or "ZIM archive is unavailable"
+        if searchable is None:
+            searchable = available
+        searchable = bool(searchable) and available
+        icon_url = _source_icon_url(
+            local_name,
+            bool(record.favicon or meta["icon_path"]),
+            self.web_base_path,
+        )
+        return SourceInfo(
+            key=key,
+            name=local_name,
+            book=local_name,
+            mode="local",
+            local_name=local_name,
+            available=available,
+            searchable=searchable,
+            error=error,
+            # An unreadable archive has no openable homepage.
+            homepage=meta["homepage"] if available else None,
+            icon_path=meta["icon_path"],
+            icon_url=icon_url,
+            intent_phrases=_intent_phrases(local_name),
+            title=meta["title"],
+            description=meta["description"],
+            long_description=meta["long_description"],
+            creator=meta["creator"],
+            publisher=meta["publisher"],
+            language=meta["language"],
+            date=meta["date"],
+            tags=meta["tags"],
+            size=meta["size"],
+            article_count=meta["article_count"],
+            uuid=meta["uuid"],
+            perma_ref=perma_ref(local_name),
+            flavour=meta["flavour"],
+            category=meta["category"],
+            media_count=meta["media_count"],
+            license=meta["license"],
+            scraper=meta["scraper"],
+            source=meta["source"],
+            attribution=meta["attribution"],
+            relation=meta["relation"],
+            counter=meta["counter"],
+            has_fulltext_index=meta["has_fulltext_index"],
+        )
+
     def _rebuild_sources(self, entries: list[dict[str, str]]) -> list[dict[str, Any]]:
         web_base_path = self.web_base_path
         with self._state_lock:
@@ -1388,58 +1462,20 @@ class Search:
                     else None
                 )
                 if record is not None:
-                    meta = record.to_source_metadata()
-                    available = bool(record.available)
-                    icon_url = _source_icon_url(
-                        local_name,
-                        "catalog-favicon" if record.favicon else meta["icon_path"],
-                        web_base_path,
-                    )
-                    local[key] = SourceInfo(
+                    local[key] = self._source_from_catalog(
+                        record,
                         key=key,
-                        name=local_name,
-                        book=local_name,
-                        mode="local",
                         local_name=local_name,
-                        available=available,
-                        error=(record.last_error or None) if not available else None,
-                        # An unreadable archive has no openable homepage.
-                        homepage=meta["homepage"] if available else None,
-                        icon_path=meta["icon_path"],
-                        icon_url=icon_url,
-                        intent_phrases=_intent_phrases(local_name),
-                        title=meta["title"],
-                        description=meta["description"],
-                        long_description=meta["long_description"],
-                        creator=meta["creator"],
-                        publisher=meta["publisher"],
-                        language=meta["language"],
-                        date=meta["date"],
-                        tags=meta["tags"],
-                        size=meta["size"],
-                        article_count=meta["article_count"],
-                        uuid=meta["uuid"],
-                        perma_ref=meta["name"],
-                        flavour=meta["flavour"],
-                        category=meta["category"],
-                        media_count=meta["media_count"],
-                        license=meta["license"],
-                        scraper=meta["scraper"],
-                        source=meta["source"],
-                        attribution=meta["attribution"],
-                        relation=meta["relation"],
-                        counter=meta["counter"],
-                        has_fulltext_index=meta["has_fulltext_index"],
                     )
                     continue
 
-                # Fallback for archives without a catalog row (e.g. a catalog
-                # created before this version, or a build that could not write
-                # it).  This opens the archive, as prior versions always did.
+                # Fallback for archives without a catalog row (for example, a
+                # catalog created before this version, or a build that could not
+                # write it). This opens the archive, as prior versions always did.
                 archive = index.ensure_open()
                 if archive is None:
                     # A title-only index can still serve results when its ZIM is
-                    # absent (the SQLite docs table is self-contained).  Keep the
+                    # absent (the SQLite docs table is self-contained). Keep the
                     # source available, as prior versions did.
                     local[key] = SourceInfo(
                         key=key,
@@ -1458,7 +1494,11 @@ class Search:
                     with index.read_lock:
                         homepage = self._resolve_article_entry(archive).path
                         icon_path = _find_archive_icon_path(archive, homepage)
-                        metadata = _archive_metadata(archive)
+                        metadata = (
+                            _archive_metadata(archive, Path(index.zim_path))
+                            if index.zim_path
+                            else {}
+                        )
                 except (
                     ArticleNotFoundError,
                     ArticleUnavailableError,
@@ -1466,11 +1506,8 @@ class Search:
                     ValueError,
                 ):
                     homepage = None
-                icon_url = _source_icon_url(local_name, icon_path, web_base_path)
-                if not icon_url and _archive_has_illustration(archive):
-                    icon_url = _source_icon_url(
-                        local_name, "illustration", web_base_path
-                    )
+                has_icon = bool(icon_path) or _archive_has_illustration(archive)
+                icon_url = _source_icon_url(local_name, has_icon, web_base_path)
                 size = index.source_size
                 if size is None and index.zim_path:
                     try:
@@ -1499,11 +1536,22 @@ class Search:
                     description=metadata.get("Description"),
                     long_description=metadata.get("LongDescription"),
                     creator=metadata.get("Creator"),
+                    publisher=metadata.get("Publisher"),
                     language=metadata.get("Language"),
                     date=metadata.get("Date"),
                     tags=metadata.get("Tags", ()),
                     size=size,
                     article_count=article_count,
+                    uuid=metadata.get("UUID") or None,
+                    perma_ref=perma_ref(local_name),
+                    flavour=metadata.get("Flavour") or None,
+                    license=metadata.get("License") or None,
+                    scraper=metadata.get("Scraper") or None,
+                    source=metadata.get("Source") or None,
+                    attribution=metadata.get("Attribution") or None,
+                    relation=metadata.get("Relation") or None,
+                    counter=metadata.get("Counter") or None,
+                    has_fulltext_index=metadata.get("HasFulltextIndex"),
                 )
 
             merged = dict(local)
@@ -1534,7 +1582,9 @@ class Search:
         if changed:
             # The set of searchable sources changed, so prior answers can be stale.
             # Keeping the cache while the source set is unchanged lets repeated
-            # queries (e.g. page reloads) be answered without recomputing.
+            # queries (for example, page reloads) be answered without recomputing.
+            self._library_scan_at = 0.0
+            self._library_version_at = 0.0
             with self._state_lock:
                 self._cache_generation = getattr(self, "_cache_generation", 0) + 1
             self.cache.clear()
@@ -1551,14 +1601,12 @@ class Search:
             )
         )
         url = server + (path if path.startswith("/") else "/" + path)
-        url = _bounded_catalog_url(
-            url,
-            _int_config(
-                self.cfg,
-                "kiwix_catalog_limit",
-                DEFAULT_KIWIX_CATALOG_LIMIT,
-            ),
+        catalog_limit = _int_config(
+            self.cfg,
+            "kiwix_catalog_limit",
+            DEFAULT_KIWIX_CATALOG_LIMIT,
         )
+        url = _bounded_catalog_url(url, catalog_limit)
         response_limit = _int_config(
             self.cfg,
             "max_kiwix_response_bytes",
@@ -1577,6 +1625,21 @@ class Search:
                     )
                 break
             except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError) as error:
+                retryable = True
+                if isinstance(error, HTTPError) and (
+                    400 <= error.code < 500 and error.code != 429
+                ):
+                    retryable = False
+                elif isinstance(error, (ValueError, ET.ParseError)):
+                    # Malformed XML, a DTD, or an over-limit response will not
+                    # become valid on the next attempt.
+                    retryable = False
+                if not retryable:
+                    logger.warning(
+                        "zimantic: catalog request failed: %s",
+                        error,
+                    )
+                    return None
                 if attempt + 1 == attempts:
                     logger.warning(
                         "zimantic: catalog request failed after %d attempt(s): %s",
@@ -1618,6 +1681,12 @@ class Search:
                 newest[key] = item
 
         items = list(newest.values())
+        # The server may ignore the requested count or return more entries than
+        # asked for. Enforce the configured ceiling locally as well, after
+        # de-duplicating by book key, so a remote catalog cannot make the source
+        # set unbounded.
+        items.sort(key=lambda item: (item["name"].casefold(), item["book"]))
+        items = items[:catalog_limit]
         title_counts: dict[str, int] = {}
         for item in items:
             title_counts[item["name"]] = title_counts.get(item["name"], 0) + 1
@@ -1628,54 +1697,22 @@ class Search:
 
     def source_dicts(self) -> list[dict[str, Any]]:
         with self._state_lock:
-            return [source.to_dict() for source in self.sources.values()]
+            return [
+                source.to_dict(include_metadata=True)
+                for source in self.sources.values()
+            ]
 
     def _inspect_library_archive(self, zim_name: str, zim_path: Path) -> SourceInfo:
         """Build library metadata for a local archive not used by search."""
         record = self._catalog.get_stem(zim_path.stem) if self._catalog else None
         if record is not None:
-            meta = record.to_source_metadata()
-            available = bool(record.available)
-            icon_url = _source_icon_url(
-                zim_name,
-                "catalog-favicon" if record.favicon else meta["icon_path"],
-                self.web_base_path,
-            )
-            return SourceInfo(
+            with self._state_lock:
+                searchable = zim_name in self.indexes
+            return self._source_from_catalog(
+                record,
                 key=_zim_key(zim_name),
-                name=zim_name,
-                book=zim_name,
-                mode="local",
                 local_name=zim_name,
-                available=available,
-                error=(record.last_error or None) if not available else None,
-                # An unreadable archive has no openable homepage; the library
-                # still lists it so the UI can explain why.
-                homepage=meta["homepage"] if available else None,
-                icon_path=meta["icon_path"],
-                icon_url=icon_url,
-                title=meta["title"],
-                description=meta["description"],
-                long_description=meta["long_description"],
-                creator=meta["creator"],
-                publisher=meta["publisher"],
-                language=meta["language"],
-                date=meta["date"],
-                tags=meta["tags"],
-                size=meta["size"],
-                article_count=meta["article_count"],
-                uuid=meta["uuid"],
-                perma_ref=meta["name"],
-                flavour=meta["flavour"],
-                category=meta["category"],
-                media_count=meta["media_count"],
-                license=meta["license"],
-                scraper=meta["scraper"],
-                source=meta["source"],
-                attribution=meta["attribution"],
-                relation=meta["relation"],
-                counter=meta["counter"],
-                has_fulltext_index=meta["has_fulltext_index"],
+                searchable=searchable,
             )
         try:
             archive = Archive(zim_path)
@@ -1688,6 +1725,7 @@ class Search:
                 mode="local",
                 local_name=zim_name,
                 available=False,
+                searchable=False,
                 error="ZIM archive is unavailable",
                 size=zim_path.stat().st_size if zim_path.exists() else None,
             )
@@ -1698,17 +1736,19 @@ class Search:
         except (ArticleNotFoundError, ArticleUnavailableError, RuntimeError, ValueError):
             pass
         icon_path = _find_archive_icon_path(archive, homepage)
-        metadata = _archive_metadata(archive)
+        metadata = _archive_metadata(archive, zim_path)
         web_base_path = self.web_base_path
-        icon_url = _source_icon_url(zim_name, icon_path, web_base_path)
-        if not icon_url and _archive_has_illustration(archive):
-            icon_url = _source_icon_url(zim_name, "illustration", web_base_path)
+        has_icon = bool(icon_path) or _archive_has_illustration(archive)
+        icon_url = _source_icon_url(zim_name, has_icon, web_base_path)
         try:
             size = zim_path.stat().st_size
         except OSError:
             size = None
         try:
-            article_count = int(getattr(archive, "article_count", 0) or 0)
+            article_count = getattr(archive, "article_count", 0)
+            if callable(article_count):
+                article_count = article_count()
+            article_count = int(article_count or 0)
         except (AttributeError, RuntimeError, TypeError, ValueError):
             article_count = None
         return SourceInfo(
@@ -1717,6 +1757,7 @@ class Search:
             book=zim_name,
             mode="local",
             local_name=zim_name,
+            searchable=False,
             homepage=homepage,
             icon_path=icon_path,
             icon_url=icon_url,
@@ -1724,19 +1765,49 @@ class Search:
             description=metadata.get("Description"),
             long_description=metadata.get("LongDescription"),
             creator=metadata.get("Creator"),
+            publisher=metadata.get("Publisher"),
             language=metadata.get("Language"),
             date=metadata.get("Date"),
             tags=metadata.get("Tags", ()),
             size=size,
             article_count=article_count,
+            uuid=metadata.get("UUID") or None,
+            perma_ref=perma_ref(zim_name),
+            flavour=metadata.get("Flavour") or None,
+            license=metadata.get("License") or None,
+            scraper=metadata.get("Scraper") or None,
+            source=metadata.get("Source") or None,
+            attribution=metadata.get("Attribution") or None,
+            relation=metadata.get("Relation") or None,
+            counter=metadata.get("Counter") or None,
+            has_fulltext_index=metadata.get("HasFulltextIndex"),
         )
+
+    def _library_zim_paths(self) -> dict[str, Path]:
+        """Scan ``zim_dir`` at most once per short interval for the library view."""
+        lock = getattr(self, "_library_scan_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._library_scan_lock = lock
+        now = time.monotonic()
+        with lock:
+            cached = getattr(self, "_library_scan_cache", None)
+            scanned_at = getattr(self, "_library_scan_at", 0.0)
+            if cached is not None and now - scanned_at < LIBRARY_SCAN_TTL_SECONDS:
+                return dict(cached)
+        scanned = self._scan_zim_paths()
+        with lock:
+            self._library_scan_cache = dict(scanned)
+            self._library_scan_at = time.monotonic()
+        return scanned
 
     def library_dicts(self) -> list[dict[str, Any]]:
         """Return metadata for every local ZIM in the library.
 
         Unreadable archives are included with ``available: false`` so the UI can
-        explain why a ZIM cannot be opened; only a readable archive without a
-        homepage (nothing to open) is omitted.
+        explain why a ZIM cannot be opened. Readable archives without a
+        resolvable homepage are also included; the frontend can offer a random
+        article instead of a homepage link.
         """
         with self._state_lock:
             indexed = {
@@ -1748,12 +1819,10 @@ class Search:
         # One card per UUID: prefer a readable copy, then a searchable one, then
         # the larger file, then the shorter/lexicographically earlier name.
         chosen: dict[str, tuple[tuple, SourceInfo]] = {}
-        for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
+        for zim_name, zim_path in sorted(self._library_zim_paths().items()):
             source = indexed.get(zim_name)
             if source is None:
                 source = self._inspect_library_archive(zim_name, zim_path)
-            if source.available and not source.homepage:
-                continue
             identity = source.uuid or f"stem:{source.name}"
             rank = (
                 source.available,
@@ -1774,8 +1843,18 @@ class Search:
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int], ...]]:
         """Return a cheap token that changes when the library contents change."""
+        lock = getattr(self, "_library_scan_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._library_scan_lock = lock
+        now = time.monotonic()
+        with lock:
+            cached = getattr(self, "_library_version_cache", None)
+            cached_at = getattr(self, "_library_version_at", 0.0)
+            if cached is not None and now - cached_at < LIBRARY_SCAN_TTL_SECONDS:
+                return cached
         signatures = []
-        for zim_name, zim_path in sorted(self._scan_zim_paths().items()):
+        for zim_name, zim_path in sorted(self._library_zim_paths().items()):
             try:
                 stat = zim_path.stat()
             except OSError:
@@ -1785,7 +1864,11 @@ class Search:
         # The catalog is read live for archives without a library source record,
         # so metadata-only writes must invalidate this payload too.
         catalog_version = catalog.version() if catalog is not None else ()
-        return (self.source_version(), catalog_version, tuple(signatures))
+        version = (self.source_version(), catalog_version, tuple(signatures))
+        with lock:
+            self._library_version_cache = version
+            self._library_version_at = time.monotonic()
+        return version
 
     def source_version(self) -> tuple[int, ...]:
         """Token that changes whenever the source set or its metadata changes."""
@@ -1793,7 +1876,7 @@ class Search:
             return (getattr(self, "_cache_generation", 0),)
 
     def close(self) -> None:
-        """Release the search thread pool, cancelling work not yet started."""
+        """Release the search thread pool, canceling work not yet started."""
         executor = getattr(self, "_executor", None)
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
@@ -1830,19 +1913,10 @@ class Search:
             entry = archive.main_entry if path is None else archive.get_entry_by_path(path)
         except (KeyError, RuntimeError, ValueError) as error:
             raise ArticleNotFoundError("article not found") from error
-
-        seen: set[str] = set()
-        for _ in range(32):
-            if not entry.is_redirect:
-                return entry
-            if entry.path in seen:
-                raise ArticleUnavailableError("article redirect cycle")
-            seen.add(entry.path)
-            try:
-                entry = entry.get_redirect_entry()
-            except (KeyError, RuntimeError, ValueError) as error:
-                raise ArticleUnavailableError("article redirect is unavailable") from error
-        raise ArticleUnavailableError("article redirect chain is too long")
+        try:
+            return resolve_redirect_entry(entry)
+        except RedirectError as error:
+            raise ArticleUnavailableError(str(error)) from error
 
     def _read_archive_article(
         self,
@@ -2017,7 +2091,7 @@ class Search:
         }
 
     def read_source_icon(self, zim_name: str) -> dict[str, Any]:
-        """Read the source illustration selected during local source discovery."""
+        """Read the illustration selected for a local ZIM."""
         with self._state_lock:
             source = next(
                 (
@@ -2027,13 +2101,19 @@ class Search:
                 ),
                 None,
             )
-        if source is not None and source.mode == "local" and self._catalog:
+        if self._catalog:
+            # Consult the catalog even when the ZIM has no search source (for
+            # example a library-only archive or a duplicate removed from
+            # search). The favicon BLOB is the same illustration the discovery
+            # code selected.
             data, mime = self._catalog.favicon(zim_name)
             if data:
                 return {
                     "zim": zim_name,
                     "path": None,
-                    "title": source.title or zim_name,
+                    "title": (
+                        source.title if source is not None and source.title else zim_name
+                    ),
                     "mimetype": (mime or "application/octet-stream")
                     .split(";", 1)[0]
                     .strip()
@@ -2150,7 +2230,7 @@ class Search:
                 continue
             if self._is_random_article_entry(entry):
                 return entry.path
-        # Sparse archive (e.g. an OSM ZIM): probes miss, and there is no docs
+        # Sparse archive (for example, an OSM ZIM): probes miss, and there is no docs
         # table to COUNT/OFFSET against, so scan the readable entry ids once and
         # reuse the list. The scan is O(entry_count) and happens at most once per
         # open index; storing ids keeps it far smaller than storing paths.
@@ -2172,6 +2252,26 @@ class Search:
         except (KeyError, RuntimeError, ValueError, IndexError):
             return None
         return entry.path
+
+    def random_local_source(self) -> SourceInfo:
+        """Return a random readable local source that has a homepage.
+
+        Used by the article toolbar's alt-click Random action and by the library
+        fallback for archives without a main entry. The caller redirects to the
+        chosen source's homepage.
+        """
+        with self._state_lock:
+            candidates = [
+                source
+                for source in self.sources.values()
+                if source.mode == "local"
+                and source.available
+                and source.local_name
+                and source.homepage
+            ]
+        if not candidates:
+            raise ArticleNotFoundError("no local source has a homepage")
+        return secrets.choice(candidates)
 
     def random_article_path(self, zim_name: str) -> str:
         """Return a random indexed article path without changing search state."""
@@ -2311,6 +2411,11 @@ class Search:
                 "loaded": embedder_loaded,
             },
             "cache": self.cache.stats(),
+            "preview_cache": (
+                self.preview_cache.stats()
+                if getattr(self, "preview_cache", None) is not None
+                else None
+            ),
         }
 
     @staticmethod
@@ -2343,6 +2448,15 @@ class Search:
             for source in available
             if wanted.intersection({source.key, source.name, source.book, source.local_name})
         ]
+        if not selected:
+            # A stale bookmark or a source removed since the URL was saved must
+            # not silently turn into a zero-source search. Fall back to the full
+            # library and let the normal availability rules decide.
+            logger.warning(
+                "zimantic: ignoring unknown source selection (%s); searching all sources",
+                ", ".join(sorted(wanted)),
+            )
+            return available, False, None
         limit = self._selective_source_limit(len(available))
         if len(selected) <= limit:
             return (
@@ -2351,9 +2465,6 @@ class Search:
                 tuple(sorted(source.key for source in selected)),
             )
         return available, False, None
-
-    def _selected_sources(self, zim: list[str] | None) -> list[SourceInfo]:
-        return self._search_scope(zim)[0]
 
     @staticmethod
     def _validate_query(query: str) -> str:
@@ -2384,7 +2495,7 @@ class Search:
         default = getattr(self, "page_size", DEFAULT_PAGE_SIZE)
         ceiling = getattr(self, "max_results", DEFAULT_MAX_RESULTS)
         if limit is None:
-            return default
+            return max(1, min(int(default), ceiling))
         try:
             return max(1, min(int(limit), ceiling))
         except (TypeError, ValueError):
@@ -2404,8 +2515,9 @@ class Search:
         fill its share of that pool. Asking every one of hundreds of sources for
         the full pool size multiplies retrieval, fusion and ranking work for
         candidates that cannot survive the global cut. At least
-        ``candidate_count`` is kept so a lone or lightly filtered source still
-        returns a full page, and a single source returns the whole pool.
+        ``candidate_count`` is kept as a recall floor, so with many sources the
+        floor can be larger than the mathematical share; a single source returns
+        the whole pool.
         """
         pool_target = self._pool_target()
         if total_sources <= 1:
@@ -2456,6 +2568,12 @@ class Search:
         selected source, so narrowing here never changes what was searched.
         """
         selected = {source} if isinstance(source, str) else set(source or [])
+        if selected:
+            # A stale bookmark may name a source that no longer exists. Treat it
+            # like an absent display filter instead of returning an empty page.
+            with self._state_lock:
+                known = {item.key for item in self.sources.values()}
+            selected &= known
         scoped = pool if not selected else [
             doc for doc in pool if doc.get("source_key") in selected
         ]
@@ -3267,7 +3385,7 @@ class Search:
         searcher = index.ensure_searcher()
         archive = index.ensure_open()
         if searcher and archive:
-            # libzim's Searcher is not documented as thread-safe: serialise it.
+            # libzim's Searcher is not documented as thread-safe: serialize it.
             with index.lock:
                 try:
                     paths = searcher.search(
@@ -3368,20 +3486,42 @@ class Search:
 
         values = list(rowids)
         fetch(values)
-        target_ids = {int(row[3]) for row in rows.values() if row[3] is not None}
-        fetch(target_ids)
+        # Older indexes may contain redirect-to-redirect rows, so follow every
+        # target chain before rendering the result. Indexing now stores the
+        # final target, but this keeps existing indexes correct too.
+        pending = {
+            int(row[3]) for row in rows.values() if row[3] is not None
+        } - set(rows)
+        seen: set[int] = set()
+        for _ in range(32):
+            if not pending:
+                break
+            fetch(pending)
+            seen.update(pending)
+            pending = {
+                int(row[3]) for row in rows.values() if row[3] is not None
+            } - set(rows) - seen
 
-        # kiwix_url is optional: without it results have no article link, so the
-        # UI renders the title as plain text instead of building a broken URL.
-        kiwix_url = str(self.cfg.get("kiwix_url") or "").strip().rstrip("/")
+        def final_row(rowid: int):
+            current_id = rowid
+            visited: set[int] = set()
+            for _ in range(32):
+                row = rows.get(current_id)
+                if row is None:
+                    return None
+                if row[3] is None:
+                    return row
+                visited.add(current_id)
+                next_id = int(row[3])
+                if next_id in visited:
+                    return None
+                current_id = next_id
+            return None
+
         web_base_path = self.web_base_path
         docs: dict[int, dict[str, Any]] = {}
         for rowid in values:
-            original = rows.get(rowid)
-            if not original:
-                continue
-            target = int(original[3]) if original[3] is not None else rowid
-            row = rows.get(target)
+            row = final_row(rowid)
             if not row:
                 continue
             _, title, path, _ = row
@@ -3397,12 +3537,6 @@ class Search:
                 "url": (
                     f"{web_base_path}/content/{quote(source.local_name or source.book, safe='')}/"
                     f"{quote(path, safe='/')}"
-                    if source.mode == "local" and (source.local_name or source.book)
-                    else (
-                        f"{kiwix_url}/{quote(source.book)}/{quote(path)}"
-                        if kiwix_url
-                        else None
-                    )
                 ),
             }
             docs[rowid] = doc
@@ -3528,31 +3662,30 @@ class Search:
         pool when any phrase matched, otherwise the pool unchanged.
         """
         phrase_words = _phrase_words(query)
+        query_terms = _query_terms(query)
         phrase_active = len(phrase_words) >= 2 and bool(pool)
         _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
         max_html_bytes = _int_config(self.cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES)
-        preview_chars = getattr(
-            self,
-            "preview_chars",
-            _int_config(self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS),
-        )
         indexes = getattr(self, "indexes", {})
 
+        # Check the phrase in article text for the highest-ranked candidates,
+        # whichever retrieval list found them. Previously only full-text hits
+        # were checked, so an exact phrase in a semantic/title hit was ignored.
         phrase_ids: set[str] = set()
         if phrase_active:
-            checked = 0
             for result in pool:
-                if checked >= MAX_PHRASE_CANDIDATES:
+                if len(phrase_ids) >= MAX_PHRASE_CANDIDATES:
                     break
-                if result["ranking"]["rrf"]["fulltext"]["rank"] is None:
-                    continue
                 source = source_by_key.get(result.get("source_key"))
                 if source is None or not source.local_name:
+                    continue
+                if _phrase(query_terms, _content_terms(result["title"])):
+                    # The title already carries the phrase; that signal is
+                    # already in the ranking, so skip the content read.
                     continue
                 index = indexes.get(source.local_name)
                 if index is None or index.ensure_open() is None:
                     continue
-                checked += 1
                 phrase_ids.add(result["id"])
 
         grouped: dict[str, list[dict[str, Any]]] = {}
@@ -3602,18 +3735,8 @@ class Search:
                         )
                         if source_doc is not None:
                             source_doc["_content_phrase"] = hit
-                        if not hit:
-                            continue
-                        found = True
-                        if mimetype in {"text/html", "application/xhtml+xml"}:
-                            preview = extract_excerpt(
-                                raw, max_preview_chars=preview_chars
-                            )
-                            if preview:
-                                lead = self._preview(preview)
-                                result["lead"] = lead
-                                if source_doc is not None:
-                                    source_doc["lead"] = lead
+                        if hit:
+                            found = True
             finally:
                 self._release_index(index)
         return self._rank_results(source_results, query, limit) if found else pool
@@ -3691,8 +3814,9 @@ class Search:
             if not title and not link or identity in seen:
                 continue
             seen.add(identity)
-            if link.startswith("/"):
-                link = server + link
+            parsed_link = urlparse(link)
+            if link and not parsed_link.scheme and not parsed_link.netloc:
+                link = urljoin(server.rstrip("/") + "/", link)
             docs.append({
                 "id": f"{source.key}:{link or title}",
                 "source_key": source.key,
@@ -3739,6 +3863,10 @@ class Search:
         ]
         assessed.sort(key=lambda item: (
             -item.total,
+            # Title/full-text-only entries still appear, but a semantic hit wins
+            # an otherwise exact tie. This keeps title-only pages (for example
+            # JavaScript loader shells) below comparable meaning matches.
+            not item.semantic_hit,
             -item.lexical,
             -item.title_quality,
             item.source_rank,

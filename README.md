@@ -21,12 +21,12 @@ Zero 2 W.
 - **Search by meaning**: questions and descriptions find articles even when they share no words with the title.
 - **Alternate names and misspellings**: "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another. Strongest in widely used languages (see the results below).
-- **Several sources at once**: search any combination of your ZIMs and rank the results together in one list.
+- **Several sources at once**: search a small selection of ZIMs directly, or search the full library and filter the ranked results by source.
 - **Best of three searches**: meaning, title-word and full-text retrieval are fused into a single ranking.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. A small selection (at most `min(10, 35%)` of available sources) is searched on its own for deeper per-source results and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed.
-- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
+- **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. Selected sources stay visible, so choosing **Other** expands that group into its individual filters. A selection of at most `min(10, 35%)` of available sources is searched on its own when it starts a search and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed. Source filters chosen after a full search are display-only and reuse that pool.
+- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
@@ -40,8 +40,8 @@ available through a Kiwix server, but local indexed results do not require it.
 
 ### Measured memory use
 
-As a reference point, a clean benchmark using the `wikipedia_en_100_2026-08.zim` ZIM (5,056
-articles) and one local index measured these peak resident set sizes:
+As a reference point, a clean benchmark using `wikipedia_en_100_2026-08.zim` (5,056 articles) and
+one local index measured these peak resident set sizes:
 
 | Operation | Peak RSS |
 |---|---:|
@@ -59,11 +59,11 @@ replaces both with a ~34 MB model and a small WordPiece vocabulary. They are loa
 duplicated, and `gc.collect()` cannot release them because they are C++ allocations, not Python
 objects. ONNX Runtime also reads the file into a temporary buffer while loading (so there is a
 short-lived ~2× peak at startup) and its **CPU memory arena** keeps the working set of the largest
-embedding batch for the lifetime of the session. At `batch_size = 32` that arena alone can consume ~400 MB and
-retain it. On hosts with **2 GB RAM or less**, Zimantic therefore disables the arena and returns
-freed heap memory to the OS between batches (`malloc_trim` on glibc), capping build memory near the
-model size at a modest throughput cost. Machines with more RAM keep the arena for faster builds.
-`serve` embeds one query at a time, so the arena costs little there either way.
+embedding batch for the lifetime of the session. At `batch_size = 32` that arena alone can consume
+~400 MB and retain it. On hosts with **2 GB RAM or less**, Zimantic therefore disables the arena and
+returns freed heap memory to the OS between batches (`malloc_trim` on glibc), capping build memory
+near the model size at a modest throughput cost. Machines with more RAM keep the arena for faster
+builds. `serve` embeds one query at a time, so the arena costs little there either way.
 
 ## How it works
 
@@ -82,9 +82,9 @@ similar) whose `<route>.md` holds the body under `content/`. Plain-text fields s
 descriptions and Markdown prose are indexed too (front matter and fenced code are dropped). Shell
 stubs and "enable JavaScript" notices are skipped.
 
-**Text extraction.** Stylesheets, scripts, footnotes, page chrome (category footers, navboxes,
-tables of contents, maintenance tags) and common boilerplate are ignored, including page chrome that
-is nested or hidden (`display:none`, `visibility:hidden`, the `hidden` attribute). When a page
+**Text extraction.** Stylesheets, scripts, footnotes, common boilerplate and page chrome (category
+footers, navboxes, tables of contents, maintenance tags) are ignored, including page chrome that is
+nested or hidden (`display:none`, `visibility:hidden`, the `hidden` attribute). When a page
 repeats the same text under `lang-*` classes (parallel translations, as in TED talks), only the
 `lang-default` copy is kept. Visible blocks are collected in priority order, with paragraphs
 preferred, and block boundaries keep neighboring text runs from running together.
@@ -92,10 +92,13 @@ preferred, and block boundaries keep neighboring text runs from running together
 Each article's **excerpt** is extracted transiently for the embedding and discarded after the
 vector is built. At search time, only the displayed local results are extracted again for previews,
 bounded to `max_preview_chars` (1,000 by default) at a word boundary. Extraction reads up to 4 MiB
-per page by default. The builder skips an entry only when its decompressed size exceeds
-`max_entry_bytes` (1 GiB on desktop, 256 MiB on the mobile profile); this high safety ceiling
-preserves large, friendly articles while preventing pathological entries from exhausting memory
-before the parser limit can be applied.
+per page by default. Entries are skipped when they are assets, JavaScript shells, empty pages, scanned
+PDFs without text, or other non-article content. Pages that ship only script/link references (for
+example PhET simulations) remain title-only, so they can still be found by title. The builder also
+skips an entry whose decompressed size exceeds `max_entry_bytes` (1 GiB on desktop, 256 MiB on the
+mobile profile); this high safety ceiling preserves large, useful articles while preventing
+pathological entries from exhausting memory before the parser limit can be applied. Companion JSON
+and Markdown bodies are subject to the same limit.
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable text:
 HTML, XHTML, plain text and PDFs. PDF text is read from the file's embedded text layer, so scanned
@@ -103,50 +106,64 @@ documents without one are skipped.
 
 **Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-The model receives a fixed 256-token budget. See
+The model receives a fixed budget of 256 tokens. See
 [Using a different embedding model](#using-a-different-embedding-model) for other e5 models, their
-tokenizers, and their memory and speed trade-offs. Search previews are generated independently from
-the local ZIM only for the final displayed page.
+tokenizers, and their memory and speed trade-offs. Entries with no body text (title-only pages, for
+example JavaScript loader shells) remain searchable through title and full-text retrieval; they
+simply have no meaning vector. Search previews are generated independently from the local ZIM only
+for the final displayed page.
 
 **Storage.** Each ZIM gets two files in `index_dir`, plus one shared catalog:
 - `<name>.sqlite`: titles, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
 - `<name>.faiss`: the vectors, in one of two layouts depending on article count.
-- `catalog.sqlite`: one row per local ZIM with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, UUID, perma-ref, flavour, category, normalized tags, article/media/entry counts, license, scraper, source, attribution, relation, content-type counts, homepage, full-text capability, availability, and the favicon as a BLOB). It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. `serve` reads this catalog instead of opening every archive at startup; archives and their libzim `Searcher` objects are opened lazily on first use. A missing or unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous catalog, rather than being mistaken for a library from which every ZIM disappeared.
+- `catalog.sqlite` (beside `index_dir`, not inside it): one row per local ZIM with the metadata used
+  by `/sources` and `/library.json` (title, description, language, creator, publisher, date, UUID,
+  perma-ref, flavour, category, normalized tags, article/media/entry counts, license, scraper, source,
+  attribution, relation, content-type counts, homepage, full-text capability, availability, and the
+  favicon as a BLOB). It is a disposable cache: the ZIM files are the source of truth, and deleting it
+  makes the next scan rebuild it. `serve` reads this catalog instead of opening every archive at
+  startup; archives and their libzim `Searcher` objects are opened lazily on first use. A missing or
+  unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous
+  catalog, rather than being mistaken for a library from which every ZIM disappeared. While the
+  directory is unavailable, the served `/sources` and `/library.json` lists are empty; the catalog
+  rows remain on disk for the next successful scan once the directory is back.
 
 The index identity is `(ZIM filename stem, source byte size)`, not the source path. A ZIM can
-move between nested folders below `zim_dir` without rebuilding. If one scan finds the same stem at
-different sizes, those conflicting inputs are rejected with a warning.
+move between nested folders below `zim_dir` without rebuilding. When files share a stem but have
+different sizes, build and serve discovery use the largest copy and log a warning; the catalog keeps
+both rows and resolves the stem to its largest file. A truncated download beside a complete archive
+therefore does not hide the readable one.
 
 | ZIM size | Vector index | Why |
 |---|---|---|
-| Under 10,000 articles | **Flat**: the query is compared with every vector | Exact, and small enough (a few MB) that comparing everything is fast |
-| 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search scans about 6% of the closest clusters by default (64 of 1,062 on WikiMed's 70k articles) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters is within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). The probe count scales automatically for larger ZIMs; set `nprobe` in `config.toml` to use a fixed value instead. 8-bit numbers are nearly exact. **Heavier compression (e.g. PQ48) loses ~25% of the top hits.** |
+| Under 10,000 embedded articles | **Flat**: the query is compared with every vector | Exact, and small enough (a few MB) that comparing everything is fast |
+| 10,000 embedded articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into up to 4·√n clusters (capped so FAISS can train at least 39 points per centroid), and each search scans about 6% of the closest clusters by default (64 of 1,062 on WikiMed's 70k articles) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters is within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). The probe count scales automatically for larger ZIMs; set `nprobe` in `config.toml` to use a fixed value instead. 8-bit numbers are nearly exact. **Heavier compression (for example PQ48) loses ~25% of the top hits.** |
 
 IVF training samples are selected across the ZIM and scale with the number of clusters, with at least
-39 samples per cluster as required by FAISS.
+39 samples per centroid as required by FAISS.
 
 The `.faiss` file is memory-mapped, so searches read only the clusters they touch.
 
 Builds resume from the last saved batch. FAISS files are published atomically, and a fast index
 remains available while a full index builds. `build --force` applies the configured extraction and
-excerpt settings and removes excerpts stored in existing indexes.
+preview settings while rebuilding the selected indexes.
 
 ### 2. Starting the server
 
 At startup Zimantic reads the shared `catalog.sqlite` for source metadata, homepages, counts and
-icons, then opens every **finished** index whose archive is still present and matches the size
+icons, then loads every **finished** index whose archive is still present and matches the size
 recorded at build time. Archives and their libzim `Searcher` objects are opened lazily on the first
-search or article request, so a large library no longer opens every ZIM at startup. It also discovers ZIM files
-in `zim_dir` that do not have a usable SQLite index and uses each archive's native full-text index as
-a graceful fallback. An index whose ZIM is missing, or whose archive has changed size, is set aside:
-the archive is served unindexed instead (re-run `build` to restore the index), so a partial or stale
-index never masks the ZIM that is actually available. A SQLite stem takes precedence, so a partially
-built index is never duplicated by its filesystem fallback. FAISS and vector files load in the
-background during startup, so title-word and full-text searches are available while semantic search
-initializes.
-The page automatically lists local ZIM sources. With `kiwix_server`, it also discovers catalog sources and
-can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries and
-remote XML responses are capped at 64 MiB by default; both limits are configurable.
+search or article request, so a large library no longer opens every ZIM at startup. It also discovers
+ZIM files in `zim_dir` that lack a usable SQLite index and uses each archive's native full-text index
+as a graceful fallback. An index whose ZIM is missing is ignored. An index whose archive has changed
+size is set aside, and the archive is served unindexed instead (re-run `build` to restore the index),
+so a partial or stale index never masks the ZIM that is actually available. Each stem appears only
+once: a finished SQLite index takes precedence over the filesystem fallback, and an unfinished one
+leaves the stem to that fallback. FAISS and vector files load in the background during startup, so
+title-word and full-text searches are available while semantic search initializes.
+The page automatically lists local ZIM sources. With `kiwix_server`, it also discovers catalog sources
+and can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries
+and remote XML responses are capped at 64 MiB by default; both limits are configurable.
 
 A finished index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
 search**. A ZIM without a SQLite index is also searchable through its native full-text index,
@@ -186,8 +203,8 @@ whole server process and reloads all in-memory state.
 
 3. **Collapse redirects**: every redirect hit resolves to the article it points to, and duplicates are merged, so each article appears only once.
 4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall; cross-language queries often need 0.80 (see **Queries in another language** below).
-5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; exact phrases in titles or readable article text and configured source intent provide additional deterministic signals. Stack Exchange-style profile pages under `/users/` are demoted unless the query explicitly asks for a user or profile.
-6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is treated as navigation, whether it writes `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
+5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; exact phrases in titles or readable article text and source-specific intent rules (for example WikiHow queries) provide additional deterministic signals. Stack Exchange-style profile pages under `/users/` are demoted unless the query explicitly asks for a user or profile.
+6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", when it renders the "This disambiguation page" footer, or when it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is treated as navigation, whether it uses `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
 **Queries in another language.** A query in Chinese, Hindi, Arabic or another language against an
 English ZIM usually shares no words with the titles or article text, so the meaning search is usually
@@ -249,15 +266,16 @@ A Raspberry Pi Zero 2 W takes around 150 ms.*
 | Questions & phrases in other languages² | "Herzinfarkt" (German: heart attack) → *Myocardial infarction* | not in top 20 | **#1** | 0% → **33%** | 0% → **53%** | 30 |
 | Words deep inside an article | "When undergoing lymphadenopathy, these are described as feeling like a 'firm pea'." → *Facial lymph nodes* | **#1** | #2 | **68%** → 28% | **78%** → 76% | 200¹ |
 
-¹ The first set is generated automatically from the articles, not typed by real users. The other sets use
-hand-written queries; with 25–60 queries each, their numbers are accurate to roughly ±12–18 points.
+¹ These 200-query sets are generated automatically from the articles, not typed by real users. The
+other sets use hand-written queries; with 25–60 queries each, their numbers are accurate to roughly
+±12–18 points.
 ² Spanish, French, German, Chinese, Hindi, Arabic, Russian, Japanese, Swahili and Portuguese, mixed.
 
 ### Single words in other languages
 
-These tests search the English articles with one word in another language, using 15 common medical words per language
-(malaria, diabetes, fever, cough, pregnancy, heart, blood, …). The test uses purpose-built
-translations, so less common languages may contain mistakes.
+These tests search the English articles with one word in another language, using 15 common medical
+words per language (malaria, diabetes, fever, cough, pregnancy, heart, blood, …). The test uses
+purpose-built translations, so less common languages may contain mistakes.
 
 | Language | Example query → article wanted | Kiwix | Zimantic | #1 Kiwix → Zimantic | Top 5 Kiwix → Zimantic |
 |---|---|---|---|---|---|
@@ -293,11 +311,11 @@ translations, so less common languages may contain mistakes.
   and `python3-pymupdf` for armhf. Create the environment with
   `--system-site-packages` so Zimantic can use them.
 - About 120 MB for the default embedding model, plus your ZIM files (the English-only `e5-small-v2`
-  is about 35 MB on disk)
-- Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks)
+  is about 35 MB on disk).
+- Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks).
 - Local indexed results are served directly by Zimantic, so `kiwix-serve` is not required.
-  To serve remote-only results through Kiwix, run `kiwix-serve` and uncomment `kiwix_url` in
-  `config.toml`; it is disabled by default.
+  With `kiwix_server` set, remote-only results open through the links returned by kiwix-serve's own
+  search API.
 
 ## Where your files go
 
@@ -309,7 +327,8 @@ The installed CLI is separate from runtime data. By default the data directory i
 ├── config.toml          ← settings (paths below are its defaults)
 ├── model/               ← model_dir: model.onnx + tokenizer vocabulary      (you download)
 ├── zims/                ← zim_dir:   your .zim files                          (you download)
-├── indexes/             ← index_dir: <name>.sqlite + <name>.faiss + catalog.sqlite
+├── indexes/             ← index_dir: <name>.sqlite + <name>.faiss for each ZIM
+├── catalog.sqlite       ← shared ZIM metadata cache (beside indexes/, not a ZIM index)
 └── zimantic.pid         ← server PID (present while serving)
 ```
 
@@ -365,7 +384,7 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
 5. **Check `config.toml`.** Point `zim_dir`, `model_dir` and `index_dir` at your folders if needed.
-   Set `kiwix_server` and uncomment `kiwix_url` only if you also want remote Kiwix sources.
+   Set `kiwix_server` only if you also want remote Kiwix sources.
 
 6. **Check the installation:**
 
@@ -523,26 +542,26 @@ zimantic serve --dev                  # alias for --debug
 zimantic reload                       # ask a running server to rescan indexes and ZIMs
 ```
 
-`build` accepts files or folders; a folder means all its `*.zim` files, and no arguments uses `zim_dir`.
-Existing ZIM indexes are skipped. Pass `--force` to rebuild selected indexes.
+`build` accepts files or folders; a folder means every `*.zim` file under it, and with no arguments
+it uses `zim_dir`. Existing ZIM indexes are skipped. Pass `--force` to rebuild selected indexes.
 Logging defaults to warnings, except that `serve` uses info when stderr is a terminal;
 repeat `--verbose`/`-v` for info and debug output.
 
 **Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
 model. Title-word and ZIM full-text search work; a normal `build` creates the vector index.
 
-Normal builds embed 32 articles at a time by default. Independent ZIMs can be read and built
-concurrently with `--workers N` or the `build_workers` setting; when unset, the default scales with
-CPU and RAM. Full builds use a bounded shared embedding pipeline: at most `embedding_workers`
-model calls run at once, and each ZIM can have only a small number of batches waiting for embedding.
-When unset, `embedding_workers` also accounts for `embed_threads` so the model is not
-oversubscribed. Tune `batch_size`, `build_workers`, `embedding_workers` and `embed_threads` in
+The desktop profile embeds 32 articles at a time (mobile 8, supercomputer 128). Independent ZIMs can
+be read and built concurrently with `--workers N` or the `build_workers` setting; when unset, the
+default scales with CPU and RAM. Full builds use a bounded shared embedding pipeline: at most
+`embedding_workers` model calls run at once, and each ZIM can have only a small number of batches
+waiting for embedding. When unset, `embedding_workers` also accounts for `embed_threads` so the model
+is not oversubscribed. Tune `batch_size`, `build_workers`, `embedding_workers` and `embed_threads` in
 `config.toml` for different hardware. Do not run concurrent builds that target the same ZIM index
 identity (filename stem and source byte size).
 
-**Hardware profiles.** Without `config.toml`, Zimantic selects mobile, desktop or supercomputer
-defaults from the machine's resources. Copy `config.pi-zero-2w.toml` or `config.pi-5.toml` to pin
-settings.
+**Hardware profiles.** Tuning keys in `config.toml` are commented out by default, so Zimantic selects
+mobile, desktop or supercomputer defaults from the machine's resources. Copy
+`config.pi-zero-2w.toml` or `config.pi-5.toml` to pin settings.
 
 As a rule of thumb, keep enough free disk space when building indexes: about **20% of total ZIM file size**.
 
@@ -583,26 +602,29 @@ JSON API examples:
   A small `zim` selection searches only those sources. A selection larger than `min(10, 35%)` of
   the available sources is promoted to a full search so its cached pool can be shared; pass
   `source=<key>` to narrow the displayed results. Totals are in `X-Total-Count`, `X-Has-More`,
-  `X-Offset`, `X-Page`, `X-Page-Count` and `X-Page-Size` headers. An offset past the last page is
+  `X-Offset`, `X-Page` and `X-Page-Count` headers. An offset past the last page is
   clamped to the last real page, and `X-Offset`/`X-Page`/stream `offset`/`page` report that
   effective position.
 - `GET /search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
   events and result snapshots. `snapshot` and `done` events carry the effective `page` and
   `page_count`. While sources are still working, the stream emits a `progress` heartbeat about every
-  700ms; when a source finishes in between, a fresh snapshot is emitted instead.
+  700 ms; when a source finishes in between, a fresh snapshot is emitted instead. A source that
+  finishes between ranking passes reports no count until the next snapshot; the final `done` event
+  always carries the complete per-source count map.
 - `GET /content/<zim>/<path>` serves a toolbar shell for a local ZIM entry; `GET /content/<zim>`
   serves the resolved ZIM homepage. The shell keeps the navigation bar in the page and loads the
   article itself from an inner iframe pointed at `/article/<zim>/<path>`, so the toolbar stays
   visible even when the article is missing or fails. Unreadable entries render a friendly error
   panel in the shell instead of showing the raw `/article` JSON error body. `GET /article/<zim>/<path>`
   serves the raw entry: redirects are followed, article links and assets resolve under the same
-  route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` only limits HTML read during
-  indexing; `max_article_bytes` limits the uncompressed response body because Zimantic reads each
-  requested entry into memory, including binary assets. The toolbar shell also uses the viewed
-  article's own `<title>` and declared icon for the browser tab title and favicon (falling back to the
-  ZIM's source icon); when the shell is embedded in the modal, the outer page mirrors them and restores
-  its own title and favicon when the modal closes. HTML articles include a small navigation bar
-  with Close, Home, Random, Copy link and Search controls. Modal articles also expose
+  route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` limits how much
+  HTML is parsed for indexing, previews and phrase checks; `max_article_bytes` limits the uncompressed
+  response body because Zimantic reads each requested entry into memory, including binary assets. The
+  toolbar shell also uses the viewed article's own `<title>` and declared icon for the browser tab
+  title and favicon (falling back to the ZIM's source icon); when the shell is embedded in the modal,
+  the outer page mirrors them and restores its own title and favicon when the modal closes. HTML and
+  XHTML articles include a small navigation bar with Close, Home, Random, Permalink and a Zimantic
+  search control. Alt-clicking Random opens the homepage of a random available ZIM. Modal articles also expose
   icon-only navigation through visible search results and, for nested articles, the adjacent article
   links listed on the article's parent page. When a modal article opens another modal article,
   the preceding article can also provide the navigation context. Back navigation uses browser
@@ -618,7 +640,9 @@ JSON API examples:
   the same `/content/` view in a new tab, where the browser's persistent storage is available. The
   IndexedDB polyfill bundles `fake-indexeddb` (Apache-2.0; see `indexeddb-shim.LICENSE`).
   `GET /random?zim=<name>`
-  redirects to a random indexed article's shell. Links from an offline article to an external
+  redirects to a random indexed article's shell. `GET /random` without `zim` redirects to the
+  homepage of a random available local source; the article toolbar's Random control uses the first
+  form, and Alt-clicking it uses the second. Links from an offline article to an external
   `http` or `https` site show an in-modal notice identifying the destination as online and offer
   to open it in a new tab, avoiding failures from sites that disallow iframe embedding. A directly
   loaded `/content/` view tries the captured copy for same-site links before leaving for the live
@@ -632,17 +656,20 @@ JSON API examples:
   renders them above the results. Debug output is configured for the whole server; it is not a
   URL parameter.
   SIGHUP restarts the whole server in debug mode; `serve --dev` is an alias for this mode.
-- `GET /sources`, `/config`, `/zims`, `/library.json` and `/health` return source,
-  configuration, local-index and health information. Source records include a `homepage` path when
-  the local ZIM exposes one, plus `available`/`error` for archives that cannot be read.
+- `GET /sources`, `/config`, `/library.json` and `/health` return source,
+  configuration, local-library and health information. `/sources` describes the searchable
+  sources (local and remote) and includes catalog metadata when available. `/library.json`
+  describes every local archive, including unreadable archives and archives that are not
+  searchable yet. Source records include a `homepage` path when the local ZIM exposes one, plus
+  `available`, `searchable` and `error` flags.
   `/library.json` also exposes
   `uuid`, `publisher`, `perma_ref`, `flavour`, `category`, `media_count`, `license`, `scraper`,
   `source`, `attribution`, `relation`, `counter`, and `has_fulltext_index` from the catalog. The
   UUID is the book identity: duplicate copies of the same ZIM are collapsed to one source, preferring
   a readable copy. An unreadable archive stays in `/library.json` with `available: false` and an
   `error` so the library page can explain why it cannot be opened. Health is read-only and reports
-  index/archive capabilities, entry counts, homepage resolution, embedding state, and cache
-  statistics.
+  index/archive capabilities, entry counts, homepage resolution, embedding state, and search and
+  preview cache statistics.
 
 Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
 `kill -HUP <pid>`.
@@ -654,7 +681,7 @@ selected ZIM contributes a larger share of the pool, but that scope is not cache
 share the cached full-search pool.
 For large libraries, `search_workers` controls how many ZIM indexes are searched in
 parallel. `max_stream_ranks` limits completion-spaced intermediate ranking passes; timed snapshots
-are additionally emitted about every 700ms so a slow query keeps updating, and the final result
+are additionally emitted about every 700 ms so a slow query keeps updating, and the final result
 still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. The
 automatic profiles use 8 workers and 16 completion-spaced passes on desktops, and 2 workers and 8
 passes on low-memory devices.

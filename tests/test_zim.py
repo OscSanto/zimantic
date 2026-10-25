@@ -257,6 +257,25 @@ class TextExtractionTests(unittest.TestCase):
     def test_empty_article_body_has_no_excerpt(self):
         self.assertEqual(extract_excerpt(b"<html><body></body></html>"), "")
 
+    def test_empty_html_entry_is_not_indexed(self):
+        class _EmptyItem:
+            mimetype = "text/html"
+            content = b"<html><body></body></html>"
+
+        class _EmptyEntry:
+            is_redirect = False
+            title = "Empty"
+            path = "empty"
+
+            def get_item(self):
+                return _EmptyItem()
+
+        class _EmptyArchive:
+            def _get_entry_by_id(self, index):
+                return _EmptyEntry()
+
+        self.assertIsNone(read_entry(_EmptyArchive(), 0))
+
     def test_preview_fills_a_realistic_article_paragraph(self):
         words = " ".join(f"article{i}" for i in range(400))
         excerpt = extract_excerpt(
@@ -389,6 +408,31 @@ class TextExtractionTests(unittest.TestCase):
         self.assertEqual(
             row[2], "Plain text article. Second paragraph with more useful detail."
         )
+
+    def test_plain_text_markdown_article_is_indexed(self):
+        class _MarkdownItem:
+            mimetype = "text/plain"
+            content = (
+                b"# Tire care\n\n"
+                b"Check the tread depth and inflate the tires to the pressure "
+                b"listed on the driver's door jamb."
+            )
+
+        class _MarkdownEntry:
+            is_redirect = False
+            title = "Tire care"
+            path = "docs/tire-care.md"
+
+            def get_item(self):
+                return _MarkdownItem()
+
+        class _MarkdownArchive:
+            def _get_entry_by_id(self, _index):
+                return _MarkdownEntry()
+
+        row = _read_entry(_MarkdownArchive(), 0)
+        self.assertIsNotNone(row)
+        self.assertIn("tread depth", row[2])
 
     def test_tiny_plain_text_assets_are_not_indexed(self):
         class _TinyItem:
@@ -895,6 +939,24 @@ class JavaScriptShellTests(unittest.TestCase):
         self.assertEqual(row[2], "")            # no markup leaked as text
         self.assertEqual(row[3], "index.html")  # falls back to the shell target
 
+    def test_oversized_json_companion_is_not_materialized(self):
+        class _LargeJsonItem(_SpaItem):
+            size = 10_000
+
+        class _LargeJsonEntry(_JsonEntry):
+            def get_item(self):
+                return _LargeJsonItem(SPA_BODY)
+
+        class _LargeArchive(_SpaArchive):
+            def get_entry_by_path(self, path):
+                if path == "content/page_content_42.json":
+                    return _LargeJsonEntry(path, SPA_BODY)
+                return super().get_entry_by_path(path)
+
+        row = _read_entry(_LargeArchive(), 0, max_entry_bytes=100)
+        self.assertEqual(row[2], "")
+        self.assertEqual(row[3], "index.html")
+
     def test_markdown_companion_body_is_indexed(self):
         stub = (
             b"<html><head><title>Find the Symmetric Difference</title>"
@@ -1046,6 +1108,64 @@ class JavaScriptShellTests(unittest.TestCase):
         self.assertEqual(row[1], "Acid-Base Solutions")
         self.assertEqual(row[2], "")
         self.assertEqual(row[3], "acid-base-solutions_en.html")
+
+    def test_redirect_chains_store_the_final_target(self):
+        class _Redirect:
+            def __init__(self, path, title, target=None):
+                self.path = path
+                self.title = title
+                self.is_redirect = target is not None
+                self._target = target
+                self._index = {"A": 0, "B": 1, "C": 2}[path]
+
+            def get_redirect_entry(self):
+                return self._target
+
+        class _Final:
+            path = "C"
+            title = "Final title"
+            is_redirect = False
+            _index = 2
+
+        final = _Final()
+        second = _Redirect("B", "Intermediate title", final)
+        first = _Redirect("A", "Alias title", second)
+
+        class _ChainArchive:
+            def _get_entry_by_id(self, _index):
+                return first
+
+        row = _read_entry(_ChainArchive(), 0)
+        self.assertEqual(row[3], "C")
+        self.assertEqual(row[4], 2)
+
+    def test_meta_refresh_accepts_absolute_and_query_paths(self):
+        stubs = (
+            b'<html><head><meta http-equiv="refresh" '
+            b'content="0;url=/index.html#/route"></head><body></body></html>',
+            b'<html><head><meta http-equiv="refresh" '
+            b'content="0;url=../index.html?x=1#/route"></head><body></body></html>',
+        )
+
+        class _RefreshArchive:
+            def __init__(self, stub):
+                self.stub = stub
+
+            def _get_entry_by_id(self, _index):
+                return _HtmlEntry(
+                    "Alias", "content/page_1.html", self.stub
+                )
+
+            def has_entry_by_path(self, path):
+                return path == "index.html"
+
+            def get_entry_by_path(self, path):
+                return _HtmlEntry("index.html", "index.html", SHELL_HTML)
+
+        for stub in stubs:
+            with self.subTest(stub=stub):
+                row = _read_entry(_RefreshArchive(stub), 0)
+                self.assertEqual(row[3], "index.html")
 
     def test_javascript_shell_detection_ignores_real_articles(self):
         article = (

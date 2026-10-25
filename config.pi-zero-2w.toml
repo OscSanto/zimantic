@@ -6,10 +6,6 @@ model_dir = "./model"
 index_dir = "./indexes"
 
 port = 8090
-# Optional Kiwix compatibility for remote-only results. Start kiwix-serve separately:
-#   kiwix-serve --port=8085 ./zims/*.zim
-# Then uncomment this setting (use this machine's address for other clients):
-# kiwix_url = "http://localhost:8085/content"
 # Optional URL of a running kiwix-serve HTTP API for catalog discovery and
 # remote full-text fallback; leave blank to use only local Zimantic indexes.
 kiwix_server = ""

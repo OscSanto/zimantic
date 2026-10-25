@@ -62,16 +62,36 @@ sudo "$venv/bin/python" -m pip install \
     "$repo" >/tmp/zimantic-pip-release.log
 sudo systemctl restart zimantic
 
+# Respect a non-default port or reverse-proxy prefix in config.toml. The
+# deploy verification previously assumed the stock 8090/root setup.
+config="$repo/config.toml"
+port=$(
+    sed -n 's/^[[:space:]]*port[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+        "$config" 2>/dev/null | head -n 1
+)
+port=${port:-8090}
+base_path=$(
+    sed -n 's/^[[:space:]]*web_base_path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$config" 2>/dev/null | head -n 1
+)
+case "$base_path" in
+    ""|/*) ;;
+    *) base_path="/$base_path" ;;
+esac
+base_path=${base_path%/}
+ready_url="http://127.0.0.1:${port}${base_path}/app.js"
+css_url="http://127.0.0.1:${port}${base_path}/app.css"
+
 ready=
 for _ in $(seq 1 20); do
-    if curl -fsS --max-time 2 http://127.0.0.1:8090/app.js >/dev/null 2>&1; then
+    if curl -fsS --max-time 2 "$ready_url" >/dev/null 2>&1; then
         ready=1
         break
     fi
     sleep 1
 done
 test "$ready" = 1
-curl -fsS http://127.0.0.1:8090/app.css -o /dev/null
+curl -fsS "$css_url" -o /dev/null
 installed_version=$(
     sudo "$venv/bin/python" -m pip show zimantic |
         awk -F': ' '/^Version:/{print $2}'

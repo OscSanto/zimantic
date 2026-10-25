@@ -85,7 +85,7 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
     accept the same input_ids/attention_mask tensors. The vocabulary artifact
     does, reliably: multilingual-e5 ships ``sentencepiece.bpe.model`` and the
     English e5-v2 models ship BERT's ``vocab.txt``. When a directory contains
-    both, honour tokenizer_config.json if it is present, otherwise keep the
+    both, honor tokenizer_config.json if it is present, otherwise keep the
     historical SentencePiece choice.
     """
     sentencepiece_path = Path(model_dir) / "sentencepiece.bpe.model"
@@ -178,8 +178,13 @@ class Embedder:
             self.tokenizer = sentencepiece.SentencePieceProcessor(
                 model_file=str(tokenizer_path)
             )
+            # XLM-RoBERTa reserves 0 for <s>, 1 for <pad> and 2 for </s>.
+            self.pad_id = 1
         else:
             self.tokenizer = WordPieceTokenizer(tokenizer_path)
+            # BERT uses [PAD] = 0, unlike XLM-R. Do not hard-code 1 here: it is
+            # [unused0] in a standard BERT vocabulary.
+            self.pad_id = self.tokenizer.pad_id
         # The tokenizer is not safe for concurrent encode calls from several
         # search threads; serialize access to it. ONNX inference itself is
         # thread-safe and needs no lock.
@@ -239,8 +244,11 @@ class Embedder:
             return np.empty((0, 0), dtype=np.float32)
         encoded = [self._ids(t) for t in texts]
         width = max(map(len, encoded))
-        ids = np.array([e + [1] * (width - len(e)) for e in encoded], dtype=np.int64)
-        mask = (ids != 1).astype(np.int64)
+        ids = np.array(
+            [e + [self.pad_id] * (width - len(e)) for e in encoded],
+            dtype=np.int64,
+        )
+        mask = (ids != self.pad_id).astype(np.int64)
         inputs = {"input_ids": ids, "attention_mask": mask}
         if "token_type_ids" in self._input_names:
             inputs["token_type_ids"] = np.zeros_like(ids)

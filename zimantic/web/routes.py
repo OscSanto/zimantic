@@ -1,5 +1,6 @@
 """HTTP route registration for the ZIM search application."""
 
+import hashlib
 import json
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -9,9 +10,11 @@ from ..search import (
     ArticleNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
+    SELECTIVE_SOURCE_LIMIT,
     SearchBusyError,
     SearchQueryError,
 )
+from ..searching.query import MAX_QUERY_LENGTH, STOPWORDS
 from . import app as web_app
 
 
@@ -42,24 +45,47 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             )
             return response
 
-        _, payload, _, _ = web_app._memoized_json(
+        _, payload, _, full_etag = web_app._memoized_json(
             memo_key,
             version,
             payload_factory,
             memos,
         )
-        page = payload[offset : offset + limit]
-        response = web_app._json_response(
-            request,
-            f"{memo_key}:page:{offset}:{limit}",
-            version,
-            lambda: page,
-            memos,
+        total = len(payload)
+        # Clamp to the last real page, like /search does. Without this, an
+        # out-of-range offset returns an empty page and a misleading X-Offset.
+        effective_offset = (
+            min(offset, ((total - 1) // limit) * limit) if total else 0
         )
-        response.headers["X-Total-Count"] = str(len(payload))
-        response.headers["X-Offset"] = str(offset)
-        response.headers["X-Has-More"] = str(offset + len(page) < len(payload)).lower()
-        return response
+        page = payload[effective_offset : effective_offset + limit]
+        # Do not memoize page slices: a client can request unlimited
+        # offset/limit combinations. The full payload above is the expensive
+        # part and remains memoized; serializing one page is cheap.
+        body = json.dumps(
+            page,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
+        etag = '"' + hashlib.sha1(
+            f"{full_etag}:{effective_offset}:{limit}".encode("utf-8")
+        ).hexdigest() + '"'
+        headers = {
+            "ETag": etag,
+            "Cache-Control": "no-cache",
+            "X-Total-Count": str(total),
+            "X-Offset": str(effective_offset),
+            "X-Has-More": str(
+                effective_offset + len(page) < total
+            ).lower(),
+        }
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers=headers,
+        )
 
     @app.get("/", include_in_schema=False)
     def page():
@@ -102,10 +128,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             raise web_app._article_http_error(error) from error
         return web_app._article_content_response(icon["content"], icon["mimetype"])
 
-    @app.get("/zims")
-    def zims():
-        return search_class.local_names()
-
     @app.get("/config")
     def config(request: Request):
         return web_app._json_response(
@@ -114,6 +136,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             1 if debug else 0,
             lambda: {
                 "page_size": getattr(search_class, "page_size", 10),
+                "max_results": getattr(search_class, "max_results", 100),
+                "max_query_length": MAX_QUERY_LENGTH,
+                "stopwords": sorted(STOPWORDS),
+                "source_filter_limit": SELECTIVE_SOURCE_LIMIT,
                 "debug": debug,
             },
             memos,
@@ -209,7 +235,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 },
             )
         content = article["content"]
-        if article["mimetype"] == "text/html":
+        if article["mimetype"] in web_app.HTML_MIMETYPES:
             content = web_app._decorate_article_bridge(content, zim, base_path)
         return web_app._article_content_response(content, article["mimetype"])
 
@@ -274,7 +300,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         check_path = getattr(search_class, "article_path_exists", None)
 
         def path_exists(parent_path: str) -> bool:
-            """Avoid breadcrumb links to containers that are not entries."""
+            """True when the path is a real entry, so breadcrumbs do not link to containers."""
             try:
                 if callable(check_path):
                     return bool(check_path(zim, parent_path))
@@ -356,7 +382,27 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         )
 
     @app.get("/random")
-    def random_article(zim: str = Query(..., min_length=1)):
+    def random_article(zim: str | None = Query(None, min_length=1)):
+        if not zim:
+            choose_source = getattr(search_class, "random_local_source", None)
+            if not callable(choose_source):
+                raise HTTPException(
+                    status_code=404, detail="random sources unavailable"
+                )
+            try:
+                source = choose_source()
+            except ArticleNotFoundError as error:
+                raise HTTPException(status_code=404, detail=str(error)) from error
+            return Response(
+                status_code=307,
+                headers={
+                    "Location": web_app._content_url(
+                        source.local_name or source.book, base_path=base_path
+                    ),
+                    "Cache-Control": "no-store",
+                },
+            )
+
         choose_article = getattr(search_class, "random_article_path", None)
         if not callable(choose_article):
             raise HTTPException(status_code=404, detail="random articles unavailable")
@@ -399,7 +445,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             "X-Offset": str(page["offset"]),
             "X-Page": str(page["page"]),
             "X-Page-Count": str(page["page_count"]),
-            "X-Page-Size": str(len(page["results"])),
         }
         if debug and page.get("matched_by") is not None:
             headers["X-Matched-By"] = json.dumps(

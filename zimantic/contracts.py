@@ -5,7 +5,13 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SourceInfo:
-    """A searchable collection and the backend currently serving it."""
+    """A searchable collection and the backend currently serving it.
+
+    ``key`` is the canonical identifier used by API responses and result
+    documents. ``name``, ``book``, and ``local_name`` remain accepted lookup
+    aliases because they expose archive stems and remote book slugs that older
+    links and integrations use.
+    """
 
     key: str
     name: str
@@ -13,6 +19,11 @@ class SourceInfo:
     mode: str
     local_name: str | None = None
     available: bool = True
+    # True when this source can answer a search (remote Kiwix sources and
+    # indexed local sources). A local archive can be readable but not yet
+    # searchable, for example when it has neither a Zimantic index nor a native
+    # libzim full-text index.
+    searchable: bool = True
     error: str | None = None
     intent_phrases: tuple[str, ...] = ()
     homepage: str | None = None
@@ -53,6 +64,7 @@ class SourceInfo:
             "mode": self.mode,
             "local_name": self.local_name,
             "available": self.available,
+            "searchable": self.searchable,
             "error": self.error,
             "intent_phrases": list(self.intent_phrases),
             "homepage": self.homepage,
@@ -63,7 +75,6 @@ class SourceInfo:
         }
         if include_metadata:
             payload.update({
-                "title": self.title,
                 "description": self.description,
                 "long_description": self.long_description,
                 "creator": self.creator,

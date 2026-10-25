@@ -106,13 +106,6 @@ def _fulltext_query(query: str) -> str:
     return " ".join(_query_words(query))
 
 
-def _coverage(query: list[str], tokens: list[str]) -> float:
-    if not query:
-        return 0.0
-    present = set(tokens)
-    return sum(term in present for term in query) / len(query)
-
-
 def _phrase(query: list[str], tokens: list[str]) -> bool:
     if not query:
         return False

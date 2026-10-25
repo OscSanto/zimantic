@@ -116,7 +116,6 @@ def _config(root: Path, *, max_results: int = 100) -> dict:
     return {
         "index_dir": str(root / "indexes"),
         "zim_dir": str(root / "zims"),
-        "kiwix_url": "http://kiwix/content",
         "candidate_count": 16,
         "page_size": 10,
         "max_results": max_results,
@@ -725,6 +724,81 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIsNone(library.json()[0]["homepage"])
             self.assertEqual(library.json()[0]["local_name"], "manual")
             self.assertEqual(library.json()[0]["size"], zim_path.stat().st_size)
+
+    def test_library_perma_ref_comes_from_the_filename_stem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "manual_2026-08.zim"
+            creator = Creator(zim_path)
+            creator.config_indexing(True, "eng")
+            creator.set_mainpath("Alpha")
+            with creator:
+                creator.add_metadata("Name", "A Display Name")
+                creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+            build_module.build(
+                zim_path,
+                indexes,
+                embedder=None,
+                batch_size=2,
+                fast=True,
+            )
+
+            search = self._open_search(root)
+            library = search.library_dicts()
+
+            self.assertEqual(library[0]["perma_ref"], "manual")
+            self.assertEqual(library[0]["uuid"], search.catalog.get_stem("manual_2026-08").uuid)
+
+    def test_xhtml_articles_get_the_article_bridge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "manual.zim"
+            creator = Creator(zim_path)
+            creator.config_indexing(True, "eng")
+            creator.set_mainpath("Alpha")
+            with creator:
+                creator.add_item(
+                    _Page(
+                        "Alpha",
+                        "Alpha",
+                        ALPHA_HTML,
+                        mimetype="application/xhtml+xml",
+                    )
+                )
+            build_module.build(
+                zim_path,
+                indexes,
+                embedder=None,
+                batch_size=2,
+                fast=True,
+            )
+
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+            response = client.get("/article/manual/Alpha")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"data-zimantic-bridge", response.content)
+
+    def test_unmounted_zim_dir_leaves_served_views_empty_until_remount(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._build_fixture(root)
+            (root / "zims").rename(root / "zims-offline")
+
+            search = self._open_search(root)
+            self.assertEqual(search.source_dicts(), [])
+            self.assertEqual(search.library_dicts(), [])
+            # The on-disk catalog is retained for the next successful scan.
+            self.assertEqual(len(search.catalog.rows()), 1)
 
     def test_readable_duplicate_replaces_an_unreadable_copy(self):
         with tempfile.TemporaryDirectory() as tmp:

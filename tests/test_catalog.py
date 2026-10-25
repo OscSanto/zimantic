@@ -13,10 +13,10 @@ from zimantic.catalog import (
     SCHEMA_VERSION,
     ZimCatalog,
     _SCHEMA_COLUMNS,
+    catalog_path,
     normalize_counter,
     normalize_tags,
     perma_ref,
-    read_catalog,
     resolve_homepage,
 )
 
@@ -124,7 +124,7 @@ class CatalogTests(unittest.TestCase):
                 self.assertEqual(record.article_count, 1)
                 self.assertEqual(record.available, 1)
                 self.assertEqual(record.last_error, "")
-                self.assertEqual(len(read_catalog(root / "indexes" / "catalog.sqlite")), 1)
+                self.assertEqual(len(catalog.rows()), 1)
 
     def test_placeholder_creator_is_stored_as_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,6 +141,16 @@ class CatalogTests(unittest.TestCase):
             self.assertIsNotNone(record)
             self.assertEqual(record.creator, "")
             self.assertIsNone(record.to_source_metadata()["creator"])
+
+    def test_catalog_path_is_beside_the_index_directory(self):
+        self.assertEqual(
+            catalog_path("/data/zimantic/indexes"),
+            Path("/data/zimantic/catalog.sqlite"),
+        )
+        self.assertEqual(
+            catalog_path("indexes"),
+            Path("catalog.sqlite"),
+        )
 
     def test_tag_normalization_and_perma_ref(self):
         self.assertEqual(

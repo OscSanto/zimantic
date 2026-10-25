@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from tqdm import tqdm
 from libzim.reader import Archive
-from .catalog import CATALOG_FILENAME, ZimCatalog
+from .catalog import ZimCatalog, catalog_path
 from .content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
@@ -324,7 +324,7 @@ def build(
         # The archive is already open: store its catalog metadata now, so serve
         # can list sources without reopening every ZIM at startup.
         try:
-            with ZimCatalog(Path(index_dir) / CATALOG_FILENAME) as catalog:
+            with ZimCatalog(catalog_path(index_dir)) as catalog:
                 catalog.upsert_from_archive(zim, zim_path)
         except Exception as error:
             logger.warning(
@@ -496,16 +496,15 @@ def _write_faiss(db, path: Path) -> None:
     dim = db.execute("SELECT length(v) / 2 FROM vecs LIMIT 1").fetchone()
     dim = dim[0] if dim else 384
 
-    if n < 10_000: # IDMap, flat. Compares query with every vector. 
-        # Small ZIM: exact search. Does not contain nprobe. 
+    if n < 10_000:  # flat: exact comparison against every vector
+        # Small ZIM: exact search; no nprobe.
         index = faiss.index_factory(dim, "IDMap,Flat", faiss.METRIC_INNER_PRODUCT)
 
-    else: # ~4*sqrt(n) clusters (capped for small n) ALSO 1 byte per number (int-8)
-        # Large ZIM: vectors grouped into lists, 1 byte per number (384 bytes per article). 
-        # Squeezing to 48 bytes (PQ48) lost ~25% of top hits in testing; this
-        # 8-bit form was nearly exact.
-        # The file is memorymapped at search time, so only the lists a query
-        # probes are read from disk.
+    else:  # IVF with ~4*sqrt(n) clusters and one byte per dimension
+        # Large ZIM: vectors are grouped into lists and quantized to 8 bits
+        # (384 bytes per 384-dimension article). PQ48 lost ~25% of top hits in
+        # testing; this form was nearly exact. The file is memory-mapped at
+        # search time, so a query reads only the lists it probes.
         cluster_centre_count = _faiss_cluster_count(n)
         index = faiss.index_factory(
             dim,

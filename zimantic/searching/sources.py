@@ -118,9 +118,9 @@ def _find_archive_icon_path(archive: Archive, homepage: str | None) -> str | Non
 
 
 def _source_icon_url(
-    zim_name: str, icon_path: str | None, base_path: str = ""
+    zim_name: str, has_icon: bool, base_path: str = ""
 ) -> str | None:
-    if not icon_path:
+    if not has_icon:
         return None
     return f"{base_path}/source-icon/{quote(zim_name, safe='')}"
 
