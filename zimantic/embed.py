@@ -121,6 +121,10 @@ class Embedder:
             opts,
             providers=["CPUExecutionProvider"],
         )
+        # Exported graphs differ: some XLM-R models (for example
+        # multilingual-e5-base) omit token_type_ids, while multilingual-e5-small
+        # requires it. Feed only the inputs the graph declares.
+        self._input_names = {item.name for item in self.session.get_inputs()}
         # sentencepiece loads this vocabulary in ~45 MB; Hugging Face `tokenizers` needed ~250 MB.
         self.tokenizer = sentencepiece.SentencePieceProcessor(
             model_file=str(Path(model_dir) / "sentencepiece.bpe.model")
@@ -170,14 +174,10 @@ class Embedder:
         width = max(map(len, encoded))
         ids = np.array([e + [1] * (width - len(e)) for e in encoded], dtype=np.int64)
         mask = (ids != 1).astype(np.int64)
-        hidden = self.session.run(
-            None,
-            {
-                "input_ids": ids,
-                "attention_mask": mask,
-                "token_type_ids": np.zeros_like(ids),
-            },
-        )[0]
+        inputs = {"input_ids": ids, "attention_mask": mask}
+        if "token_type_ids" in self._input_names:
+            inputs["token_type_ids"] = np.zeros_like(ids)
+        hidden = self.session.run(None, inputs)[0]
         weights = mask[..., None].astype(np.float32)
         vectors = (hidden * weights).sum(1) / weights.sum(1)
         result = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)

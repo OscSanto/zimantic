@@ -1,5 +1,6 @@
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -95,6 +96,40 @@ class LowMemoryArenaTests(unittest.TestCase):
         with patch.object(embed, "_reclaim_native_memory") as reclaim:
             normal.embed(["passage: a", "passage: b"])
             reclaim.assert_not_called()
+
+
+class InputSignatureTests(unittest.TestCase):
+    """Only feed ONNX inputs the exported graph actually declares."""
+
+    def _run(self, input_names):
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = [1, 2]
+        session = MagicMock()
+        session.get_inputs.return_value = [
+            types.SimpleNamespace(name=name) for name in input_names
+        ]
+        session.run.return_value = [np.ones((1, 4, 4), dtype=np.float32)]
+
+        with (
+            patch.object(embed.ort, "InferenceSession", return_value=session),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=tokenizer
+            ),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                embedder = embed.Embedder(tmp)
+        embedder.embed(["query: a"])
+        return session.run.call_args.args[1]
+
+    def test_omits_token_type_ids_when_graph_does_not_declare_it(self):
+        inputs = self._run(["input_ids", "attention_mask"])
+        self.assertEqual(set(inputs), {"input_ids", "attention_mask"})
+
+    def test_includes_token_type_ids_when_graph_declares_it(self):
+        inputs = self._run(["input_ids", "attention_mask", "token_type_ids"])
+        self.assertEqual(
+            set(inputs), {"input_ids", "attention_mask", "token_type_ids"}
+        )
 
 
 if __name__ == "__main__":

@@ -102,7 +102,9 @@ documents without one are skipped.
 
 **Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-The model receives a fixed 256-token budget. Search previews are generated independently from
+The model receives a fixed 256-token budget. See
+[Using a different embedding model](#using-a-different-embedding-model) for the larger e5 variants
+and their memory and speed trade-offs. Search previews are generated independently from
 the local ZIM only for the final displayed page.
 
 **Storage.** Each ZIM gets two files in `index_dir`, plus one shared catalog:
@@ -182,9 +184,30 @@ whole server process and reloads all in-memory state.
    | **Full text** (the ZIM's own Kiwix index) | Articles containing the words anywhere | Words buried deep inside an article | ~8 ms |
 
 3. **Collapse redirects**: every redirect hit resolves to the article it points to, and duplicates are merged, so each article appears only once.
-4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall.
+4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall; cross-language queries often need 0.80 (see **Queries in another language** below).
 5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; exact phrases in titles or readable article text and configured source intent provide additional deterministic signals. Stack Exchange-style profile pages under `/users/` are demoted unless the query explicitly asks for a user or profile.
 6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", it renders the "This disambiguation page" footer, or it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is treated as navigation, whether it writes `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
+
+**Queries in another language.** A query in Chinese, Hindi, Arabic or another language against an
+English ZIM usually shares no words with the titles or article text, so the meaning search is usually
+the only stage that can retrieve the right article. Cross-language cosine scores run lower than
+same-language scores, even when the result is correct: the whole distribution shifts down rather than
+the correct article disappearing. The 0.85 floor can therefore trim results that would otherwise rank
+well. Lowering the threshold recovered many Chinese, Hindi and Arabic results in testing:
+
+```toml
+# config.toml
+min_cosine_similarity = 0.80
+```
+
+This is a recall/precision trade-off, not a separate language mode: lower values admit weaker
+meaning-only matches, while title-word and full-text matches are unaffected.
+
+The lexical stages remain tuned for space-delimited, mostly English text. The stopword list is
+English, SQLite's `unicode61` tokenizer treats a run of Chinese characters as one title token, and the
+long-query full-text boost counts space-separated words. A long Chinese or Japanese question without
+spaces therefore gets little help from title-word matching or that boost; expect it to depend on
+semantic search and the similarity floor.
 
 Search ranks one pool of results (up to `max_results`, at least `candidate_count`) and caches it by
 query and source scope. A selection of at most `min(10, 35%)` of the available sources searches only
@@ -333,6 +356,70 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
 
    For a development runtime check, activate the `uv` environment and run
    `python -m pytest tests/test_runtime_api.py`; use `python -m pytest` for the full suite.
+
+### Using a different embedding model
+
+The default is `multilingual-e5-small`, but Zimantic loads whatever ONNX graph and SentencePiece
+vocabulary are in `model_dir`. The model must follow the same e5 contract: `input_ids` and
+`attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state`
+output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes. The larger
+multilingual-e5 models keep the same tokenizer and contract. For example, to try
+`multilingual-e5-base`:
+
+```bash
+mkdir -p model-e5-base
+curl -L -o model-e5-base/model.onnx https://huggingface.co/Xenova/multilingual-e5-base/resolve/main/onnx/model_quantized.onnx
+curl -L -o model-e5-base/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-base/resolve/main/sentencepiece.bpe.model
+```
+
+Replace `base` with `large` in both URLs to try `multilingual-e5-large`.
+
+Point `model_dir` at the new folder, use a separate `index_dir` so the old indexes stay usable, and
+rebuild every index:
+
+```toml
+model_dir = "./model-e5-base"
+index_dir = "./indexes-e5-base"
+```
+
+```bash
+zimantic build --force
+zimantic serve
+```
+
+Vectors are model-specific, and Zimantic does not store a model fingerprint in the index, so always
+rebuild after switching models. A checksum warning for a non-default model is expected; the check is
+informational.
+
+These measurements use 256-token passages, batch size 32 and 4 CPU threads on one x86-64 host.
+Absolute numbers vary with CPU, but the ratios show the trade-off:
+
+| Model | Int8 ONNX | Vector dim | Extra RSS¹ | Embedding² | Notes |
+|---|---:|---:|---:|---:|---|
+| `multilingual-e5-small` | 118 MB | 384 | ~190 MB | 68/s (1×) | Default; 100+ languages |
+| `multilingual-e5-base` | 279 MB | 768 | ~340 MB | 26/s (0.38×) | 100+ languages; ~2.7× slower |
+| `multilingual-e5-large` | 562 MB | 1,024 | ~730 MB | 9/s (0.13×) | 100+ languages; ~7.8× slower |
+| `e5-small-v2` | 34 MB | 384 | ~35 MB³ | ≈1×³ | English only; not loadable as-is³ |
+
+¹ Additional resident memory for the model and vocabulary after loading, excluding ONNX Runtime's
+batch arena. Add this to the server's baseline footprint (see **Measured memory use**); leave about
+0.5 GB of headroom for base and 1 GB for large. On hosts with 2 GB RAM or less the arena is disabled,
+so builds stay closer to these figures.
+
+² Passages per second while embedding 256 passages in batches of 32. A single query embedding takes
+about 13 ms with small, 39 ms with base and 110 ms with large, so query latency rises in the same
+direction.
+
+³ `e5-small-v2` uses a BERT WordPiece vocabulary (`vocab.txt`), not SentencePiece, so it is not a
+drop-in. Its encoder has the same 12 layers and 384 hidden units as `multilingual-e5-small`; the
+smaller file comes from a 30k-entry instead of a 250k-entry embedding table, and compute is about the
+same. It buys little speed and loses all non-English search, so the default model is usually the
+better small-footprint choice.
+
+Vector storage also grows with dimension: an 8-bit IVF index stores one byte per dimension per article
+(384 B, 768 B and 1 KB), while a flat index for under 10,000 articles stores float16 vectors
+(0.75 KB, 1.5 KB and 2 KB). For a mostly English library on a small device, keep the default; base is
+a reasonable upgrade when cross-language recall matters; large needs a machine with more RAM.
 
 ## Development install
 
