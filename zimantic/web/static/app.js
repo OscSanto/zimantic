@@ -280,13 +280,13 @@
                     const actions = document.createElement("div");
                     actions.className = "library-info-actions";
                     const open = document.createElement("a");
-                    open.className = "primary library-info-action";
+                    open.className = "library-button library-info-action";
                     open.href = homepage;
                     open.dataset.libraryArticle = "true";
                     open.textContent = "Open";
                     const search = document.createElement("button");
                     search.type = "button";
-                    search.className = "secondary library-info-action";
+                    search.className = "library-button library-info-action";
                     search.textContent = "Search";
                     search.addEventListener("click", () => searchWithinLibrarySource(source));
                     actions.append(open, search);
@@ -538,7 +538,7 @@
                     }
                     const detailsButton = document.createElement("button");
                     detailsButton.type = "button";
-                    detailsButton.className = "secondary library-card-action";
+                    detailsButton.className = "library-button library-card-action";
                     detailsButton.textContent = "Details";
                     detailsButton.addEventListener("click", () => showLibraryInfo(source));
                     actions.appendChild(detailsButton);
@@ -2081,6 +2081,7 @@
                 };
                 document.body.classList.add("search-active");
                 window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+                $("searchSummary").hidden = false;
                 $("searchButton").disabled = true;
                 $("status").innerHTML =
                     `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
@@ -2219,7 +2220,7 @@
                 const url = new URL(location.href);
                 url.hash = "";
                 url.search = "";
-                url.searchParams.set("q", question);
+                if (question) url.searchParams.set("q", question);
                 const sourceValues =
                     selectedSources instanceof Set
                         ? [...selectedSources]
@@ -2373,6 +2374,8 @@
                 selectedSourceKeys = new Set();
                 resultList = null;
                 document.body.classList.remove("search-active");
+                $("searchSummary").hidden = true;
+                $("sourceFilterToolbar").hidden = true;
                 $("status").textContent = "";
                 renderMatchedBy();
                 $("sourceFilters").hidden = true;
@@ -2494,8 +2497,15 @@
                     clearSearch(pushHistory);
                     return;
                 }
-                history[pushHistory ? "pushState" : "replaceState"](null, "", makeStateUrl(question, [], 0));
-                runSearch(question);
+                // Keep the current source filter when the query changes, so a search
+                // started from a library source's "Search" button stays scoped to it.
+                const selectedSources = [...selectedSourceKeys];
+                history[pushHistory ? "pushState" : "replaceState"](
+                    null,
+                    "",
+                    makeStateUrl(question, selectedSources, 0),
+                );
+                runSearch(question, selectedSources);
             }
 
             $("question").addEventListener("input", () => {
@@ -2539,6 +2549,10 @@
 
             async function initialize() {
                 const libraryView = location.pathname === appPath("/library");
+                const state = readLocationState();
+                // Apply the URL state before the discovery fetches below: a query typed
+                // while they are in flight must keep the URL's source selection.
+                setSelectedSources(state.selectedSources);
                 $("homeHeading").setAttribute(
                     "aria-label",
                     libraryView ? "Switch to search" : "Clear or restore search",
@@ -2578,8 +2592,6 @@
                 $("searchView").hidden = libraryView;
                 $("libraryView").hidden = !libraryView;
                 document.body.classList.toggle("library-active", libraryView);
-                const state = readLocationState();
-                setSelectedSources(state.selectedSources);
                 syncArticleModal(state.modal);
                 if (state.question) {
                     $("question").value = state.question;

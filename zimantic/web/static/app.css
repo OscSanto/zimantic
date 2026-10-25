@@ -430,32 +430,36 @@ ol.results {
     margin: 0;
     text-align: right;
 }
-.library-toolbar button {
+.library-button {
     background: var(--panel);
     border: 1px solid var(--border);
+    border-radius: 8px;
     color: var(--text);
+    cursor: pointer;
+    display: inline-block;
     font-size: 1rem;
     font-weight: 400;
     line-height: inherit;
     padding: 7px 10px;
+    text-decoration: none;
     transition:
         background-color 0.18s ease,
         border-color 0.18s ease,
         color 0.18s ease,
         transform 0.1s ease;
 }
-.library-toolbar button:hover {
+.library-button:hover {
     background: var(--mark-bg);
     border-color: var(--accent);
     color: var(--accent);
 }
-.library-toolbar button:active {
+.library-button:active {
     background: var(--accent);
     border-color: var(--accent);
     color: #fff;
     transform: translateY(1px);
 }
-.library-toolbar button:focus-visible {
+.library-button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
 }
