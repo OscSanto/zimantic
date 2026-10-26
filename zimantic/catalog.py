@@ -66,6 +66,93 @@ def is_zim_filename(name: str) -> bool:
     return name.lower().endswith(".zim")
 
 
+DEFAULT_FILE_TYPES = ("*.zim",)
+
+
+def normalize_file_pattern(pattern: object) -> str:
+    """Normalize one file-type token into a match pattern.
+
+    Three extension notations are equivalent::
+
+        zim      -> *.zim
+        .zim     -> *.zim
+        *.zim    -> *.zim
+
+    Anything containing a glob character, a path separator or an inner dot
+    (for example ``*.tar.gz`` or ``book.epub``) is kept as written, so exact
+    filenames and explicit paths keep working.
+    """
+    value = str(pattern).strip()
+    if not value:
+        return ""
+    if any(character in value for character in "*?[") or "/" in value or "\\" in value:
+        return value
+    if value.startswith("."):
+        return "*" + value
+    if "." not in value:
+        return "*." + value
+    return value
+
+
+def parse_file_patterns(value: object) -> tuple[str, ...]:
+    """Normalize ``file_types`` from a config value or CLI option.
+
+    Accepts a TOML array, one comma/whitespace-separated string, or any other
+    iterable of strings. Extensions may be written as ``*.zim``, ``.zim`` or
+    ``zim``. An empty result falls back to the historical ZIM-only behavior so a
+    missing or blank setting never indexes unexpected files.
+    """
+    if value is None:
+        return DEFAULT_FILE_TYPES
+    if isinstance(value, str):
+        parts = value.replace(",", " ").split()
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        parts = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            parts.extend(item.replace(",", " ").split())
+    else:
+        return DEFAULT_FILE_TYPES
+    from .content.formats import expand_file_type_token
+
+    expanded: list[str] = []
+    for part in parts:
+        expanded.extend(expand_file_type_token(part))
+    patterns = tuple(
+        dict.fromkeys(
+            normalized
+            for normalized in (normalize_file_pattern(part) for part in expanded)
+            if normalized
+        )
+    )
+    return patterns or DEFAULT_FILE_TYPES
+
+
+def matches_file_type(name: str, patterns: tuple[str, ...]) -> bool:
+    """True when ``name`` matches one of the configured glob patterns."""
+    from fnmatch import fnmatchcase
+
+    folded = str(name).casefold()
+    return any(
+        fnmatchcase(folded, normalize_file_pattern(pattern).casefold())
+        for pattern in patterns
+    )
+
+
+def iter_files(
+    root: Path | str,
+    patterns: tuple[str, ...] = DEFAULT_FILE_TYPES,
+    on_error=None,
+) -> Iterator[Path]:
+    """Yield files below ``root`` matching any pattern, in a stable order."""
+    for directory, dirnames, filenames in os.walk(root, onerror=on_error):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if matches_file_type(name, patterns):
+                yield Path(directory, name)
+
+
 def iter_zim_files(root: Path | str, on_error=None) -> Iterator[Path]:
     """Yield ``*.zim`` files below ``root`` in a stable order.
 
@@ -74,11 +161,19 @@ def iter_zim_files(root: Path | str, on_error=None) -> Iterator[Path]:
     prevents their directory filters from drifting apart. ``on_error`` receives
     the ``OSError`` for unreadable directories, like ``os.walk``.
     """
-    for directory, dirnames, filenames in os.walk(root, onerror=on_error):
-        dirnames.sort()
-        for name in sorted(filenames):
-            if is_zim_filename(name):
-                yield Path(directory, name)
+    yield from iter_files(root, DEFAULT_FILE_TYPES, on_error=on_error)
+
+
+def source_index_name(path: Path | str) -> str:
+    """Index identity for a source path.
+
+    ZIMs keep their historical stem (``manual.zim`` -> ``manual``). Ordinary
+    files keep their extension (``book.epub`` -> ``book.epub``) so a book and a
+    PDF with the same stem cannot overwrite each other's index.
+    """
+    path = Path(path)
+    return path.stem if is_zim_filename(path.name) else path.name
+
 
 
 # Serializes schema creation between threads in one process. Cross-process

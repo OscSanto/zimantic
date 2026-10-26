@@ -1,4 +1,4 @@
-"""Content readers and extractors for ZIM entries."""
+"""Content readers and extractors for ZIM entries and ordinary files."""
 
 from .reader import (
     DEFAULT_MAX_ENTRY_BYTES,

@@ -50,10 +50,17 @@ class _LocalIndex:
     zim_path: str | None = None
     zim_signature: tuple[int, int, int, int] | None = None
     has_fulltext_index: bool | None = None
+    # ``"zim"`` for a libzim archive, ``"file"`` for an ordinary-file source.
+    source_kind: str = "zim"
+    source_title: str | None = None
+    source_description: str | None = None
+    source_language: str | None = None
+    source_creator: str | None = None
+    source_article_count: int = 1
     error: str | None = None
     open_failed: bool = field(default=False, repr=False, compare=False)
 
-    def ensure_open(self) -> Archive | None:
+    def ensure_open(self) -> Any | None:
         """Open the archive on first use, not at server startup."""
         if self.archive is not None:
             return self.archive
@@ -70,7 +77,12 @@ class _LocalIndex:
                     self.open_failed = True
                     return None
                 try:
-                    self.archive = Archive(self.zim_path)
+                    if self.source_kind == "file":
+                        from ..content.files import FileArchive
+
+                        self.archive = FileArchive(self.zim_path)
+                    else:
+                        self.archive = Archive(self.zim_path)
                 except Exception as error:
                     self.error = str(error)
                     self.open_failed = True
@@ -89,7 +101,7 @@ class _LocalIndex:
 
     def ensure_searcher(self) -> Searcher | None:
         """Create the libzim full-text searcher on first use."""
-        if self.has_fulltext_index is False:
+        if self.source_kind != "zim" or self.has_fulltext_index is False:
             return None
         archive = self.ensure_open()
         if archive is None:

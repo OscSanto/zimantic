@@ -39,7 +39,7 @@ MAX_ACTIVE_DEPTH = 200
 
 
 class EntryRecord(NamedTuple):
-    """Indexable fields extracted from one ZIM entry."""
+    """Indexable fields extracted from one entry."""
 
     id: int
     title: str
@@ -251,8 +251,9 @@ class _TextExtractor(HTMLParser):
         "details", "summary", "form", "fieldset", "legend",
     }
 
-    def __init__(self):
+    def __init__(self, min_block_chars: int = MIN_BLOCK_CHARS):
         super().__init__()
+        self.min_block_chars = max(1, int(min_block_chars))
         self.skipping = []  # open tags whose contents are not article text
         self.blocks = []
         self.active = []
@@ -343,7 +344,7 @@ class _TextExtractor(HTMLParser):
                     block = self.active.pop(index)
                     text = self._text(block["parts"])
                     block["text"] = text
-                    if len(text) >= MIN_BLOCK_CHARS:
+                    if len(text) >= self.min_block_chars:
                         for parent in self.active[:index]:
                             parent["nested"] = True
                         if block["priority"] == 0 and not block["nested"]:
@@ -377,7 +378,7 @@ class _TextExtractor(HTMLParser):
             if default_lang is not None and block.get("lang") not in (None, default_lang):
                 continue
             text = block.get("text", self._text(block["parts"]))
-            if len(text) >= MIN_BLOCK_CHARS:
+            if len(text) >= self.min_block_chars:
                 candidates.append((block["priority"], block["order"], text))
         return [
             text
@@ -448,6 +449,7 @@ def iter_text_blocks(
     html: bytes,
     max_chars: int | None = None,
     deadline: float | None = None,
+    min_block_chars: int = MIN_BLOCK_CHARS,
 ) -> Iterator[str]:
     """Yield substantial article blocks, preferring paragraphs over fallbacks.
 
@@ -458,7 +460,7 @@ def iter_text_blocks(
     yields whatever text was collected, so a pathological page cannot hang a
     request.
     """
-    parser = _TextExtractor()
+    parser = _TextExtractor(min_block_chars=min_block_chars)
     html = _SCRIPT_STYLE.sub(b" ", html)
 
     # "ignore" drops bytes that aren't valid UTF-8 rather than crashing.

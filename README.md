@@ -19,6 +19,7 @@ Zero 2 W.
 ## Features
 
 - **Search by meaning**: questions and descriptions find articles even when they share no words with the title.
+- **Also index your own files** (opt-in): text, Markdown, HTML, PDF, EPUB, Office/OpenDocument, subtitles, media (embedded or sidecar subtitles, optional speech recognition), images/comics with optional OCR, and archive contents become searchable sources alongside your ZIMs.
 - **Alternate names and misspellings**: "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another. Strongest in widely used languages (see the results below).
 - **Several sources at once**: search a small selection of ZIMs directly, or search the full library and filter the ranked results by source.
@@ -103,6 +104,69 @@ and Markdown bodies are subject to the same limit.
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, …) are supported when they contain readable text:
 HTML, XHTML, plain text and PDFs. PDF text is read from the file's embedded text layer, so scanned
 documents without one are skipped.
+
+**Ordinary files.** `build` can index files outside ZIMs when `file_types` (or
+`--file-types`) includes their extension. Extensions may be written as `epub`, `.epub` or
+`*.epub`. Explicit file paths are always considered; when the extension is missing or unknown
+(for example a downloaded `manual.bin`), the leading bytes are inspected and the file is routed to
+the right reader (PDF, EPUB, ZIP/Office, media, and so on). Use `--file-types any` to make a folder
+scan consider every file and let that content detection decide. The extractor is layered: a native
+reader is preferred, then a small optional command (`pdftotext`, `unrtf`, `catdoc`, `ps2ascii`,
+`tesseract`, `ffmpeg`), then calibre's `ebook-convert`, and a missing helper only skips that format
+instead of failing the build. Calibre 7.19+ uses its faster `pdftohtml` PDF engine; older Calibre
+builds keep the default engine.
+
+Supported families include:
+
+- text, Markdown, HTML/XML/SVG, source code, JSON/CSV/YAML, EML messages, man pages, torrent
+  metadata and subtitles;
+- PDF (page text) and EPUB/EPUB3 (spine chapters);
+- Office/OpenDocument: DOCX, ODT, PPTX, XLSX and legacy DOC/XLS/PPT;
+- RTF, PostScript/EPS, CHM, MOBI/AZW3/FB2/DjVu (via calibre);
+- video and audio through embedded subtitle streams, sidecar subtitles
+  (`lesson.mp4` + `lesson.en.srt`, `lesson_en.srt`, `lesson - English.srt`, or a `subtitles/`/`subs/`
+  folder), or opt-in speech recognition;
+- images and comic archives with opt-in OCR. Images in formats tesseract does not read reliably
+  (WebP, AVIF, HEIC, JPEG 2000, JPEG XL, ...) are converted to PNG first;
+- archives: member names are always indexed; `archive_depth` optionally extracts and indexes
+  nested files. ZIP/7z/RAR and many aliases (`.zipx`, `.tar.lz4`, `.zstd`, `.lzh`, `.001`, `.r00`,
+  ...) are supported, and subtitle-bearing media inside an archive is indexed like a standalone
+  file.
+
+A PDF page, EPUB chapter, presentation slide, spreadsheet sheet and subtitle chunk become separate
+results. Locators are preserved in the result link, for example `/file/manual.pdf#page=12` or
+`/file/lesson.mp4#t=91.4`. A plain file with no sections remains one result. Scanned PDFs and images
+are skipped unless OCR is enabled; a comic archive still exposes its page filenames when OCR is off.
+
+```bash
+# Index every text and ebook file below ./zims (plus the ZIMs).
+zimantic build --file-types 'zim,text,ebook'
+
+# OCR scanned PDFs/images and recurse one archive level.
+zimantic build --file-types 'zim,docs,archives' --ocr --archive-depth 1
+
+# Consider every file and rely on content detection for unknown extensions.
+zimantic build --file-types any
+
+# Index one explicit file regardless of file_types.
+zimantic build ~/Documents/manual.pdf
+```
+
+Named profiles are `text`, `ebook`, `docs`, `office`, `media`, `video`, `audio`, `image`, `comic`,
+`archive`, `all` (every supported type) and `any` (every file, using content detection). The same list
+belongs in `config.toml` so a later folder build uses it:
+
+```toml
+file_types = ["zim", "text", "docs", "ebook"]
+# ocr = true
+# archive_depth = 1
+# file_timeout = 120.0
+# max_file_text_chars = 2000000
+```
+
+Each extraction is bounded by `file_timeout`, `max_file_text_chars`, `max_archive_members` and
+`max_archive_bytes`. A malformed file or a failing helper is logged and skipped without aborting
+the rest of the build.
 
 **Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
@@ -362,7 +426,7 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    ```bash
    sudo apt install python3-venv python3-numpy python3-tqdm python3-onnxruntime \
        python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
-       python3-fastapi python3-uvicorn
+       python3-chardet python3-fastapi python3-uvicorn
    python3 -m venv --system-site-packages .venv
    .venv/bin/pip install --no-deps .
    ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
