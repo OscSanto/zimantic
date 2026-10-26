@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def _html_attribute(tag: str, name: str) -> str:
     match = re.search(
-        rf"\b{re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+        rf"(?:^|[\s/]){re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
         tag,
         re.I,
     )

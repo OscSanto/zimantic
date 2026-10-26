@@ -232,6 +232,17 @@ def _collapse(text: str) -> str:
     return " ".join(str(text).split())
 
 
+_NATURAL_PART = re.compile(r"(\d+)")
+
+
+def _natural_key(value: object) -> tuple:
+    """Sort names with embedded numbers numerically (page2 before page10)."""
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in _NATURAL_PART.split(str(value))
+    )
+
+
 def _truncate(text: str, limit: int) -> str:
     limit = max(1, int(limit))
     if len(text) <= limit:
@@ -350,18 +361,49 @@ def _xml_text(raw: bytes) -> str:
         root = ET.fromstring(raw)
     except ET.ParseError:
         return _collapse(_HTML_TAG.sub(" ", decode_text(raw)))
-    blocks = [
-        _collapse("".join(element.itertext()))
-        for element in root.iter()
-        if _local_name(element) in {
-            "p", "h", "title", "description", "item", "entry",
-            # SVG (and some other XML vocabularies) carry the visible text in
-            # elements called "text"; without it an SVG with a <title> would
-            # index only the caption and lose the diagram labels.
-            "text",
-        }
-    ]
-    blocks = [block for block in blocks if block]
+    selected = {
+        "p", "h", "title", "description", "item", "entry",
+        # SVG (and some other XML vocabularies) carry the visible text in
+        # elements called "text"; without it an SVG with a <title> would
+        # index only the caption and lose the diagram labels.
+        "text",
+    }
+
+    def has_selected_descendant(element: ET.Element) -> bool:
+        return any(
+            _local_name(child.tag) in selected
+            for child in element.iter()
+            if child is not element
+        )
+
+    def walk(element: ET.Element):
+        local = _local_name(element.tag)
+        selected_here = local in selected
+        selected_below = has_selected_descendant(element)
+        if selected_here and not selected_below:
+            # A leaf selected element is safe to emit whole; its descendants
+            # are not themselves selected, so nothing is duplicated.
+            text = _collapse("".join(element.itertext()))
+            if text:
+                yield text
+            return
+        if selected_here or selected_below:
+            # Emit direct text in document order around the selected children.
+            # Emitting itertext() for the container as well would duplicate
+            # every child (for example an Atom <entry> and its <title>).
+            leading = _collapse(element.text or "")
+            if leading:
+                yield leading
+            for child in element:
+                yield from walk(child)
+                tail = _collapse(child.tail or "")
+                if tail:
+                    yield tail
+            return
+        for child in element:
+            yield from walk(child)
+
+    blocks = [block for block in walk(root) if block]
     if blocks:
         return "\n\n".join(blocks)
     return _collapse(" ".join(root.itertext()))
@@ -761,7 +803,7 @@ def _zip_xml(archive: zipfile.ZipFile, name: str, max_bytes: int = MAX_XML_BYTES
         if info.file_size > max_bytes:
             return None
         return ET.fromstring(archive.read(name))
-    except (KeyError, ET.ParseError, OSError, RuntimeError):
+    except (KeyError, ET.ParseError, OSError, RuntimeError, NotImplementedError):
         return None
 
 
@@ -771,7 +813,7 @@ def _zip_member(archive: zipfile.ZipFile, name: str, max_bytes: int) -> bytes:
         if info.file_size > max_bytes:
             return b""
         return archive.read(name)
-    except (KeyError, OSError, RuntimeError):
+    except (KeyError, OSError, RuntimeError, NotImplementedError):
         return b""
 
 
@@ -809,6 +851,10 @@ def _epub_nav_titles(
     return titles
 
 
+class _EpubStructureError(Exception):
+    """The EPUB container or package document is missing or unusable."""
+
+
 def _epub_document(
     path: Path,
     options: ExtractOptions,
@@ -821,7 +867,7 @@ def _epub_document(
             names = set(archive.namelist())
             container = _zip_xml(archive, "META-INF/container.xml")
             if container is None:
-                return _finish(path, sections, options, deadline)
+                raise _EpubStructureError("container.xml is missing or malformed")
             rootfile = next(
                 (
                     element.get("full-path")
@@ -831,11 +877,11 @@ def _epub_document(
                 "",
             )
             if not rootfile:
-                return _finish(path, sections, options, deadline)
+                raise _EpubStructureError("container.xml has no rootfile")
             rootfile = rootfile.lstrip("/")
             opf = _zip_xml(archive, rootfile)
             if opf is None:
-                return _finish(path, sections, options, deadline)
+                raise _EpubStructureError("package document is missing or malformed")
 
             manifest: dict[str, tuple[str, str]] = {}
             spine: list[str] = []
@@ -908,8 +954,8 @@ def _epub_document(
                 sections.append(
                     Section(heading, f"{heading}\n\n{body}", f"chapter={index}")
                 )
-    except (OSError, zipfile.BadZipFile, RuntimeError):
-        return _finish(path, [], options, deadline, metadata)
+    except (OSError, zipfile.BadZipFile, RuntimeError, _EpubStructureError):
+        pass
     if not sections:
         calibre = _calibre_document(path, options, deadline)
         if calibre is not None:
@@ -927,6 +973,14 @@ def _element_text(element: ET.Element) -> str:
     return _collapse("".join(element.itertext()))
 
 
+def _element_attribute(element: ET.Element, name: str) -> str:
+    """Return an attribute by local name, ignoring its XML namespace."""
+    for key, value in element.attrib.items():
+        if _local_name(key) == name:
+            return str(value).strip()
+    return ""
+
+
 def _heading_style(element: ET.Element) -> str:
     for child in element.iter():
         if _local_name(child.tag) not in {"pStyle", "style-name", "style"}:
@@ -942,7 +996,7 @@ def _heading_like(style: str) -> bool:
         style
         and (
             "heading" in style
-            or style.startswith("h")
+            or re.fullmatch(r"h[\s_-]?[1-6]", style)
             or style in {"title", "subtitle"}
         )
     )
@@ -998,13 +1052,24 @@ def _odf_sections(raw: bytes, kind: str) -> list[Section]:
         blocks = []
 
     if kind == "presentation":
-        for page in root.iter():
-            if _local_name(page.tag) != "page":
-                continue
-            name = str(page.get("name") or "").strip()
-            text = _collapse(" ".join(_element_text(item) for item in page.iter()))
+        for index, page in enumerate(
+            (element for element in root.iter() if _local_name(element.tag) == "page"),
+            1,
+        ):
+            # ODF stores the human-readable name in the namespaced draw:name
+            # attribute, not an unqualified "name" attribute.
+            name = _element_attribute(page, "name")
+            parts = [
+                _element_text(item)
+                for item in page.iter()
+                if _local_name(item.tag) in {"p", "h"}
+            ]
+            text = "\n\n".join(part for part in parts if part)
+            if not text:
+                # Some generators put slide text outside text:p/text:h.
+                text = _collapse(" ".join(page.itertext()))
             if text:
-                sections.append(Section(name or "Slide", text))
+                sections.append(Section(name or "Slide", text, f"slide={index}"))
         return sections
 
     for element in root.iter():
@@ -1127,7 +1192,7 @@ def _zip_office_document(
                     or _zip_member(archive, "main.xml", MAX_XML_BYTES)
                 )
                 sections = _odf_sections(raw, "text")
-    except (OSError, zipfile.BadZipFile, RuntimeError):
+    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
         sections = []
     if not sections:
         calibre = _calibre_document(path, options, deadline)
@@ -1205,9 +1270,13 @@ def _calibre_document(
             return None
         sections: list[Section] = []
         files = sorted(
-            item
-            for item in output.rglob("*")
-            if item.is_file() and item.suffix.lower() in {".html", ".htm", ".xhtml"}
+            (
+                item
+                for item in output.rglob("*")
+                if item.is_file()
+                and item.suffix.lower() in {".html", ".htm", ".xhtml"}
+            ),
+            key=_natural_key,
         )
         for index, item in enumerate(files, 1):
             if deadline.expired():
@@ -1300,7 +1369,7 @@ def _chm_document(
             result = _run(["extract_chm", "-l", temp_dir, str(path)], deadline)
             if result is not None and result.returncode == 0:
                 for index, item in enumerate(
-                    sorted(Path(temp_dir).rglob("*.htm*")), 1
+                    sorted(Path(temp_dir).rglob("*.htm*"), key=_natural_key), 1
                 ):
                     if deadline.expired():
                         break
@@ -1325,11 +1394,15 @@ def _chm_document(
 
 def _parse_timestamp(hours: str, minutes: str, seconds: str, fraction: str = "0") -> float:
     try:
+        # The fraction is a decimal fraction of a second, not a left-padded
+        # integer. "5" means 500 ms and "50" means 500 ms in ASS (centiseconds);
+        # padding on the left would turn those into 5 ms and 50 ms.
+        milliseconds = float(f"0.{str(fraction).ljust(3, '0')[:3]}")
         return (
             int(hours or 0) * 3600
             + int(minutes) * 60
             + float(seconds)
-            + float(f"0.{fraction.zfill(3)}")
+            + milliseconds
         )
     except (TypeError, ValueError):
         return 0.0
@@ -1571,6 +1644,7 @@ def _embedded_subtitle_cues(
         return []
     if not isinstance(streams, list):
         return []
+    streams = [stream for stream in streams if isinstance(stream, dict)]
     def rank(stream: dict) -> tuple[int, int]:
         codec = str(stream.get("codec_name") or "").lower()
         tags = stream.get("tags") or {}
@@ -1685,7 +1759,7 @@ def _comic_member_sections(
         for info in archive.infolist()
         if not info.is_dir() and file_extension(info.filename) in _IMAGE_MEMBER_EXTENSIONS
     ]
-    members.sort(key=lambda info: info.filename.casefold())
+    members.sort(key=lambda info: _natural_key(info.filename))
     sections: list[Section] = []
     for number, info in enumerate(members[: options.max_ocr_pages], 1):
         if deadline.expired():
@@ -1714,15 +1788,31 @@ def _comic_document(
         except (OSError, zipfile.BadZipFile):
             sections = []
     elif options.ocr:
-        # CBR/CB7/CBT/CBA: let the archive helpers pick unrar, unar or 7z.
+        # CBR/CB7/CBA use an external helper; CBT is a tar archive and can be
+        # handled by the standard library even when no helper is installed.
         with tempfile.TemporaryDirectory(prefix="zimantic-comic-") as temp_dir:
-            files = _extract_external_archive(
-                path, Path(temp_dir) / "contents", options, deadline
-            )
+            destination = Path(temp_dir) / "contents"
+            extension = file_extension(path)
+            if extension in {
+                ".cbt", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2",
+                ".tbz", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".taz",
+            }:
+                files = _extract_tar_members(path, destination, options, deadline)
+                if not files:
+                    files = _extract_external_archive(
+                        path, destination, options, deadline
+                    )
+            else:
+                files = _extract_external_archive(
+                    path, destination, options, deadline
+                )
             images = sorted(
-                item
-                for item in files
-                if file_extension(item) in _IMAGE_MEMBER_EXTENSIONS
+                (
+                    item
+                    for item in files
+                    if file_extension(item) in _IMAGE_MEMBER_EXTENSIONS
+                ),
+                key=_natural_key,
             )
             for number, item in enumerate(images[: options.max_ocr_pages], 1):
                 if deadline.expired():
@@ -1873,7 +1963,7 @@ def _extract_external_archive(
         if result is not None and result.returncode == 0:
             return [
                 item
-                for item in sorted(destination.rglob("*"))
+                for item in sorted(destination.rglob("*"), key=_natural_key)
                 if item.is_file()
             ][: options.max_archive_members]
     return []
@@ -1899,25 +1989,40 @@ def _extract_zip_members(
                 target = _safe_member_path(destination, info.filename)
                 if target is None:
                     continue
-                if file_extension(target) not in SUPPORTED_EXTENSIONS:
-                    with archive.open(info) as probe:
-                        sample = probe.read(min(info.file_size, TEXT_SAMPLE_BYTES))
-                    if (
-                        sniff_bytes(sample) not in SUPPORTED_EXTENSIONS
-                        and not is_text_sample(sample)
-                    ):
-                        continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info) as source, target.open("wb") as output:
-                    remaining = options.max_archive_bytes - total
-                    data = source.read(min(info.file_size, remaining))
-                    output.write(data)
-                    total += len(data)
+                try:
+                    if file_extension(target) not in SUPPORTED_EXTENSIONS:
+                        with archive.open(info) as probe:
+                            sample = probe.read(min(info.file_size, TEXT_SAMPLE_BYTES))
+                        if (
+                            sniff_bytes(sample) not in SUPPORTED_EXTENSIONS
+                            and not is_text_sample(sample)
+                        ):
+                            continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info) as source, target.open("wb") as output:
+                        remaining = options.max_archive_bytes - total
+                        data = source.read(min(info.file_size, remaining))
+                        output.write(data)
+                        total += len(data)
+                except (
+                    OSError,
+                    RuntimeError,
+                    NotImplementedError,
+                    zipfile.BadZipFile,
+                ):
+                    # Encrypted members raise RuntimeError on open. Keep the
+                    # members that did extract (and the archive listing) rather
+                    # than failing the whole archive.
+                    try:
+                        target.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    continue
                 extracted.append(target)
                 if deadline.expired():
                     break
-    except (OSError, zipfile.BadZipFile):
-        return []
+    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+        return extracted
     return extracted
 
 

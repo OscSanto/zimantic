@@ -29,7 +29,8 @@ max_preview_chars = 1_000
 
 # Leave one core for search and the web server.
 embed_threads = 3
-embedding_workers = 2
+# Only used when build_workers is greater than 1.
+# embedding_workers = 2
 
 # nprobe = 64
 min_cosine_similarity = 0.85

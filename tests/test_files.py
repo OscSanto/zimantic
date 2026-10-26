@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -205,6 +206,32 @@ class FileBuildSearchTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_fast_file_build_skips_the_embedder(self):
+        class _ExplodingEmbedder:
+            def embed(self, _texts):
+                raise AssertionError("fast build must not embed")
+
+            def truncate(self, _text, prefix=""):
+                raise AssertionError("fast build must not tokenize")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_dir = root / "indexes"
+            index_dir.mkdir()
+            path = root / "notes.txt"
+            path.write_text("A note about bicycle tires. " * 20, encoding="utf-8")
+            build(path, index_dir, _ExplodingEmbedder(), 1, fast=True)
+            db = sqlite3.connect(index_dir / "notes.txt.sqlite")
+            try:
+                self.assertEqual(
+                    dict(db.execute("SELECT key, value FROM meta"))["done"], "fast"
+                )
+                self.assertFalse(
+                    db.execute("SELECT 1 FROM sqlite_master WHERE name = 'vecs'").fetchone()
+                )
+            finally:
+                db.close()
+
     def test_search_discovers_a_file_source_and_links_to_the_original(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -229,6 +256,65 @@ class FileBuildSearchTests(unittest.TestCase):
                 self.assertEqual(results[0]["url"], "/file/notes.txt")
                 self.assertIn("bicycle", results[0]["lead"])
                 self.assertEqual(search.source_file_path("notes.txt"), zim_dir / "notes.txt")
+            finally:
+                search.close()
+
+    def test_search_does_not_reopen_a_file_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zim_dir, index_dir, _ = self._build(
+                root,
+                "notes.txt",
+                "A sufficiently long note about repairing a bicycle tire. " * 4,
+            )
+            with patch(
+                "zimantic.content.files.FileArchive",
+                side_effect=AssertionError("file source was re-extracted"),
+            ):
+                search = Search(
+                    {
+                        "zim_dir": str(zim_dir),
+                        "index_dir": str(index_dir),
+                        "max_preview_chars": 200,
+                    },
+                    semantic=False,
+                )
+                try:
+                    results = search.search("bicycle tire", limit=3)
+                finally:
+                    search.close()
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["mimetype"], "text/plain")
+            self.assertIn("bicycle", results[0]["lead"])
+
+    def test_same_named_files_are_indexed_separately(self):
+        import zimantic.__main__ as main_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zim_dir = root / "zims"
+            index_dir = root / "indexes"
+            one = zim_dir / "one" / "notes.txt"
+            two = zim_dir / "two" / "notes.txt"
+            one.parent.mkdir(parents=True)
+            two.parent.mkdir(parents=True)
+            index_dir.mkdir()
+            one.write_text("Alpha notes about bicycles. " * 20, encoding="utf-8")
+            two.write_text("Beta notes about sailboats. " * 20, encoding="utf-8")
+            selected = main_module._select_build_sources(
+                [one, two], {one: one.stat().st_size, two: two.stat().st_size}
+            )
+            for path, index_name in selected:
+                build(path, index_dir, None, 1, fast=True, index_name=index_name)
+
+            search = Search(
+                {"zim_dir": str(zim_dir), "index_dir": str(index_dir)},
+                semantic=False,
+            )
+            try:
+                self.assertEqual(len(search.local_names()), 2)
+                self.assertIn("bicycles", search.search("bicycles", limit=3)[0]["lead"])
+                self.assertIn("sailboats", search.search("sailboats", limit=3)[0]["lead"])
             finally:
                 search.close()
 

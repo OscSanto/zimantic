@@ -123,6 +123,20 @@ _HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
 _PHRASE_MIMETYPES = frozenset({"text/plain", "text/html", "application/xhtml+xml"})
 
 
+def _catalog_book(href: str) -> str:
+    """Extract a ZIM book name from a catalog entry's HTML link.
+
+    Kiwix normally links to ``/content/<book>``, but some servers link to an
+    article below it (``/content/<book>/A/Main_Page``). Take the segment after
+    ``content`` when present instead of assuming it is the last one.
+    """
+    parts = [part for part in urlparse(href).path.split("/") if part]
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] == "content" and index + 1 < len(parts):
+            return unquote(parts[index + 1])
+    return unquote(parts[-1]) if parts else ""
+
+
 def _archive_metadata(archive: Archive, zim_path: Path) -> dict[str, Any]:
     """Read archive metadata through the shared catalog extractor.
 
@@ -864,6 +878,7 @@ class Search:
 
         zim_paths = self._scan_zim_paths()
         found: dict[str, tuple[str, Path]] = {}
+        file_sources: dict[str, str] = {}
         for stem, db_path in finished.items():
             if kinds.get(stem) == "file":
                 meta = self._read_index_meta(db_path) or {}
@@ -886,6 +901,35 @@ class Search:
                         source,
                     )
                     continue
+                source_key = str(source.resolve())
+                existing = file_sources.get(source_key)
+                if existing is not None:
+                    # A collision-named index and a canonical rebuild can both
+                    # exist after one of two same-named files is removed. Keep
+                    # the canonical name, otherwise the lexicographically first.
+                    canonical = source.name
+                    if existing == canonical:
+                        keep, drop = existing, stem
+                    elif stem == canonical:
+                        keep, drop = stem, existing
+                    elif existing < stem:
+                        keep, drop = existing, stem
+                    else:
+                        keep, drop = stem, existing
+                    if drop == stem:
+                        logger.info(
+                            "zimantic: %s duplicates the file index %s; ignoring",
+                            stem,
+                            existing,
+                        )
+                        continue
+                    found.pop(drop, None)
+                    file_sources[source_key] = keep
+                    logger.info(
+                        "zimantic: %s replaces duplicate file index %s", keep, drop
+                    )
+                else:
+                    file_sources[source_key] = stem
                 found[stem] = ("sqlite", db_path)
                 continue
 
@@ -1636,9 +1680,11 @@ class Search:
                 # write it). This opens the archive, as prior versions always did.
                 archive = index.ensure_open()
                 if archive is None:
-                    # A title-only index can still serve results when its ZIM is
-                    # absent (the SQLite docs table is self-contained). Keep the
-                    # source available, as prior versions did.
+                    # A title-only index can still serve results when its ZIM
+                    # exists but cannot be opened (the SQLite docs table is
+                    # self-contained). Keep the source available, as prior
+                    # versions did. A ZIM that is actually absent is filtered
+                    # out earlier by _discover_local_indexes.
                     local[key] = SourceInfo(
                         key=key,
                         name=local_name,
@@ -1833,7 +1879,7 @@ class Search:
                     or not href
                 ):
                     href = child.attrib.get("href") or ""
-            book = unquote(urlparse(href).path.rstrip("/").split("/")[-1])
+            book = _catalog_book(href) or unquote(_child_text(entry, "name"))
             if not book:
                 continue
             item = {"name": title or book, "book": book, "updated": updated}
@@ -2635,7 +2681,13 @@ class Search:
 
     @staticmethod
     def _selective_source_limit(total_sources: int) -> int:
-        """Largest selection that still searches only the selected sources."""
+        """Largest selection that still searches only the selected sources.
+
+        The ratio intentionally rounds down: a two-source library has a limit
+        of zero, so selecting one of them is promoted to the shared full search
+        (the display filter still narrows the visible results). This keeps the
+        number of distinct cached pools small on tiny libraries.
+        """
         return min(
             SELECTIVE_SOURCE_LIMIT,
             math.floor(total_sources * SELECTIVE_SOURCE_RATIO),
@@ -2654,8 +2706,12 @@ class Search:
         """
         with self._state_lock:
             available = [source for source in self.sources.values() if source.available]
-        if not zim:
+        if zim is None:
             return available, False, None
+        if not zim:
+            # An explicit empty list is a deliberately empty scope (the cache
+            # key distinguishes it from None); it must not mean "all sources".
+            return [], True, ()
 
         wanted = set(zim)
         selected = [
@@ -3794,20 +3850,31 @@ class Search:
             # File indexes keep the extracted body in SQLite FTS. Reading it
             # back is cheap and avoids re-parsing a large PDF/EPUB for a
             # preview (and avoids needing the build-time OCR/ASR flags here).
-            db = self._db_for(index)
-            if db is None:
+            # Acquire the index so a concurrent reload cannot close the
+            # connection while it is in use.
+            try:
+                self._acquire_index(index)
+            except RuntimeError:
                 return {doc["id"]: "" for doc in docs}
-            previews: dict[str, str] = {}
-            for doc in docs:
-                try:
-                    row = db.execute(
-                        "SELECT body FROM docs WHERE path = ? LIMIT 1",
-                        (doc["path"],),
-                    ).fetchone()
-                except sqlite3.Error:
-                    row = None
-                previews[doc["id"]] = self._preview(str(row[0] or "")) if row else ""
-            return previews
+            try:
+                db = self._db_for(index)
+                if db is None:
+                    return {doc["id"]: "" for doc in docs}
+                previews: dict[str, str] = {}
+                for doc in docs:
+                    try:
+                        row = db.execute(
+                            "SELECT body FROM docs WHERE path = ? LIMIT 1",
+                            (doc["path"],),
+                        ).fetchone()
+                    except sqlite3.Error:
+                        row = None
+                    previews[doc["id"]] = (
+                        self._preview(str(row[0] or "")) if row else ""
+                    )
+                return previews
+            finally:
+                self._release_index(index)
         archive = index.ensure_open()
         if archive is None:
             return {doc["id"]: "" for doc in docs}
@@ -3891,7 +3958,7 @@ class Search:
             local_name, source_docs = futures[future]
             try:
                 previews = future.result()
-            except (RuntimeError, ValueError, OSError) as error:
+            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
                 logger.warning("%s: preview extraction failed (%s)", local_name, error)
                 previews = {doc["id"]: "" for doc in source_docs}
             for doc in source_docs:
@@ -3940,7 +4007,11 @@ class Search:
                     # already in the ranking, so skip the content read.
                     continue
                 index = indexes.get(source.local_name)
-                if index is None or index.ensure_open() is None:
+                if index is None:
+                    continue
+                # File indexes answer phrase checks from their stored body; only
+                # ZIM sources need the archive to be opened.
+                if index.source_kind != "file" and index.ensure_open() is None:
                     continue
                 phrase_ids.add(result["id"])
 
@@ -3955,6 +4026,14 @@ class Search:
         for local_name, result_docs in grouped.items():
             index = indexes.get(local_name)
             if index is None:
+                continue
+            if index.source_kind == "file":
+                found = (
+                    self._enrich_file_pool(
+                        index, result_docs, phrase_ids, phrase_words, docs
+                    )
+                    or found
+                )
                 continue
             archive = index.ensure_open()
             if archive is None:
@@ -3996,6 +4075,60 @@ class Search:
             finally:
                 self._release_index(index)
         return self._rank_results(source_results, query, limit) if found else pool
+
+    def _enrich_file_pool(
+        self,
+        index: _LocalIndex,
+        result_docs: list[dict[str, Any]],
+        phrase_ids: set[str],
+        phrase_words: list[str],
+        docs: dict[str, dict[str, Any]],
+    ) -> bool:
+        """Set MIME types and phrase flags from a file index's stored body.
+
+        Ordinary-file indexes are self-contained: reopening the original file
+        would re-parse a PDF/EPUB/video and could even produce a different entry
+        set when the build used OCR, ASR or nested-archive extraction.
+        """
+        try:
+            self._acquire_index(index)
+        except RuntimeError:
+            return False
+        found = False
+        try:
+            try:
+                db = self._db_for(index)
+            except sqlite3.Error:
+                return False
+            if db is None:
+                return False
+            for result in result_docs:
+                result["mimetype"] = "text/plain"
+                source_doc = docs.get(result["id"])
+                if source_doc is not None:
+                    source_doc["mimetype"] = "text/plain"
+                if result["id"] not in phrase_ids:
+                    continue
+                try:
+                    row = db.execute(
+                        "SELECT body FROM docs WHERE path = ? LIMIT 1",
+                        (result["path"],),
+                    ).fetchone()
+                except sqlite3.Error:
+                    continue
+                hit = bool(
+                    row
+                    and _phrase_in_word_stream(
+                        str(row[0] or "").casefold(), phrase_words
+                    )
+                )
+                if source_doc is not None:
+                    source_doc["_content_phrase"] = hit
+                if hit:
+                    found = True
+        finally:
+            self._release_index(index)
+        return found
 
     def _preview(self, text: str) -> str:
         limit = getattr(

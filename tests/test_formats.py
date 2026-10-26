@@ -106,6 +106,38 @@ class OfficeExtractionTests(unittest.TestCase):
             path.write_bytes(b"this is not a zip file")
             self.assertEqual(FileArchive(path).entry_count, 0)
 
+    def test_odp_slides_keep_their_names_without_duplicating_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "talk.odp"
+            _write_zip(path, {
+                "content.xml": (
+                    '<office:document-content xmlns:office="o" '
+                    'xmlns:draw="d" xmlns:text="t">'
+                    "<office:body><office:presentation>"
+                    '<draw:page draw:name="Slide 1"><draw:frame>'
+                    "<draw:text-box><text:p>Hello</text:p></draw:text-box>"
+                    "</draw:frame></draw:page>"
+                    "</office:presentation></office:body>"
+                    "</office:document-content>"
+                )
+            })
+            parsed = FileArchive(path)
+            self.assertEqual(parsed.main_entry.title, "Slide 1")
+            self.assertEqual(parsed.main_entry.body.count("Hello"), 1)
+            self.assertEqual(parsed.main_entry.locator, "slide=1")
+
+    def test_xml_containers_do_not_duplicate_child_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "feed.rss"
+            path.write_text(
+                "<rss><channel><item><title>Hello</title>"
+                "<description>World</description></item></channel></rss>",
+                encoding="utf-8",
+            )
+            parsed = FileArchive(path)
+            self.assertEqual(parsed.main_entry.body.count("Hello"), 1)
+            self.assertEqual(parsed.main_entry.body.count("World"), 1)
+
 
 class MultiEntryBuildTests(unittest.TestCase):
     def test_sections_get_unique_paths_and_previews(self):
@@ -265,6 +297,24 @@ class SubtitleTests(unittest.TestCase):
             self.assertIn("lighthouses", parsed.main_entry.body)
             self.assertNotIn("Dialogue", parsed.main_entry.body)
             self.assertNotIn("0:00:01", parsed.main_entry.body)
+
+    def test_short_fractional_seconds_are_decimal_fractions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ass = Path(tmp) / "movie.ass"
+            ass.write_text(
+                "[Events]\n"
+                "Dialogue: 0,0:00:05.50,0:00:06.00,Default,,0,0,0,,"
+                "A line about lighthouses.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(FileArchive(ass).main_entry.locator, "t=5.500")
+
+            srt = Path(tmp) / "movie.srt"
+            srt.write_text(
+                "1\n00:00:01,5 --> 00:00:02,000\nA short cue.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(FileArchive(srt).main_entry.locator, "t=1.500")
 
 
 class OcrTests(unittest.TestCase):

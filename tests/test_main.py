@@ -148,6 +148,30 @@ class BuildWorkerTests(unittest.TestCase):
             self.assertEqual([path.name for path in selected], ["manual.zim"])
             self.assertEqual(selected[0].read_bytes(), b"a much larger copy")
 
+    def test_ordinary_files_with_the_same_name_get_unique_index_names(self):
+        import zimantic.__main__ as main_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "one" / "book.pdf"
+            second = root / "two" / "book.pdf"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+
+            sources = main_module._collect_sources(
+                [first, second], root, ("*.pdf",)
+            )
+            selected = main_module._select_build_sources(
+                sources, {path: path.stat().st_size for path in sources}
+            )
+
+            self.assertEqual(len(selected), 2)
+            names = [name for _path, name in selected]
+            self.assertEqual(len(set(names)), 2)
+            self.assertTrue(all(name.startswith("book.pdf-") for name in names))
+
     def test_build_workers_process_independent_zims_concurrently(self):
         import zimantic.__main__ as main_module
         from zimantic import settings

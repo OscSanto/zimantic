@@ -1073,6 +1073,24 @@ def read_entry(
         return None
 
     if fast:
+        # Keep the cheap asset filters that do not require a full parse: a fast
+        # index should not turn licenses/configs or mislabeled script files
+        # into title-only search results.
+        if mimetype == "text/plain" and (
+            _PLAIN_TEXT_ASSET.search(entry.path)
+            or _PLAIN_TEXT_ASSET.search(entry.title)
+        ):
+            return None
+        if (
+            mimetype in {"text/html", "application/xhtml+xml"}
+            and _HTML_ASSET_PATH.search(entry.path)
+        ):
+            try:
+                head = bytes(item.content[:REFRESH_SCAN_BYTES])
+            except (KeyError, RuntimeError, TypeError, ValueError):
+                return None
+            if not _HTML_TAG.search(head):
+                return None
         return EntryRecord(i, entry.title, "", entry.path, None)
 
     try:

@@ -114,7 +114,9 @@ scan consider every file and let that content detection decide. The extractor is
 reader is preferred, then a small optional command (`pdftotext`, `unrtf`, `catdoc`, `ps2ascii`,
 `tesseract`, `ffmpeg`), then calibre's `ebook-convert`, and a missing helper only skips that format
 instead of failing the build. Calibre 7.19+ uses its faster `pdftohtml` PDF engine; older Calibre
-builds keep the default engine.
+builds keep the default engine. Two ordinary files with the same filename in
+different folders are both indexed; the index name gets a short path-derived suffix so their
+SQLite/FAISS files cannot collide.
 
 Supported families include:
 
@@ -653,8 +655,9 @@ be read and built concurrently with `--workers N` or the `build_workers` setting
 default scales with CPU and RAM. Full builds use a bounded shared embedding pipeline: at most
 `embedding_workers` model calls run at once, and each ZIM can have only a small number of batches
 waiting for embedding. When unset, `embedding_workers` also accounts for `embed_threads` so the model
-is not oversubscribed. Tune `batch_size`, `build_workers`, `embedding_workers` and `embed_threads` in
-`config.toml` for different hardware. Do not run concurrent builds that target the same ZIM index
+is not oversubscribed. The pipeline is only used when multiple sources are built concurrently
+(`build_workers` or `--workers` greater than 1). Tune `batch_size`, `build_workers`,
+`embedding_workers` and `embed_threads` in `config.toml` for different hardware. Do not run concurrent builds that target the same ZIM index
 identity (filename stem and source byte size).
 
 **Hardware profiles.** Tuning keys in `config.toml` are commented out by default, so Zimantic selects

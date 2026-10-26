@@ -79,6 +79,7 @@ from zimantic.search import (  # noqa: E402
     _title_query,
 )
 from zimantic.searching.config import _file_signature  # noqa: E402
+from zimantic.searching.sources import _html_attribute  # noqa: E402
 
 
 def _bare_search(cfg):
@@ -283,6 +284,17 @@ class SearchContractTests(unittest.TestCase):
         # enriching the whole candidate pool.
         self.assertFalse(pool[0]["lead"])
         self.assertEqual(archive.calls, 2)
+
+    def test_html_attribute_does_not_match_data_prefixed_names(self):
+        self.assertEqual(
+            _html_attribute('<link rel="icon" data-href="/x.png">', "href"), ""
+        )
+        self.assertEqual(
+            _html_attribute('<link data-rel="icon" href="/x.png">', "rel"), ""
+        )
+        self.assertEqual(
+            _html_attribute('<link rel="icon" href="/x.png">', "href"), "/x.png"
+        )
 
     def test_source_icon_prefers_zim_metadata(self):
         homepage = _IconEntry(
@@ -1949,6 +1961,37 @@ class CatalogRefreshTests(unittest.TestCase):
 
         self.assertEqual([entry["book"] for entry in entries], ["one", "three"])
 
+    def test_catalog_book_uses_the_content_segment_for_article_links(self):
+        class _Response:
+            headers = {}
+
+            def __init__(self):
+                self._read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                if self._read:
+                    return b""
+                self._read = True
+                return (
+                    b"<feed><entry><title>Manual</title>"
+                    b'<link type="text/html" '
+                    b'href="https://example.test/content/manual/A/Main_Page" />'
+                    b"</entry></feed>"
+                )
+
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        with patch("zimantic.search.urlopen", return_value=_Response()):
+            entries = search._catalog_entries("http://kiwix")
+
+        self.assertEqual(entries[0]["book"], "manual")
+
 
 class KiwixSearchTests(unittest.TestCase):
     def test_relative_result_links_are_resolved_against_the_server(self):
@@ -2217,6 +2260,18 @@ class SourceScopeTests(unittest.TestCase):
                 self.assertEqual(len(sources), 6)
                 self.assertFalse(selective)
                 self.assertIsNone(scope)
+            finally:
+                search._executor.shutdown(wait=True)
+
+    def test_explicit_empty_source_list_is_an_empty_scope(self):
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            search = self._search(tmp)
+            try:
+                sources, selective, scope = search._search_scope([])
+                self.assertEqual(sources, [])
+                self.assertTrue(selective)
+                self.assertEqual(scope, ())
             finally:
                 search._executor.shutdown(wait=True)
 

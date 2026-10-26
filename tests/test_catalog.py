@@ -162,6 +162,7 @@ class CatalogTests(unittest.TestCase):
             "_videos:no;_ftindex:no;_pictures:yes;_details:yes",
         )
         self.assertEqual(perma_ref("wikipedia_en_100_2026-08"), "wikipedia_en_100")
+        self.assertEqual(perma_ref("wikipedia_en_100_2026-08-15"), "wikipedia_en_100")
         self.assertEqual(perma_ref("custom_zim"), "custom_zim")
 
     def test_schema_version_rebuilds_cache(self):

@@ -87,8 +87,9 @@ max_kiwix_response_bytes = 67108864
 # Desktop auto, mobile 2, supercomputer 8.
 # embed_threads = 3
 
-# Maximum simultaneous embedding calls when multiple ZIMs are being built. When
-# unset, the default accounts for build_workers, CPU threads and available RAM.
+# Maximum simultaneous embedding calls when multiple ZIMs are being built.
+# When unset, the default accounts for build_workers, CPU threads and available RAM.
+# Only used when build_workers is greater than 1.
 # embedding_workers = 2
 
 # Maximum HTML read per article.

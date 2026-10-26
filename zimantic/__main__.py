@@ -1,5 +1,6 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import logging
 import os
 import signal
@@ -239,35 +240,67 @@ def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
     return _collect_sources(paths, default_dir, DEFAULT_FILE_TYPES)
 
 
-def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path]:
-    """Choose one source per index identity, preferring the largest copy."""
-    from .catalog import source_index_name
+def _select_build_sources(
+    sources: list[Path], sizes: dict[Path, int]
+) -> list[tuple[Path, str]]:
+    """Choose sources and the index name each one will use.
+
+    ZIMs sharing a stem keep the historical largest-copy rule. Ordinary files
+    that share a filename are all indexed: the flat index directory needs a
+    unique name, so each gets a short path-derived suffix instead of silently
+    discarding every copy but the largest.
+    """
+    from .catalog import is_zim_filename, source_index_name
 
     by_stem: dict[str, list[Path]] = {}
-    for zim in zims:
-        by_stem.setdefault(source_index_name(zim), []).append(zim)
-    accepted: list[Path] = []
+    for source in sources:
+        by_stem.setdefault(source_index_name(source), []).append(source)
+
+    accepted: list[tuple[Path, str]] = []
     for stem, paths in sorted(by_stem.items()):
-        sizes = {zim_sizes[path] for path in paths}
-        # Build and serve use the largest copy for an ambiguous stem. The
-        # catalog keeps every row but resolves the stem to its largest file, so
-        # all three agree on which archive wins.
-        chosen = max(paths, key=zim_sizes.__getitem__)
-        if len(sizes) > 1:
+        zims = [path for path in paths if is_zim_filename(path.name)]
+        files = [path for path in paths if not is_zim_filename(path.name)]
+
+        if zims:
+            chosen = max(zims, key=sizes.__getitem__)
+            if len({sizes[path] for path in zims}) > 1:
+                logger.warning(
+                    "zimantic: sources share index identity %r with different "
+                    "sizes; using the largest %s",
+                    stem,
+                    chosen,
+                )
+            elif len(zims) > 1:
+                logger.warning(
+                    "zimantic: ignoring duplicate sources with index identity "
+                    "%r: %s",
+                    stem,
+                    ", ".join(str(path) for path in zims if path != chosen),
+                )
+            accepted.append((chosen, stem))
+
+        if len(files) == 1 and not zims:
+            accepted.append((files[0], stem))
+            continue
+        if files:
             logger.warning(
-                "zimantic: sources share index identity %r with different sizes; "
-                "using the largest %s",
+                "zimantic: %d ordinary files share the name %r; indexing each "
+                "with a unique index name",
+                len(files),
                 stem,
-                chosen,
             )
-        elif len(paths) > 1:
-            logger.warning(
-                "zimantic: ignoring duplicate sources with index identity %r: %s",
-                stem,
-                ", ".join(str(path) for path in paths if path != chosen),
-            )
-        accepted.append(chosen)
-    return sorted(accepted, key=zim_sizes.__getitem__)
+            for path in sorted(files, key=lambda item: str(item.resolve())):
+                digest = hashlib.sha1(
+                    str(path.resolve()).encode("utf-8")
+                ).hexdigest()[:10]
+                accepted.append((path, f"{stem}-{digest}"))
+
+    return sorted(accepted, key=lambda item: sizes.get(item[0], 0))
+
+
+def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path]:
+    """Backward-compatible helper returning the selected source paths."""
+    return [path for path, _name in _select_build_sources(zims, zim_sizes)]
 
 
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
@@ -342,7 +375,9 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
 
     source_sizes = {source: source.stat().st_size for source in sources}
     downloading = _find_downloading_sizes(source_sizes)
-    sources = _select_zim_paths(sources, source_sizes)
+    selected = _select_build_sources(sources, source_sizes)
+    sources = [source for source, _index_name in selected]
+    index_names = dict(selected)
     if not sources:
         logger.info("zimantic: no matching files to index")
         return
@@ -393,6 +428,7 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             force=args.force,
             embedding_pipeline=embedding_pipeline,
             extract_options=extract_options,
+            index_name=index_names[source],
         )
 
     try:

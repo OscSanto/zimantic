@@ -322,7 +322,7 @@ def category_from_tags(tags: str) -> str:
 
 
 def perma_ref(stem: str) -> str:
-    match = re.search(r"_20[0-9]{2}-(0[1-9]|1[0-2])$", stem)
+    match = re.search(r"_\d{4}-\d{2}(?:-\d{2})?$", stem)
     return stem[: match.start()] if match else stem
 
 

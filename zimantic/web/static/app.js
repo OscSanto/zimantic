@@ -814,7 +814,9 @@
                 const topVisible = sorted.slice(0, SOURCE_FILTER_LIMIT);
                 const selectedVisible = query
                     ? []
-                    : sorted.filter((outcome) => selectedSourceKeys.has(outcome.source.key));
+                    : outcomes.filter((outcome) =>
+                          selectedSourceKeys.has(outcome.source.key),
+                      );
                 const visibleKeys = new Set([
                     ...topVisible.map((outcome) => outcome.source.key),
                     ...selectedVisible.map((outcome) => outcome.source.key),
@@ -837,7 +839,14 @@
                     outcomes,
                     query,
                     matching,
-                    visible: sorted.filter((outcome) => visibleKeys.has(outcome.source.key)),
+                    visible: [
+                        ...selectedVisible,
+                        ...sorted.filter(
+                            (outcome) =>
+                                visibleKeys.has(outcome.source.key) &&
+                                !selectedSourceKeys.has(outcome.source.key),
+                        ),
+                    ],
                     otherOutcomes: otherCount > 1 ? otherOutcomes : [],
                     otherCount,
                     showOther: !query && otherCount > 1,

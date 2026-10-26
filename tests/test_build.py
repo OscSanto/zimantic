@@ -437,6 +437,54 @@ class FaissTrainingSamplingTests(unittest.TestCase):
 
 
 class BuildInterruptTests(unittest.TestCase):
+    def test_interrupted_build_restarts_when_source_size_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
+            source = directory / "manual.zim"
+            db_path = directory / "manual.sqlite"
+            faiss_path = directory / "manual.faiss"
+            source.write_bytes(b"a" * 10)
+            state = build_module._prepare_build_state(
+                source,
+                db_path,
+                faiss_path,
+                fast=True,
+                force=False,
+                schema=build_module.SCHEMA,
+                kind="zim",
+            )
+            self.assertIsNotNone(state)
+            state.db.execute(
+                "INSERT INTO docs(rowid, title, path, target) VALUES (1, 'Old', 'old', NULL)"
+            )
+            state.db.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('next', 1)"
+            )
+            state.db.commit()
+            state.db.close()
+
+            source.write_bytes(b"b" * 20)
+            state = build_module._prepare_build_state(
+                source,
+                db_path,
+                faiss_path,
+                fast=True,
+                force=False,
+                schema=build_module.SCHEMA,
+                kind="zim",
+            )
+            self.assertIsNotNone(state)
+            try:
+                meta = dict(state.db.execute("SELECT key, value FROM meta"))
+                self.assertEqual(meta["build_filesize"], "20")
+                self.assertNotIn("next", meta)
+                self.assertFalse(
+                    state.db.execute("SELECT 1 FROM docs WHERE rowid = 1").fetchone()
+                )
+            finally:
+                state.db.close()
+
     def test_stopped_build_resumes_from_the_last_committed_batch(self):
         class _Archive8(_FakeArchive):
             entry_count = 8
@@ -469,7 +517,8 @@ class BuildInterruptTests(unittest.TestCase):
 
             # The interrupted run committed batches up to entry 4 (next=4) and
             # never marked the index done, so a rerun resumes exactly there.
-            self.assertEqual(_meta(db_path), {"next": 4})
+            # build_filesize records the source version for that resume.
+            self.assertEqual(_meta(db_path), {"build_filesize": "0", "next": 4})
 
             with (
                 patch.object(build_module, "Archive", _Archive8),

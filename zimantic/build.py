@@ -153,6 +153,28 @@ def _prepare_build_state(
     try:
         meta = dict(db.execute("SELECT key, value FROM meta"))
         done = str(meta.get("done", ""))
+        # A build interrupted before meta.filesize was written still needs to
+        # notice a source that changed underneath it. build_filesize is written
+        # as soon as the build starts, so resuming cannot mix rows from two
+        # different versions of the source.
+        recorded_build_size = meta.get("build_filesize")
+        if (
+            done not in {"1", "fast"}
+            and recorded_build_size is not None
+            and str(filesize) != recorded_build_size
+        ):
+            logger.warning(
+                "%s: source changed size during an interrupted build "
+                "(%s -> %s bytes); restarting",
+                source_index_name(source_path),
+                recorded_build_size,
+                filesize,
+            )
+            db.close()
+            _reset_index(db_path, faiss_path)
+            db = _open_database(db_path, schema)
+            meta = {}
+            done = ""
         # A source replaced under the same name must not keep its old index:
         # rebuild when the source file's size no longer matches the recorded
         # size. The same applies when a ZIM and an ordinary file collide on an
@@ -246,6 +268,30 @@ def _prepare_build_state(
                     "marked fast; delete it and retry"
                 )
             publish_upgrade = True
+
+        if publish_upgrade:
+            staged_build_size = meta.get("build_filesize")
+            if (
+                staged_build_size is not None
+                and str(filesize) != staged_build_size
+            ):
+                logger.warning(
+                    "%s: upgrade staging file was built from a different source "
+                    "size; restarting the upgrade",
+                    source_index_name(source_path),
+                )
+                db.close()
+                build_db_path.unlink(missing_ok=True)
+                build_faiss_path.unlink(missing_ok=True)
+                db = _open_database(build_db_path, schema)
+                meta = {}
+
+        with db:
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('build_filesize', ?)",
+                (str(filesize),),
+            )
+        meta["build_filesize"] = str(filesize)
 
         return _BuildState(
             db=db,
@@ -347,6 +393,11 @@ def _index_file_source(
                 embedding_pipeline.submit(rows).result(),
                 bodies=bodies,
             )
+        elif fast:
+            # Fast builds never keep vectors. Skip the embedder entirely so a
+            # caller that supplies one (the CLI does not) cannot pay for work
+            # that _finish_build immediately throws away.
+            _save_rows(db, rows, next_entry, {}, bodies=bodies)
         else:
             _save(db, embedder, rows, next_entry, bodies=bodies)
         rows = []
@@ -391,6 +442,7 @@ def _finish_build(
             db.execute("DROP TABLE IF EXISTS vecs")
             for key, value in extra:
                 db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+            db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
         logger.debug(f"{db_path.stem}: title + full-text index ready")
@@ -402,6 +454,7 @@ def _finish_build(
         db.execute("DELETE FROM meta WHERE key = 'next'")
         for key, value in extra:
             db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+        db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
         db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
         db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
     if state.publish_upgrade:
@@ -430,8 +483,14 @@ def build(
     embedding_pipeline: EmbeddingPipeline | None = None,
     kind: str | None = None,
     extract_options: ExtractOptions | None = None,
+    index_name: str | None = None,
 ) -> None:
-    """Index a ZIM or ordinary file, optionally without bodies or vectors."""
+    """Index a ZIM or ordinary file, optionally without bodies or vectors.
+
+    ``index_name`` overrides the flat index identity; the CLI uses it to give
+    same-named ordinary files distinct indexes without changing their source
+    paths or titles.
+    """
     source_path = Path(source_path)
     if kind is None:
         kind = "zim" if is_zim_filename(source_path.name) else "file"
@@ -449,7 +508,7 @@ def build(
         )
         return
 
-    name = source_index_name(source_path)
+    name = index_name or source_index_name(source_path)
     db_path = Path(index_dir) / f"{name}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
