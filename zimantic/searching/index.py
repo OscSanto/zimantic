@@ -1,16 +1,15 @@
 """State and native-index helpers for local search sources."""
 
-from dataclasses import dataclass, field
 import math
-import threading
 import sqlite3
+import threading
+from dataclasses import dataclass, field
 from typing import Any
 
 from libzim.reader import Archive
 from libzim.search import Searcher
 
 from .config import _int_config
-
 
 DEFAULT_NPROBE_FRACTION = 0.06
 

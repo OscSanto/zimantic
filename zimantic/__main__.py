@@ -1,11 +1,11 @@
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import logging
 import os
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -304,6 +304,8 @@ def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path
 
 
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
+    from tqdm import tqdm
+
     from .build import build as build_source
     from .catalog import parse_file_patterns
     from .content.extract import (
@@ -323,7 +325,6 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         DEFAULT_PREVIEW_CHARS,
     )
     from .content.tools import log_capabilities
-    from tqdm import tqdm
 
     sigterm = getattr(signal, "SIGTERM", None)
     if sigterm is not None:

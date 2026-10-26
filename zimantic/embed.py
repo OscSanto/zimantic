@@ -110,7 +110,10 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
 def verify_model_files(model_dir, warn=None) -> None:
     """Warn (never fail) when a model file differs from the documented checksum."""
     if warn is None:
-        warn = lambda message: print(message, file=sys.stderr)  # noqa: E731
+        def warn_to_stderr(message):
+            print(message, file=sys.stderr)
+
+        warn = warn_to_stderr
     for name, expected in EXPECTED_CHECKSUMS.items():
         path = Path(model_dir) / name
         try:

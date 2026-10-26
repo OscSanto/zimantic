@@ -8,10 +8,10 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from ..search import (
+    SELECTIVE_SOURCE_LIMIT,
     ArticleNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
-    SELECTIVE_SOURCE_LIMIT,
     SearchBusyError,
     SearchQueryError,
 )
@@ -69,7 +69,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             default=str,
         )
         etag = '"' + hashlib.sha1(
-            f"{full_etag}:{effective_offset}:{limit}".encode("utf-8")
+            f"{full_etag}:{effective_offset}:{limit}".encode()
         ).hexdigest() + '"'
         headers = {
             "ETag": etag,

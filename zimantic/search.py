@@ -1,22 +1,23 @@
 """Hybrid search over local ZIM indexes and optional Kiwix sources."""
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
 import logging
 import math
 import posixpath
-from pathlib import Path
 import re
 import secrets
 import sqlite3
 import threading
 import time
-from typing import Any, Iterator
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, unquote, urljoin, urlparse
-from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
+from urllib.request import Request, urlopen
 
 from libzim.reader import Archive
 from libzim.search import Query
@@ -28,6 +29,14 @@ from .catalog import (
     iter_zim_files,
     metadata_from_archive,
     perma_ref,
+)
+from .content.reader import (
+    _READABLE_MIMETYPES,
+    DEFAULT_MAX_HTML_BYTES,
+    DEFAULT_PARSE_TIMEOUT,
+    DEFAULT_PREVIEW_CHARS,
+    read_entry,
+    truncate_at_word_boundary,
 )
 from .contracts import SourceInfo, SourceResult
 from .redirects import RedirectError, resolve_redirect_entry
@@ -48,9 +57,9 @@ from .searching.query import (
     _phrase,
     _phrase_words,
     _query_terms,
-    _user_page_intent,
     _title_prefix_query,
     _title_query,
+    _user_page_intent,
 )
 from .searching.sources import (
     _bounded_catalog_url,
@@ -64,14 +73,6 @@ from .searching.sources import (
     _zim_key,
 )
 from .settings import normalize_web_base_path
-from .content.reader import (
-    DEFAULT_MAX_HTML_BYTES,
-    DEFAULT_PARSE_TIMEOUT,
-    DEFAULT_PREVIEW_CHARS,
-    _READABLE_MIMETYPES,
-    read_entry,
-    truncate_at_word_boundary,
-)
 
 logger = logging.getLogger(__name__)
 

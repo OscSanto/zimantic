@@ -10,16 +10,15 @@ from libzim.reader import Archive
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.catalog import (
+    _SCHEMA_COLUMNS,
     SCHEMA_VERSION,
     ZimCatalog,
-    _SCHEMA_COLUMNS,
     catalog_path,
     normalize_counter,
     normalize_tags,
     perma_ref,
     resolve_homepage,
 )
-
 
 ALPHA_HTML = (
     "<html><body><p>Alpha is a sufficiently long article about tires and "

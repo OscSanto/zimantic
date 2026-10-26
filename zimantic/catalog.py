@@ -26,9 +26,10 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .redirects import resolve_redirect_entry
 
@@ -499,7 +500,7 @@ class CatalogRecord:
     scanned_at: float
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "CatalogRecord":
+    def from_row(cls, row: sqlite3.Row) -> CatalogRecord:
         return cls(**{field: row[field] for field in cls.__dataclass_fields__})
 
     def to_source_metadata(self) -> dict[str, Any]:
@@ -656,10 +657,10 @@ class ZimCatalog:
         with self._lock:
             self.db.close()
 
-    def __enter__(self) -> "ZimCatalog":
+    def __enter__(self) -> ZimCatalog:
         return self
 
-    def __exit__(self, *_exc: Any) -> None:
+    def __exit__(self, *_exc: object) -> None:
         self.close()
 
     # ------------------------------------------------------------------ writes

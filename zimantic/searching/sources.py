@@ -3,13 +3,12 @@
 import logging
 import posixpath
 import re
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from libzim.reader import Archive
 
 from .query import INTENT_RULES
-
 
 ICON_METADATA_PATH = "-/icon"
 ICON_MAX_BYTES = 1 << 20
@@ -21,7 +20,7 @@ def _html_attribute(tag: str, name: str) -> str:
     match = re.search(
         rf"(?:^|[\s/]){re.escape(name)}\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
         tag,
-        re.I,
+        re.IGNORECASE,
     )
     if not match:
         return ""
@@ -83,7 +82,7 @@ def _find_archive_icon_path(archive: Archive, homepage: str | None) -> str | Non
                 and size <= ICON_DISCOVERY_HTML_BYTES
             ):
                 html = bytes(item.content).decode("utf-8", "ignore")
-                for match in re.finditer(r"<link\b[^>]*>", html, re.I):
+                for match in re.finditer(r"<link\b[^>]*>", html, re.IGNORECASE):
                     tag = match.group(0)
                     rel = _html_attribute(tag, "rel").casefold()
                     href = _html_attribute(tag, "href")

@@ -18,8 +18,8 @@ from typing import Any
 
 from .extract import (
     DEFAULT_MAX_FILE_TEXT_CHARS,
-    ExtractOptions,
     Extraction,
+    ExtractOptions,
     Section,
     extract_document,
 )
@@ -36,12 +36,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_MAX_FILE_TEXT_CHARS",
-    "FileArchive",
-    "FileEntry",
     "SUBTITLE_EXTENSIONS",
     "SUPPORTED_EXTENSIONS",
     "TEXT_EXTENSIONS",
     "VIDEO_EXTENSIONS",
+    "FileArchive",
+    "FileEntry",
     "file_extension",
     "is_supported_file",
 ]

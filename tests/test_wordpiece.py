@@ -8,7 +8,6 @@ import numpy as np
 from zimantic import embed
 from zimantic.wordpiece import WordPieceTokenizer
 
-
 VOCAB = [
     "[PAD]",
     "[UNK]",

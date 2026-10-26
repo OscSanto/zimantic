@@ -2,9 +2,9 @@ import itertools
 import json
 import os
 import tempfile
-from contextlib import contextmanager
 import unittest
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,7 +14,6 @@ from libzim.writer import Creator, Hint, Item, StringProvider
 from zimantic import build as build_module
 from zimantic.search import Search
 from zimantic.web.app import create_app
-
 
 ALPHA_HTML = (
     "<html><body><p>Alpha is a sufficiently long article about tires and "

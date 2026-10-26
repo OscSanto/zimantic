@@ -4,9 +4,11 @@ import logging
 import posixpath
 import re
 import time
+from collections.abc import Iterator
 from html.parser import HTMLParser
+from typing import Any, NamedTuple, Protocol, cast
 from urllib.parse import unquote, urlsplit
-from typing import Any, Iterator, NamedTuple, Protocol, cast
+
 from libzim.reader import Archive
 
 from ..redirects import RedirectError, resolve_redirect_entry
@@ -18,7 +20,6 @@ try:
 except ImportError:
     def set_cluster_cache_max_size(_size: int) -> None:
         """Keep compatibility with older distro libzim bindings."""
-        pass
 
 # libzim undercounts this cache: its 16 MB default really used ~170 MB.
 # 1 MB used ~4 MB and was not slower.
@@ -98,16 +99,16 @@ _PLAIN_TEXT_ASSET = re.compile(
 _HTML_ASSET_PATH = re.compile(
     r"\.(?:js|mjs|cjs|css|scss|less|json|xml|svg|png|jpe?g|gif|webp|ico|map"
     r"|woff2?|ttf|otf|eot|mp3|mp4|webm|pdf)$",
-    re.I,
+    re.IGNORECASE,
 )
 REFRESH_SCAN_BYTES = 64 << 10
-REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.I)
+REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.IGNORECASE)
 BOILERPLATE = re.compile(
     r"This article or its section is a stub\."
     r"|You can help by expanding the article\."
     r"|Our robots\.txt blocks googlebot\."
     r"|You're wasting your own time by spamming here\.",
-    re.I,
+    re.IGNORECASE,
 )
 
 # Some ZIMs render every article through a JavaScript app (an "SPA shell"): the
@@ -137,8 +138,8 @@ _ELEMENT_LANG = re.compile(r"(?:^|\s)lang-([a-z0-9-]+)")
 # a docs/curriculum source (freeCodeCamp and friends) ship the article body as
 # text/markdown; the HTML route is only a meta-refresh stub, so the markdown is
 # read as the stub's companion.
-_YAML_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n", re.S)
-_MARKDOWN_FENCE = re.compile(r"```.*?```", re.S)
+_YAML_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n", re.DOTALL)
+_MARKDOWN_FENCE = re.compile(r"```.*?```", re.DOTALL)
 _MARKDOWN_SECTION = re.compile(r"(?m)^#{1,6}[ \t]*--[a-z0-9-]+--[ \t]*$")
 _MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 _MARKDOWN_HTML = re.compile(r"<[^>]+>")
@@ -176,12 +177,12 @@ SKIP_ROLES = frozenset({"navigation", "banner", "contentinfo"})
 
 # Persist disambiguation pages with a title suffix instead of a metadata table.
 DISAMBIGUATION_SUFFIX = " (disambiguation)"
-DISAMBIG_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
-DISAMBIG_BOILERPLATE = re.compile(r"this disambiguation page", re.I)
+DISAMBIG_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.IGNORECASE)
+DISAMBIG_BOILERPLATE = re.compile(r"this disambiguation page", re.IGNORECASE)
 DISAMBIG_HTML_MARKERS = re.compile(
     rb"this disambiguation page"          # template footer, wherever it renders
     rb"|category:[^\"'<>\s]{0,120}?disambig",  # rendered Category:…disambiguation link
-    re.I,
+    re.IGNORECASE,
 )
 WGCATEGORIES = re.compile(rb'"wgCategories"\s*:\s*(\[[^\]]*\])')
 
@@ -420,7 +421,7 @@ def is_disambiguation(title: str, text: str, html: bytes = b"") -> bool:
     if DISAMBIG_HTML_MARKERS.search(html):
         return True
     categories = WGCATEGORIES.search(html)
-    return bool(categories and re.search(rb"disambig", categories.group(1), re.I))
+    return bool(categories and re.search(rb"disambig", categories.group(1), re.IGNORECASE))
 
 
 def disambiguation_title(title: str) -> str:
@@ -436,13 +437,13 @@ CHUNK = 8192
 # <script> and <style> content is never article text, and it can be tens of KB
 # of CSS/JS. Stripping it up front also sidesteps html.parser's CDATA handling,
 # which misbehaves when a single very large block is fed in small chunks.
-_SCRIPT_STYLE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1>", re.I | re.S)
+_SCRIPT_STYLE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 
 # <head> (and a stray <title>) carry metadata, not visible text. They are
 # stripped before the loader-shell emptiness check so an ordinary <title> does
 # not hide the fact that the page body has no text (see _is_loader_shell).
-_HEAD = re.compile(rb"<head\b[^>]*>.*?</head>", re.I | re.S)
-_TITLE = re.compile(rb"<title\b[^>]*>.*?</title>", re.I | re.S)
+_HEAD = re.compile(rb"<head\b[^>]*>.*?</head>", re.IGNORECASE | re.DOTALL)
+_TITLE = re.compile(rb"<title\b[^>]*>.*?</title>", re.IGNORECASE | re.DOTALL)
 
 
 def iter_text_blocks(
@@ -691,12 +692,12 @@ def _meta_description(html: bytes) -> str:
     pages still get a preview and an embedding instead of being title-only.
     """
     best = ""
-    for match in re.finditer(rb"<meta\b[^>]*>", html, re.I):
+    for match in re.finditer(rb"<meta\b[^>]*>", html, re.IGNORECASE):
         tag = match.group(0)
-        if not re.search(rb"(?:name|property)\s*=\s*[\"']?\s*(?:og:)?description\b", tag, re.I):
+        if not re.search(rb"(?:name|property)\s*=\s*[\"']?\s*(?:og:)?description\b", tag, re.IGNORECASE):
             continue
-        content = re.search(rb"content\s*=\s*\"([^\"]*)\"", tag, re.I) or re.search(
-            rb"content\s*=\s*'([^']*)'", tag, re.I
+        content = re.search(rb"content\s*=\s*\"([^\"]*)\"", tag, re.IGNORECASE) or re.search(
+            rb"content\s*=\s*'([^']*)'", tag, re.IGNORECASE
         )
         if content is None:
             continue

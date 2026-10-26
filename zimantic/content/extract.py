@@ -14,10 +14,6 @@ chapters, a PPTX yields slides, and a video yields subtitle chunks.  The
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from email import policy
-from email.parser import BytesParser
-from functools import lru_cache
 import json
 import logging
 import posixpath
@@ -27,8 +23,12 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
+from email import policy
+from email.parser import BytesParser
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
 from xml.etree import ElementTree as ET
 
 from .encoding import decode_text
@@ -108,7 +108,7 @@ MAX_METADATA_BYTES = 8 << 20
 
 _IMAGE_MEMBER_EXTENSIONS = IMAGE_EXTENSIONS
 _SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+")
-_HTML_TITLE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
+_HTML_TITLE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _ASS_TAG = re.compile(r"\{[^}]*\}")
 _HTML_TAG = re.compile(r"<[^>]+>")
 _RTF_CONTROL = re.compile(r"\\[a-zA-Z]+-?\d* ?")
@@ -1472,7 +1472,7 @@ def _subtitle_cues(
             if body:
                 cues.append((start, body))
     elif extension == ".vtt":
-        text = re.sub(r"\A\ufeff?WEBVTT[^\n]*\n?", "", text, flags=re.I)
+        text = re.sub(r"\A\ufeff?WEBVTT[^\n]*\n?", "", text, flags=re.IGNORECASE)
         blocks = re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip())
         for block in blocks:
             lines = [line.strip() for line in block.splitlines() if line.strip()]
@@ -1614,7 +1614,7 @@ def _sidecar_subtitles(path: Path) -> list[Path]:
             candidates.append(item)
     candidates.sort(
         key=lambda item: (
-            0 if re.search(r"(?:^|[._-])en(?:g|gl|glish)?(?:[._-]|$)", item.name, re.I) else 1,
+            0 if re.search(r"(?:^|[._-])en(?:g|gl|glish)?(?:[._-]|$)", item.name, re.IGNORECASE) else 1,
             0 if item.stem.casefold() == base else 1,
             str(item),
         )

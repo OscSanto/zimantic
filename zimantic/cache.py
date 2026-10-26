@@ -12,9 +12,9 @@ byte bound is what keeps the cache from ballooning.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 import sys
 import threading
+from collections import OrderedDict
 from typing import Any
 
 DEFAULT_CACHE_SIZE = 256

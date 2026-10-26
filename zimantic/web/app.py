@@ -1,20 +1,22 @@
 import hashlib
-from html import escape as html_escape
-from html import unescape as html_unescape
 import json
 import logging
-from pathlib import Path
 import os
 import re
 import signal
 import sys
 import threading
+from html import escape as html_escape
+from html import unescape as html_unescape
+from pathlib import Path
 from urllib.parse import quote as quote_path
 from urllib.parse import urljoin, urlsplit
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response, StreamingResponse
+
 from ..search import (
     ArticleNotFoundError,
     ArticleTooLargeError,

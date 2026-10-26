@@ -1,26 +1,27 @@
 """Build a resumable SQLite and optional FAISS index for one ZIM."""
 from __future__ import annotations
 
-from concurrent.futures import Future
-from dataclasses import dataclass
 import logging
 import os
-from queue import Queue
 import secrets
 import sqlite3
-from threading import Thread
+from concurrent.futures import Future
+from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 from typing import TYPE_CHECKING
 
-from tqdm import tqdm
 from libzim.reader import Archive
+from tqdm import tqdm
+
 from .catalog import ZimCatalog, catalog_path, is_zim_filename, source_index_name
 from .content.extract import DEFAULT_MAX_FILE_TEXT_CHARS, ExtractOptions
 from .content.files import FileArchive, is_supported_file
 from .content.reader import (
+    DEFAULT_MAX_ENTRY_BYTES,
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
-    DEFAULT_MAX_ENTRY_BYTES,
     EntryRecord,
     read_entry,
 )

@@ -264,7 +264,10 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
     present in the file always override their profile default.
     """
     if warn is None:
-        warn = lambda message: print(message, file=sys.stderr)  # noqa: E731
+        def warn_to_stderr(message):
+            print(message, file=sys.stderr)
+
+        warn = warn_to_stderr
     profile = profile_for_hardware()
     cfg = dict(PROFILES[profile])
     config_path = Path(path)

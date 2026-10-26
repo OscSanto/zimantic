@@ -4,7 +4,6 @@ import re
 
 from ..contracts import SourceInfo
 
-
 MAX_QUERY_LENGTH = 4096
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
@@ -15,12 +14,12 @@ STOPWORDS = {
 }
 INTENT_RULES = (
     (
-        re.compile(r"^wikihow", re.I),
+        re.compile(r"^wikihow", re.IGNORECASE),
         ("how to", "how do", "how can", "how should", "steps to"),
     ),
 )
-DISAMBIGUATION_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.I)
-USER_PAGE_PATH = re.compile(r"(?:^|/)users(?:/|$)", re.I)
+DISAMBIGUATION_TITLE = re.compile(r"\s*\(disambiguation\)\s*$", re.IGNORECASE)
+USER_PAGE_PATH = re.compile(r"(?:^|/)users(?:/|$)", re.IGNORECASE)
 DEFAULT_DISAMBIGUATION_BOOST = 0.08
 DEFAULT_DISAMBIGUATION_PENALTY = 0.5
 DEFAULT_USER_PAGE_PENALTY = 0.25

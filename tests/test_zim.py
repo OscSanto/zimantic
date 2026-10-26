@@ -3,9 +3,8 @@ import sys
 import types
 import unittest
 
-
 try:
-    import libzim.reader  # noqa: F401
+    import libzim.reader
 except ImportError:
     libzim = types.ModuleType("libzim")
     libzim.__path__ = []
@@ -22,9 +21,9 @@ from zimantic.content.reader import (
     disambiguation_title,
     extract_excerpt,
     extract_pdf_excerpt,
+    is_disambiguation,
     is_javascript_shell,
     iter_text_blocks,
-    is_disambiguation,
     read_entry,
     truncate_at_word_boundary,
 )

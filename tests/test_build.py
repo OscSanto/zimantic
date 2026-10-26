@@ -73,10 +73,9 @@ class BuildUpgradeTests(unittest.TestCase):
                     build_module,
                     "read_entry",
                     side_effect=[rows[0], RuntimeError("interrupted")],
-                ),
+                ),self.assertRaisesRegex(RuntimeError, "interrupted")
             ):
-                with self.assertRaisesRegex(RuntimeError, "interrupted"):
-                    build_module.build(directory / "manual.zim", directory, None, 1)
+                build_module.build(directory / "manual.zim", directory, None, 1)
 
             self.assertEqual(_meta(db_path), {"done": "fast"})
             db = sqlite3.connect(db_path)

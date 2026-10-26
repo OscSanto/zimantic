@@ -10,8 +10,8 @@ from unittest.mock import patch
 from zimantic.build import build
 from zimantic.catalog import parse_file_patterns
 from zimantic.content.extract import (
-    _Deadline,
     _calibre_command,
+    _Deadline,
     _png_for_ocr,
     extract_document,
 )

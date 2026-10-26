@@ -89,12 +89,11 @@ class LowMemoryArenaTests(unittest.TestCase):
             patch.object(embed.ort, "InferenceSession", return_value=session),
             patch.object(
                 embed.sentencepiece, "SentencePieceProcessor", return_value=tokenizer
-            ),
+            ),tempfile.TemporaryDirectory() as tmp
         ):
-            with tempfile.TemporaryDirectory() as tmp:
-                _sentencepiece_dir(tmp)
-                small = embed.Embedder(tmp, low_memory=True)
-                normal = embed.Embedder(tmp, low_memory=False)
+            _sentencepiece_dir(tmp)
+            small = embed.Embedder(tmp, low_memory=True)
+            normal = embed.Embedder(tmp, low_memory=False)
 
         with patch.object(embed, "_reclaim_native_memory") as reclaim:
             small.embed(["passage: a", "passage: b"])
@@ -177,11 +176,10 @@ class InputSignatureTests(unittest.TestCase):
             patch.object(embed.ort, "InferenceSession", return_value=session),
             patch.object(
                 embed.sentencepiece, "SentencePieceProcessor", return_value=tokenizer
-            ),
+            ),tempfile.TemporaryDirectory() as tmp
         ):
-            with tempfile.TemporaryDirectory() as tmp:
-                _sentencepiece_dir(tmp)
-                embedder = embed.Embedder(tmp)
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp)
         embedder.embed(["query: a"])
         return session.run.call_args.args[1]
 

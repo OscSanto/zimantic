@@ -1,85 +1,40 @@
+import sqlite3
 import sys
+import tempfile
+import threading
+import time
 import types
 import unittest
-import tempfile
-from contextlib import contextmanager
-import time
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-import threading
-import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 
-def _install_optional_dependency_stubs():
-    """Stub heavy dependencies only when they are not installed.
-
-    Tests that require the real class (e.g. catalog scans in test_integration)
-    must not be affected by another module's stubs, so an already-imported
-    module is never modified here.
-    """
-    try:
-        import faiss  # noqa: F401
-    except ImportError:
-        faiss = types.ModuleType("faiss")
-        faiss.IO_FLAG_MMAP_IFC = 1
-        faiss.IO_FLAG_READ_ONLY = 2
-        faiss.METRIC_INNER_PRODUCT = 0
-
-        class _Index:
-            def train(self, _vectors):
-                pass
-
-            def add_with_ids(self, _vectors, _ids):
-                pass
-
-        faiss.index_factory = lambda *_args: _Index()
-        faiss.write_index = lambda _index, path: Path(path).write_bytes(b"vectors")
-        sys.modules["faiss"] = faiss
-
-    try:
-        import libzim.reader  # noqa: F401
-        import libzim.search  # noqa: F401
-    except ImportError:
-        libzim = types.ModuleType("libzim")
-        libzim.__path__ = []
-        reader = types.ModuleType("libzim.reader")
-        reader.Archive = object
-        reader.set_cluster_cache_max_size = lambda size: None
-        search = types.ModuleType("libzim.search")
-        search.Query = object
-        search.Searcher = object
-        sys.modules["libzim"] = libzim
-        sys.modules["libzim.reader"] = reader
-        sys.modules["libzim.search"] = search
-
-
-_install_optional_dependency_stubs()
-
-from zimantic.cache import QueryCache  # noqa: E402
-from zimantic.contracts import SourceInfo, SourceResult  # noqa: E402
-from zimantic.search import (  # noqa: E402
+from zimantic.cache import QueryCache
+from zimantic.contracts import SourceInfo, SourceResult
+from zimantic.search import (
+    ArticleUnavailableError,
     Search,
     SearchBusyError,
-    ArticleUnavailableError,
-    _LocalIndex,
     _bounded_catalog_url,
-    _fulltext_query,
     _find_archive_icon_path,
+    _fulltext_query,
+    _LocalIndex,
     _nprobe,
     _parse_remote_xml,
     _phrase_in_word_stream,
-    _query_terms,
     _phrase_words,
+    _query_terms,
     _read_limited_response,
     _source_icon_url,
     _title_prefix_query,
     _title_query,
 )
-from zimantic.searching.config import _file_signature  # noqa: E402
-from zimantic.searching.sources import _html_attribute  # noqa: E402
+from zimantic.searching.config import _file_signature
+from zimantic.searching.sources import _html_attribute
 
 
 def _bare_search(cfg):
