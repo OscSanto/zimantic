@@ -318,6 +318,61 @@ class FileBuildSearchTests(unittest.TestCase):
             finally:
                 search.close()
 
+    def test_same_named_files_built_separately_do_not_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zim_dir = root / "zims"
+            index_dir = root / "indexes"
+            one = zim_dir / "one" / "notes.txt"
+            two = zim_dir / "two" / "notes.txt"
+            one.parent.mkdir(parents=True)
+            two.parent.mkdir(parents=True)
+            index_dir.mkdir()
+            one.write_text("Alpha notes about bicycles. " * 20, encoding="utf-8")
+            two.write_text("Beta notes about sailboats. " * 20, encoding="utf-8")
+            # No explicit index_name: each build has to detect the other file's
+            # canonical index and choose its own digest name.
+            build(one, index_dir, None, 1, fast=True)
+            build(two, index_dir, None, 1, fast=True)
+
+            search = Search(
+                {"zim_dir": str(zim_dir), "index_dir": str(index_dir)},
+                semantic=False,
+            )
+            try:
+                self.assertEqual(len(search.local_names()), 2)
+                self.assertIn("bicycles", search.search("bicycles", limit=3)[0]["lead"])
+                self.assertIn("sailboats", search.search("sailboats", limit=3)[0]["lead"])
+            finally:
+                search.close()
+
+    def test_file_index_remains_available_when_zim_dir_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_dir = root / "indexes"
+            index_dir.mkdir()
+            path = root / "notes.txt"
+            path.write_text(
+                "A sufficiently long note about bicycle repair. " * 4,
+                encoding="utf-8",
+            )
+            build(path, index_dir, None, 1, fast=True)
+            search = Search(
+                {
+                    "zim_dir": str(root / "missing-zims"),
+                    "index_dir": str(index_dir),
+                },
+                semantic=False,
+            )
+            try:
+                self.assertEqual(len(search.local_names()), 1)
+                self.assertEqual(
+                    [item["title"] for item in search.library_dicts()],
+                    ["notes"],
+                )
+            finally:
+                search.close()
+
     def test_missing_source_is_ignored_at_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

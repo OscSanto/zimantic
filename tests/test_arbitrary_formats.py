@@ -13,7 +13,9 @@ from zimantic.content.extract import (
     _calibre_command,
     _Deadline,
     _chunk_text,
+    _extract_external_archive,
     _png_for_ocr,
+    ExtractOptions,
     extract_document,
 )
 from zimantic.content.files import FileArchive, is_supported_file
@@ -259,6 +261,65 @@ class SubtitleTests(unittest.TestCase):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_external_archive_preflights_declared_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "bundle.7z"
+            archive.write_bytes(b"not a real archive")
+            destination = root / "out"
+            destination.mkdir()
+            listing = (
+                "Path = bundle.7z\n\n"
+                "Path = huge.bin\n"
+                "Size = 100\n"
+                "Attributes = A\n\n"
+            )
+            calls = []
+
+            def fake_run(argv, _deadline, **_kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout=listing.encode())
+
+            options = ExtractOptions(max_archive_bytes=10, max_archive_members=100)
+            with (
+                patch("zimantic.content.extract.has_tool", side_effect=lambda name: name == "7z"),
+                patch("zimantic.content.extract._run", side_effect=fake_run),
+            ):
+                extracted = _extract_external_archive(
+                    archive, destination, options, _Deadline(10)
+                )
+
+            self.assertEqual(extracted, [])
+            self.assertEqual(len(calls), 1)  # listing only, no extraction command
+
+    def test_external_archive_rejects_excess_member_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "bundle.7z"
+            archive.write_bytes(b"not a real archive")
+            destination = root / "out"
+            destination.mkdir()
+            listing = (
+                "Path = one\nSize = 1\nAttributes = A\n\n"
+                "Path = two\nSize = 1\nAttributes = A\n\n"
+            )
+            calls = []
+
+            def fake_run(argv, _deadline, **_kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, stdout=listing.encode())
+
+            options = ExtractOptions(max_archive_bytes=10_000, max_archive_members=1)
+            with (
+                patch("zimantic.content.extract.has_tool", side_effect=lambda name: name == "7z"),
+                patch("zimantic.content.extract._run", side_effect=fake_run),
+            ):
+                extracted = _extract_external_archive(
+                    archive, destination, options, _Deadline(10)
+                )
+
+            self.assertEqual(extracted, [])
+            self.assertEqual(len(calls), 1)
     def test_nested_media_sidecar_is_indexed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bundle.zip"

@@ -25,6 +25,7 @@ _COMMON = {
     "kiwix_catalog_path": "/kiwix/catalog/v2/entries?count=50000",
     "kiwix_catalog_limit": 50_000,
     "max_kiwix_response_bytes": 64 * 1024 * 1024,
+    "max_remote_sources": 100,
     "page_size": 10,
     "max_html_bytes": 4_194_304,
     "max_article_bytes": 33_554_432,

@@ -106,6 +106,57 @@ class BuildUpgradeTests(unittest.TestCase):
             self.assertFalse(staging_db.exists())
             self.assertFalse(staging_faiss.exists())
 
+    def test_interrupted_fast_build_restarts_when_resumed_as_full(self):
+        class _TwoEntryArchive(_FakeArchive):
+            entry_count = 2
+
+        class _Embedder:
+            def truncate(self, text, prefix=""):
+                return text
+
+            def embed(self, texts):
+                return np.ones((len(texts), 4), dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
+            db_path = directory / "manual.sqlite"
+            db = sqlite3.connect(db_path)
+            db.executescript(build_module.SCHEMA)
+            db.execute(
+                "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+                (0, "Partial fast row", "partial", None),
+            )
+            db.execute("INSERT INTO meta VALUES ('next', 1)")
+            db.execute("INSERT INTO meta VALUES ('build_filesize', '0')")
+            db.execute("INSERT INTO meta VALUES ('build_mode', 'fast')")
+            db.commit()
+            db.close()
+
+            seen: list[int] = []
+            faiss_ids: list[int] = []
+
+            def read_entry(_zim, index, **_kwargs):
+                seen.append(index)
+                return EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
+
+            def write_fake_faiss(db, path):
+                faiss_ids.extend(
+                    row[0] for row in db.execute("SELECT id FROM vecs ORDER BY id")
+                )
+                path.write_bytes(b"vectors")
+
+            with (
+                patch.object(build_module, "Archive", _TwoEntryArchive),
+                patch.object(build_module, "read_entry", side_effect=read_entry),
+                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
+            ):
+                build_module.build(directory / "manual.zim", directory, _Embedder(), 1)
+
+            self.assertEqual(seen, [0, 1])
+            self.assertEqual(faiss_ids, [0, 1])
+            self.assertEqual(str(_meta(db_path)["done"]), "1")
+
     def test_force_fast_rebuild_replaces_sqlite_and_removes_faiss(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / "indexes"
@@ -562,7 +613,10 @@ class BuildInterruptTests(unittest.TestCase):
             # The interrupted run committed batches up to entry 4 (next=4) and
             # never marked the index done, so a rerun resumes exactly there.
             # build_filesize records the source version for that resume.
-            self.assertEqual(_meta(db_path), {"build_filesize": "0", "next": 4})
+            self.assertEqual(
+                _meta(db_path),
+                {"build_filesize": "0", "build_mode": "full", "next": 4},
+            )
 
             with (
                 patch.object(build_module, "Archive", _Archive8),

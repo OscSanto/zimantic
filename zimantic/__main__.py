@@ -4,11 +4,39 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+class _LazyEmbedder:
+    """Create the embedding model only when the first real batch needs it.
+
+    A full build of already-complete indexes should not fail (or spend time
+    loading a model) merely because ``model_dir`` is unavailable. File builds
+    that produce no indexable text likewise never touch the model.
+    """
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._lock = threading.Lock()
+        self._value = None
+
+    def _get(self):
+        if self._value is None:
+            with self._lock:
+                if self._value is None:
+                    self._value = self._factory()
+        return self._value
+
+    def truncate(self, *args, **kwargs):
+        return self._get().truncate(*args, **kwargs)
+
+    def embed(self, *args, **kwargs):
+        return self._get().embed(*args, **kwargs)
 
 
 def _graceful_interrupt(_signum: int, _frame) -> None:
@@ -241,24 +269,26 @@ def _collect_sources(
     return sources
 
 
-def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
-    """Backward-compatible ZIM-only collector used by older callers/tests."""
-    from .catalog import DEFAULT_FILE_TYPES
-
-    return _collect_sources(paths, default_dir, DEFAULT_FILE_TYPES)
-
-
 def _select_build_sources(
-    sources: list[Path], sizes: dict[Path, int]
+    sources: list[Path],
+    sizes: dict[Path, int],
+    index_dir: str | Path | None = None,
 ) -> list[tuple[Path, str]]:
     """Choose sources and the index name each one will use.
 
     ZIMs sharing a stem keep the historical largest-copy rule. Ordinary files
     that share a filename are all indexed: the flat index directory needs a
     unique name, so each gets a short path-derived suffix instead of silently
-    discarding every copy but the largest.
+    discarding every copy but the largest. When ``index_dir`` is known, an
+    existing canonical index owned by another source is also treated as a
+    collision, so two separately built same-named files do not overwrite each
+    other.
     """
-    from .catalog import is_zim_filename, source_index_name
+    from .catalog import (
+        is_zim_filename,
+        source_index_name,
+        unique_file_index_name,
+    )
 
     by_stem: dict[str, list[Path]] = {}
     for source in sources:
@@ -288,7 +318,12 @@ def _select_build_sources(
             accepted.append((chosen, stem))
 
         if len(files) == 1 and not zims:
-            accepted.append((files[0], stem))
+            name = (
+                unique_file_index_name(files[0], index_dir)
+                if index_dir is not None
+                else stem
+            )
+            accepted.append((files[0], name))
             continue
         if files:
             logger.warning(
@@ -297,18 +332,28 @@ def _select_build_sources(
                 len(files),
                 stem,
             )
+            used: set[str] = set()
             for path in sorted(files, key=lambda item: str(item.resolve())):
-                digest = hashlib.sha1(
-                    str(path.resolve()).encode("utf-8")
-                ).hexdigest()[:10]
-                accepted.append((path, f"{stem}-{digest}"))
+                if index_dir is not None:
+                    name = unique_file_index_name(
+                        path,
+                        index_dir,
+                        reserved=used,
+                        force_digest=bool(zims),
+                    )
+                else:
+                    digest = hashlib.sha1(
+                        str(path.resolve()).encode("utf-8")
+                    ).hexdigest()[:10]
+                    name = f"{stem}-{digest}"
+                    suffix = 2
+                    while name in used:
+                        name = f"{stem}-{digest}-{suffix}"
+                        suffix += 1
+                used.add(name)
+                accepted.append((path, name))
 
     return sorted(accepted, key=lambda item: sizes.get(item[0], 0))
-
-
-def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path]:
-    """Backward-compatible helper returning the selected source paths."""
-    return [path for path, _name in _select_build_sources(zims, zim_sizes)]
 
 
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
@@ -388,15 +433,18 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     downloading = (
         _find_downloading_sizes(source_sizes) if args.wait_stable else set()
     )
-    selected = _select_build_sources(sources, source_sizes)
+    if downloading:
+        _wait_for_stable_sizes(downloading)
+        # Selection prefers the largest copy of an ambiguous ZIM stem, so it
+        # must see the finished sizes rather than the sizes observed before the
+        # download completed.
+        source_sizes = {source: source.stat().st_size for source in sources}
+    selected = _select_build_sources(sources, source_sizes, cfg["index_dir"])
     sources = [source for source, _index_name in selected]
     index_names = dict(selected)
     if not sources:
         logger.info("zimantic: no matching files to index")
         return
-
-    if downloading:
-        _wait_for_stable_sizes(downloading)
 
     embedder = None
     embedding_pipeline = None
@@ -404,11 +452,14 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         from .build import EmbeddingPipeline
         from .embed import Embedder
 
-        embedder = Embedder(
-            cfg["model_dir"],
-            threads=cfg.get("embed_threads"),
-        )
-        if workers > 1:
+        def _make_embedder():
+            return Embedder(
+                cfg["model_dir"],
+                threads=cfg.get("embed_threads"),
+            )
+
+        embedder = _LazyEmbedder(_make_embedder)
+        if workers > 1 and len(sources) > 1:
             embedding_workers = int(cfg.get("embedding_workers", 2))
             if embedding_workers < 1:
                 parser.error("embedding_workers must be at least 1")

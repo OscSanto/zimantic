@@ -19,6 +19,7 @@ Why a separate catalog:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -174,6 +175,80 @@ def source_index_name(path: Path | str) -> str:
     """
     path = Path(path)
     return path.stem if is_zim_filename(path.name) else path.name
+
+
+def _index_owner(index_path: Path) -> tuple[str, bool] | None:
+    """Return ``(source_path, is_file_index)`` recorded in an index, if any.
+
+    An incomplete file build may not have written ``source_path`` yet, but its
+    ``docs`` table has a body column. Callers use that distinction to avoid
+    stealing a ZIM's index while still allowing an interrupted file build to
+    resume under its canonical name.
+    """
+    try:
+        db = sqlite3.connect(index_path)
+    except sqlite3.Error:
+        return None
+    try:
+        meta = dict(db.execute("SELECT key, value FROM meta"))
+        columns = {str(row[1]) for row in db.execute("PRAGMA table_info(docs)")}
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    owner = str(meta.get("source_path") or "")
+    is_file = str(meta.get("kind", "")) == "file" or "body" in columns
+    return owner, is_file
+
+
+def unique_file_index_name(
+    path: Path | str,
+    index_dir: Path | str,
+    *,
+    reserved: set[str] | None = None,
+    force_digest: bool = False,
+) -> str:
+    """Return a non-colliding index name for an ordinary file.
+
+    Ordinary files normally keep their filename as the index identity. If that
+    identity is already occupied by a *different* source (including a ZIM whose
+    stem happens to match), append a short path-derived digest. The same digest
+    is reused when the same file is rebuilt, so repeated builds stay stable.
+    """
+    source = Path(path)
+    base = source_index_name(source)
+    index_dir = Path(index_dir)
+    reserved = reserved or set()
+
+    def available(candidate: str) -> bool:
+        if candidate in reserved:
+            return False
+        candidate_path = index_dir / f"{candidate}.sqlite"
+        if not candidate_path.exists():
+            return True
+        identity = _index_owner(candidate_path)
+        if identity is None:
+            return False
+        owner, is_file = identity
+        if owner:
+            try:
+                return Path(owner).resolve() == source.resolve()
+            except OSError:
+                return False
+        # An interrupted first build has the file schema but no source path
+        # yet. Resume it instead of creating an orphan beside it.
+        return is_file and not force_digest
+
+    if not force_digest and available(base):
+        return base
+
+    digest = hashlib.sha1(str(source.resolve()).encode("utf-8")).hexdigest()[:10]
+    candidate = f"{base}-{digest}"
+    suffix = 2
+    while not available(candidate):
+        candidate = f"{base}-{digest}-{suffix}"
+        suffix += 1
+    return candidate
 
 
 

@@ -164,7 +164,7 @@
             }
 
             function libraryTitle(source) {
-                return String(source.title || source.name || source.book || "Untitled ZIM").trim();
+                return String(source.title || source.name || source.book || "Untitled source").trim();
             }
 
             function sourceRecord(keyOrSource) {
@@ -411,13 +411,13 @@
                     const unavailable = document.createElement("p");
                     unavailable.className = "library-info-unavailable";
                     unavailable.textContent =
-                        source.error || "This ZIM is currently unavailable.";
+                        source.error || "This source is currently unavailable.";
                     content.appendChild(unavailable);
                 } else {
                     const unavailable = document.createElement("p");
                     unavailable.className = "library-info-unavailable";
                     unavailable.textContent =
-                        "This ZIM has no homepage and cannot be searched yet.";
+                        "This source has no homepage and cannot be searched yet.";
                     content.appendChild(unavailable);
                 }
 
@@ -446,7 +446,7 @@
                 appendInfoRow(list, "Source", source.source);
                 appendInfoRow(list, "Attribution", source.attribution, { href: false });
                 appendInfoRow(list, "Relation", source.relation);
-                appendInfoRow(list, "ZIM name", source.perma_ref);
+                appendInfoRow(list, "Source name", source.perma_ref);
                 if (list.children.length) content.appendChild(list);
 
                 const counter = counterSummary(source.counter);
@@ -522,14 +522,16 @@
                 const filter = $("libraryFilter");
                 if (filter) {
                     const count = librarySources.length;
-                    filter.placeholder = `Filter ${count.toLocaleString()} ZIM${count === 1 ? "" : "s"}`;
+                    filter.placeholder = `Filter ${count.toLocaleString()} source${count === 1 ? "" : "s"}`;
                 }
                 grid.replaceChildren();
                 if (!librarySources.length) {
-                    status.textContent = "No installed ZIMs found.";
+                    status.textContent = "No installed sources found.";
                     const empty = document.createElement("p");
                     empty.className = "empty";
-                    empty.textContent = "Add a .zim file to the configured library and reload the server.";
+                    empty.textContent =
+                        "Add a .zim file, or index an ordinary file with " +
+                        "`zimantic build --file-types ...`, then reload the server.";
                     grid.appendChild(empty);
                     return;
                 }
@@ -551,12 +553,12 @@
                       })
                     : librarySources;
                 status.textContent = query
-                    ? `${visibleSources.length} of ${librarySources.length} installed ZIMs`
-                      : "";
+                    ? `${visibleSources.length} of ${librarySources.length} installed sources`
+                    : "";
                 if (!visibleSources.length) {
                     const empty = document.createElement("p");
                     empty.className = "empty";
-                    empty.textContent = "No installed ZIM matches that filter.";
+                    empty.textContent = "No installed source matches that filter.";
                     grid.appendChild(empty);
                     return;
                 }
@@ -620,8 +622,8 @@
                         (available
                             ? linkable
                                 ? ""
-                                : "This ZIM has no homepage and cannot be searched yet."
-                            : source.error || "This ZIM cannot be opened.");
+                                : "This source has no homepage and cannot be searched yet."
+                            : source.error || "This source cannot be opened.");
                     if (description) {
                         const text = document.createElement("p");
                         text.className = "library-card-description";
@@ -812,11 +814,9 @@
                     );
                 });
                 const topVisible = sorted.slice(0, SOURCE_FILTER_LIMIT);
-                const selectedVisible = query
-                    ? []
-                    : outcomes.filter((outcome) =>
-                          selectedSourceKeys.has(outcome.source.key),
-                      );
+                const selectedVisible = outcomes.filter((outcome) =>
+                    selectedSourceKeys.has(outcome.source.key),
+                );
                 const visibleKeys = new Set([
                     ...topVisible.map((outcome) => outcome.source.key),
                     ...selectedVisible.map((outcome) => outcome.source.key),
@@ -2548,7 +2548,7 @@
                 return false;
             }
 
-            async function runSearch(question, selectedSources = [], page = 0) {
+            async function runSearch(question, selectedSources = [], page = 0, scopeSources) {
                 question = question.trim();
                 if (!question) return;
                 if (requestController) requestController.abort();
@@ -2565,8 +2565,15 @@
                 const sequence = ++searchSequence;
                 const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
                 activeSearchResult = null;
-                setSelectedSources(selectedSources);
-                const searchKeys = [...new Set(selectionValues(selectedSources))];
+                const requested = [...new Set(selectionValues(selectedSources))];
+                const scopeKeys = [
+                    ...new Set(
+                        selectionValues(
+                            scopeSources === undefined ? requested : scopeSources,
+                        ),
+                    ),
+                ];
+                setSelectedSources(requested);
                 current = {
                     question,
                     terms: queryTerms(question),
@@ -2579,11 +2586,11 @@
                     sourcesTotal: 0,
                     streaming: true,
                     page: pageIndex,
-                    searchKeys,
+                    searchKeys: scopeKeys,
                     // The server decides whether this selection is small
                     // enough to search on its own; `started` replaces both
                     // values with the scope it actually searched.
-                    searchAll: searchKeys.length === 0,
+                    searchAll: scopeKeys.length === 0,
                 };
                 announceSearchStatus();
                 document.body.classList.add("search-active");
@@ -2607,7 +2614,7 @@
                         offset: String(pageIndex * PAGE_SIZE),
                     });
                     sourceFilterParams(params);
-                    searchScopeParams(params, searchKeys);
+                    searchScopeParams(params, scopeKeys);
                     // The server promotes large selections to one full search, so
                     // this request's scope is reported in the `started` event. Page
                     // size, offset and the display filter are not cached keys.
@@ -2754,7 +2761,13 @@
                 runSearch(question, requested, page);
             }
 
-            function makeStateUrl(question, selectedSources, page, modal = null) {
+            function makeStateUrl(
+                question,
+                selectedSources,
+                page,
+                modal = null,
+                scopeSources,
+            ) {
                 // Keep search and modal state in the query string so links are shareable
                 // and Back/Forward just work.
                 const url = new URL(location.href);
@@ -2769,7 +2782,44 @@
                           : selectedSources
                             ? [selectedSources]
                             : [];
-                sourceValues.forEach((source) => url.searchParams.append("zim", source));
+                const displayValues = [...new Set(selectionValues(sourceValues))];
+                const explicitScope = scopeSources !== undefined;
+                const sameSearch =
+                    explicitScope || (current && current.question === question);
+                const scopeValues = explicitScope
+                    ? [...new Set(selectionValues(scopeSources))]
+                    : sameSearch
+                      ? [...new Set(current.searchKeys || [])]
+                      : displayValues;
+                const fullSearch =
+                    sameSearch &&
+                    (explicitScope
+                        ? scopeValues.length === 0
+                        : Boolean(current.searchAll));
+                if (fullSearch) {
+                    // A full-search pool is already cached; these keys only
+                    // narrow the displayed results and must not become a new
+                    // `zim` search scope when the URL is reloaded.
+                    displayValues.forEach((source) =>
+                        url.searchParams.append("source", source),
+                    );
+                } else {
+                    scopeValues.forEach((source) =>
+                        url.searchParams.append("zim", source),
+                    );
+                    if (sameSearch) {
+                        const scopeSet = new Set(scopeValues);
+                        const displaySet = new Set(displayValues);
+                        const differs =
+                            scopeSet.size !== displaySet.size ||
+                            [...displaySet].some((key) => !scopeSet.has(key));
+                        if (differs) {
+                            displayValues.forEach((source) =>
+                                url.searchParams.append("source", source),
+                            );
+                        }
+                    }
+                }
                 if (page > 0) url.searchParams.set("page", String(page + 1));
                 if (modal) url.searchParams.set("modal", modal);
                 return url.pathname + url.search;
@@ -2800,18 +2850,27 @@
             function readLocationState() {
                 const params = new URLSearchParams(location.search);
                 const pageNumber = Number.parseInt(params.get("page") || "1", 10);
+                const scopeSources = [
+                    ...new Set(
+                        [
+                            ...params.getAll("zim"),
+                            ...params.getAll("src"),
+                        ].filter(Boolean),
+                    ),
+                ];
+                const displaySources = [
+                    ...new Set(params.getAll("source").filter(Boolean)),
+                ];
                 return {
                     question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
-                    // `zim` is the canonical source-selection parameter. Keep
-                    // reading legacy `src` links so shared URLs keep working.
-                    selectedSources: [
-                        ...new Set(
-                            [
-                                ...params.getAll("zim"),
-                                ...params.getAll("src"),
-                            ].filter(Boolean),
-                        ),
-                    ],
+                    // `zim` is the canonical search-scope parameter and
+                    // `source` is the display filter for a full-search pool.
+                    // Keep reading legacy `src` links too.
+                    selectedSources: displaySources.length
+                        ? displaySources
+                        : scopeSources,
+                    scopeSources,
+                    hasScope: params.has("zim") || params.has("src"),
                     page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0,
                     modal: params.get("modal") || null,
                 };
@@ -2884,7 +2943,22 @@
                 }
                 const selected = [...selectedSourceKeys];
                 commitAutoSearchHistory();
-                history.pushState(null, "", makeStateUrl(current.question, selected, 0));
+                const currentScope = current.searchAll
+                    ? []
+                    : [...new Set(current.searchKeys || [])];
+                const addsOutside = selected.some(
+                    (source) => !currentScope.includes(source),
+                );
+                const nextScope = current.searchAll || !selected.length
+                    ? []
+                    : addsOutside
+                      ? selected
+                      : currentScope;
+                history.pushState(
+                    null,
+                    "",
+                    makeStateUrl(current.question, selected, 0, null, nextScope),
+                );
                 renderSourceFilters();
                 applySourceSelection(current.question, selected, 0);
             });
@@ -3043,6 +3117,9 @@
                     previousHeadingSearch = {
                         question: current.question,
                         selectedSources: [...selectedSourceKeys],
+                        scopeSources: current.searchAll
+                            ? []
+                            : [...new Set(current.searchKeys || [])],
                         page: current.page,
                     };
                     clearSearch(true);
@@ -3055,9 +3132,20 @@
                 history.pushState(
                     null,
                     "",
-                    makeStateUrl(previous.question, previous.selectedSources, previous.page),
+                    makeStateUrl(
+                        previous.question,
+                        previous.selectedSources,
+                        previous.page,
+                        null,
+                        previous.scopeSources,
+                    ),
                 );
-                runSearch(previous.question, previous.selectedSources, previous.page);
+                runSearch(
+                    previous.question,
+                    previous.selectedSources,
+                    previous.page,
+                    previous.scopeSources,
+                );
             }
 
             function celebrateHeadingClick(event) {
@@ -3248,12 +3336,25 @@
                     return;
                 }
                 $("question").value = state.question;
-                if (current && current.question === state.question) {
-                    // Same query: reuse the pool when the selection still uses the
-                    // same search scope; otherwise the scope itself changed.
+                const currentScope = current && !current.searchAll
+                    ? [...new Set(current.searchKeys || [])]
+                    : [];
+                const stateScope = state.hasScope ? state.scopeSources : [];
+                const sameScope =
+                    currentScope.length === stateScope.length &&
+                    currentScope.every((key) => stateScope.includes(key));
+                if (current && current.question === state.question && sameScope) {
+                    // Same query and search scope: reuse the pool when the
+                    // displayed filters change; otherwise the scope itself
+                    // changed and needs a new search.
                     applySourceSelection(state.question, state.selectedSources, state.page);
                 } else {
-                    runSearch(state.question, state.selectedSources, state.page);
+                    runSearch(
+                        state.question,
+                        state.selectedSources,
+                        state.page,
+                        stateScope,
+                    );
                 }
             });
 
@@ -3333,7 +3434,12 @@
                 syncArticleModal(state.modal);
                 if (state.question) {
                     $("question").value = state.question;
-                    runSearch(state.question, state.selectedSources, state.page);
+                    runSearch(
+                        state.question,
+                        state.selectedSources,
+                        state.page,
+                        state.scopeSources,
+                    );
                 } else if (!libraryView) {
                     renderSourceSelectionSummary();
                     $("question").focus();

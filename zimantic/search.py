@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import mimetypes
 import posixpath
 import re
 import secrets
@@ -95,6 +96,7 @@ SELECTIVE_SOURCE_LIMIT = 10
 SELECTIVE_SOURCE_RATIO = 0.35
 DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
 DEFAULT_KIWIX_CATALOG_LIMIT = 50_000
+DEFAULT_MAX_REMOTE_SOURCES = 100
 DEFAULT_KIWIX_CATALOG_ATTEMPTS = 3
 DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF = 1.0
 MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
@@ -593,6 +595,9 @@ class Search:
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
+        self.max_remote_sources = _int_config(
+            cfg, "max_remote_sources", DEFAULT_MAX_REMOTE_SOURCES, minimum=0
+        )
         self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
         self.max_results = _int_config(cfg, "max_results", DEFAULT_MAX_RESULTS)
         # A page can never be larger than the ranked pool it is sliced from.
@@ -1817,6 +1822,7 @@ class Search:
             # Keeping the cache while the source set is unchanged lets repeated
             # queries (for example, page reloads) be answered without recomputing.
             self._invalidate_library_cache()
+            self._remote_limit_warned = False
             self.cache.clear()
             preview_cache = getattr(self, "preview_cache", None)
             if preview_cache is not None:
@@ -2654,7 +2660,7 @@ class Search:
 
             fulltext_capability = (
                 True
-                if index.source_kind == "file" and index.db_path is not None
+                if index.source_kind == "file"
                 else (
                     bool(record.has_fulltext_index) and bool(record.available)
                     if record is not None
@@ -2684,6 +2690,13 @@ class Search:
                 if record.last_error:
                     report["issues"] = [*reasons, record.last_error]
                     report["status"] = "degraded"
+            elif index.source_kind == "file":
+                # File indexes are self-contained. Opening the FileArchive here
+                # would re-run extraction (and not with the build's OCR/ASR
+                # options), which is both expensive and misleading for /health.
+                report["entry_count"] = index.source_article_count
+                report["article_count"] = index.source_article_count
+                report["homepage"] = None
             elif archive_current:
                 acquired = False
                 try:
@@ -2738,6 +2751,38 @@ class Search:
             math.floor(total_sources * SELECTIVE_SOURCE_RATIO),
         )
 
+    def _bounded_available_sources(
+        self, available: list[SourceInfo]
+    ) -> list[SourceInfo]:
+        """Limit remote catalog fan-out for an unscoped search."""
+        limit = getattr(
+            self,
+            "max_remote_sources",
+            _int_config(
+                self.cfg,
+                "max_remote_sources",
+                DEFAULT_MAX_REMOTE_SOURCES,
+                minimum=0,
+            ),
+        )
+        remote = [source for source in available if source.mode == "kiwix"]
+        if len(remote) <= limit:
+            return available
+        kept = {source.key for source in remote[:limit]}
+        if not getattr(self, "_remote_limit_warned", False):
+            logger.warning(
+                "zimantic: %d remote Kiwix sources available; searching the first %d "
+                "(set max_remote_sources to change this)",
+                len(remote),
+                limit,
+            )
+            self._remote_limit_warned = True
+        return [
+            source
+            for source in available
+            if source.mode != "kiwix" or source.key in kept
+        ]
+
     def _search_scope(
         self, zim: list[str] | None
     ) -> tuple[list[SourceInfo], bool, tuple[str, ...] | None]:
@@ -2746,13 +2791,16 @@ class Search:
         A small selection searches only those sources and is treated as a
         one-off scope: it is not cached, because users can try many different
         subsets. A larger selection is promoted to a full search over every
-        available source; that pool is cached without a selection in its key so
-        every large selection and every unfiltered search share it.
+        available source (remote Kiwix fan-out is capped by
+        ``max_remote_sources``); that pool is cached without a selection in its
+        key so every large selection and every unfiltered search share it. An
+        explicit selection that includes a source outside that cap is honored.
         """
         with self._state_lock:
             available = [source for source in self.sources.values() if source.available]
+        bounded = self._bounded_available_sources(available)
         if zim is None:
-            return available, False, None
+            return bounded, False, None
         if not zim:
             # An explicit empty list is a deliberately empty scope (the cache
             # key distinguishes it from None); it must not mean "all sources".
@@ -2778,15 +2826,27 @@ class Search:
                 "zimantic: ignoring unknown source selection (%s); searching all sources",
                 ", ".join(sorted(wanted)),
             )
-            return available, False, None
+            return bounded, False, None
         limit = self._selective_source_limit(len(available))
-        if len(selected) <= limit:
+        bounded_keys = {source.key for source in bounded}
+        if len(selected) <= limit and all(
+            source.key in bounded_keys for source in selected
+        ):
             return (
                 selected,
                 bool(selected),
                 tuple(sorted(source.key for source in selected)),
             )
-        return available, False, None
+        if any(source.key not in bounded_keys for source in selected):
+            # The user named a source that the unscoped remote cap would have
+            # dropped. Honor the explicit selection instead of silently
+            # searching a different set.
+            return (
+                selected,
+                bool(selected),
+                tuple(sorted(source.key for source in selected)),
+            )
+        return bounded, False, None
 
     @staticmethod
     def _validate_query(query: str) -> str:
@@ -4278,11 +4338,15 @@ class Search:
                 return False
             if db is None:
                 return False
+            mimetype = (
+                mimetypes.guess_type(str(index.zim_path or ""))[0]
+                or "text/plain"
+            )
             for result in result_docs:
-                result["mimetype"] = "text/plain"
+                result["mimetype"] = mimetype
                 source_doc = docs.get(result["id"])
                 if source_doc is not None:
-                    source_doc["mimetype"] = "text/plain"
+                    source_doc["mimetype"] = mimetype
                 if result["id"] not in phrase_ids:
                     continue
                 rowid = source_doc.get("_rowid") if source_doc is not None else None

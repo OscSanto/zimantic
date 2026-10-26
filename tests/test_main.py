@@ -127,7 +127,7 @@ class StableSizeTests(unittest.TestCase):
 
 
 class BuildWorkerTests(unittest.TestCase):
-    def test_collect_zims_prefers_the_largest_conflicting_stem(self):
+    def test_collect_sources_prefers_the_largest_conflicting_stem(self):
         import zimantic.__main__ as main_module
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,14 +139,14 @@ class BuildWorkerTests(unittest.TestCase):
             first.write_bytes(b"small")
             second.write_bytes(b"a much larger copy")
 
-            zims = main_module._collect_zims([first, second], root)
-            selected = main_module._select_zim_paths(
+            zims = main_module._collect_sources([first, second], root, ("*.zim",))
+            selected = main_module._select_build_sources(
                 zims,
                 {path: path.stat().st_size for path in zims},
             )
 
-            self.assertEqual([path.name for path in selected], ["manual.zim"])
-            self.assertEqual(selected[0].read_bytes(), b"a much larger copy")
+            self.assertEqual([path.name for path, _name in selected], ["manual.zim"])
+            self.assertEqual(selected[0][0].read_bytes(), b"a much larger copy")
 
     def test_ordinary_files_with_the_same_name_get_unique_index_names(self):
         import zimantic.__main__ as main_module
@@ -171,6 +171,44 @@ class BuildWorkerTests(unittest.TestCase):
             names = [name for _path, name in selected]
             self.assertEqual(len(set(names)), 2)
             self.assertTrue(all(name.startswith("book.pdf-") for name in names))
+
+    def test_same_named_files_consider_existing_indexes(self):
+        import zimantic.__main__ as main_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_dir = root / "indexes"
+            index_dir.mkdir()
+            first = root / "one" / "book.pdf"
+            second = root / "two" / "book.pdf"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            # The canonical index is already owned by the first file; selecting
+            # both again must leave that name alone and suffix the second.
+            (index_dir / "book.pdf.sqlite").write_bytes(b"")
+            import sqlite3
+
+            db = sqlite3.connect(index_dir / "book.pdf.sqlite")
+            db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")
+            db.execute("CREATE TABLE docs(title TEXT, path TEXT, target TEXT)")
+            db.execute("INSERT INTO meta VALUES ('kind', 'file')")
+            db.execute("INSERT INTO meta VALUES ('source_path', ?)", (str(first.resolve()),))
+            db.commit()
+            db.close()
+
+            sources = main_module._collect_sources(
+                [first, second], root, ("*.pdf",)
+            )
+            selected = main_module._select_build_sources(
+                sources,
+                {path: path.stat().st_size for path in sources},
+                index_dir,
+            )
+            names = {path: name for path, name in selected}
+            self.assertEqual(names[first], "book.pdf")
+            self.assertTrue(names[second].startswith("book.pdf-"))
 
     def test_build_stability_wait_is_opt_in(self):
         import zimantic.__main__ as main_module
@@ -249,6 +287,60 @@ class BuildWorkerTests(unittest.TestCase):
                 main_module.main()
 
         self.assertEqual(set(built), {"first.zim", "second.zim"})
+
+    def test_lazy_embedder_does_not_load_until_used(self):
+        import zimantic.__main__ as main_module
+
+        class _Embedder:
+            @staticmethod
+            def truncate(text, **_kwargs):
+                return text
+
+            @staticmethod
+            def embed(texts):
+                return texts
+
+        calls = []
+        lazy = main_module._LazyEmbedder(lambda: calls.append(1) or _Embedder())
+        self.assertEqual(calls, [])
+        self.assertEqual(lazy.truncate("text"), "text")
+        self.assertEqual(calls, [1])
+        self.assertEqual(lazy.embed(["a"]), ["a"])
+        self.assertEqual(calls, [1])
+
+    def test_one_source_does_not_start_the_embedding_pipeline(self):
+        import zimantic.__main__ as main_module
+        from zimantic import settings
+
+        build_module = importlib.import_module("zimantic.build")
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            source = directory / "only.zim"
+            source.write_bytes(b"zim")
+            config = {
+                "zim_dir": str(directory),
+                "index_dir": str(directory / "indexes"),
+                "batch_size": 1,
+                "build_workers": 2,
+            }
+            with (
+                patch.object(main_module.sys, "argv", [
+                    "zimantic",
+                    "build",
+                    "--workers",
+                    "2",
+                    str(source),
+                ]),
+                patch.object(settings, "load_config", return_value=config),
+                patch.object(main_module, "_configure_logging"),
+                patch.object(build_module, "build"),
+                patch.object(
+                    build_module,
+                    "EmbeddingPipeline",
+                    side_effect=AssertionError("pipeline used for one source"),
+                ),
+            ):
+                main_module.main()
 
 
 if __name__ == "__main__":

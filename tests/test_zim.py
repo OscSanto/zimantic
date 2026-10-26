@@ -18,6 +18,7 @@ from zimantic.content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
     EntryRecord,
+    _markdown_source,
     disambiguation_title,
     extract_excerpt,
     extract_pdf_excerpt,
@@ -1185,6 +1186,22 @@ class JavaScriptShellTests(unittest.TestCase):
                 "access content inside this ZIM.",
             )
         )
+
+    def test_broken_markdown_companion_is_ignored(self):
+        class _Item:
+            def get_item(self):
+                raise RuntimeError("broken companion")
+
+        class _Archive:
+            @staticmethod
+            def has_entry_by_path(path):
+                return path == "page.md"
+
+            @staticmethod
+            def get_entry_by_path(path):
+                return _Item()
+
+        self.assertIsNone(_markdown_source(_Archive(), "page.md"))
 
 
 if __name__ == "__main__":

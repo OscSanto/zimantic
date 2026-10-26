@@ -1881,25 +1881,57 @@ def _tar_members(path: Path, limit: int) -> list[str]:
         return []
 
 
-def _external_archive_members(path: Path, limit: int, deadline: _Deadline) -> list[str]:
+def _external_archive_entries(
+    path: Path, limit: int, deadline: _Deadline
+) -> list[tuple[str, int | None]]:
+    """Return ``(member, uncompressed_size)`` from an external archiver.
+
+    Sizes are available from 7z and lsar; ``unrar lb`` only lists names, so its
+    entries carry ``None`` and the post-extraction bound still applies.
+    """
     if has_tool("7z"):
         result = _run(["7z", "l", "-ba", "-slt", str(path)], deadline)
         if result is not None and result.returncode == 0:
-            names = []
+            entries: list[tuple[str, int | None]] = []
+            current_name: str | None = None
+            current_size: int | None = None
+            current_directory = False
+
+            def finish() -> None:
+                nonlocal current_name, current_size, current_directory
+                if (
+                    current_name
+                    and current_name != str(path)
+                    and not current_directory
+                ):
+                    entries.append((current_name, current_size))
+                current_name = None
+                current_size = None
+                current_directory = False
+
             for line in decode_text(result.stdout or b"").splitlines():
                 if line.startswith("Path = "):
-                    value = line[7:].strip()
-                    if value and value != str(path):
-                        names.append(value)
-                        if len(names) >= limit:
-                            break
-            if names:
-                return names
+                    finish()
+                    if len(entries) >= limit:
+                        break
+                    current_name = line[7:].strip()
+                elif line.startswith("Size = ") and current_name is not None:
+                    try:
+                        current_size = int(line[7:].strip())
+                    except ValueError:
+                        current_size = None
+                elif line.startswith("Attributes = ") and current_name is not None:
+                    attributes = line[13:].strip().upper()
+                    current_directory = "D" in attributes
+            if len(entries) < limit:
+                finish()
+            if entries:
+                return entries[:limit]
     if has_tool("unrar"):
         result = _run(["unrar", "lb", str(path)], deadline)
         if result is not None and result.returncode == 0:
             return [
-                line.strip()
+                (line.strip(), None)
                 for line in decode_text(result.stdout or b"").splitlines()
                 if line.strip()
             ][:limit]
@@ -1911,12 +1943,29 @@ def _external_archive_members(path: Path, limit: int, deadline: _Deadline) -> li
             except (TypeError, ValueError):
                 return []
             contents = payload.get("lsarContents") or []
-            return [
-                str(item.get("XADFileName") or "")
-                for item in contents
-                if isinstance(item, dict) and not item.get("XADIsDirectory")
-            ][:limit]
+            entries = []
+            for item in contents:
+                if not isinstance(item, dict) or item.get("XADIsDirectory"):
+                    continue
+                name = str(item.get("XADFileName") or "")
+                if not name:
+                    continue
+                try:
+                    size = int(item.get("XADFileSize"))
+                except (TypeError, ValueError):
+                    size = None
+                entries.append((name, size))
+                if len(entries) >= limit:
+                    break
+            return entries
     return []
+
+
+def _external_archive_members(path: Path, limit: int, deadline: _Deadline) -> list[str]:
+    return [
+        name
+        for name, _size in _external_archive_entries(path, limit, deadline)
+    ]
 
 
 def _archive_members(path: Path, limit: int, deadline: _Deadline) -> list[str]:
@@ -1961,10 +2010,22 @@ def _extract_external_archive(
     """Extract an archive with the best available external helper.
 
     Member names are validated before extraction because 7z/unar/unrar do not
-    all reject ``../`` entries themselves.  The same helper is used for comic
+    all reject ``../`` entries themselves. Known uncompressed sizes are checked
+    before extraction, and the extracted tree is checked again because some
+    helpers do not expose member sizes. The same helper is used for comic
     archives so CBR no longer depends on ``unrar`` being installed.
     """
-    listed = _external_archive_members(path, options.max_archive_members, deadline)
+    entries = _external_archive_entries(
+        path, options.max_archive_members + 1, deadline
+    )
+    if len(entries) > options.max_archive_members:
+        logger.warning(
+            "%s: archive has more than %d members; skipping extraction",
+            path.name,
+            options.max_archive_members,
+        )
+        return []
+    listed = [name for name, _size in entries]
     if not listed:
         # Without a member listing the extractor's path handling cannot be
         # validated; extract only when the helper can tell us what it will
@@ -1973,6 +2034,16 @@ def _extract_external_archive(
         return []
     if any(_safe_member_path(destination, name) is None for name in listed):
         logger.warning("%s: refusing archive with unsafe member paths", path.name)
+        return []
+    known_total = sum(size for _name, size in entries if size is not None)
+    if known_total > options.max_archive_bytes:
+        logger.warning(
+            "%s: archive declares %d bytes, over the %d byte limit; "
+            "skipping extraction",
+            path.name,
+            known_total,
+            options.max_archive_bytes,
+        )
         return []
 
     commands: list[list[str]] = []
@@ -1988,12 +2059,42 @@ def _extract_external_archive(
         ])
     for command in commands:
         result = _run(command, deadline)
-        if result is not None and result.returncode == 0:
-            return [
-                item
-                for item in sorted(destination.rglob("*"), key=_natural_key)
-                if item.is_file()
-            ][: options.max_archive_members]
+        if result is None or result.returncode != 0:
+            continue
+        extracted: list[Path] = []
+        total = 0
+        destination_root = destination.resolve()
+        for item in sorted(destination.rglob("*"), key=_natural_key):
+            if not item.is_file():
+                continue
+            try:
+                resolved = item.resolve()
+                resolved.relative_to(destination_root)
+                size = item.stat().st_size
+            except (OSError, ValueError):
+                logger.warning(
+                    "%s: refusing archive member outside the extraction root",
+                    path.name,
+                )
+                return []
+            if len(extracted) >= options.max_archive_members:
+                logger.warning(
+                    "%s: more than %d extracted members; skipping extraction",
+                    path.name,
+                    options.max_archive_members,
+                )
+                return []
+            if total + size > options.max_archive_bytes:
+                logger.warning(
+                    "%s: extracted data exceeds the %d byte limit; "
+                    "skipping extraction",
+                    path.name,
+                    options.max_archive_bytes,
+                )
+                return []
+            total += size
+            extracted.append(item)
+        return extracted
     return []
 
 

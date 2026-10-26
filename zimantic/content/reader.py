@@ -601,23 +601,29 @@ def _markdown_source(
     ZIM packaging does not always keep those signals consistent. The
     decompressed-size ceiling applies to the companion, not just its stub.
     """
-    if not path or not zim.has_entry_by_path(path):
+    if not path:
         return None
-    item = zim.get_entry_by_path(path).get_item()
-    size = int(getattr(item, "size", 0) or 0)
-    if size > max_entry_bytes:
-        logger.warning(
-            "ignoring %s companion of %d bytes (limit %d)",
-            path,
-            size,
-            max_entry_bytes,
-        )
-        return None
-    mimetype = item.mimetype.split(";", 1)[0].strip().lower()
-    extension = posixpath.splitext(path)[1].lower()
-    if extension in MARKDOWN_EXTENSIONS or mimetype in MARKDOWN_MIME_TYPES:
+    try:
+        if not zim.has_entry_by_path(path):
+            return None
+        item = zim.get_entry_by_path(path).get_item()
+        size = int(getattr(item, "size", 0) or 0)
+        mimetype = str(getattr(item, "mimetype", "") or "").split(";", 1)[0].strip().lower()
+        extension = posixpath.splitext(path)[1].lower()
+        if extension not in MARKDOWN_EXTENSIONS and mimetype not in MARKDOWN_MIME_TYPES:
+            return None
+        if size > max_entry_bytes:
+            logger.warning(
+                "ignoring %s companion of %d bytes (limit %d)",
+                path,
+                size,
+                max_entry_bytes,
+            )
+            return None
         return bytes(item.content)
-    return None
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        logger.debug("could not read markdown companion %s (%s)", path, error)
+        return None
 
 
 def _companion(

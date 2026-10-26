@@ -2245,6 +2245,26 @@ class SourceScopeTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
         self.assertEqual([source.key for source in sources], ["foo"])
 
+    def test_unscoped_search_caps_remote_sources_but_honors_explicit_ones(self):
+        search = _bare_search({"max_remote_sources": 1})
+        search.sources = {
+            "local": SourceInfo("local", "Local", "local", "local"),
+            "remote-one": SourceInfo("remote-one", "One", "one", "kiwix"),
+            "remote-two": SourceInfo("remote-two", "Two", "two", "kiwix"),
+        }
+        try:
+            sources, _selective, _scope = search._search_scope(None)
+            self.assertEqual([source.key for source in sources], ["local", "remote-one"])
+            sources, _selective, _scope = search._search_scope(["remote-two"])
+            self.assertEqual([source.key for source in sources], ["remote-two"])
+            search.max_remote_sources = 0
+            sources, _selective, _scope = search._search_scope(["remote-two"])
+            self.assertEqual([source.key for source in sources], ["remote-two"])
+            sources, _selective, _scope = search._search_scope(None)
+            self.assertEqual([source.key for source in sources], ["local"])
+        finally:
+            search._executor.shutdown(wait=True)
+
     def test_remote_catalog_does_not_overwrite_a_local_source_identity(self):
         search = _bare_search({})
         search.indexes = {
@@ -2507,6 +2527,33 @@ class ProductionHardeningTests(unittest.TestCase):
             finally:
                 search._executor.shutdown(wait=True)
 
+    def test_health_does_not_open_file_archives(self):
+        with _temp_dir(self) as tmp:
+            path = Path(tmp) / "notes.txt"
+            path.write_text("A note about bicycle repair.", encoding="utf-8")
+            index = _LocalIndex(
+                None,
+                None,
+                None,
+                None,
+                threading.Lock(),
+                done="fast",
+                source_kind="file",
+                zim_path=str(path),
+                source_article_count=4,
+            )
+            search = _bare_search({})
+            search.indexes = {"notes.txt": index}
+            with patch.object(
+                index, "ensure_open", side_effect=AssertionError("re-extracted")
+            ):
+                report = search.health()
+            self.assertEqual(report["indexes"][0]["entry_count"], 4)
+            self.assertEqual(
+                report["indexes"][0]["capabilities"]["fulltext"], True
+            )
+            search._executor.shutdown(wait=True)
+
     def test_unavailable_native_index_reports_an_error_not_an_empty_ok(self):
         source = SourceInfo(
             "manual", "Manual", "manual", "local", local_name="manual"
@@ -2554,6 +2601,32 @@ class ProductionHardeningTests(unittest.TestCase):
             )
         finally:
             db.close()
+
+    def test_file_results_report_the_original_mimetype(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, body, path UNINDEXED, target UNINDEXED)"
+        )
+        index = _LocalIndex(
+            db,
+            None,
+            None,
+            None,
+            threading.Lock(),
+            source_kind="file",
+            zim_path="/library/lesson.mp4",
+        )
+        search = _bare_search({})
+        result = {"id": "lesson:clip", "path": "lesson.mp4#t=12.0", "mimetype": None}
+        docs = {"lesson:clip": dict(result)}
+        try:
+            search._enrich_file_pool(index, [result], set(), [], docs=docs)
+        finally:
+            search._executor.shutdown(wait=True)
+            db.close()
+        self.assertEqual(result["mimetype"], "video/mp4")
+        self.assertEqual(docs["lesson:clip"]["mimetype"], "video/mp4")
 
 
 class CatalogLocationTests(unittest.TestCase):

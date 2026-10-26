@@ -27,7 +27,7 @@ Zero 2 W.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. Selected sources stay visible, so choosing **Other** expands that group into its individual filters. A selection of at most `min(10, 35%)` of available sources is searched on its own when it starts a search and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed. Source filters chosen after a full search are display-only and reuse that pool.
-- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
+- **Installed library view**: browse local sources (ZIMs and indexed ordinary files) at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a source title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
@@ -115,7 +115,7 @@ reader is preferred, then a small optional command (`pdftotext`, `unrtf`, `catdo
 `tesseract`, `ffmpeg`), then calibre's `ebook-convert`, and a missing helper only skips that format
 instead of failing the build. Calibre 7.19+ uses its faster `pdftohtml` PDF engine; older Calibre
 builds keep the default engine. Two ordinary files with the same filename in
-different folders are both indexed; the index name gets a short path-derived suffix so their
+different folders are both indexed; a colliding index name gets a short path-derived suffix so their
 SQLite/FAISS files cannot collide.
 
 Supported families include:
@@ -132,12 +132,12 @@ Supported families include:
   (WebP, AVIF, HEIC, JPEG 2000, JPEG XL, ...) are converted to PNG first;
 - archives: member names are always indexed; `archive_depth` optionally extracts and indexes
   nested files. ZIP/7z/RAR and many aliases (`.zipx`, `.tar.lz4`, `.zstd`, `.lzh`, `.001`, `.r00`,
-  ...) are supported, and subtitle-bearing media inside an archive is indexed like a standalone
-  file. Archives are read with `7z` or `unar`.
+  ...) are supported, and when `archive_depth` is greater than zero, subtitle-bearing media inside an archive is indexed like a standalone file. Archives are read with `7z` or `unar`.
 
 A PDF page, EPUB chapter, presentation slide, spreadsheet sheet and subtitle chunk become separate
 results. Locators are preserved in the result link, for example `/file/manual.pdf#page=12` or
-`/file/lesson.mp4#t=91.4`. A plain file with no sections remains one result. Scanned PDFs and images
+`/file/lesson.mp4#t=91.4`. A plain file with no sections remains one result when it fits the section
+budget; longer plain text is split into bounded results. Scanned PDFs and images
 are skipped unless OCR is enabled; a comic archive still exposes its page filenames when OCR is off.
 
 ```bash
@@ -197,8 +197,9 @@ for the final displayed page.
   startup; archives and their libzim `Searcher` objects are opened lazily on first use. A missing or
   unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous
   catalog, rather than being mistaken for a library from which every ZIM disappeared. While the
-  directory is unavailable, the served `/sources` and `/library.json` lists are empty; the catalog
-  rows remain on disk for the next successful scan once the directory is back.
+  directory is unavailable, ZIM-backed `/sources` and `/library.json` entries are empty; indexed
+  ordinary-file sources remain available. The catalog rows remain on disk for the next successful
+  scan once the directory is back.
 
 The index identity is `(ZIM filename stem, source byte size)`, not the source path. A ZIM can
 move between nested folders below `zim_dir` without rebuilding. When files share a stem but have
@@ -217,8 +218,9 @@ IVF training samples are selected across the ZIM and scale with the number of cl
 The `.faiss` file is memory-mapped, so searches read only the clusters they touch.
 
 Builds resume from the last saved batch. FAISS files are published atomically, and a fast index
-remains available while a full index builds. `build --force` applies the configured extraction and
-preview settings while rebuilding the selected indexes.
+remains available while a full index builds. Changing between `--fast` and a full build after an
+interruption restarts that index, because fast rows have no vectors to reuse. `build --force` applies
+the configured extraction and preview settings while rebuilding the selected indexes.
 
 ### 2. Starting the server
 
@@ -233,9 +235,11 @@ so a partial or stale index never masks the ZIM that is actually available. Each
 once: a finished SQLite index takes precedence over the filesystem fallback, and an unfinished one
 leaves the stem to that fallback. FAISS and vector files load in the background during startup, so
 title-word and full-text searches are available while semantic search initializes.
-The page automatically lists local ZIM sources. With `kiwix_server`, it also discovers catalog sources
+The page automatically lists local sources (ZIMs and indexed ordinary files). With `kiwix_server`, it also discovers catalog sources
 and can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries
-and remote XML responses are capped at 64 MiB by default; both limits are configurable.
+and remote XML responses are capped at 64 MiB by default; both limits are configurable. An unscoped
+search uses at most `max_remote_sources` (default 100) of the discovered remote sources; selecting a
+remote source explicitly always searches it.
 
 A finished index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
 search**. A ZIM without a SQLite index is also searchable through its native full-text index,
@@ -275,7 +279,7 @@ whole server process and reloads all in-memory state.
 
 3. **Collapse redirects**: every redirect hit resolves to the article it points to, and duplicates are merged, so each article appears only once.
 4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall; cross-language queries often need 0.80 (see **Queries in another language** below).
-5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; exact phrases in titles or readable article text and source-specific intent rules (for example WikiHow queries) provide additional deterministic signals. Stack Exchange-style profile pages under `/users/` are demoted unless the query explicitly asks for a user or profile.
+5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in; the full-text contribution is doubled for queries of ten or more words. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; exact phrases in titles or readable article text and source-specific intent rules (for example WikiHow queries) provide additional deterministic signals. Stack Exchange-style profile pages under `/users/` are demoted unless the query explicitly asks for a user or profile.
 6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", when it renders the "This disambiguation page" footer, or when it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. A query that names the full title is treated as navigation, whether it uses `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
 **Queries in another language.** A query in Chinese, Hindi, Arabic or another language against an
@@ -299,7 +303,7 @@ long-query full-text boost counts space-separated words. A long Chinese or Japan
 spaces therefore gets little help from title-word matching or that boost; expect it to depend on
 semantic search and the similarity floor.
 
-Search ranks one pool of results (up to `max_results`, at least `candidate_count`) and caches it by
+Search ranks one pool of results (the larger of `max_results` and `candidate_count`) and caches it by
 query and source scope. A selection of at most `min(10, 35%)` of the available sources searches only
 those sources and is not cached, because one-off subsets would fragment the cache. A larger selection
 is promoted to one full search over every available source, and the source filters narrow the
@@ -449,8 +453,8 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    ```
 
    English-only and larger multilingual models use the same `model_dir` layout; see
-   [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns if a file
-   differs from the documented default checksum, but still runs.
+   [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns if
+   `model.onnx` or `sentencepiece.bpe.model` differs from the documented default checksum, but still runs.
 
 4. **Put your ZIM files in `zims/`.** Download them from
    [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
@@ -594,14 +598,14 @@ The Makefile can increment the patch version, update `uv.lock`, commit and publi
 annotated tag:
 
 ```bash
-make release                 # 0.1.3 -> 0.1.4
+make release                 # 0.1.4 -> 0.1.5
 make release VERSION=1.0.0  # explicit version override
 ```
 
 To deploy a published tag to the default test box:
 
 ```bash
-make deploy VERSION=v0.1.4
+make deploy VERSION=v0.1.5
 make release-deploy           # release, then deploy the new version
 ```
 
@@ -634,6 +638,7 @@ zimantic build --workers 4            # build up to four independent ZIMs at onc
 zimantic build /media/usb             # every .zim in a folder
 zimantic build zims/a.zim /media/usb  # mix files and folders
 zimantic build --fast                 # quick title-word + full-text index (no vectors)
+zimantic build --wait-stable          # wait for changing download sizes, then index
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
 zimantic serve                        # web page; unindexed ZIMs use native full-text search
 zimantic serve --fast                 # start without a model or vectors
@@ -642,13 +647,16 @@ zimantic serve --dev                  # alias for --debug
 zimantic reload                       # ask a running server to rescan indexes and ZIMs
 ```
 
-`build` accepts files or folders; a folder means every `*.zim` file under it, and with no arguments
-it uses `zim_dir`. Existing ZIM indexes are skipped. Pass `--force` to rebuild selected indexes.
+`build` accepts files or folders; a folder means every file matching `file_types` under it (the
+default profile is `*.zim`), and with no arguments it uses `zim_dir`. Existing indexes are skipped.
+Pass `--force` to rebuild selected indexes.
 Logging defaults to warnings, except that `serve` uses info when stderr is a terminal;
 repeat `--verbose`/`-v` for info and debug output.
 
 **Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
-model. Title-word and ZIM full-text search work; a normal `build` creates the vector index.
+model. Title-word and ZIM full-text search work; a normal `build` creates the vector index. Ordinary
+files are the exception: their fast build still extracts the text that SQLite full-text search needs,
+but skips embeddings and FAISS.
 
 `build --wait-stable` polls source sizes until they stop changing before indexing. The systemd units
 below pass it so a file caught mid-download is not indexed; an ordinary CLI build starts immediately.
@@ -679,7 +687,7 @@ indexes and reload the server as ZIMs become available:
 - `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run the full build
   (with meaning vectors) once a night.
 
-The path-triggered fast build runs for each ZIM in `zims/`. The full build runs from 01:00–06:00
+The path-triggered fast build runs for each matching source in `zims/` (ZIMs by default). The full build runs from 01:00–06:00
 local time by default; set its `ExecCondition` and timer to select a different window. A shared `flock`
 prevents overlapping builds.
 

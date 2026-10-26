@@ -176,6 +176,32 @@ def _prepare_build_state(
             db = _open_database(db_path, schema)
             meta = {}
             done = ""
+        # A fast build has no vectors for the rows it wrote. Resuming it as a
+        # full build would mark the index done while FAISS contains only the
+        # rows processed after the interruption, so treat a mode change as a
+        # restart instead of mixing the two modes.
+        recorded_mode = str(meta.get("build_mode", ""))
+        requested_mode = "fast" if fast else "full"
+        if (
+            done not in {"1", "fast"}
+            and recorded_mode
+            and recorded_mode != requested_mode
+        ):
+            logger.warning(
+                "%s: build mode changed during an interrupted build (%s -> %s); "
+                "restarting",
+                source_index_name(source_path),
+                recorded_mode,
+                requested_mode,
+            )
+            db.close()
+            _reset_index(db_path, faiss_path)
+            db = _open_database(db_path, schema)
+            meta = {}
+            done = ""
+        # Existing indexes written before build_mode was introduced cannot be
+        # distinguished reliably from a full build that had no embedder; they
+        # keep the historical resume behavior.
         # A source replaced under the same name must not keep its old index:
         # rebuild when the source file's size no longer matches the recorded
         # size. The same applies when a ZIM and an ordinary file collide on an
@@ -292,7 +318,12 @@ def _prepare_build_state(
                 "INSERT OR REPLACE INTO meta VALUES ('build_filesize', ?)",
                 (str(filesize),),
             )
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('build_mode', ?)",
+                (requested_mode,),
+            )
         meta["build_filesize"] = str(filesize)
+        meta["build_mode"] = requested_mode
 
         return _BuildState(
             db=db,
@@ -456,6 +487,7 @@ def _finish_build(
             for key, value in extra:
                 db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
             db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
+            db.execute("DELETE FROM meta WHERE key = 'build_mode'")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
         logger.debug(f"{db_path.stem}: title + full-text index ready")
@@ -468,6 +500,7 @@ def _finish_build(
         for key, value in extra:
             db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
         db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
+        db.execute("DELETE FROM meta WHERE key = 'build_mode'")
         db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
         db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
     if state.publish_upgrade:
@@ -522,6 +555,10 @@ def build(
         return
 
     name = index_name or source_index_name(source_path)
+    if kind == "file" and index_name is None:
+        from .catalog import unique_file_index_name
+
+        name = unique_file_index_name(source_path, index_dir)
     db_path = Path(index_dir) / f"{name}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)

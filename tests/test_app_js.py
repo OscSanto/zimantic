@@ -1,0 +1,68 @@
+import json
+import shutil
+import subprocess
+import unittest
+from pathlib import Path
+
+APP_JS = Path(__file__).resolve().parents[1] / "zimantic" / "web" / "static" / "app.js"
+NODE = shutil.which("node")
+
+
+def _function_source(source: str, start: str, end: str) -> str:
+    start_index = source.index(start)
+    end_index = source.index(end, start_index)
+    return source[start_index:end_index]
+
+
+@unittest.skipUnless(NODE, "node is unavailable")
+class AppSourceStateTests(unittest.TestCase):
+    def test_full_search_filters_are_url_display_filters(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/?q=q");
+const MAX_QUERY_LENGTH = 4096;
+let current = {{question: "q", searchAll: true, searchKeys: ["a", "b", "c"]}};
+{_function_source(source, "function selectionValues(", "function setSelectedSources(")}
+{_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
+{_function_source(source, "function readLocationState(", "function syncArticleModal(")}
+const full = makeStateUrl("q", ["a"], 0);
+current = {{question: "q", searchAll: false, searchKeys: ["a", "b"]}};
+const selective = makeStateUrl("q", ["a"], 0);
+location.href = "http://example.test/?q=q&zim=a&zim=b&source=a";
+location.search = "?q=q&zim=a&zim=b&source=a";
+const state = readLocationState();
+location.href = "http://example.test/?q=q&source=a";
+location.search = "?q=q&source=a";
+const displayOnly = readLocationState();
+console.log(JSON.stringify({{
+  full,
+  selective,
+  selected: state.selectedSources,
+  scope: state.scopeSources,
+  hasScope: state.hasScope,
+  displayOnly: displayOnly.selectedSources,
+  displayOnlyScope: displayOnly.scopeSources,
+  displayOnlyHasScope: displayOnly.hasScope,
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["full"], "/?q=q&source=a")
+        self.assertEqual(
+            payload["selective"], "/?q=q&zim=a&zim=b&source=a"
+        )
+        self.assertEqual(payload["selected"], ["a"])
+        self.assertEqual(payload["scope"], ["a", "b"])
+        self.assertTrue(payload["hasScope"])
+        self.assertEqual(payload["displayOnly"], ["a"])
+        self.assertEqual(payload["displayOnlyScope"], [])
+        self.assertFalse(payload["displayOnlyHasScope"])
+
+
+if __name__ == "__main__":
+    unittest.main()

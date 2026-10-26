@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 
 from libzim.reader import Archive
 
+from ..catalog import perma_ref
 from .query import INTENT_RULES
 
 ICON_METADATA_PATH = "-/icon"
@@ -173,7 +174,7 @@ def _parse_remote_xml(payload: bytes) -> ET.Element:
 
 
 def _zim_key(book: str) -> str:
-    return re.sub(r"_\d{4}-\d{2}(-\d{2})?$", "", book)
+    return perma_ref(book)
 
 
 def _intent_phrases(book: str) -> tuple[str, ...]:

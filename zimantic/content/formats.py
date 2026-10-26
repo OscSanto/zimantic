@@ -213,11 +213,6 @@ def is_text_sample(raw: bytes) -> bool:
     return any(marker in raw for marker in (b" ", b"\t", b"\r", b"\n"))
 
 
-def matches_extension(path: Path | str, extensions: frozenset[str]) -> bool:
-    """Case-insensitive extension membership using the longest suffix."""
-    return file_extension(path) in extensions
-
-
 def profile_extensions(name: str) -> frozenset[str] | None:
     """Return the extensions for a named profile, or None when unknown."""
     return PROFILE_EXTENSIONS.get(str(name).strip().casefold())
