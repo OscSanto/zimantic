@@ -666,8 +666,8 @@ As a rule of thumb, keep enough free disk space when building indexes: about **2
 **Automatic indexing with systemd.** Ready-to-copy user units in `deploy/` watch `zims/`, build
 indexes and reload the server as ZIMs become available:
 
-- `deploy/zimantic.service` — the server, with `Restart=always` and sandboxing. Copy it to
-  `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
+- `deploy/zimantic.service` — the server, with `Restart=always`, restart rate limiting, and
+  sandboxing. Copy it to `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
 - `deploy/zimantic-indexing-fast.path` + `deploy/zimantic-indexing-fast.service` — watch `zims/` and run a fast build
   followed by `reload` as a ZIM becomes available.
 - `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run the full build
@@ -676,6 +676,14 @@ indexes and reload the server as ZIMs become available:
 The path-triggered fast build runs for each ZIM in `zims/`. The full build runs from 01:00–06:00
 local time by default; set its `ExecCondition` and timer to select a different window. A shared `flock`
 prevents overlapping builds.
+
+The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server
+that cannot fit its archives fails visibly instead of looping through OOM kills. Check
+`systemctl --user status zimantic` and `journalctl --user -u zimantic`; after fixing the cause,
+`systemctl --user reset-failed zimantic` clears the rate limit. Its header also shows
+`MemoryHigh`/`MemoryMax` pairs for a Pi Zero 2 W and a Pi 5; uncomment and adjust them for the
+device, leaving headroom for the OS and kiwix-serve. `MemoryHigh` throttles first; `MemoryMax` is the
+hard limit that OOM-kills only Zimantic.
 
 Each unit has install instructions in its header. The units assume runtime data at the default XDG
 data directory, `~/.local/share/zimantic`, and the CLI installed at `~/.local/bin/zimantic`.
