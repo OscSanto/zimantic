@@ -346,14 +346,16 @@ def _refine_ole(path: Path) -> str:
     except OSError:
         return ".doc"
     markers = (
-        (b"WordDocument", ".doc"),
-        (b"Workbook", ".xls"),
-        (b"Book", ".xls"),
-        (b"PowerPoint Document", ".ppt"),
+        (b"WordDocument", ".doc", True),
+        (b"Workbook", ".xls", True),
+        # "Book" is short enough to appear in ordinary document text; the OLE
+        # directory entry that identifies BIFF5 is UTF-16, so require that form.
+        (b"Book", ".xls", False),
+        (b"PowerPoint Document", ".ppt", True),
     )
-    for marker, extension in markers:
+    for marker, extension, allow_ascii in markers:
         utf16 = marker.decode("ascii").encode("utf-16-le")
-        if marker in raw or utf16 in raw:
+        if (allow_ascii and marker in raw) or utf16 in raw:
             return extension
     return ".doc"
 

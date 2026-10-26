@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from ..search import (
     SELECTIVE_SOURCE_LIMIT,
     ArticleNotFoundError,
+    ArticleSourceNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
     SearchBusyError,
@@ -284,8 +285,9 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             for part in (requested_path or "").split("/")
             if part and part not in {".", ".."}
         )
-        message = str(error)
-        zim_found = message != "ZIM not found" and (
+        # The source itself is missing: there is no home/random link to offer.
+        # Any other not-found error still belongs to an existing source.
+        zim_found = not isinstance(error, ArticleSourceNotFoundError) and (
             not isinstance(error, ArticleUnavailableError)
             or isinstance(error, ArticleTooLargeError)
         )
@@ -295,10 +297,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         elif isinstance(error, ArticleUnavailableError):
             title = "Source unavailable"
             detail = "This offline source is not available right now."
-        elif message == "ZIM not found":
+        elif isinstance(error, ArticleSourceNotFoundError):
             title = "Source not found"
             detail = "This offline source is not installed on this device."
-        elif message == "invalid article path":
+        elif str(error) == "invalid article path":
             title = "Article not found"
             detail = "The requested path is not valid."
         else:
@@ -365,7 +367,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             return web_app._content_shell(
                 zim,
                 error_info,
-                web_app._ARTICLE_ERROR_STATUS[type(error)],
+                web_app._article_http_error(error).status_code,
                 fallback_icon,
                 base_path,
                 highlight,

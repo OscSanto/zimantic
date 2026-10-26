@@ -47,6 +47,10 @@ class _LocalIndex:
     )
     source_size: int | None = None
     zim_path: str | None = None
+    # Original basename of a file source. The index identity can differ from the
+    # filename (duplicate names get a digest suffix), while FileArchive entry
+    # paths keep the real name; URL locators are parsed against this.
+    source_name: str | None = None
     zim_signature: tuple[int, int, int, int] | None = None
     has_fulltext_index: bool | None = None
     # ``"zim"`` for a libzim archive, ``"file"`` for an ordinary-file source.

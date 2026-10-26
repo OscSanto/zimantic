@@ -252,6 +252,27 @@ def _truncate(text: str, limit: int) -> str:
     return cut[:boundary].rstrip() if boundary > 0 else cut
 
 
+def _split_oversized(text: str, limit: int) -> list[str]:
+    """Split text over ``limit`` characters without cutting normal words."""
+    chunks: list[str] = []
+    current = ""
+    for word in text.split():
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= limit:
+            current = f"{current} {word}"
+        else:
+            chunks.append(current)
+            current = word
+        # A single word longer than the limit still has to be split.
+        while len(current) > limit:
+            chunks.append(current[:limit])
+            current = current[limit:]
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _chunk_text(text: str, limit: int = MAX_SECTION_CHARS) -> list[str]:
     """Split prose at paragraph and sentence boundaries, never mid-word."""
     text = text.strip()
@@ -281,8 +302,7 @@ def _chunk_text(text: str, limit: int = MAX_SECTION_CHARS) -> list[str]:
             if len(sentence) > limit:
                 if current:
                     flush()
-                for start in range(0, len(sentence), limit):
-                    chunks.append(sentence[start:start + limit].strip())
+                chunks.extend(_split_oversized(sentence, limit))
                 continue
             if current and len(current) + 1 + len(sentence) > limit:
                 flush()
@@ -351,7 +371,7 @@ def _html_blocks(raw: bytes, max_chars: int, deadline: _Deadline) -> str:
 
 
 _XML_EXTENSIONS = frozenset({
-    ".xml", ".xsl", ".xsd", ".svg", ".opml", ".rss", ".atom", ".plist",
+    ".xml", ".xsl", ".xsd", ".svg", ".opml", ".rss", ".atom", ".plist", ".fb2",
 })
 
 
@@ -449,6 +469,8 @@ def _mime_text(
         metadata["creator"] = _collapse(sender)
 
     blocks: list[str] = []
+    html_blocks: list[str] = []
+    plain_blocks: list[str] = []
     attachments: list[str] = []
     for part in message.walk():
         if part.is_multipart():
@@ -467,14 +489,20 @@ def _mime_text(
             payload = str(payload).encode("utf-8", "replace")
         if content_type == "text/html":
             body = _html_blocks(payload, options.max_text_chars, deadline)
+            target = html_blocks
         else:
             head = payload[:4096].lstrip().lower()
             if head.startswith((b"<!doctype html", b"<html")) or b"<html" in head:
                 body = _html_blocks(payload, options.max_text_chars, deadline)
+                target = html_blocks
             else:
                 body = decode_text(payload)
+                target = plain_blocks
         if body.strip():
-            blocks.append(body)
+            target.append(body)
+    # A multipart/alternative message carries the same text twice; prefer the
+    # HTML rendition so the body is not indexed twice.
+    blocks.extend(html_blocks or plain_blocks)
     if attachments:
         blocks.append("Attachments:\n" + "\n".join(attachments))
     return "\n\n".join(blocks), metadata
@@ -2162,7 +2190,18 @@ def _unknown_document(
     # A handful of well-known but unlisted extensions still deserve a proper
     # fallback chain rather than a binary-to-text guess.
     if extension in EBOOK_EXTENSIONS:
-        return _chm_document(path, options, deadline) if extension == ".chm" else _calibre_document(path, options, deadline) or _finish(path, [], options, deadline)
+        if extension == ".chm":
+            return _chm_document(path, options, deadline)
+        calibre = _calibre_document(path, options, deadline)
+        if calibre is not None:
+            return calibre
+        # Without Calibre, an XML-based ebook (FB2) can still be read as text;
+        # returning an empty successful extraction here used to hide it from
+        # the content-sniffing fallback below.
+        raw = _read_limited(path, TEXT_SAMPLE_BYTES)
+        if _looks_like_text(raw):
+            return _text_document(path, extension, options, deadline)
+        return _finish(path, [], options, deadline)
     raw = _read_limited(path, TEXT_SAMPLE_BYTES)
     if not _looks_like_text(raw):
         return None

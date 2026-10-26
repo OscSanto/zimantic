@@ -272,13 +272,18 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
     cfg = dict(PROFILES[profile])
     config_path = Path(path)
     user: dict = {}
+    loaded = False
     try:
         user = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        loaded = True
     except FileNotFoundError:
         warn(f"zimantic: warning: {path} not found; using {profile} defaults")
     except (OSError, tomllib.TOMLDecodeError) as error:
         warn(f"zimantic: warning: could not read {path} ({error}); using {profile} defaults")
-    if config_path.exists() and not user:
+    # Only a file that parsed successfully can be called empty. A malformed or
+    # unreadable file already got its own warning above, and calling it empty
+    # afterwards contradicts that message.
+    if loaded and not user:
         warn(f"zimantic: warning: {path} is empty; using {profile} defaults")
     for key in sorted(set(user) - KNOWN_KEYS):
         warn(f"zimantic: warning: unknown config key {key!r} in {path} (ignored)")

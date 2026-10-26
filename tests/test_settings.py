@@ -90,6 +90,18 @@ class LoadConfigTests(unittest.TestCase):
             cfg = load_config(path, warn=warnings.append)
             self.assertTrue(warnings)
             self.assertEqual(cfg["index_dir"], "./indexes")
+            # A parse failure is not an empty file; the second warning used to
+            # contradict the "could not read" one.
+            self.assertFalse(any("empty" in message for message in warnings))
+
+    def test_unreadable_path_is_not_reported_as_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "config.toml"
+            directory.mkdir()
+            warnings = []
+            load_config(directory, warn=warnings.append)
+            self.assertTrue(any("could not read" in message for message in warnings))
+            self.assertFalse(any("empty" in message for message in warnings))
 
     def test_user_keys_override_and_missing_keys_stay_defaulted(self):
         with tempfile.TemporaryDirectory() as tmp:

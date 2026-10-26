@@ -1324,10 +1324,17 @@ def _append_highlight(url: str, highlight: str | None = None) -> str:
 
 
 def _article_http_error(error: Exception) -> HTTPException:
-    return HTTPException(
-        status_code=_ARTICLE_ERROR_STATUS[type(error)],
-        detail=str(error),
+    # ArticleTooLargeError subclasses ArticleUnavailableError, so test the
+    # specific exceptions first (the mapping preserves that order).
+    status = next(
+        (
+            status_code
+            for error_type, status_code in _ARTICLE_ERROR_STATUS.items()
+            if isinstance(error, error_type)
+        ),
+        500,
     )
+    return HTTPException(status_code=status, detail=str(error))
 
 
 def _search_base_path(search) -> str:

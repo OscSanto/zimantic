@@ -12,6 +12,7 @@ from zimantic.catalog import parse_file_patterns
 from zimantic.content.extract import (
     _calibre_command,
     _Deadline,
+    _chunk_text,
     _png_for_ocr,
     extract_document,
 )
@@ -292,6 +293,15 @@ class ArchiveTests(unittest.TestCase):
 
 
 class SmallFormatTests(unittest.TestCase):
+    def test_oversized_sentences_split_at_word_boundaries(self):
+        text = " ".join(f"word{number}" for number in range(40))
+        chunks = _chunk_text(text, 40)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 40 for chunk in chunks))
+        # Every source word survives intact; no chunk starts or ends with a
+        # fragment of a word.
+        self.assertEqual(" ".join(chunks).split(), text.split())
+
     def test_man_page_troff_is_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "tool.1"

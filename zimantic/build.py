@@ -381,24 +381,27 @@ def _index_file_source(
     batch_size = max(1, int(batch_size))
     rows: list[EntryRecord] = []
     bodies: dict[int, str] = {}
+    # Batches submitted to the shared embedding pipeline but not yet written.
+    # They are saved in submission order so meta.next only moves forward.
+    pending: list[tuple[Future, list[EntryRecord], int, dict[int, str]]] = []
 
-    def flush(next_entry: int) -> None:
+    def drain_one() -> None:
+        future, saved_rows, next_entry, saved_bodies = pending.pop(0)
+        _save_rows(db, saved_rows, next_entry, future.result(), bodies=saved_bodies)
+
+    def save(next_entry: int) -> None:
         nonlocal rows, bodies
         if not rows:
             return
-        if embedding_pipeline is not None and not fast:
-            _save_rows(
-                db,
-                rows,
-                next_entry,
-                embedding_pipeline.submit(rows).result(),
-                bodies=bodies,
-            )
-        elif fast:
+        if fast:
             # Fast builds never keep vectors. Skip the embedder entirely so a
             # caller that supplies one (the CLI does not) cannot pay for work
             # that _finish_build immediately throws away.
             _save_rows(db, rows, next_entry, {}, bodies=bodies)
+        elif embedding_pipeline is not None:
+            pending.append((embedding_pipeline.submit(rows), rows, next_entry, bodies))
+            if len(pending) >= embedding_pipeline.max_pending_per_build:
+                drain_one()
         else:
             _save(db, embedder, rows, next_entry, bodies=bodies)
         rows = []
@@ -419,8 +422,17 @@ def _index_file_source(
             )
             bodies[i] = entry.body
         if len(rows) >= batch_size:
-            flush(i + 1)
-    flush(source.entry_count)
+            save(i + 1)
+    save(source.entry_count)
+    while pending:
+        drain_one()
+    # Ensure a resume starts at the end even when the trailing entries had no
+    # body (the final save() is a no-op then).
+    with db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES ('next', ?)",
+            (source.entry_count,),
+        )
 
 
 def _finish_build(

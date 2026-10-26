@@ -18,6 +18,6 @@ WorkingDirectory=%h/.local/share/zimantic
 # Serialize against the nightly full build: if it already holds the lock, skip
 # instead of touching the same index files concurrently. Always reload after a
 # build attempt, while preserving the build failure for systemd.
-ExecStart=/bin/sh -c 'if ! exec 9>"%t/zimantic-build.lock"; then echo "zimantic: unable to open build lock" >&2; exit 1; fi; if ! /usr/bin/flock -n 9; then echo "zimantic: another build is running, fast build skipped" >&2; exit 0; fi; build_status=0; "%h/.local/bin/zimantic" build --fast || build_status=$?; reload_status=0; "%h/.local/bin/zimantic" reload || reload_status=$?; if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi; exit "$reload_status"'
+ExecStart=/bin/sh -c 'if ! exec 9>"%t/zimantic-build.lock"; then echo "zimantic: unable to open build lock" >&2; exit 1; fi; if ! /usr/bin/flock -n 9; then echo "zimantic: another build is running, fast build skipped" >&2; exit 0; fi; build_status=0; "%h/.local/bin/zimantic" build --fast --wait-stable || build_status=$?; reload_status=0; "%h/.local/bin/zimantic" reload || reload_status=$?; if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi; exit "$reload_status"'
 NoNewPrivileges=yes
 PrivateTmp=yes

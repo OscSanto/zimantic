@@ -6,8 +6,14 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from zimantic.cache import QueryCache
-from zimantic.search import ArticleNotFoundError, SearchQueryError
-from zimantic.web.app import create_app
+from zimantic.search import (
+    ArticleNotFoundError,
+    ArticleSourceNotFoundError,
+    ArticleTooLargeError,
+    ArticleUnavailableError,
+    SearchQueryError,
+)
+from zimantic.web.app import _article_http_error, create_app
 
 
 class FakeSearch:
@@ -702,6 +708,32 @@ class ServerTests(unittest.TestCase):
 
     def test_streaming_search_validates_query(self):
         self.assertEqual(self.client.get("/search/stream?q=%20").status_code, 400)
+
+    def test_article_error_types_map_by_subclass(self):
+        self.assertEqual(
+            _article_http_error(ArticleNotFoundError("x")).status_code, 404
+        )
+        self.assertEqual(
+            _article_http_error(ArticleSourceNotFoundError("x")).status_code, 404
+        )
+        self.assertEqual(
+            _article_http_error(ArticleTooLargeError("x")).status_code, 413
+        )
+        self.assertEqual(
+            _article_http_error(ArticleUnavailableError("x")).status_code, 503
+        )
+
+    def test_missing_source_shell_says_source_not_found(self):
+        class _MissingSourceSearch(FakeSearch):
+            @staticmethod
+            def read_article(zim, path=None):
+                raise ArticleSourceNotFoundError("ZIM not found")
+
+        client = TestClient(create_app(_MissingSourceSearch()))
+        response = client.get("/content/missing")
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("Source not found", response.text)
+        self.assertNotIn("This page is not available", response.text)
 
     def test_health_reports_indexes_and_cache(self):
         body = self.client.get("/health").json()

@@ -5,7 +5,7 @@ import threading
 import time
 import types
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -726,7 +726,7 @@ class SearchContractTests(unittest.TestCase):
                     "_enrich_pool",
                     lambda results, query, pool, limit: pool,
                 ),
-                patch.object(search, "_hydrate_results", lambda docs: None),
+                patch.object(search, "_hydrate_results", lambda docs, *_args: None),
                 patch.object(search_module, "as_completed", new=fake_as_completed),
             ):
                 executor.submit.side_effect = submit
@@ -799,7 +799,7 @@ class SearchContractTests(unittest.TestCase):
                 patch.object(
                     search, "_enrich_pool", lambda results, query, pool, limit: pool
                 ),
-                patch.object(search, "_hydrate_results", lambda docs: None),
+                patch.object(search, "_hydrate_results", lambda docs, *_args: None),
             ):
                 executor.submit.side_effect = submit
                 events = list(search.stream_search("query", limit=10))
@@ -1583,7 +1583,7 @@ class GracefulDegradationTests(unittest.TestCase):
         self.addCleanup(search.close)
         search.sources = {source.key: source for source in sources}
         search._enrich_pool = lambda results, query, pool, limit: pool
-        search._hydrate_results = lambda docs: None
+        search._hydrate_results = lambda docs, *_args: None
 
         def result_for(source):
             doc = {
@@ -2230,6 +2230,49 @@ class SourceScopeTests(unittest.TestCase):
             finally:
                 search._executor.shutdown(wait=True)
 
+    def test_remote_dated_book_slug_selects_the_local_base_source(self):
+        search = _bare_search({})
+        search.sources = {
+            "foo": SourceInfo(
+                "foo", "foo", "foo", "local", local_name="foo"
+            )
+        }
+        try:
+            sources, _selective, _scope = search._search_scope(
+                ["foo_2024-01"]
+            )
+        finally:
+            search._executor.shutdown(wait=True)
+        self.assertEqual([source.key for source in sources], ["foo"])
+
+    def test_remote_catalog_does_not_overwrite_a_local_source_identity(self):
+        search = _bare_search({})
+        search.indexes = {
+            "manual": types.SimpleNamespace(
+                source_kind="zim", source_size=None, ensure_open=lambda: None
+            )
+        }
+        sources = search._rebuild_sources(
+            [{"name": "Remote Manual", "book": "manual_2024-01"}]
+        )
+        self.assertEqual([source["name"] for source in sources], ["manual"])
+        self.assertEqual(sources[0]["book"], "manual")
+        search._executor.shutdown(wait=True)
+
+    def test_colliding_local_source_keys_are_made_unique(self):
+        search = _bare_search({})
+        index = types.SimpleNamespace(
+            source_kind="zim", source_size=None, ensure_open=lambda: None
+        )
+        # Insert the dated stem first so the undated one hits the fallback.
+        search.indexes = {"foo_2024-01": index, "foo": index}
+        sources = search._rebuild_sources([])
+        self.assertEqual(
+            sorted(source["key"] for source in sources), ["foo", "foo-2"]
+        )
+        self.assertEqual(len(sources), 2)
+        search._executor.shutdown(wait=True)
+
     def test_unknown_display_filter_falls_back_to_the_full_page(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
@@ -2377,6 +2420,140 @@ class ProductionHardeningTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
         self.assertEqual(events[-1]["type"], "error")
         self.assertTrue(events[-1]["busy"])
+
+    def test_public_results_hide_internal_rowids(self):
+        doc = {"id": "a:b", "path": "b", "_rowid": 7, "score": 1.0}
+        self.assertNotIn("_rowid", Search._public(doc, False))
+        self.assertNotIn("_rowid", Search._public(doc, True))
+        self.assertIn("_rowid", doc)
+
+    def test_slot_released_before_waiting_is_acquired_without_delay(self):
+        class _Slots:
+            def __init__(self):
+                self.calls = 0
+
+            def acquire(self, blocking=False):
+                self.calls += 1
+                return self.calls > 1
+
+        search = _bare_search({})
+        search._search_slots = _Slots()
+        search._slot_condition = threading.Condition()
+        self.assertTrue(search._acquire_search_slot())
+        self.assertEqual(search._search_slots.calls, 2)
+        search._executor.shutdown(wait=True)
+
+    def test_claim_search_reports_busy_when_the_owner_never_finishes(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        stuck = Future()
+        search._inflight[("gen", "key")] = stuck
+        with patch("zimantic.search.SEARCH_CLAIM_WAIT_SECONDS", 0.01):
+            cached, pending = search._claim_search("key", ("gen", "key"), "gen")
+        self.assertIsNone(cached)
+        self.assertIsNone(pending)
+        search._executor.shutdown(wait=True)
+
+    def test_missing_zim_path_is_not_reported_as_exact(self):
+        with _temp_dir(self) as tmp:
+            search = _bare_search({"zim_dir": str(Path(tmp) / "missing")})
+            try:
+                self.assertEqual(
+                    search._match_zim_path("manual", None), (None, False)
+                )
+            finally:
+                search._executor.shutdown(wait=True)
+
+    def test_phrase_matching_ignores_script_and_style_bodies(self):
+        html = (
+            '<html><script>var x = "very hidden phrase";</script>'
+            "<style>.very.hidden.phrase{color:red}</style>"
+            "<p>Visible text mentions none of it.</p></html>"
+        )
+        self.assertFalse(
+            _phrase_in_word_stream(
+                html.casefold(), ["very", "hidden", "phrase"]
+            )
+        )
+
+    def test_health_does_not_call_deferred_vectors_degraded(self):
+        with _temp_dir(self) as tmp:
+            archive = Path(tmp) / "manual.zim"
+            archive.write_bytes(b"zim")
+            search = _bare_search({})
+            search._defer_faiss = True
+            search.indexes = {
+                "manual": _LocalIndex(
+                    None,
+                    None,
+                    None,
+                    None,
+                    threading.Lock(),
+                    done="1",
+                    source_kind="file",
+                    zim_path=str(archive),
+                )
+            }
+            try:
+                report = search.health()
+                self.assertEqual(report["indexes"][0]["status"], "ok")
+                search._defer_faiss = False
+                report = search.health()
+                self.assertEqual(report["indexes"][0]["status"], "degraded")
+                self.assertIn(
+                    "semantic vectors unavailable",
+                    report["indexes"][0]["issues"],
+                )
+            finally:
+                search._executor.shutdown(wait=True)
+
+    def test_unavailable_native_index_reports_an_error_not_an_empty_ok(self):
+        source = SourceInfo(
+            "manual", "Manual", "manual", "local", local_name="manual"
+        )
+        index = _LocalIndex(
+            None,
+            None,
+            None,
+            None,
+            threading.Lock(),
+            open_failed=True,
+            error="cannot open archive",
+            zim_path="/zims/manual.zim",
+        )
+        search = _bare_search({})
+        search.indexes = {"manual": index}
+        try:
+            result = search._search_local(source, "query", "", "query", None, 10)
+        finally:
+            search._executor.shutdown(wait=True)
+        self.assertEqual(result.status, "error")
+        self.assertIn("cannot open archive", result.error)
+        self.assertEqual(result.items, [])
+
+    def test_file_body_lookup_prefers_rowid_and_verifies_path(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, body, path UNINDEXED, target UNINDEXED)"
+        )
+        db.executemany(
+            "INSERT INTO docs(rowid, title, body, path, target) VALUES (?, ?, ?, ?, ?)",
+            [
+                (1, "One", "body one", "one", None),
+                (2, "Two", "body two", "two", None),
+            ],
+        )
+        try:
+            self.assertEqual(
+                Search._file_body_row(db, {"path": "one"}, 1), ("one", "body one")
+            )
+            # A stale/mismatched rowid falls back to the path after verifying it.
+            self.assertEqual(
+                Search._file_body_row(db, {"path": "one"}, 2), ("one", "body one")
+            )
+        finally:
+            db.close()
 
 
 class CatalogLocationTests(unittest.TestCase):

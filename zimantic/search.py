@@ -110,6 +110,9 @@ RANDOM_ARTICLE_ATTEMPTS = 128
 # short burst of retries this way lets an in-flight search finish and the
 # query be answered (or served from cache) instead of failing with 503.
 SLOT_WAIT_SECONDS = 2.0
+# Bound how long an identical-query waiter (or an abandoned finalizer) waits
+# for a source future. A hung source must not hang every following request.
+SEARCH_CLAIM_WAIT_SECONDS = 60.0
 # Leading bytes returned by a head-only article read (shell title/favicon).
 HEAD_READ_BYTES = 256 << 10
 # The installed-library view recomputes its version on every conditional
@@ -119,6 +122,12 @@ LIBRARY_SCAN_TTL_SECONDS = 120.0
 
 
 _HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
+# Script and style bodies are not visible article text. Treat a complete block
+# as one separator, and an unclosed opener as swallowing the rest of the page.
+_SCRIPT_STYLE_BLOCK = re.compile(
+    r"<\s*(script|style)\b[^>]*>.*?</\s*\1\s*>", re.IGNORECASE | re.DOTALL
+)
+_SCRIPT_STYLE_OPEN = re.compile(r"<\s*(?:script|style)\b", re.IGNORECASE)
 
 # Entries whose readable text can be searched for an exact query phrase.
 _PHRASE_MIMETYPES = frozenset({"text/plain", "text/html", "application/xhtml+xml"})
@@ -190,6 +199,14 @@ def _readable_words(text: str) -> Iterator[str]:
     tags_possible = True
     while position < length:
         if tags_possible and text[position] == "<":
+            block = _SCRIPT_STYLE_BLOCK.match(text, position)
+            if block is not None:
+                position = block.end()
+                continue
+            if _SCRIPT_STYLE_OPEN.match(text, position):
+                # An unclosed script/style has no reliable end; everything
+                # after it is code, not article text.
+                return
             end = text.find(">", position + 1)
             if end >= 0:
                 position = end + 1
@@ -255,6 +272,10 @@ class SearchBusyError(Exception):
 
 class ArticleNotFoundError(Exception):
     """The requested local ZIM or article path does not exist."""
+
+
+class ArticleSourceNotFoundError(ArticleNotFoundError):
+    """The named local source is not installed."""
 
 
 class ArticleUnavailableError(Exception):
@@ -680,7 +701,13 @@ class Search:
             # A file source can expose several entries (PDF pages, EPUB
             # chapters, subtitle chunks). Keep the locator as a browser
             # fragment so a PDF opens at the page and a video at the cue.
-            prefix = f"{local_name}#"
+            # The index identity may carry a digest suffix while entry paths
+            # keep the original filename, so parse against that name.
+            index = self.indexes.get(local_name)
+            source_name = getattr(index, "source_name", None)
+            if not source_name and index is not None and index.zim_path:
+                source_name = Path(index.zim_path).name
+            prefix = f"{source_name or local_name}#"
             value = str(path or "")
             locator = value[len(prefix):] if value.startswith(prefix) else ""
             return f"{base}#{quote(locator, safe='=&')}" if locator else base
@@ -727,7 +754,7 @@ class Search:
             if size > largest_size:
                 largest_size = size
                 largest = path
-        return largest, source_size is None
+        return largest, largest is not None and source_size is None
 
     def _find_zim_path(self, stem: str, source_size: int | None) -> Path | None:
         """Best archive for ``stem``: an exact-size match, else the largest."""
@@ -807,25 +834,6 @@ class Search:
             return None
         finally:
             db.close()
-
-    @staticmethod
-    def _read_index_state(db_path: Path) -> tuple[bool, int | None]:
-        """Return ``(finished, recorded_source_size)`` for one SQLite index.
-
-        An index still being written, or one that cannot be opened, reports
-        ``False`` so its archive's native full-text index keeps the source
-        searchable until the database is ready. The recorded source size is
-        ``None`` when absent or unparsable.
-        """
-        meta = Search._read_index_meta(db_path)
-        if not meta:
-            return False, None
-        finished = str(meta.get("done", "")) in {"1", "fast"}
-        try:
-            source_size = int(meta["filesize"]) if "filesize" in meta else None
-        except (TypeError, ValueError):
-            source_size = None
-        return finished, source_size
 
     def _stale_zim_archive(
         self, stem: str, source_size: int | None, scanned: Path
@@ -1093,6 +1101,7 @@ class Search:
                     done=done_value,
                     source_size=source_size,
                     zim_path=str(source_path),
+                    source_name=Path(source_path).name,
                     zim_signature=_file_signature(Path(source_path)),
                     has_fulltext_index=True,
                     source_kind="file",
@@ -1422,8 +1431,7 @@ class Search:
             if any_changed:
                 # Index content, and therefore what is searchable, changed;
                 # cached answers under the same names can no longer be fresh.
-                self._library_scan_at = 0.0
-                self._library_version_at = 0.0
+                self._invalidate_library_cache()
                 with self._state_lock:
                     self._cache_generation = getattr(self, "_cache_generation", 0) + 1
                 self.cache.clear()
@@ -1662,7 +1670,20 @@ class Search:
                     continue
                 key = _zim_key(local_name)
                 if key in local:
+                    # Two local ZIMs can share a base name (a dated archive and
+                    # an undated one). Fall back to the unique index name, and
+                    # add a numeric suffix if even that is taken.
                     key = local_name
+                    suffix = 2
+                    while key in local:
+                        key = f"{local_name}-{suffix}"
+                        suffix += 1
+                    logger.warning(
+                        "zimantic: %s shares a source key with another local "
+                        "source; exposing it as %r",
+                        local_name,
+                        key,
+                    )
                 record = (
                     self._catalog.get_stem_size(local_name, index.source_size)
                     if self._catalog
@@ -1766,36 +1787,36 @@ class Search:
             merged = dict(local)
             for entry in entries:
                 key = _zim_key(entry["book"])
-                current = merged.get(key)
-                if current and current.mode == "local":
-                    merged[key] = replace(
-                        current,
-                        name=entry["name"],
-                        book=entry["book"],
-                        intent_phrases=_intent_phrases(entry["book"]),
-                    )
-                else:
-                    merged[key] = SourceInfo(
-                        key=key,
-                        name=entry["name"],
-                        book=entry["book"],
-                        mode="kiwix",
-                        available=True,
-                        intent_phrases=_intent_phrases(entry["book"]),
-                    )
+                if merged.get(key) is not None:
+                    # A local source is authoritative for its own identity.
+                    # Merging the remote catalog's display name here used to
+                    # overwrite the local name (and made "is this indexed?"
+                    # checks look at the wrong field); the local catalog and
+                    # archive already provide the title.
+                    continue
+                merged[key] = SourceInfo(
+                    key=key,
+                    name=entry["name"],
+                    book=entry["book"],
+                    mode="kiwix",
+                    available=True,
+                    intent_phrases=_intent_phrases(entry["book"]),
+                )
 
             old_sources = self.sources
             self.sources = dict(sorted(merged.items(), key=lambda pair: pair[1].name.casefold()))
             changed = self.sources != old_sources
+            if changed:
+                # Bump the generation in the same critical section that swaps
+                # the source snapshot, so a concurrent search can never pair
+                # the old source list with the new generation.
+                self._cache_generation = getattr(self, "_cache_generation", 0) + 1
             sources = self.source_dicts()
         if changed:
             # The set of searchable sources changed, so prior answers can be stale.
             # Keeping the cache while the source set is unchanged lets repeated
             # queries (for example, page reloads) be answered without recomputing.
-            self._library_scan_at = 0.0
-            self._library_version_at = 0.0
-            with self._state_lock:
-                self._cache_generation = getattr(self, "_cache_generation", 0) + 1
+            self._invalidate_library_cache()
             self.cache.clear()
             preview_cache = getattr(self, "preview_cache", None)
             if preview_cache is not None:
@@ -1992,16 +2013,33 @@ class Search:
             has_fulltext_index=metadata.get("HasFulltextIndex"),
         )
 
+    def _library_cache_lock(self) -> threading.Lock:
+        """Return the lock guarding the library scan/version caches."""
+        with self._state_lock:
+            lock = getattr(self, "_library_scan_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self._library_scan_lock = lock
+            return lock
+
+    def _invalidate_library_cache(self) -> None:
+        """Drop cached library scans, including one currently being computed."""
+        lock = self._library_cache_lock()
+        with lock:
+            self._library_scan_at = 0.0
+            self._library_version_at = 0.0
+            # A scan that started before this point must not publish its stale
+            # result with a fresh timestamp.
+            self._library_scan_token = getattr(self, "_library_scan_token", 0) + 1
+
     def _library_zim_paths(self) -> dict[str, Path]:
         """Scan ``zim_dir`` at most once per short interval for the library view."""
-        lock = getattr(self, "_library_scan_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            self._library_scan_lock = lock
+        lock = self._library_cache_lock()
         now = time.monotonic()
         with lock:
             cached = getattr(self, "_library_scan_cache", None)
             scanned_at = getattr(self, "_library_scan_at", 0.0)
+            token = getattr(self, "_library_scan_token", 0)
             if cached is not None and now - scanned_at < LIBRARY_SCAN_TTL_SECONDS:
                 return dict(cached)
         scanned = self._scan_zim_paths()
@@ -2013,8 +2051,9 @@ class Search:
                 if index.source_kind == "file" and index.zim_path:
                     scanned.setdefault(name, Path(index.zim_path))
         with lock:
-            self._library_scan_cache = dict(scanned)
-            self._library_scan_at = time.monotonic()
+            if getattr(self, "_library_scan_token", 0) == token:
+                self._library_scan_cache = dict(scanned)
+                self._library_scan_at = time.monotonic()
         return scanned
 
     def library_dicts(self) -> list[dict[str, Any]]:
@@ -2042,7 +2081,7 @@ class Search:
             identity = source.uuid or f"stem:{source.name}"
             rank = (
                 source.available,
-                source.name in indexed_names,
+                bool(source.local_name and source.local_name in indexed_names),
                 source.size or 0,
                 -len(source.name or ""),
                 source.name or "",
@@ -2059,14 +2098,12 @@ class Search:
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int], ...]]:
         """Return a cheap token that changes when the library contents change."""
-        lock = getattr(self, "_library_scan_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            self._library_scan_lock = lock
+        lock = self._library_cache_lock()
         now = time.monotonic()
         with lock:
             cached = getattr(self, "_library_version_cache", None)
             cached_at = getattr(self, "_library_version_at", 0.0)
+            token = getattr(self, "_library_scan_token", 0)
             if cached is not None and now - cached_at < LIBRARY_SCAN_TTL_SECONDS:
                 return cached
         signatures = []
@@ -2082,8 +2119,11 @@ class Search:
         catalog_version = catalog.version() if catalog is not None else ()
         version = (self.source_version(), catalog_version, tuple(signatures))
         with lock:
-            self._library_version_cache = version
-            self._library_version_at = time.monotonic()
+            # A reload during the scan already invalidated the previous token;
+            # do not let this older signature set be cached under the new one.
+            if getattr(self, "_library_scan_token", 0) == token:
+                self._library_version_cache = version
+                self._library_version_at = time.monotonic()
         return version
 
     def source_version(self) -> tuple[int, ...]:
@@ -2238,7 +2278,7 @@ class Search:
                 else self._scan_zim_paths().get(zim_name)
             )
             if zim_path is None:
-                raise ArticleNotFoundError("ZIM not found")
+                raise ArticleSourceNotFoundError("ZIM not found")
             try:
                 archive = Archive(zim_path)
             except (OSError, RuntimeError, ValueError) as error:
@@ -2536,7 +2576,7 @@ class Search:
         with self._state_lock:
             index = self.indexes.get(zim_name)
         if index is None:
-            raise ArticleNotFoundError("ZIM not found")
+            raise ArticleSourceNotFoundError("ZIM not found")
         if index.source_kind != "file" and index.ensure_open() is None:
             raise ArticleUnavailableError("ZIM archive is unavailable")
 
@@ -2603,7 +2643,11 @@ class Search:
             if not archive_current:
                 reasons.append("source unavailable")
 
-            vectors_expected = self.semantic and index.done == "1"
+            vectors_expected = (
+                self.semantic
+                and index.done == "1"
+                and not getattr(self, "_defer_faiss", False)
+            )
             vectors_loaded = index.faiss_index is not None
             if vectors_expected and not vectors_loaded:
                 reasons.append("semantic vectors unavailable")
@@ -2715,10 +2759,16 @@ class Search:
             return [], True, ()
 
         wanted = set(zim)
+        # Match the same aliases that a Kiwix catalog link may use: a remote
+        # book slug carries a date suffix, while a local index is identified by
+        # its date-stripped key. Comparing base keys preserves those links
+        # without overwriting the local source's own name/book metadata.
+        wanted_keys = {_zim_key(value) for value in wanted}
         selected = [
             source
             for source in available
             if wanted.intersection({source.key, source.name, source.book, source.local_name})
+            or source.key in wanted_keys
         ]
         if not selected:
             # A stale bookmark or a source removed since the URL was saved must
@@ -2807,13 +2857,20 @@ class Search:
 
     @staticmethod
     def _public(doc: dict[str, Any], debug: bool) -> dict[str, Any]:
-        """A response copy. Ranking metadata is only shipped in debug mode."""
+        """A response copy. Ranking metadata is only shipped in debug mode.
+
+        Private bookkeeping keys (``_rowid`` and the transient ranking flags)
+        never leave the server, even in debug mode.
+        """
         if debug:
-            return dict(doc)
+            return {
+                key: value for key, value in doc.items() if not key.startswith("_")
+            }
         return {
             key: value
             for key, value in doc.items()
-            if key not in ("explain", "ranking", "score")
+            if not key.startswith("_")
+            and key not in ("explain", "ranking", "score")
         }
 
     @staticmethod
@@ -2991,6 +3048,15 @@ class Search:
         page = self.search_page(query, zim, limit, offset, source, debug)
         return list(page["results"])
 
+    @staticmethod
+    def _rowids_by_id(pool: list[dict[str, Any]]) -> dict[str, int]:
+        """Map result ids to their file-index rowids, when they have one."""
+        return {
+            doc["id"]: doc["_rowid"]
+            for doc in pool
+            if isinstance(doc.get("_rowid"), int)
+        }
+
     def _cached_events(
         self,
         cached: Any,
@@ -3006,7 +3072,7 @@ class Search:
         """Replay a cached pool as a finished stream (progress + one page)."""
         pool, cached_sources = self._unpack_cache(cached)
         state = self._page_state(pool, source, offset, page_size, debug)
-        self._hydrate_results(state["results"])
+        self._hydrate_results(state["results"], self._rowids_by_id(pool))
         total_sources = len(sources)
         yield {
             "type": "started",
@@ -3057,6 +3123,7 @@ class Search:
         generation: int,
     ) -> tuple[Any | None, Future | None]:
         """Return a cached result or claim ownership of an in-flight query."""
+        deadline = time.monotonic() + SEARCH_CLAIM_WAIT_SECONDS
         while True:
             cached = self._cached_for_generation(cache_key, generation)
             if cached is not None:
@@ -3067,8 +3134,15 @@ class Search:
                     pending = Future()
                     self._inflight[inflight_key] = pending
                     return None, pending
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, None
             try:
-                cached = existing.result(timeout=self.source_timeout * 4)
+                cached = existing.result(timeout=remaining)
+            except TimeoutError:
+                # The owner is still running. Report busy instead of waiting
+                # forever; a retry can pick up the result once it is cached.
+                return None, None
             except Exception:
                 cached = None
             if (
@@ -3099,11 +3173,14 @@ class Search:
         query = self._validate_query(query)
         page_size = self._page_size(limit)
         offset = max(0, int(offset))
-        sources, selective, scope_key = self._search_scope(zim)
+        # Snapshot the source set and the cache generation together. Reading
+        # them in separate critical sections could pair the old sources with a
+        # newer generation and cache pre-refresh results as current.
+        with self._state_lock:
+            sources, selective, scope_key = self._search_scope(zim)
+            generation = getattr(self, "_cache_generation", 0)
         all_sources = scope_key is None
         cache_key = self._cache_key(query, scope_key)
-        with self._state_lock:
-            generation = getattr(self, "_cache_generation", 0)
         inflight_key = (generation, cache_key)
         cached, pending = self._claim_search(cache_key, inflight_key, generation)
         if cached is not None:
@@ -3120,7 +3197,12 @@ class Search:
             )
             return
         if pending is None:
-            raise RuntimeError("search ownership was not claimed")
+            yield {
+                "type": "error",
+                "error": "search is taking too long; try again shortly",
+                "busy": True,
+            }
+            return
         yield from self._run_search_owner(
             query,
             cache_key,
@@ -3134,6 +3216,56 @@ class Search:
             selective,
             all_sources,
         )
+
+    def _finalize_search(
+        self,
+        query: str,
+        source_results: list[SourceResult],
+        source: str | list[str] | None,
+        offset: int,
+        page_size: int,
+        debug: bool,
+        pool_target: int,
+        reported_counts: dict[str, int | None],
+        selective: bool,
+        generation: int,
+        cache_key: Any,
+        pool: list[dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Rank, enrich, hydrate and cache one finished search.
+
+        Shared by the live owner and the abandoned-stream finalizer so the two
+        paths cannot drift; it returns the page state used by the ``done`` event
+        and the value stored in the query cache. The live owner passes its last
+        ranked pool so the final page does not pay for one more ranking pass.
+        """
+        if pool is None:
+            pool = self._rank_results(source_results, query, pool_target)
+        pool = self._enrich_pool(source_results, query, pool, pool_target)
+        state = self._page_state(pool, source, offset, page_size, debug)
+        self._hydrate_results(state["results"], self._rowids_by_id(pool))
+        hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
+        for doc in pool:
+            if doc["id"] in hydrated:
+                doc["lead"] = hydrated[doc["id"]]
+        # The cache holds only the deduplicated ranked pool plus compact source
+        # outcomes, never a copy of every source's item list. Source counts are
+        # the ones the live `source` events reported (a source that finished
+        # between rank passes reported none), so a cached replay shows the same
+        # per-source numbers as the original stream.
+        cache_value = {
+            "generation": generation,
+            "pool": pool,
+            "sources": [
+                result.to_event(reported_counts.get(result.source.key))
+                for result in source_results
+            ],
+        }
+        with self._state_lock:
+            current_generation = getattr(self, "_cache_generation", 0)
+        if not selective and current_generation == generation:
+            self.cache.put(cache_key, cache_value)
+        return state, cache_value
 
     def _run_search_owner(
         self,
@@ -3345,7 +3477,6 @@ class Search:
                     # rank pass. Publish it now instead of waiting for the next
                     # completion, which may be a long way off.
                     pool = self._rank_results(completed, query, pool_target)
-                    counts = self._source_counts(pool)
                     last_rank_at = now
                     unranked = 0
                     state = self._page_state(pool, source, offset, page_size, debug)
@@ -3372,35 +3503,20 @@ class Search:
                         "elapsed": round(now - started_at, 1),
                     }
 
-            if len(completed) != total_sources:
-                pool = self._rank_results(completed, query, pool_target)
-            pool = self._enrich_pool(completed, query, pool, pool_target)
-            state = self._page_state(pool, source, offset, page_size, debug)
-            self._hydrate_results(state["results"])
-            hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
-            for doc in pool:
-                if doc["id"] in hydrated:
-                    doc["lead"] = hydrated[doc["id"]]
-            matched_by = self._matched_by(pool) if debug else None
-            # The cache holds only the deduplicated ranked pool plus compact
-            # source outcomes, never a copy of every source's item list. Source
-            # counts are the ones the live `source` events reported (a source
-            # that finished between rank passes reported none), so a cached
-            # replay shows the same per-source numbers as the original stream
-            # (`_enrich_pool` can reorder or drop docs, changing a fresh count).
-            cache_value = {
-                "generation": generation,
-                "pool": pool,
-                "sources": [
-                    result.to_event(reported_counts.get(result.source.key))
-                    for result in completed
-                ],
-                "pool_target": pool_target,
-            }
-            with self._state_lock:
-                current_generation = getattr(self, "_cache_generation", 0)
-            if not selective and current_generation == generation:
-                self.cache.put(cache_key, cache_value)
+            state, cache_value = self._finalize_search(
+                query,
+                completed,
+                source,
+                offset,
+                page_size,
+                debug,
+                pool_target,
+                reported_counts,
+                selective,
+                generation,
+                cache_key,
+                pool=None if unranked else pool,
+            )
             yield self._event(
                 "done",
                 state,
@@ -3408,7 +3524,7 @@ class Search:
                 total_sources,
                 offset,
                 page_size,
-                matched_by,
+                self._matched_by(cache_value["pool"]) if debug else None,
             )
         except GeneratorExit:
             # A disconnected streaming response closes this generator while
@@ -3471,12 +3587,29 @@ class Search:
         cache_value: Any = None
         try:
             future_sources = dict(zip(futures, sources))
+            deadline = time.monotonic() + SEARCH_CLAIM_WAIT_SECONDS
             for future in futures:
                 if future in completed_futures:
                     continue
                 src = future_sources[future]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    completed.append(
+                        SourceResult(
+                            source=src,
+                            error="search timed out",
+                            status="error",
+                        )
+                    )
+                    continue
                 try:
-                    result = future.result()
+                    result = future.result(timeout=remaining)
+                except TimeoutError:
+                    result = SourceResult(
+                        source=src,
+                        error="search timed out",
+                        status="error",
+                    )
                 except Exception as error:
                     result = SourceResult(
                         source=src,
@@ -3486,27 +3619,19 @@ class Search:
                 completed.append(result)
 
             pool_target = self._pool_target()
-            pool = self._rank_results(completed, query, pool_target)
-            pool = self._enrich_pool(completed, query, pool, pool_target)
-            state = self._page_state(pool, source, offset, page_size, debug)
-            self._hydrate_results(state["results"])
-            hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
-            for doc in pool:
-                if doc["id"] in hydrated:
-                    doc["lead"] = hydrated[doc["id"]]
-            cache_value = {
-                "generation": generation,
-                "pool": pool,
-                "sources": [
-                    result.to_event(reported_counts.get(result.source.key))
-                    for result in completed
-                ],
-                "pool_target": pool_target,
-            }
-            with self._state_lock:
-                current_generation = getattr(self, "_cache_generation", 0)
-            if not selective and current_generation == generation:
-                self.cache.put(cache_key, cache_value)
+            _, cache_value = self._finalize_search(
+                query,
+                completed,
+                source,
+                offset,
+                page_size,
+                debug,
+                pool_target,
+                reported_counts,
+                selective,
+                generation,
+                cache_key,
+            )
         except Exception:
             logger.exception("zimantic: abandoned search finalization failed")
         finally:
@@ -3536,12 +3661,15 @@ class Search:
         deadline = time.monotonic() + SLOT_WAIT_SECONDS
         with condition:
             while True:
+                # Retry under the condition before waiting. A slot released
+                # between the first attempt and this block has no waiter to
+                # notify, so waiting first would sleep for the full budget.
+                if self._search_slots.acquire(blocking=False):
+                    return True
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
                 condition.wait(remaining)
-                if self._search_slots.acquire(blocking=False):
-                    return True
 
     def _search_source(
         self,
@@ -3669,6 +3797,15 @@ class Search:
         # all live in SQLite. Opening its FileArchive here would re-parse the
         # whole PDF/EPUB/video on the first search for no benefit.
         archive = None if index.source_kind == "file" else index.ensure_open()
+        if db is None and searcher is None and index.faiss_index is None:
+            # Nothing can answer this source: no SQLite index, no libzim
+            # full-text searcher and no vectors. Report an error instead of a
+            # successful empty result so a missing/corrupt archive is visible.
+            return SourceResult(
+                source=replace(source, available=False),
+                error=index.error or "ZIM archive is unavailable",
+                status="error",
+            )
         if searcher and archive:
             # libzim's Searcher is not documented as thread-safe: serialize it.
             with index.lock:
@@ -3809,7 +3946,7 @@ class Search:
                 if row is None:
                     return None
                 if row[3] is None:
-                    return row
+                    return current_id, row
                 visited.add(current_id)
                 next_id = int(row[3])
                 if next_id in visited:
@@ -3819,10 +3956,10 @@ class Search:
 
         docs: dict[int, dict[str, Any]] = {}
         for rowid in values:
-            row = final_row(rowid)
-            if not row:
+            resolved = final_row(rowid)
+            if not resolved:
                 continue
-            _, title, path, _ = row
+            final_id, (_, title, path, _) = resolved
             doc = {
                 "id": f"{source.key}:{path}",
                 "source_key": source.key,
@@ -3833,14 +3970,46 @@ class Search:
                 "path": path,
                 "mimetype": None,
                 "url": self._source_url(source, path),
+                # Internal only: file-source previews and phrase checks read the
+                # body by rowid so they do not scan the UNINDEXED path column.
+                # _public() strips private keys before serialization.
+                "_rowid": final_id,
             }
             docs[rowid] = doc
         return docs
+
+    @staticmethod
+    def _file_body_row(db, doc: dict[str, Any], rowid: int | None):
+        """Return the file index's ``(path, body)`` row for one result.
+
+        The rowid lookup avoids a full scan of the FTS table's UNINDEXED
+        ``path`` column. The stored path is verified before use so a stale
+        cached pool cannot show another entry's body; docs without a rowid (or
+        with a mismatched one) fall back to the historical path lookup.
+        """
+        if rowid is not None:
+            try:
+                row = db.execute(
+                    "SELECT path, body FROM docs WHERE rowid = ?", (rowid,)
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            if row is not None and row[0] == doc["path"]:
+                return row
+        try:
+            row = db.execute(
+                "SELECT path, body FROM docs WHERE path = ? LIMIT 1",
+                (doc["path"],),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        return row if row is not None and row[0] == doc["path"] else None
 
     def _extract_previews(
         self,
         local_name: str,
         docs: list[dict[str, Any]],
+        rowids: dict[str, int] | None = None,
     ) -> dict[str, str]:
         """Extract previews for one local source while holding its archive lock."""
         with self._state_lock:
@@ -3863,15 +4032,9 @@ class Search:
                     return {doc["id"]: "" for doc in docs}
                 previews: dict[str, str] = {}
                 for doc in docs:
-                    try:
-                        row = db.execute(
-                            "SELECT body FROM docs WHERE path = ? LIMIT 1",
-                            (doc["path"],),
-                        ).fetchone()
-                    except sqlite3.Error:
-                        row = None
+                    row = self._file_body_row(db, doc, (rowids or {}).get(doc["id"]))
                     previews[doc["id"]] = (
-                        self._preview(str(row[0] or "")) if row else ""
+                        self._preview(str(row[1] or "")) if row else ""
                     )
                 return previews
             finally:
@@ -3925,7 +4088,11 @@ class Search:
             self._release_index(index)
         return previews
 
-    def _hydrate_results(self, docs: list[dict[str, Any]]) -> None:
+    def _hydrate_results(
+        self,
+        docs: list[dict[str, Any]],
+        rowids: dict[str, int] | None = None,
+    ) -> None:
         """Populate only the displayed local results, in parallel by source."""
         with self._state_lock:
             sources = dict(self.sources)
@@ -3949,10 +4116,9 @@ class Search:
             grouped.setdefault(source.local_name, []).append(doc)
 
         futures = {
-            self._executor.submit(self._extract_previews, local_name, source_docs): (
-                local_name,
-                source_docs,
-            )
+            self._executor.submit(
+                self._extract_previews, local_name, source_docs, rowids
+            ): (local_name, source_docs)
             for local_name, source_docs in grouped.items()
         }
         for future in as_completed(futures):
@@ -3990,6 +4156,9 @@ class Search:
         phrase_active = len(phrase_words) >= 2 and bool(pool)
         _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
         max_html_bytes = _int_config(self.cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES)
+        max_phrase_bytes = _int_config(
+            self.cfg, "max_article_bytes", 33_554_432
+        )
         indexes = getattr(self, "indexes", {})
 
         # Check the phrase in article text for the highest-ranked candidates,
@@ -4062,6 +4231,12 @@ class Search:
                             source_doc["mimetype"] = mimetype
                         if not is_phrase_candidate or mimetype not in _PHRASE_MIMETYPES:
                             continue
+                        # libzim decompresses the whole item when .content is
+                        # read; slice after that is too late. Honor the same
+                        # serving limit as /article so one huge entry cannot
+                        # monopolize memory during a phrase check.
+                        if int(getattr(item, "size", 0) or 0) > max_phrase_bytes:
+                            continue
                         try:
                             raw = bytes(item.content[:max_html_bytes])
                         except (KeyError, RuntimeError, TypeError, ValueError):
@@ -4110,18 +4285,12 @@ class Search:
                     source_doc["mimetype"] = "text/plain"
                 if result["id"] not in phrase_ids:
                     continue
-                try:
-                    row = db.execute(
-                        "SELECT body FROM docs WHERE path = ? LIMIT 1",
-                        (result["path"],),
-                    ).fetchone()
-                except sqlite3.Error:
+                rowid = source_doc.get("_rowid") if source_doc is not None else None
+                row = self._file_body_row(db, result, rowid)
+                if row is None:
                     continue
-                hit = bool(
-                    row
-                    and _phrase_in_word_stream(
-                        str(row[0] or "").casefold(), phrase_words
-                    )
+                hit = _phrase_in_word_stream(
+                    str(row[1] or "").casefold(), phrase_words
                 )
                 if source_doc is not None:
                     source_doc["_content_phrase"] = hit

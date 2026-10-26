@@ -224,6 +224,42 @@ class PdfAndLocatorTests(unittest.TestCase):
             finally:
                 search.close()
 
+    def test_file_result_url_keeps_locator_when_index_name_has_a_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zim_dir = root / "zims"
+            index_dir = root / "indexes"
+            zim_dir.mkdir()
+            index_dir.mkdir()
+            path = zim_dir / "notes.txt"
+            path.write_text(
+                "A sufficiently long note about repairing a bicycle tire. " * 4,
+                encoding="utf-8",
+            )
+            # Duplicate-named files get a path-derived suffix; entry paths keep
+            # the real filename.
+            build(
+                path,
+                index_dir,
+                None,
+                1,
+                fast=True,
+                index_name="notes.txt-abc123",
+            )
+            search = Search(
+                {"zim_dir": str(zim_dir), "index_dir": str(index_dir)},
+                semantic=False,
+            )
+            try:
+                source = search.sources[search.local_names()[0]]
+                self.assertEqual(source.local_name, "notes.txt-abc123")
+                self.assertEqual(
+                    search._source_url(source, "notes.txt#page=3"),
+                    "/file/notes.txt-abc123#page=3",
+                )
+            finally:
+                search.close()
+
 
 class ArchiveTests(unittest.TestCase):
     def test_archive_names_are_indexed_without_extraction(self):

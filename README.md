@@ -650,6 +650,9 @@ repeat `--verbose`/`-v` for info and debug output.
 **Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
 model. Title-word and ZIM full-text search work; a normal `build` creates the vector index.
 
+`build --wait-stable` polls source sizes until they stop changing before indexing. The systemd units
+below pass it so a file caught mid-download is not indexed; an ordinary CLI build starts immediately.
+
 The desktop profile embeds 32 articles at a time (mobile 8, supercomputer 128). Independent ZIMs can
 be read and built concurrently with `--workers N` or the `build_workers` setting; when unset, the
 default scales with CPU and RAM. Full builds use a bounded shared embedding pipeline: at most

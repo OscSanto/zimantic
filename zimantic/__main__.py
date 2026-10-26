@@ -179,6 +179,14 @@ def _make_parser() -> argparse.ArgumentParser:
         help="rebuild the selected indexes even if they are already complete",
     )
     build.add_argument(
+        "--wait-stable",
+        action="store_true",
+        help=(
+            "wait until every source's size stops changing before indexing "
+            "(for downloaded files and systemd.path triggers)"
+        ),
+    )
+    build.add_argument(
         "-j",
         "--workers",
         type=int,
@@ -375,7 +383,11 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         log_capabilities()
 
     source_sizes = {source: source.stat().st_size for source in sources}
-    downloading = _find_downloading_sizes(source_sizes)
+    # The stability poll exists for downloads and the systemd.path trigger; an
+    # explicit CLI build of already-present files should start immediately.
+    downloading = (
+        _find_downloading_sizes(source_sizes) if args.wait_stable else set()
+    )
     selected = _select_build_sources(sources, source_sizes)
     sources = [source for source, _index_name in selected]
     index_names = dict(selected)

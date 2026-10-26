@@ -172,6 +172,41 @@ class BuildWorkerTests(unittest.TestCase):
             self.assertEqual(len(set(names)), 2)
             self.assertTrue(all(name.startswith("book.pdf-") for name in names))
 
+    def test_build_stability_wait_is_opt_in(self):
+        import zimantic.__main__ as main_module
+        from zimantic import settings
+
+        build_module = importlib.import_module("zimantic.build")
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            source = directory / "note.txt"
+            source.write_text("A note about repairing a bicycle.", encoding="utf-8")
+            config = {
+                "zim_dir": str(directory),
+                "index_dir": str(directory / "indexes"),
+                "batch_size": 1,
+                "build_workers": 1,
+            }
+            for extra, expected in (([], 0), (["--wait-stable"], 1)):
+                with self.subTest(extra=extra):
+                    with (
+                        patch.object(
+                            main_module.sys,
+                            "argv",
+                            ["zimantic", "build", "--fast", *extra, str(source)],
+                        ),
+                        patch.object(settings, "load_config", return_value=config),
+                        patch.object(main_module, "_configure_logging"),
+                        patch.object(
+                            main_module,
+                            "_find_downloading_sizes",
+                            return_value=set(),
+                        ) as find_sizes,
+                        patch.object(build_module, "build"),
+                    ):
+                        main_module.main()
+                    self.assertEqual(find_sizes.call_count, expected)
+
     def test_build_workers_process_independent_zims_concurrently(self):
         import zimantic.__main__ as main_module
         from zimantic import settings
