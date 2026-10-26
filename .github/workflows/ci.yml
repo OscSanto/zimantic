@@ -32,6 +32,20 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest -q
 
+  windows:
+    name: test (windows x86_64, py3.14, non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@main
+      - uses: astral-sh/setup-uv@main
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
   armhf:
     name: native dependency check (armhf)
     needs: test

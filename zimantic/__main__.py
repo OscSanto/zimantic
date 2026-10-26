@@ -139,10 +139,10 @@ def _make_parser() -> argparse.ArgumentParser:
             "values with commas, for example 'zim,epub,pdf,txt,md,mp4'. "
             "Named profiles expand to several formats: text, ebook, docs, "
             "office, media, video, audio, image, comic, archive, all "
-            "(every supported type) and any (every file, using content "
-            "detection). Explicit file paths are always considered even "
-            "when their extension is unknown. Default: config file_types "
-            "(zim)"
+            "(every supported type), and all+unknown (every file, using "
+            "content detection). Explicit file paths are always considered "
+            "even when their extension is unknown. Default: config "
+            "file_types (zim)"
         ),
     )
     build.add_argument(

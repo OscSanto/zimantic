@@ -186,6 +186,32 @@ def normalize_web_base_path(value: object) -> str:
 
 def _system_memory_gb() -> float:
     """Total physical memory in GiB, 0.0 when unknown."""
+    if os.name == "nt":
+        # os.sysconf does not exist on Windows; ask the Win32 API instead so
+        # the mobile profile can still be selected on low-memory tablets.
+        try:
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return status.ullTotalPhys / (1024 ** 3)
+        except (AttributeError, OSError, ValueError):
+            pass
+        return 0.0
     try:
         pages = os.sysconf("SC_PHYS_PAGES")
         page_size = os.sysconf("SC_PAGE_SIZE")

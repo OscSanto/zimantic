@@ -172,8 +172,8 @@ def is_supported_file(path: Path | str) -> bool:
     A known extension is authoritative and costs no file read.  For unknown or
     missing extensions (``manual.bin``, an extensionless download) the leading
     bytes are inspected so explicitly passed files still get the right reader.
-    A decodable prose sample is accepted as text so ``--file-types any`` can
-    index extensionless notes such as ``README``.
+    A decodable prose sample is accepted as text so ``--file-types
+    all+unknown`` can index extensionless notes such as ``README``.
     """
     extension = file_extension(path)
     if extension in SUPPORTED_EXTENSIONS:
@@ -228,13 +228,13 @@ def expand_file_type_token(token: object) -> list[str]:
 
     A profile name expands to ``*.ext`` patterns; anything else is returned
     unchanged so globs, exact filenames and explicit paths keep working.
-    ``any`` is a profile that matches every file, letting content sniffing
-    decide whether a file is readable.
+    ``all+unknown`` matches every file, letting content sniffing decide
+    whether a file is readable.
     """
     value = str(token).strip()
     if not value:
         return []
-    if value.casefold() in {"any", "all-files", "everything"}:
+    if value.casefold() == "all+unknown":
         return ["*"]
     extensions = profile_extensions(value)
     if extensions is None:

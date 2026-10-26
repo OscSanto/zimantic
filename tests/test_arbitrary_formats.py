@@ -77,8 +77,15 @@ def _bencode(value) -> bytes:
 
 
 class SniffingTests(unittest.TestCase):
-    def test_any_profile_matches_every_file(self):
-        self.assertEqual(parse_file_patterns("any"), ("*",))
+    def test_all_unknown_profile_matches_every_file(self):
+        self.assertEqual(parse_file_patterns("all+unknown"), ("*",))
+
+    def test_all_profile_matches_supported_types_only(self):
+        patterns = parse_file_patterns("all")
+        self.assertIn("*.zim", patterns)
+        self.assertIn("*.pdf", patterns)
+        self.assertIn("*.mp4", patterns)
+        self.assertNotIn("*", patterns)
 
     def test_missing_extension_pdf_is_sniffed_and_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:

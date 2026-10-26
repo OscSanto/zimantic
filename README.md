@@ -109,7 +109,7 @@ documents without one are skipped.
 `--file-types`) includes their extension. Extensions may be written as `epub`, `.epub` or
 `*.epub`. Explicit file paths are always considered; when the extension is missing or unknown
 (for example a downloaded `manual.bin`), the leading bytes are inspected and the file is routed to
-the right reader (PDF, EPUB, ZIP/Office, media, and so on). Use `--file-types any` to make a folder
+the right reader (PDF, EPUB, ZIP/Office, media, and so on). Use `--file-types all+unknown` to make a folder
 scan consider every file and let that content detection decide. The extractor is layered: a native
 reader is preferred, then a small optional command (`pdftotext`, `unrtf`, `catdoc`, `ps2ascii`,
 `tesseract`, `ffmpeg`), then calibre's `ebook-convert`, and a missing helper only skips that format
@@ -131,7 +131,7 @@ Supported families include:
 - archives: member names are always indexed; `archive_depth` optionally extracts and indexes
   nested files. ZIP/7z/RAR and many aliases (`.zipx`, `.tar.lz4`, `.zstd`, `.lzh`, `.001`, `.r00`,
   ...) are supported, and subtitle-bearing media inside an archive is indexed like a standalone
-  file.
+  file. Archives are read with `7z` or `unar`.
 
 A PDF page, EPUB chapter, presentation slide, spreadsheet sheet and subtitle chunk become separate
 results. Locators are preserved in the result link, for example `/file/manual.pdf#page=12` or
@@ -146,27 +146,33 @@ zimantic build --file-types 'zim,text,ebook'
 zimantic build --file-types 'zim,docs,archives' --ocr --archive-depth 1
 
 # Consider every file and rely on content detection for unknown extensions.
-zimantic build --file-types any
+zimantic build --file-types all+unknown
 
 # Index one explicit file regardless of file_types.
 zimantic build ~/Documents/manual.pdf
 ```
 
 Named profiles are `text`, `ebook`, `docs`, `office`, `media`, `video`, `audio`, `image`, `comic`,
-`archive`, `all` (every supported type) and `any` (every file, using content detection). The same list
-belongs in `config.toml` so a later folder build uses it:
+`archive`, `all` (every supported type) and `all+unknown` (every file, using content detection). The
+same list belongs in `config.toml` so a later folder build uses it:
 
 ```toml
 file_types = ["zim", "text", "docs", "ebook"]
 # ocr = true
 # archive_depth = 1
+# max_archive_bytes = 268435456
 # file_timeout = 120.0
 # max_file_text_chars = 2000000
 ```
 
-Each extraction is bounded by `file_timeout`, `max_file_text_chars`, `max_archive_members` and
-`max_archive_bytes`. A malformed file or a failing helper is logged and skipped without aborting
-the rest of the build.
+`archive_depth` controls recursive archive extraction: `0` (the default) lists member names without
+unpacking files, `1` extracts and indexes supported direct members, and `2` also extracts and
+indexes supported members inside nested archives. `max_archive_bytes` is a separate per-archive
+limit on the total **uncompressed member data** extracted (256 MiB by default); archive metadata
+and member names do not count toward it. Compressed archives may still be streamed to read their
+directory, but member contents are only unpacked when the archive depth requires it. Each
+extraction is also bounded by `file_timeout`, `max_file_text_chars` and `max_archive_members`.
+A malformed file or a failing helper is logged and skipped without aborting the rest of the build.
 
 **Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
@@ -458,6 +464,34 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
 
    For a development runtime check, activate the `uv` environment and run
    `python -m pytest tests/test_runtime_api.py`; use `python -m pytest` for the full suite.
+
+### Windows
+
+Zimantic supports 64-bit Windows (x86-64) on Python 3.11–3.14. Windows ARM64 and
+32-bit Windows are not supported because `libzim`, `faiss-cpu` and `onnxruntime`
+do not publish wheels for those targets.
+
+The steps above work with the Windows equivalents:
+
+```powershell
+git clone https://github.com/OscSanto/zimantic.git zimantic
+cd zimantic
+uv sync --locked --no-dev
+.venv\Scripts\activate
+zimantic --help
+```
+
+Download the model with PowerShell instead of `curl`:
+
+```powershell
+New-Item -ItemType Directory -Force model | Out-Null
+Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model\model.onnx
+Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model\sentencepiece.bpe.model
+```
+
+`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`; restart
+`zimantic serve` instead. Stop the server before replacing or deleting a ZIM or
+index file, since Windows does not allow an open file to be replaced in place.
 
 ### Using a different embedding model
 

@@ -1,6 +1,8 @@
 import itertools
 import json
+import os
 import tempfile
+from contextlib import contextmanager
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
@@ -33,6 +35,18 @@ AIR_DISAMBIGUATION_HTML = (
     "<p>This disambiguation page lists articles associated with the same title.</p>"
     "</body></html>"
 )
+
+
+@contextmanager
+def _temp_dir(test_case):
+    """Yield a temporary directory and register its cleanup early.
+
+    unittest runs cleanups in LIFO order, so a Search created later is closed
+    before Windows tries to delete the files it still has open.
+    """
+    directory = tempfile.TemporaryDirectory()
+    test_case.addCleanup(directory.cleanup)
+    yield Path(directory.name)
 
 
 class _Page(Item):
@@ -124,9 +138,7 @@ def _config(root: Path, *, max_results: int = 100) -> dict:
 
 
 def _close_search(search: Search) -> None:
-    for index in list(search.indexes.values()):
-        search._close_index(index)
-    search._executor.shutdown(wait=True)
+    search.close()
 
 
 class LocalIntegrationTests(unittest.TestCase):
@@ -168,7 +180,7 @@ class LocalIntegrationTests(unittest.TestCase):
         return search
 
     def test_real_zim_build_search_and_http_api(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             self._build_fixture(root)
             search = self._open_search(root)
@@ -315,7 +327,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(json.loads(stream.text.splitlines()[-1])["results"][0]["title"], "Beta")
 
     def test_homepage_with_trailing_slash_path(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             self._build_fixture(
                 root,
@@ -334,7 +346,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(raw.status_code, 200)
 
     def test_toolbar_skips_container_paths_that_are_not_articles(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             self._build_fixture(
                 root,
@@ -361,7 +373,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b">5e Hazards</span>", shell.content)
 
     def test_unindexed_zim_uses_native_fulltext_before_build(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zims = root / "zims"
             indexes = root / "indexes"
@@ -384,7 +396,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertTrue(report["capabilities"]["fulltext"])
 
     def test_unindexed_zim_random_only_returns_articles(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zims = root / "zims"
             indexes = root / "indexes"
@@ -428,7 +440,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(index.random_article_ids, [article_id])
 
     def test_indexed_random_uses_uniform_fallback_when_sparse(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zims = root / "zims"
             indexes = root / "indexes"
@@ -463,7 +475,7 @@ class LocalIntegrationTests(unittest.TestCase):
                 self.assertEqual(search.random_article_path("manual"), "Alpha")
 
     def test_zim_without_native_fulltext_is_not_a_source(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zims = root / "zims"
             indexes = root / "indexes"
@@ -483,7 +495,7 @@ class LocalIntegrationTests(unittest.TestCase):
     def test_pdf_entries_are_indexed_end_to_end(self):
         import pymupdf
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zims = root / "zims"
             indexes = root / "indexes"
@@ -525,8 +537,12 @@ class LocalIntegrationTests(unittest.TestCase):
                 next(result for result in results if result["title"] == "Photosynthesis")["lead"],
             )
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows cannot replace a ZIM that the running server holds open",
+    )
     def test_interrupted_upgrade_keeps_published_index_until_reload(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             old_pages = [("Old", "Old article", ALPHA_HTML)]
             new_pages = [
@@ -577,7 +593,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(search.search("old article", limit=1), [])
 
     def test_corrupt_vectors_degrade_and_missing_zim_is_ignored(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zim_path = self._build_fixture(root)
             faiss_path = root / "indexes" / "manual.faiss"
@@ -589,13 +605,15 @@ class LocalIntegrationTests(unittest.TestCase):
 
             # Removing the archive orphans the finished index: it is ignored
             # entirely rather than served title-only, so the source disappears.
+            # Close first so Windows releases its handle to the archive.
+            search.close()
             zim_path.unlink()
             missing_zim_search = self._open_search(root)
             self.assertNotIn("manual", missing_zim_search.indexes)
             self.assertEqual(missing_zim_search.health()["status"], "degraded")
 
     def test_redirects_collapse_and_disambiguation_ranking_survive_real_build(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             self._build_fixture(
                 root,
@@ -641,7 +659,7 @@ class LocalIntegrationTests(unittest.TestCase):
             )
 
     def test_http_boundaries_etags_and_gzip_are_preserved(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             long_text = "A detailed article body for compression testing. " * 30
             long_html = f"<html><body><p>{long_text}</p></body></html>"
@@ -696,7 +714,7 @@ class LocalIntegrationTests(unittest.TestCase):
             )
 
     def test_unreadable_archive_is_reported_in_sources_and_library(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zim_path = self._build_fixture(root)
             search = self._open_search(root)
@@ -726,7 +744,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(library.json()[0]["size"], zim_path.stat().st_size)
 
     def test_library_perma_ref_comes_from_the_filename_stem(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zims = root / "zims"
             indexes = root / "indexes"
@@ -754,7 +772,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(library[0]["uuid"], search.catalog.get_stem("manual_2026-08").uuid)
 
     def test_xhtml_articles_get_the_article_bridge(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zims = root / "zims"
             indexes = root / "indexes"
@@ -789,7 +807,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b"data-zimantic-bridge", response.content)
 
     def test_unmounted_zim_dir_leaves_served_views_empty_until_remount(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             self._build_fixture(root)
             (root / "zims").rename(root / "zims-offline")
@@ -801,7 +819,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(search.catalog.rows()), 1)
 
     def test_readable_duplicate_replaces_an_unreadable_copy(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             zim_path = self._build_fixture(root)
             copy_path = zim_path.with_name("manual-copy.zim")

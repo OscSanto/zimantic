@@ -1404,7 +1404,21 @@ class Search:
                 return
             index._closed = True
             connections = [index.db, *index._conns]
+            Search._release_native_resources(index)
         Search._close_connections(connections)
+
+    @staticmethod
+    def _release_native_resources(index: _LocalIndex) -> None:
+        """Drop references to native handles held by a closed index.
+
+        libzim archives and FAISS indexes close when their last Python
+        reference disappears. Clearing them here matters on Windows, where an
+        open file cannot be deleted or replaced.
+        """
+        index.searcher = None
+        index.archive = None
+        index.faiss_index = None
+        index.random_article_ids = None
 
     @staticmethod
     def _close_connections(connections: list[sqlite3.Connection | None]) -> None:
@@ -1435,6 +1449,7 @@ class Search:
             if should_close:
                 index._closed = True
                 connections = [index.db, *index._conns]
+                Search._release_native_resources(index)
             else:
                 connections = []
         if connections:
@@ -2030,10 +2045,15 @@ class Search:
             return (getattr(self, "_cache_generation", 0),)
 
     def close(self) -> None:
-        """Release the search thread pool, canceling work not yet started."""
+        """Release the search thread pool and every open index."""
         executor = getattr(self, "_executor", None)
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
+        with self._state_lock:
+            indexes = list(self.indexes.values())
+            self.indexes.clear()
+        for index in indexes:
+            self._close_index(index)
         catalog = getattr(self, "catalog", None)
         if catalog is not None:
             catalog.close()

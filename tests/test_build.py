@@ -1,4 +1,5 @@
 import importlib
+import os
 import sqlite3
 import tempfile
 import threading
@@ -195,6 +196,9 @@ class BuildUpgradeTests(unittest.TestCase):
 
 
 class TempIndexFileTests(unittest.TestCase):
+    @unittest.skipIf(
+        os.name == "nt", "Windows does not expose POSIX permission bits"
+    )
     def test_temp_index_file_uses_readable_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "manual.faiss"

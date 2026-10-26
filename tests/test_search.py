@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 import tempfile
+from contextlib import contextmanager
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -104,6 +105,18 @@ def _bare_search(cfg):
     return search
 
 
+@contextmanager
+def _temp_dir(test_case):
+    """Yield a temporary directory and register its cleanup early.
+
+    unittest runs cleanups in LIFO order, so a Search created later is closed
+    before Windows tries to delete the files it still has open.
+    """
+    directory = tempfile.TemporaryDirectory()
+    test_case.addCleanup(directory.cleanup)
+    yield Path(directory.name)
+
+
 class _IconItem:
     def __init__(self, mimetype, content):
         self.mimetype = mimetype
@@ -160,8 +173,7 @@ def _title_search(rows, query, limit=1):
     try:
         events = list(search.stream_search(query, limit=limit))
     finally:
-        search._executor.shutdown(wait=True)
-        db.close()
+        search.close()
     return events[-1]["results"]
 
 
@@ -636,6 +648,7 @@ class SearchContractTests(unittest.TestCase):
                 "max_stream_ranks": 4,
             }
         )
+        self.addCleanup(search.close)
         search.max_stream_ranks = 4
         search.semantic = False
         search.sources = {source.key: source for source in sources}
@@ -690,6 +703,7 @@ class SearchContractTests(unittest.TestCase):
             for index in range(3)
         ]
         search = _bare_search({"candidate_count": 2, "max_stream_ranks": 1})
+        self.addCleanup(search.close)
         search.max_stream_ranks = 1  # rank_interval = ceil(3 / 1) = 3
         search.stream_update_interval = 0.05
         search.semantic = False
@@ -777,6 +791,7 @@ class SearchContractTests(unittest.TestCase):
             for index in range(2)
         ]
         search = _bare_search({"candidate_count": 2})
+        self.addCleanup(search.close)
         search.semantic = False
         search.sources = {source.key: source for source in sources}
         search._search_slots = threading.BoundedSemaphore(1)
@@ -1186,10 +1201,11 @@ class GracefulDegradationTests(unittest.TestCase):
         }
 
     def test_index_without_vectors_still_serves_title_results(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -1202,11 +1218,12 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_health_reports_ok_when_homepage_is_unavailable(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             zim = tmp / "manual.zim"
             zim.write_bytes(b"zim")
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search.semantic = False
             search.sources = {
                 "manual": SourceInfo(
@@ -1238,6 +1255,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
     def test_library_includes_sources_without_a_homepage(self):
         search = _bare_search({})
+        self.addCleanup(search.close)
         search.sources = {
             "readable": SourceInfo(
                 "readable",
@@ -1275,6 +1293,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
     def test_library_lists_an_unreadable_source(self):
         search = _bare_search({})
+        self.addCleanup(search.close)
         search.sources = {
             "broken": SourceInfo(
                 "broken",
@@ -1302,6 +1321,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
     def test_library_prefers_a_readable_duplicate(self):
         search = _bare_search({})
+        self.addCleanup(search.close)
         search.sources = {
             "broken": SourceInfo(
                 "broken",
@@ -1340,7 +1360,7 @@ class GracefulDegradationTests(unittest.TestCase):
         search._executor.shutdown(wait=True)
 
     def test_failed_archive_open_is_not_retried(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             index = _LocalIndex(
                 None,
                 None,
@@ -1359,10 +1379,11 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(index.error, "cannot open")
 
     def test_reload_retries_a_latched_archive_open(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             zim = Path(tmp) / "manual.zim"
             zim.write_bytes(b"not a zim")
             search = _bare_search({"zim_dir": tmp})
+            self.addCleanup(search.close)
             search._defer_faiss = False
             index = _LocalIndex(
                 None,
@@ -1394,7 +1415,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_deferred_faiss_loads_vectors_after_indexes_open(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             (tmp / "manual.faiss").write_bytes(b"vectors")
@@ -1422,7 +1443,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertTrue(search.indexes["manual"].semantic)
 
     def test_deferred_faiss_reload_skips_catalog_and_source_refresh(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             (tmp / "manual.faiss").write_bytes(b"vectors")
@@ -1455,13 +1476,14 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertTrue(search.indexes["manual"].semantic)
 
     def test_archive_lookup_prefers_the_matching_size_then_the_largest(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             nested = root / "collection" / "nested"
             nested.mkdir(parents=True)
             moved = nested / "manual.zim"
             moved.write_bytes(b"x" * 10)
             search = _bare_search({"zim_dir": str(root)})
+            self.addCleanup(search.close)
 
             self.assertEqual(search._find_zim_path("manual", 10), moved)
             (root / "other").mkdir()
@@ -1474,16 +1496,17 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(search._find_zim_path("manual", 12), larger)
 
     def test_scan_zim_paths_accepts_uppercase_extension(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             upper = root / "manual.ZIM"
             upper.write_bytes(b"x")
             search = _bare_search({"zim_dir": str(root)})
+            self.addCleanup(search.close)
             self.assertEqual(search._scan_zim_paths(), {"manual": upper})
             self.assertEqual(search._find_zim_path("manual", 1), upper)
 
     def test_scan_zim_paths_keeps_the_largest_of_a_repeated_stem(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             (root / "a").mkdir()
             (root / "a" / "solo.zim").write_bytes(b"x" * 10)
@@ -1497,6 +1520,7 @@ class GracefulDegradationTests(unittest.TestCase):
             larger.write_bytes(b"x" * 6)
 
             search = _bare_search({"zim_dir": str(root)})
+            self.addCleanup(search.close)
             found = search._scan_zim_paths()
 
             self.assertEqual(found["solo"], root / "a" / "solo.zim")
@@ -1504,10 +1528,11 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(found["clash"], larger)
 
     def test_finished_stream_is_cached_for_search_method(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -1521,7 +1546,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_cached_stream_replays_source_outcomes(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(
                 tmp,
@@ -1529,6 +1554,7 @@ class GracefulDegradationTests(unittest.TestCase):
                 rows=[(1, "Tire Change", "tire-change", None)],
             )
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -1544,7 +1570,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(cached_events[-1]["results"], first_events[-1]["results"])
 
     def test_cached_source_counts_match_the_stream(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(
                 tmp,
@@ -1552,6 +1578,7 @@ class GracefulDegradationTests(unittest.TestCase):
                 rows=[(1, "Tire Change", "tire-change", None)],
             )
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -1586,6 +1613,7 @@ class GracefulDegradationTests(unittest.TestCase):
         cfg["max_stream_ranks"] = 1  # rank_interval = ceil(3 / 1) = 3
 
         search = _bare_search(cfg)
+        self.addCleanup(search.close)
         search.sources = {source.key: source for source in sources}
         search._enrich_pool = lambda results, query, pool, limit: pool
         search._hydrate_results = lambda docs: None
@@ -1655,10 +1683,11 @@ class GracefulDegradationTests(unittest.TestCase):
         self.assertEqual(counts_of(cached), live)
 
     def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -1679,10 +1708,11 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_reload_keeps_cache_when_nothing_changed(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
             list(search.stream_search("tire change", limit=1))
@@ -1694,9 +1724,10 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_reload_picks_up_and_forgets_indexes(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
 
             self.assertEqual(search.reload()["indexes"], [])
 
@@ -1714,7 +1745,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_reload_reopens_a_replaced_index(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(
                 tmp,
@@ -1722,6 +1753,7 @@ class GracefulDegradationTests(unittest.TestCase):
                 rows=[(1, "Old title", "old", None)],
             )
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
             old_index = search.indexes["manual"]
@@ -1741,7 +1773,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_incomplete_index_keeps_the_zim_fulltext_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             # A filesystem fallback is discoverable even while a build is in
             # progress (the schema exists but no 'done' marker is written yet).
@@ -1756,6 +1788,7 @@ class GracefulDegradationTests(unittest.TestCase):
             db.close()
 
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             self.assertEqual(search._discover_local_indexes()["manual"][0], "zim")
 
             # Once the build finishes, the SQLite index becomes authoritative.
@@ -1767,7 +1800,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_index_whose_zim_changed_size_falls_back_to_the_unindexed_zim(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
             db = sqlite3.connect(tmp / "manual.sqlite")
@@ -1778,13 +1811,14 @@ class GracefulDegradationTests(unittest.TestCase):
             zim.write_bytes(b"zim")  # 3 bytes, not the recorded 999
 
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             found = search._discover_local_indexes()
             # The stale index is ignored and the archive serves unindexed.
             self.assertEqual(found["manual"], ("zim", zim))
             search._executor.shutdown(wait=True)
 
     def test_index_matching_its_zim_size_stays_authoritative(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
             zim = tmp / "manual.zim"
@@ -1798,16 +1832,18 @@ class GracefulDegradationTests(unittest.TestCase):
             db.close()
 
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             self.assertEqual(search._discover_local_indexes()["manual"][0], "sqlite")
             search._executor.shutdown(wait=True)
 
     def test_finished_index_with_no_local_zim_is_ignored(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
             (tmp / "manual.zim").unlink()
 
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             # With no archive to serve, the orphaned index is not loaded.
             self.assertNotIn("manual", search._discover_local_indexes())
             search._executor.shutdown(wait=True)
@@ -1816,6 +1852,7 @@ class GracefulDegradationTests(unittest.TestCase):
 class CatalogRefreshTests(unittest.TestCase):
     def test_failed_catalog_refresh_preserves_last_successful_entries(self):
         search = _bare_search({"kiwix_server": "http://kiwix"})
+        self.addCleanup(search.close)
         entries = [{"name": "Remote Manual", "book": "manual"}]
 
         with patch.object(search, "_catalog_entries", side_effect=[entries, None]):
@@ -1852,6 +1889,7 @@ class CatalogRefreshTests(unittest.TestCase):
                 return self._payload()
 
         search = _bare_search({})
+        self.addCleanup(search.close)
         with (
             patch(
                 "zimantic.search.urlopen",
@@ -1867,6 +1905,7 @@ class CatalogRefreshTests(unittest.TestCase):
 
     def test_catalog_refresh_does_not_retry_invalid_responses(self):
         search = _bare_search({})
+        self.addCleanup(search.close)
         with (
             patch("zimantic.search.urlopen", side_effect=ValueError("bad XML")) as urlopen,
             patch("zimantic.search.time.sleep") as sleep,
@@ -1904,6 +1943,7 @@ class CatalogRefreshTests(unittest.TestCase):
                 )
 
         search = _bare_search({"kiwix_catalog_limit": 2})
+        self.addCleanup(search.close)
         with patch("zimantic.search.urlopen", return_value=_Response()):
             entries = search._catalog_entries("http://kiwix")
 
@@ -1936,6 +1976,7 @@ class KiwixSearchTests(unittest.TestCase):
                 return self.payload
 
         search = _bare_search({"candidate_count": 4, "kiwix_server": "http://kiwix"})
+        self.addCleanup(search.close)
         source = SourceInfo("remote", "Remote", "manual", "kiwix")
         with patch("zimantic.search.urlopen", return_value=_Response()):
             result = search._search_kiwix(source, "query", 4)
@@ -1954,11 +1995,12 @@ class PaginationTests(unittest.TestCase):
         }
 
     def test_pages_are_prefixes_of_one_ranked_pool(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 6)]
             _write_index(tmp, "manual", rows=rows)
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -1972,11 +2014,12 @@ class PaginationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_out_of_range_offset_clamps_to_last_page(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 6)]
             _write_index(tmp, "manual", rows=rows)
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -1990,11 +2033,12 @@ class PaginationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_second_page_reuses_the_cached_pool(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 6)]
             _write_index(tmp, "manual", rows=rows)
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -2008,11 +2052,12 @@ class PaginationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_display_source_filter_keeps_counts_for_all_sources(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "alpha", rows=[(1, "Tire Change Alpha", "a", None)])
             _write_index(tmp, "beta", rows=[(1, "Tire Change Beta", "b", None)])
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -2032,10 +2077,11 @@ class PaginationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_concurrent_identical_searches_share_one_computation(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire", None)])
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -2075,6 +2121,7 @@ class PaginationTests(unittest.TestCase):
 
     def test_disconnected_stream_finishes_shared_search(self):
         search = _bare_search({})
+        self.addCleanup(search.close)
         quick = SourceInfo("quick", "Quick", "quick", "local", local_name="quick")
         slow = SourceInfo("slow", "Slow", "slow", "local", local_name="slow")
         search.sources = {source.key: source for source in (quick, slow)}
@@ -2108,10 +2155,11 @@ class PaginationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_debug_flag_gates_ranking_explanation(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire", None)])
             search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
             search._load_indexes()
             search.refresh_sources()
 
@@ -2148,6 +2196,7 @@ class SourceScopeTests(unittest.TestCase):
                 rows=[(1, f"Tire Change {index}", f"tire-{index}", None)],
             )
         search = _bare_search(self._cfg(tmp))
+        self.addCleanup(search.close)
         search._load_indexes()
         search.refresh_sources()
         return search
@@ -2160,7 +2209,7 @@ class SourceScopeTests(unittest.TestCase):
         self.assertEqual(Search._selective_source_limit(1_000), 10)
 
     def test_unknown_source_selection_falls_back_to_all_sources(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = self._search(tmp)
             try:
@@ -2172,7 +2221,7 @@ class SourceScopeTests(unittest.TestCase):
                 search._executor.shutdown(wait=True)
 
     def test_unknown_display_filter_falls_back_to_the_full_page(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = self._search(tmp)
             try:
@@ -2190,7 +2239,7 @@ class SourceScopeTests(unittest.TestCase):
                 search._executor.shutdown(wait=True)
 
     def test_small_selection_searches_only_those_sources_and_is_not_cached(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = self._search(tmp)
             try:
@@ -2212,7 +2261,7 @@ class SourceScopeTests(unittest.TestCase):
                 search._executor.shutdown(wait=True)
 
     def test_large_selection_promotes_to_full_cached_scope(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = self._search(tmp)
             try:
@@ -2306,6 +2355,7 @@ class ProductionHardeningTests(unittest.TestCase):
 
     def test_exhausted_search_slots_report_busy_without_blocking(self):
         search = _bare_search({})
+        self.addCleanup(search.close)
         search._search_slots = threading.BoundedSemaphore(1)
         self.assertTrue(search._search_slots.acquire(blocking=False))
         try:
@@ -2321,7 +2371,7 @@ class ProductionHardeningTests(unittest.TestCase):
 
 class CatalogLocationTests(unittest.TestCase):
     def test_page_size_is_clamped_to_the_result_pool(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             index_dir = root / "indexes"
             index_dir.mkdir()
@@ -2337,7 +2387,7 @@ class CatalogLocationTests(unittest.TestCase):
             self.assertEqual(search.page_size, 10)
 
     def test_search_puts_catalog_beside_the_index_directory(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with _temp_dir(self) as tmp:
             root = Path(tmp)
             index_dir = root / "indexes"
             index_dir.mkdir()

@@ -10,9 +10,10 @@ zim_dir = "./zims"
 # File types that `zimantic build` indexes when scanning a folder. The default
 # indexes ZIMs only. Extensions may be written as `epub`, `.epub` or `*.epub`.
 # Named profiles expand to a group of formats: text, ebook, docs, office, media,
-# video, audio, image, comic, archive, all (every supported type) and any
-# (every file; content detection decides). Add other types to index ebooks,
-# text, PDFs, subtitles, and videos with subtitle sidecars, for example:
+# video, audio, image, comic, archive, all (every supported type) and
+# all+unknown (every file; content detection decides). Add other types to
+# index ebooks, text, PDFs, subtitles, and videos with subtitle sidecars, for
+# example:
 #   file_types = ["zim", "epub", "pdf", "txt", "md", "mp4"]
 #   file_types = ["zim", "text", "docs", "ebook"]
 # A single comma-separated string also works: file_types = "zim,epub,pdf,txt".

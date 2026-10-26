@@ -51,7 +51,7 @@ class FilePatternTests(unittest.TestCase):
             root = Path(tmp)
             (root / "nested").mkdir()
             (root / "one.zim").write_bytes(b"z")
-            (root / "NESTED").mkdir()
+            (root / "other").mkdir()
             (root / "nested" / "book.EPUB").write_bytes(b"e")
             (root / "nested" / "notes.txt").write_text("text")
 
