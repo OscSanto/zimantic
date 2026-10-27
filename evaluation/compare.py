@@ -53,6 +53,19 @@ def main():
         runs.append((data["meta"]["label"], data["meta"], data["results"]))
     names = [label for label, _, _ in runs]
 
+    # Score every run on the same queries. A run that covered fewer ZIMs (e.g. a ZIM no longer
+    # downloadable) would otherwise be compared on a different, easier or harder, query set.
+    # ZIMs an engine refuses (meta "unsupported") don't count against the other runs.
+    def answered(run, q):
+        return q["zim"] in run[1].get("unsupported", {}) or f"{q['zim']}|{q['id']}" in run[2]
+    shared = [q for q in qs if all(answered(run, q) for run in runs)]
+    left_out = sorted({q["zim"] for q in qs} - {q["zim"] for q in shared})
+    note = (f"{len(qs) - len(shared)} queries left out because not every run has them"
+            + (f" (ZIMs: {', '.join(left_out)})" if left_out else "") + ".") if len(shared) < len(qs) else ""
+    qs = shared
+    if not qs:
+        sys.exit("no queries in common between these runs")
+
     def ranks(run, subset):
         _, meta, res = run
         out = []
@@ -66,6 +79,8 @@ def main():
     lines = [f"## Evaluation: {', '.join(names)}", "",
              f"{len(qs)} queries ({args.split} split). Baseline: **{names[0]}**. "
              "#1 / top 5 / top 20 = share of queries with the right article at that position or better.", ""]
+    if note:
+        lines += [f"**Note:** {note}", ""]
 
     # overall
     lines += ["### Overall", "", "| Run | Queries | #1 | Top 5 | Top 20 | MRR | ± (#1, 95%) | Median ms | p95 ms | Fixed / broken vs baseline |",
