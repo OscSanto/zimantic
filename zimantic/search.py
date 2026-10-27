@@ -675,6 +675,10 @@ class Search:
             _int_config(cfg, "page_size", DEFAULT_PAGE_SIZE),
             self.max_results,
         )
+        # Reading a preview means opening and parsing the article. The UI only
+        # displays one page, so hydrating more than that is wasted work on the
+        # request path; 0 turns previews off (the lead field stays empty).
+        self.preview_limit = _int_config(cfg, "preview_limit", self.page_size, minimum=0)
         self.max_concurrent_searches = _int_config(
             cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
         )
@@ -3628,17 +3632,10 @@ class Search:
         if query_vector is not None and index.faiss_index is not None:
             try:
                 similarities, ids = index.faiss_index.search(query_vector, count)
-                minimum_similarity = _float_config(
-                    self.cfg,
-                    "min_cosine_similarity",
-                    DEFAULT_MIN_COSINE_SIMILARITY,
-                    -1.0,
-                    1.0,
-                )
                 semantic_ids = [
                     (float(score), int(rowid))
                     for score, rowid in zip(similarities[0], ids[0])
-                    if rowid >= 0 and score >= minimum_similarity
+                    if rowid >= 0
                 ]
                 rowids.update(rowid for _, rowid in semantic_ids)
             except Exception as error:
@@ -3700,15 +3697,32 @@ class Search:
             if db is not None
             else self._fetch_archive_docs(source, archive, archive_entries)
         )
-        for score, rowid in semantic_ids:
-            doc = docs.get(rowid)
-            if doc:
-                semantic.append((score, doc))
         keyword = [(score, docs[row["rowid"]]) for score, row in keyword if row["rowid"] in docs]
         for rank, rowid in fulltext_rows:
             doc = docs.get(rowid)
             if doc:
                 fulltext.append((rank, doc))
+        # Keep weak meaning matches only when this source has no lexical
+        # candidates. With title or full-text hits the cosine floor removes
+        # noise; without them it used to turn a meaning-only query into an
+        # empty result list, because every semantic candidate was discarded.
+        if keyword or fulltext:
+            minimum_similarity = _float_config(
+                self.cfg,
+                "min_cosine_similarity",
+                DEFAULT_MIN_COSINE_SIMILARITY,
+                -1.0,
+                1.0,
+            )
+            semantic_ids = [
+                (score, rowid)
+                for score, rowid in semantic_ids
+                if score >= minimum_similarity
+            ]
+        for score, rowid in semantic_ids:
+            doc = docs.get(rowid)
+            if doc:
+                semantic.append((score, doc))
 
         items = self._source_items(semantic, keyword, fulltext)
         return SourceResult(
@@ -3887,7 +3901,10 @@ class Search:
         self,
         docs: list[dict[str, Any]],
     ) -> None:
-        """Populate only the displayed local results, in parallel by source."""
+        """Populate previews for the displayed page, in parallel by source."""
+        if self.preview_limit <= 0:
+            return
+        docs = docs[: self.preview_limit]
         with self._state_lock:
             sources = dict(self.sources)
         preview_cache = getattr(self, "preview_cache", None)

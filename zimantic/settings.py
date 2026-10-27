@@ -29,6 +29,7 @@ _COMMON = {
     "max_html_bytes": 4_194_304,
     "max_article_bytes": 33_554_432,
     "max_preview_chars": 1_000,
+    "preview_limit": 10,
     "min_cosine_similarity": 0.85,
     "source_timeout": 12,
 }

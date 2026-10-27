@@ -45,6 +45,10 @@ max_kiwix_response_bytes = 67108864
 # max_results because a page is sliced from the ranked pool.
 # page_size = 10
 
+# Previews are read from the ZIM at request time. Hydrate at most this many
+# results per page; the rest keep an empty lead. 0 disables preview hydration.
+# preview_limit = 10
+
 # Largest ranked result pool kept and served. Pages are drawn from this pool.
 # Desktop 100, mobile 50, supercomputer 200.
 # max_results = 100
@@ -88,9 +92,11 @@ max_kiwix_response_bytes = 67108864
 # Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
 # nprobe = 64
 
-# Meaning matches below this cosine similarity are discarded. Cross-language
-# queries (for example Chinese, Hindi or Arabic against an English ZIM) score
-# lower; 0.80 often recovers them at the cost of more weak matches.
+# Meaning matches below this cosine similarity are discarded when the source
+# also has a title or full-text match. A meaning-only query keeps its best
+# candidates regardless, so this cannot turn it into an empty result list.
+# Lower it (0.80) when a lexical match should not suppress broader meaning
+# matches, for example for cross-language queries.
 # min_cosine_similarity = 0.85
 
 # Search workers. Desktop 8, mobile 2, supercomputer 16. More workers reduce

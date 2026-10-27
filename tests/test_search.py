@@ -56,6 +56,7 @@ def _bare_search(cfg):
     search.source_timeout = 12
     search.candidate_count = cfg.get("candidate_count", 16)
     search.page_size = cfg.get("page_size", 10)
+    search.preview_limit = cfg.get("preview_limit", search.page_size)
     search.max_results = cfg.get("max_results", 100)
     search.source_workers = 2
     search.max_concurrent_searches = 2
@@ -349,6 +350,12 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(_fulltext_query("how to"), "how to")
         self.assertEqual(_title_query("the"), '"the"')
 
+    def test_one_letter_contraction_fragments_are_dropped(self):
+        # "can't" tokenizes to "can" + "t"; the stray "t" is not a Xapian term
+        # and used to make the whole full-text query match nothing.
+        self.assertEqual(_fulltext_query("can't keep it uncovered"), "keep uncovered")
+        self.assertEqual(_fulltext_query("C"), "c")
+
     def test_title_prefix_query_uses_prefix_tokens_except_single_characters(self):
         self.assertEqual(_title_prefix_query("how to change tires"), "change* AND tires*")
         self.assertEqual(_title_prefix_query("praise of fol"), "praise* AND fol*")
@@ -595,6 +602,7 @@ class SearchContractTests(unittest.TestCase):
         search.sources = {source.key: source for source in sources}
         search._state_lock = threading.RLock()
         search._reload_lock = threading.Lock()
+        search.preview_limit = 10
         search._search_slots = threading.BoundedSemaphore(1)
         search._executor = ThreadPoolExecutor(max_workers=2)
         search._inflight = {}
@@ -867,6 +875,7 @@ class SearchContractTests(unittest.TestCase):
         }
         search._state_lock = threading.RLock()
         search._reload_lock = threading.Lock()
+        search.preview_limit = 10
         search._search_slots = threading.BoundedSemaphore(1)
         search._executor = ThreadPoolExecutor(max_workers=1)
         search._inflight = {}
@@ -941,7 +950,7 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(len(docs), 1801)
         self.assertEqual(docs[1801]["path"], "path-1801")
 
-    def test_semantic_results_below_cosine_threshold_are_ignored(self):
+    def test_semantic_results_below_cosine_threshold_are_ignored_when_lexical_matches_exist(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
         db.execute(
             "CREATE VIRTUAL TABLE docs USING fts5("
@@ -958,8 +967,50 @@ class SearchContractTests(unittest.TestCase):
         class FakeFaiss:
             def search(self, query_vector, count):
                 return (
-                    np.array([[0.84, 0.90]]),
-                    np.array([[1, 2]]),
+                    np.array([[0.90, 0.84]]),
+                    np.array([[2, 1]]),
+                )
+
+        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        search = object.__new__(Search)
+        search.cfg = {
+            "candidate_count": 2,
+            "min_cosine_similarity": 0.85,
+        }
+        search.candidate_count = 2
+        result = search._search_local_locked(
+            source,
+            "above",
+            _title_query("above"),
+            _fulltext_query("above"),
+            np.array([[1.0]]),
+            1,
+            _LocalIndex(db, FakeFaiss(), None, None, threading.Lock()),
+        )
+
+        db.close()
+        self.assertEqual([item["title"] for item in result.items], ["Above threshold"])
+        self.assertEqual(result.semantic[0][0], 0.90)
+
+    def test_meaning_only_results_keep_candidates_below_the_cosine_floor(self):
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, path UNINDEXED, target UNINDEXED)"
+        )
+        db.executemany(
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+            [
+                (1, "Below threshold", "weak", None),
+                (2, "Above threshold", "strong", None),
+            ],
+        )
+
+        class FakeFaiss:
+            def search(self, query_vector, count):
+                return (
+                    np.array([[0.90, 0.84]]),
+                    np.array([[2, 1]]),
                 )
 
         source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
@@ -980,8 +1031,13 @@ class SearchContractTests(unittest.TestCase):
         )
 
         db.close()
-        self.assertEqual([item["title"] for item in result.items], ["Above threshold"])
-        self.assertEqual(result.semantic[0][0], 0.90)
+        # No title or full-text candidate: dropping the weak meaning match
+        # would return nothing at all, so it is kept.
+        self.assertEqual(
+            [item["title"] for item in result.items],
+            ["Above threshold", "Below threshold"],
+        )
+        self.assertEqual([score for score, _ in result.semantic], [0.90, 0.84])
 
     def test_local_result_preview_is_extracted_for_display(self):
         class _Entry:
@@ -1006,6 +1062,7 @@ class SearchContractTests(unittest.TestCase):
             "max_preview_chars": 24,
         }
         search.preview_chars = 24
+        search.preview_limit = 10
         search.sources = {"manual": source}
         search.indexes = {
             "manual": _LocalIndex(
@@ -1038,6 +1095,48 @@ class SearchContractTests(unittest.TestCase):
 
         self.assertLessEqual(len(doc["lead"]), 24)
         self.assertTrue(doc["lead"].endswith("one"))
+
+    def test_preview_hydration_is_bounded(self):
+        class _Entry:
+            _index = 1
+
+        class _Archive:
+            def get_entry_by_path(self, path):
+                return _Entry()
+
+        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        search = object.__new__(Search)
+        search.cfg = {
+            "max_html_bytes": 4_194_304,
+            "max_article_bytes": 33_554_432,
+            "max_preview_chars": 24,
+        }
+        search.preview_chars = 24
+        search.preview_limit = 1
+        search.sources = {"manual": source}
+        search.indexes = {
+            "manual": _LocalIndex(None, None, _Archive(), None, threading.Lock())
+        }
+        search._state_lock = threading.RLock()
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        search.preview_cache = QueryCache(16)
+        docs = [
+            {"id": "manual:first", "source_key": "manual", "lead": "", "path": "first"},
+            {"id": "manual:second", "source_key": "manual", "lead": "", "path": "second"},
+        ]
+
+        try:
+            with patch(
+                "zimantic.search.read_entry",
+                return_value=(1, "First", "first preview", "first", None),
+            ) as read:
+                search._hydrate_results(docs)
+        finally:
+            search._executor.shutdown(wait=True)
+
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(docs[0]["lead"], "first preview")
+        self.assertEqual(docs[1]["lead"], "")
 
     def test_title_search_falls_back_to_prefix_when_exact_matches_nothing(self):
         # Exact token matching misses these because the query word is a truncated

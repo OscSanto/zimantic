@@ -92,7 +92,9 @@ preferred, and block boundaries keep neighboring text runs from running together
 
 Each article's **excerpt** is extracted transiently for the embedding and discarded after the
 vector is built. At search time, only the displayed local results are extracted again for previews,
-bounded to `max_preview_chars` (1,000 by default) at a word boundary. Extraction reads up to 4 MiB
+bounded to `max_preview_chars` (1,000 by default) at a word boundary. Only the first `preview_limit`
+results of a page are hydrated (10 by default, matching the default page size; 0 disables previews);
+the rest keep an empty `lead`. Extraction reads up to 4 MiB
 per page by default. Entries are skipped when they are assets, JavaScript shells, empty pages, scanned
 PDFs without text, or other non-article content. Pages that ship only script/link references (for
 example PhET simulations) remain title-only, so they can still be found by title. The builder also
@@ -211,7 +213,7 @@ whole server process and reloads all in-memory state.
    | **Full text** (the ZIM's own Kiwix index) | Articles containing the words anywhere | Words buried deep inside an article | ~8 ms |
 
 3. **Collapse redirects**: every redirect hit resolves to the article it points to, and duplicates are merged, so each article appears only once.
-4. **Filter weak meaning matches.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking. Title-word and full-text matches still work below that floor, so the threshold only controls meaning-only results. Lower it in `config.toml` when a corpus needs broader semantic recall; cross-language queries often need 0.80 (see **Queries in another language** below).
+4. **Filter weak meaning matches when there is a lexical alternative.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking, but only when that source also returned a title-word or full-text match. If a query has no lexical match at all, its best meaning candidates are kept, so a meaning-only query never becomes an empty result list. Lower the value in `config.toml` when a lexical match should not suppress broader meaning matches; cross-language queries often need 0.80 (see **Queries in another language** below).
 5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in; the full-text contribution is doubled for queries of ten or more words. An article found near the top by several searches beats one that's first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal; exact phrases in titles or readable article text and source-specific intent rules (for example WikiHow queries) provide additional deterministic signals. Stack Exchange-style profile pages under `/users/` are demoted unless the query explicitly asks for a user or profile.
 6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", when it renders the "This disambiguation page" footer, or when it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. Fast builds read a bounded HTML prefix for these signals; a footer that appears only beyond that prefix may need a full build to be detected. A query that names the full title is treated as navigation, whether it uses `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
@@ -219,8 +221,9 @@ whole server process and reloads all in-memory state.
 English ZIM usually shares no words with the titles or article text, so the meaning search is usually
 the only stage that can retrieve the right article. Cross-language cosine scores run lower than
 same-language scores, even when the result is correct: the whole distribution shifts down rather than
-the correct article disappearing. The 0.85 floor can therefore trim results that would otherwise rank
-well. Lowering the threshold recovered many Chinese, Hindi and Arabic results in testing:
+the correct article disappearing. The floor only applies when a source also has a lexical match, so a
+pure cross-language query keeps its best meaning candidates even at 0.85. A spurious title or
+full-text match can still suppress them; lowering the threshold recovers those cases:
 
 ```toml
 # config.toml

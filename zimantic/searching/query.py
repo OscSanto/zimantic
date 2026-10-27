@@ -74,7 +74,14 @@ def _query_terms(query: str) -> list[str]:
 
 def _query_words(query: str) -> list[str]:
     words = re.findall(r"[^\W_]+", query.casefold(), re.UNICODE)
-    kept = [word for word in words if word not in STOPWORDS]
+    # One-letter tokens are mostly contraction fragments ("can't" -> "can",
+    # "t") and do not exist as Xapian terms, so a query containing one used to
+    # match nothing at all. Drop them when there is something else to search
+    # for; a query that is only stopwords or single letters is kept as typed.
+    kept = [
+        word for word in words
+        if word not in STOPWORDS and len(word) > 1
+    ]
     return kept or words
 
 
