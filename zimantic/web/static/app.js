@@ -39,6 +39,8 @@
             const THUMB_LIMIT = 128 * 1024;
             const THUMB_CONCURRENCY = 4;
             let SOURCE_FILTER_LIMIT = 10;
+            const SOURCE_FILTER_QUERY_LIMIT = 30;
+            let sourceFilterShowAll = false;
             const SOURCE_CACHE_KEY = "zimantic.sources.v2";
             const LIBRARY_CACHE_KEY = "zimantic.library.v5";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -812,7 +814,14 @@
                         )
                     );
                 });
-                const topVisible = sorted.slice(0, SOURCE_FILTER_LIMIT);
+                const topVisible = sorted.slice(
+                    0,
+                    query
+                        ? sourceFilterShowAll
+                            ? sorted.length
+                            : SOURCE_FILTER_QUERY_LIMIT
+                        : SOURCE_FILTER_LIMIT,
+                );
                 const selectedVisible = outcomes.filter((outcome) =>
                     selectedSourceKeys.has(outcome.source.key),
                 );
@@ -820,20 +829,29 @@
                     ...topVisible.map((outcome) => outcome.source.key),
                     ...selectedVisible.map((outcome) => outcome.source.key),
                 ]);
-                const otherOutcomes = !query
-                    ? nonEmptyOutcomes.filter(
-                          (outcome) =>
-                              !visibleKeys.has(outcome.source.key) && outcomeCount(outcome) > 0,
-                      )
-                    : [];
+                let otherOutcomes = nonEmptyOutcomes.filter(
+                    (outcome) =>
+                        !visibleKeys.has(outcome.source.key) &&
+                        outcomeCount(outcome) > 0 &&
+                        (!query || matching.includes(outcome)),
+                );
                 const otherCount = otherOutcomes.reduce(
                     (total, outcome) => total + outcomeCount(outcome),
                     0,
                 );
-                // A lone "other" source is cheaper to show than a one-item button.
-                if (!query && otherCount === 1) {
+                // A lone hidden source is cheaper as a normal chip than as a
+                // one-item disclosure. For an unfiltered list, keep the
+                // historical one-result promotion too.
+                if (
+                    (query && otherOutcomes.length === 1) ||
+                    (!query && otherCount === 1)
+                ) {
                     otherOutcomes.forEach((outcome) => visibleKeys.add(outcome.source.key));
+                    otherOutcomes = [];
                 }
+                const showOther = query
+                    ? otherOutcomes.length > 0
+                    : otherCount > 1;
                 return {
                     outcomes,
                     query,
@@ -846,12 +864,19 @@
                                 !selectedSourceKeys.has(outcome.source.key),
                         ),
                     ],
-                    otherOutcomes: otherCount > 1 ? otherOutcomes : [],
+                    otherOutcomes: showOther ? otherOutcomes : [],
                     otherCount,
-                    showOther: !query && otherCount > 1,
+                    showOther,
                     failed,
                     outcomeCount,
                 };
+            }
+
+            function sourceFilterControlKey(node) {
+                if (!(node instanceof HTMLElement)) return "";
+                if (node.dataset.sourceAction) return `action:${node.dataset.sourceAction}`;
+                if (node.dataset.source) return `source:${node.dataset.source}`;
+                return "";
             }
 
             function renderSourceFilters() {
@@ -867,6 +892,10 @@
                     status.textContent = "";
                     return;
                 }
+                const focused = document.activeElement;
+                const focusKey = options.contains(focused)
+                    ? sourceFilterControlKey(focused)
+                    : "";
                 panel.classList.remove("empty-selection");
                 const layout = sourceFilterLayout();
                 panel.hidden = false;
@@ -910,19 +939,49 @@
                     const other = document.createElement("button");
                     other.className = "source-filter-option ok";
                     other.type = "button";
-                    other.dataset.sourceAction = "other";
-                    other.setAttribute("aria-pressed", "false");
-                    other.textContent = `Other: ${layout.otherCount}`;
+                    other.dataset.sourceAction = layout.query ? "more" : "other";
+                    if (!layout.query) {
+                        other.setAttribute("aria-pressed", "false");
+                    }
+                    other.textContent = layout.query
+                        ? `Show ${layout.otherOutcomes.length} more`
+                        : `Other: ${layout.otherCount}`;
                     entries.push(other);
                 }
                 options.replaceChildren(all, ...entries);
+                if (focusKey) {
+                    const buttons = [...options.querySelectorAll("button")];
+                    const target =
+                        buttons.find(
+                            (button) =>
+                                !button.disabled &&
+                                sourceFilterControlKey(button) === focusKey,
+                        ) ||
+                        buttons.find(
+                            (button) =>
+                                !button.disabled &&
+                                button.getAttribute("aria-pressed") === "true",
+                        ) ||
+                        buttons.find((button) => !button.disabled);
+                    if (target) target.focus({ preventScroll: true });
+                }
 
+                const visibleMatching = layout.visible.filter((outcome) =>
+                    layout.matching.includes(outcome),
+                ).length;
                 if (!layout.matching.length) {
                     status.textContent = layout.query
                         ? "No matching sources."
                         : layout.outcomes.length
                           ? ""
                           : "No sources have reported yet.";
+                } else if (
+                    layout.query &&
+                    layout.matching.length > visibleMatching
+                ) {
+                    status.textContent =
+                        `Showing ${visibleMatching} of ${layout.matching.length} ` +
+                        "matching sources.";
                 } else {
                     status.textContent = "";
                 }
@@ -1164,8 +1223,13 @@
                 offlineLinkRequest++;
                 const notice = $("externalLinkNotice");
                 const frame = $("articleModalFrame");
+                const wrap = document.querySelector(".wrap");
                 if (notice) notice.hidden = true;
-                if (frame) frame.focus();
+                if (frame) {
+                    frame.inert = false;
+                    frame.focus();
+                }
+                if (wrap) wrap.inert = false;
             }
 
             async function copyTextToClipboard(text) {
@@ -1209,10 +1273,15 @@
                 const frame = $("articleModalFrame");
                 const link = $("externalLinkOpen");
                 const urlLabel = $("externalLinkUrl");
+                const wrap = document.querySelector(".wrap");
                 if (!url || !modal || !notice || !frame || !link || !urlLabel) return;
                 link.href = url.href;
                 urlLabel.textContent = url.href;
                 notice.hidden = false;
+                // The article iframe is behind this notice and must not take
+                // keyboard focus while the notice is showing.
+                frame.inert = true;
+                if (wrap) wrap.inert = true;
                 notice.focus();
             }
 
@@ -2045,8 +2114,12 @@
                         .map((block) => `<p>${highlight(block, current ? current.terms : [])}</p>`)
                         .join("");
                 } else {
-                    snippet.className = "result-snippet none";
-                    snippet.textContent = "No preview available for this result.";
+                    snippet.className = current?.streaming
+                        ? "result-snippet loading"
+                        : "result-snippet none";
+                    snippet.textContent = current?.streaming
+                        ? "Loading preview…"
+                        : "No preview available for this result.";
                 }
                 setResultDebug(node, item);
                 let thumb = node.querySelector(".result-thumb");
@@ -2239,16 +2312,47 @@
                     node.textContent = message;
                     return;
                 }
+                if (!current) {
+                    node.textContent = "";
+                    return;
+                }
+                // Before the stream's `started` event, 0/0 is not a result:
+                // announcing "No searchable sources." here would be wrong.
+                if (current.streaming && current.sourcesTotal === 0) {
+                    node.textContent = "";
+                    return;
+                }
+                if (current.sourcesTotal === 0) {
+                    node.textContent = current.total
+                        ? searchStatusText()
+                        : current.streaming
+                          ? ""
+                          : "No sources are available to search.";
+                    return;
+                }
                 node.textContent =
-                    current && current.completed === current.sourcesTotal
+                    current.completed === current.sourcesTotal
                         ? searchStatusText()
                         : "";
             }
 
             function renderPager(total, pageCount) {
                 const pager = $("pager");
+                const focused = document.activeElement;
+                const focusLabel =
+                    focused instanceof HTMLElement && pager.contains(focused)
+                        ? focused.textContent.trim()
+                        : "";
                 pager.innerHTML = "";
-                if (total <= PAGE_SIZE && pageCount <= 1) return;
+                if (total <= PAGE_SIZE && pageCount <= 1) {
+                    if (focusLabel) {
+                        const firstResult = $("results").querySelector(
+                            ".result-title a[href]",
+                        );
+                        if (firstResult) firstResult.focus({ preventScroll: true });
+                    }
+                    return;
+                }
                 const pageLink = (text, page, disabled) => {
                     const link = document.createElement(disabled ? "span" : "a");
                     link.textContent = text;
@@ -2273,6 +2377,15 @@
                 if (current.page > 0) {
                     // Shortcut back to the first page from anywhere in the pager.
                     pager.prepend(pageLink("« First", 0, false));
+                }
+                if (focusLabel) {
+                    const links = [...pager.querySelectorAll("a[data-page]")];
+                    const target =
+                        links.find((link) => link.textContent.trim() === focusLabel) ||
+                        (focusLabel.includes("Next")
+                            ? links[links.length - 1]
+                            : links[0]);
+                    if (target) target.focus({ preventScroll: true });
                 }
             }
 
@@ -2483,6 +2596,12 @@
                             current.searchKeys = event.sources
                                 .map((source) => source?.key)
                                 .filter(Boolean);
+                            // A hidden version alias (for example, a bookmarked
+                            // mini/nopic variant) resolves to the chosen book.
+                            // Reflect that canonical key in the filter UI.
+                            if (event.all_sources === false && current.searchKeys.length) {
+                                setSelectedSources(current.searchKeys);
+                            }
                         }
                         if (typeof event.all_sources === "boolean") {
                             current.searchAll = event.all_sources;
@@ -2550,6 +2669,7 @@
             async function runSearch(question, selectedSources = [], page = 0, scopeSources) {
                 question = question.trim();
                 if (!question) return;
+                sourceFilterShowAll = false;
                 if (requestController) requestController.abort();
                 if (pageController) pageController.abort();
                 cancelStreamRender();
@@ -2605,6 +2725,7 @@
                     const selected = activeSources();
                     if (!selected.length) {
                         $("status").textContent = "No sources are available to search.";
+                        announceSearchStatus($("status").textContent);
                         return;
                     }
                     const params = new URLSearchParams({
@@ -2898,6 +3019,7 @@
             }
 
             $("sourceFilterSearch").addEventListener("input", () => {
+                sourceFilterShowAll = false;
                 renderSourceFilters();
             });
 
@@ -2920,15 +3042,37 @@
                         makeStateUrl("", selected, 0),
                     );
                     renderSourceSelectionSummary();
-                    const next = selected.length
-                        ? $("sourceFilterOptions").querySelector("button")
-                        : null;
+                    const buttons = [
+                        ...$("sourceFilterOptions").querySelectorAll("button"),
+                    ];
+                    const next =
+                        (key && buttons.find((item) => item.dataset.source === key)) ||
+                        buttons.find(
+                            (item) => item.dataset.sourceAction === "all",
+                        ) ||
+                        buttons[0];
                     if (next) next.focus();
                     else $("question").focus();
                     return;
                 }
                 if (button.dataset.sourceAction === "all") {
                     selectedSourceKeys.clear();
+                } else if (button.dataset.sourceAction === "more") {
+                    // Reveal the remaining matching source chips without
+                    // changing the search scope or the current selection.
+                    const hidden = sourceFilterLayout().otherOutcomes.map(
+                        (outcome) => outcome.source.key,
+                    );
+                    sourceFilterShowAll = true;
+                    renderSourceFilters();
+                    const next = [
+                        ...$("sourceFilterOptions").querySelectorAll("button"),
+                    ].find(
+                        (item) =>
+                            hidden.length && item.dataset.source === hidden[0],
+                    );
+                    if (next) next.focus({ preventScroll: true });
+                    return;
                 } else if (button.dataset.sourceAction === "other") {
                     // Use the same layout the visible "Other" button was rendered
                     // from, so selecting it matches the number it displayed.
@@ -3038,6 +3182,35 @@
             $("externalLinkNotice").addEventListener("click", (event) => {
                 if (event.target === event.currentTarget) hideExternalLinkNotice();
             });
+            $("externalLinkNotice").addEventListener("keydown", (event) => {
+                if (event.key !== "Tab" || $("externalLinkNotice").hidden) return;
+                const notice = $("externalLinkNotice");
+                const focusable = [
+                    ...notice.querySelectorAll(
+                        'a[href], button:not([disabled]):not([tabindex="-1"]), ' +
+                            "input:not([disabled]), select:not([disabled]), " +
+                            "textarea:not([disabled]), summary, " +
+                            '[tabindex]:not([tabindex="-1"])',
+                    ),
+                ].filter((node) => node.getClientRects().length > 0);
+                if (!focusable.length) return;
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+                if (!notice.contains(document.activeElement)) {
+                    event.preventDefault();
+                    first.focus();
+                } else if (
+                    event.shiftKey &&
+                    (document.activeElement === first ||
+                        document.activeElement === notice)
+                ) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            });
             window.addEventListener("keydown", (event) => {
                 if (event.key === "Escape" && !$("externalLinkNotice").hidden) {
                     event.preventDefault();
@@ -3058,6 +3231,7 @@
             function resetResults() {
                 // Clear everything a search painted, without touching history. Removes
                 // search-active so the empty page re-centers like a fresh load.
+                sourceFilterShowAll = false;
                 clearTimeout(autoSubmitTimer);
                 autoSubmitTimer = null;
                 cancelAutoSearchHistory();
@@ -3281,10 +3455,8 @@
                 const selectedSources = [...selectedSourceKeys];
                 const url = makeStateUrl(question, selectedSources, 0);
                 if (pushHistory) {
-                    const before = currentUrlValue();
-                    const hadAutoSearch = Boolean(autoSearchBase);
                     commitAutoSearchHistory();
-                    if (!(hadAutoSearch && url === before)) {
+                    if (url !== currentUrlValue()) {
                         history.pushState(null, "", url);
                     }
                 } else if (auto) {
@@ -3323,6 +3495,19 @@
             });
 
             $("homeHeading").addEventListener("click", activateHomeHeading);
+
+            // The active view link should be a no-op. Reloading it would drop
+            // the current query/results (Search) or the library filter/shuffle
+            // state (Library), which is surprising for an already-current tab.
+            for (const link of document.querySelectorAll(".view-nav a")) {
+                link.addEventListener("click", (event) => {
+                    if (modifiedClick(event)) return;
+                    const target = new URL(link.href, location.href);
+                    if (target.pathname === location.pathname) {
+                        event.preventDefault();
+                    }
+                });
+            }
 
             window.addEventListener("popstate", () => {
                 cancelAutoSearchHistory();
@@ -3365,7 +3550,9 @@
                 setSelectedSources(state.selectedSources);
                 $("homeHeading").setAttribute(
                     "aria-label",
-                    libraryView ? "Switch to search" : "Clear or restore search",
+                    libraryView
+                        ? "Zimantic: switch to search"
+                        : "Zimantic: clear or restore search",
                 );
                 try {
                     // Source discovery is read-only; refreshing the index/catalog set is an

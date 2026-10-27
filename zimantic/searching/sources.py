@@ -177,6 +177,25 @@ def _zim_key(book: str) -> str:
     return perma_ref(book)
 
 
+_FLAVOUR_SUFFIX = re.compile(r"_(?:maxi|mini|nopic)$", re.IGNORECASE)
+
+
+def _book_identity(book: str) -> str:
+    """Return the identity shared by versions/flavours of one local book.
+
+    ``perma_ref`` removes a trailing ZIM date, and the loop also removes a
+    trailing archive flavour (``mini``, ``nopic``, ``maxi``). This collapses
+    dated and flavour variants such as
+    ``wikipedia_en_medicine_mini_2025-10`` and
+    ``wikipedia_en_medicine_nopic_2025-10`` while keeping language variants
+    (``phet_en_all`` vs ``phet_mul_all``) separate.
+    """
+    base = perma_ref(str(book or "").strip())
+    while _FLAVOUR_SUFFIX.search(base):
+        base = _FLAVOUR_SUFFIX.sub("", base)
+    return base.casefold()
+
+
 def _intent_phrases(book: str) -> tuple[str, ...]:
     key = _zim_key(book)
     for pattern, phrases in INTENT_RULES:

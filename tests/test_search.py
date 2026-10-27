@@ -34,7 +34,7 @@ from zimantic.search import (
     _title_query,
 )
 from zimantic.searching.config import _file_signature
-from zimantic.searching.sources import _html_attribute
+from zimantic.searching.sources import _book_identity, _html_attribute
 
 
 def _bare_search(cfg):
@@ -1286,6 +1286,47 @@ class GracefulDegradationTests(unittest.TestCase):
         self.assertEqual(library[0]["title"], "A broken book")
         search._executor.shutdown(wait=True)
 
+    def test_library_prefers_the_newest_version_of_one_book(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search.sources = {
+            "book_2025-01": SourceInfo(
+                "book_2025-01",
+                "book_2025-01",
+                "book_2025-01",
+                "local",
+                local_name="book_2025-01",
+                title="A book",
+                date="2025-01-01",
+                uuid="older-uuid",
+                size=100,
+            ),
+            "book_2026-01": SourceInfo(
+                "book_2026-01",
+                "book_2026-01",
+                "book_2026-01",
+                "local",
+                local_name="book_2026-01",
+                title="A book",
+                date="2026-01-01",
+                uuid="newer-uuid",
+                size=90,
+            ),
+        }
+        with patch.object(
+            search,
+            "_scan_zim_paths",
+            return_value={
+                "book_2025-01": Path("/zims/book_2025-01.zim"),
+                "book_2026-01": Path("/zims/book_2026-01.zim"),
+            },
+        ):
+            library = search.library_dicts()
+
+        self.assertEqual([source["name"] for source in library], ["book_2026-01"])
+        self.assertEqual(library[0]["date"], "2026-01-01")
+        search._executor.shutdown(wait=True)
+
     def test_library_prefers_a_readable_duplicate(self):
         search = _bare_search({})
         self.addCleanup(search.close)
@@ -2245,6 +2286,31 @@ class SourceScopeTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
         self.assertEqual([source.key for source in sources], ["foo"])
 
+    def test_hidden_flavour_variant_selects_the_chosen_book(self):
+        search = _bare_search({})
+        search.sources = {
+            "medicine": SourceInfo(
+                "medicine",
+                "medicine_nopic_2025-10",
+                "medicine_nopic_2025-10",
+                "local",
+                local_name="medicine_nopic_2025-10",
+            )
+        }
+        for index in range(3):
+            key = f"other-{index}"
+            search.sources[key] = SourceInfo(
+                key, key, key, "local", local_name=key
+            )
+        try:
+            sources, selective, _scope = search._search_scope(
+                ["medicine_mini_2025-10"]
+            )
+        finally:
+            search._executor.shutdown(wait=True)
+        self.assertEqual([source.key for source in sources], ["medicine"])
+        self.assertTrue(selective)
+
     def test_unscoped_search_caps_remote_sources_but_honors_explicit_ones(self):
         search = _bare_search({"max_remote_sources": 1})
         search.sources = {
@@ -2279,19 +2345,47 @@ class SourceScopeTests(unittest.TestCase):
         self.assertEqual(sources[0]["book"], "manual")
         search._executor.shutdown(wait=True)
 
-    def test_colliding_local_source_keys_are_made_unique(self):
+    def test_versioned_local_sources_collapse_to_one_book(self):
         search = _bare_search({})
         index = types.SimpleNamespace(
             source_size=None, ensure_open=lambda: None
         )
-        # Insert the dated stem first so the undated one hits the fallback.
+        # Dated and undated copies of one book are not two sources.
         search.indexes = {"foo_2024-01": index, "foo": index}
         sources = search._rebuild_sources([])
-        self.assertEqual(
-            sorted(source["key"] for source in sources), ["foo", "foo-2"]
-        )
-        self.assertEqual(len(sources), 2)
+        self.assertEqual([source["key"] for source in sources], ["foo"])
+        self.assertEqual([source["name"] for source in sources], ["foo"])
         search._executor.shutdown(wait=True)
+
+    def test_language_variants_of_local_sources_stay_separate(self):
+        search = _bare_search({})
+        index = types.SimpleNamespace(
+            source_size=None, ensure_open=lambda: None
+        )
+        search.indexes = {"foo_en_2024-01": index, "foo_mul_2024-01": index}
+        sources = search._rebuild_sources([])
+        self.assertEqual(
+            sorted(source["key"] for source in sources), ["foo_en", "foo_mul"]
+        )
+        search._executor.shutdown(wait=True)
+
+    def test_book_identity_strips_dates_and_flavours(self):
+        self.assertEqual(
+            _book_identity("wikipedia_en_medicine_mini_2025-10"),
+            "wikipedia_en_medicine",
+        )
+        self.assertEqual(
+            _book_identity("wikipedia_en_medicine_nopic_2025-10"),
+            "wikipedia_en_medicine",
+        )
+        self.assertEqual(
+            _book_identity("wikipedia_en_top_mini_2026-09"),
+            "wikipedia_en_top",
+        )
+        self.assertNotEqual(
+            _book_identity("phet_en_all_2025-03"),
+            _book_identity("phet_mul_all_2025-06"),
+        )
 
     def test_unknown_display_filter_falls_back_to_the_full_page(self):
         with _temp_dir(self) as tmp:

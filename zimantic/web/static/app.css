@@ -381,6 +381,10 @@ ol.results {
     color: var(--muted);
     font-style: italic;
 }
+.result-snippet.loading {
+    color: var(--muted);
+    font-style: italic;
+}
 .result-debug {
     border-top: 1px solid var(--border);
     margin-top: 10px;

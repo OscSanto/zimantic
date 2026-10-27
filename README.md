@@ -25,8 +25,8 @@ Zero 2 W.
 - **Best of three searches**: meaning, title-word and full-text retrieval are fused into a single ranking.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. Selected sources stay visible, so choosing **Other** expands that group into its individual filters. A selection of at most `min(10, 35%)` of available sources is searched on its own when it starts a search and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed. Source filters chosen after a full search are display-only and reuse that pool.
-- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
+- **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed, while searching sources shows up to 30 matches plus a **Show N more** control for the rest. Selected sources stay visible, so choosing **Other** expands that group into its individual filters. A selection of at most `min(10, 35%)` of available sources is searched on its own when it starts a search and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed. Source filters chosen after a full search are display-only and reuse that pool.
+- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. Dated and flavour variants of the same local book are collapsed to one card, keeping the newest readable/searchable copy. **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
@@ -703,17 +703,19 @@ JSON API examples:
 - `GET /sources`, `/config`, `/library.json` and `/health` return source,
   configuration, local-library and health information. `/sources` describes the searchable
   sources (local and remote) and includes catalog metadata when available. `/library.json`
-  describes every local archive, including unreadable archives and archives that are not
+  describes every distinct local book, including unreadable archives and archives that are not
   searchable yet. Source records include a `homepage` path when the local ZIM exposes one, plus
   `available`, `searchable` and `error` flags.
   `/library.json` also exposes
   `uuid`, `publisher`, `perma_ref`, `flavour`, `category`, `media_count`, `license`, `scraper`,
   `source`, `attribution`, `relation`, `counter`, and `has_fulltext_index` from the catalog. The
-  UUID is the book identity: duplicate copies of the same ZIM are collapsed to one source, preferring
-  a readable copy. An unreadable archive stays in `/library.json` with `available: false` and an
-  `error` so the library page can explain why it cannot be opened. Health is read-only and reports
-  index/archive capabilities, entry counts, homepage resolution, embedding state, and search and
-  preview cache statistics.
+  UUID is the book identity: exact duplicate copies of the same ZIM are collapsed to one source,
+  preferring a readable copy. Dated or flavour variants of one local book
+  (`medicine_mini_2025-10` and `medicine_nopic_2025-10`, for example) also collapse to the newest
+  readable, searchable, fuller copy. An unreadable archive stays in `/library.json` with
+  `available: false` and an `error` so the library page can explain why it cannot be opened. Health
+  is read-only and reports index/archive capabilities, entry counts, homepage resolution, embedding
+  state, and search and preview cache statistics.
 
 Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
 `kill -HUP <pid>`.

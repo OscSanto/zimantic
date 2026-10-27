@@ -565,6 +565,8 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(shell.status_code, 200)
         self.assertIn("<title>Deep &amp; Nice</title>", shell.text)
+        self.assertIn('<main data-zimantic-shell-main>', shell.text)
+        self.assertIn('class="zimantic-shell-heading">Deep &amp; Nice</h1>', shell.text)
         # The article's relative icon resolves through the raw /article/ route.
         self.assertIn(
             '<link rel="icon" data-zimantic-article-icon '
@@ -734,6 +736,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("Source not found", response.text)
         self.assertNotIn("This page is not available", response.text)
+        self.assertIn('<main data-zimantic-shell-main>', response.text)
+        self.assertIn("data-zimantic-search-home", response.text)
+        self.assertIn('role="group" aria-label="Adjacent search results"', response.text)
 
     def test_health_reports_indexes_and_cache(self):
         body = self.client.get("/health").json()

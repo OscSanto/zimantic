@@ -425,6 +425,20 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       }, "*");
     });
   }
+  // Error shells are shown inside the modal too. A normal link there would
+  // navigate the sandboxed shell to the app, which cannot fetch its config in
+  // an opaque-origin frame. Let the host close the modal instead.
+  document.addEventListener("click", event => {
+    const target = event.target instanceof Element
+      ? event.target.closest("[data-zimantic-search-home]")
+      : null;
+    if (!target || window.parent === window) return;
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    window.parent.postMessage({type: "zimantic-search", query: ""}, "*");
+  });
   // Register before DOMContentLoaded: the article frame can report blocked
   // storage while its own deferred modules run, before this shell initializes.
   window.addEventListener("message", event => {
@@ -443,6 +457,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const parentNext = toolbar.querySelector("[data-zimantic-parent-next]");
     const actions = toolbar.querySelector(".zimantic-toolbar-actions");
     const articleFrame = document.querySelector("iframe[data-zimantic-article]");
+    const permalinkLabel = permalink ? permalink.innerHTML : "";
+    let permalinkResetTimer = null;
     let selectedSearchText = "";
     let articleSelection = "";
     let offlineRequest = 0;
@@ -492,6 +508,17 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const announce = message => {
       if (status) status.textContent = message;
     };
+    const showPermalinkCopied = () => {
+      if (!permalink) return;
+      clearTimeout(permalinkResetTimer);
+      permalink.textContent = "Link copied";
+      permalinkResetTimer = setTimeout(() => {
+        permalinkResetTimer = null;
+        if (permalink && permalink.isConnected) {
+          permalink.innerHTML = permalinkLabel;
+        }
+      }, 1600);
+    };
     const setContextNavigation = navigation => {
       for (const [control, direction] of contextControls) {
         if (!control) continue;
@@ -532,7 +559,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       }
       if (event.data?.type === "zimantic-article-copy-result") {
         if (event.data.ok) {
-          if (permalink) permalink.textContent = "Link copied";
+          showPermalinkCopied();
           announce("Link copied");
         } else {
           announce("Copy unavailable");
@@ -844,7 +871,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         event.preventDefault();
         const text = shareUrl(articleSelection);
         const copied = () => {
-          control.textContent = "Link copied";
+          showPermalinkCopied();
           announce("Link copied");
         };
         const delegate = () => {
@@ -1478,7 +1505,7 @@ def _article_toolbar(
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
     <button type="button" data-zimantic-action="close" title="Close article">Close</button>
-    <span class="zimantic-toolbar-context-nav" aria-label="Adjacent search results">
+    <span class="zimantic-toolbar-context-nav" role="group" aria-label="Adjacent search results">
       <button type="button" data-zimantic-action="previous"
         data-zimantic-context-previous hidden disabled aria-label="Previous search result"
         title="Open the previous search result">←</button>
@@ -1491,7 +1518,7 @@ def _article_toolbar(
     <span class="zimantic-toolbar-breadcrumbs">{breadcrumb_html}</span>
   </div>
   <div class="zimantic-toolbar-actions">
-    <span class="zimantic-toolbar-parent-nav-group" aria-label="Adjacent links in parent page">
+    <span class="zimantic-toolbar-parent-nav-group" role="group" aria-label="Adjacent links in parent page">
       <button type="button" class="zimantic-toolbar-parent-nav"
         data-zimantic-action="parent-previous" data-zimantic-parent-previous
         hidden disabled aria-label="Previous link in parent page"
@@ -1629,7 +1656,7 @@ def _content_error_panel(error: dict, base_path: str = "") -> str:
         f"<p>{message}</p>"
         f"{path_html}"
         f'<p class="zimantic-shell-error-links">'
-        f'<a href="{base_path}/">Search your library</a>'
+        f'<a href="{base_path}/" data-zimantic-search-home>Search your library</a>'
         "</p>"
         "</div>"
     )
@@ -1704,6 +1731,24 @@ body {
   background: #fff;
   display: flex;
   flex-direction: column;
+}
+main[data-zimantic-shell-main] {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.zimantic-shell-heading {
+  border: 0;
+  clip: rect(0 0 0 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
 }
 nav[data-zimantic-toolbar] {
   flex: 0 0 auto !important;
@@ -1814,10 +1859,12 @@ iframe[data-zimantic-article] {
 <body>
 """
         + toolbar
+        + '<main data-zimantic-shell-main>'
         + (
             _content_error_panel(error, base_path)
             if error
             else (
+                f'<h1 class="zimantic-shell-heading">{title}</h1>\n'
                 "\n<div id=\"articleStorageNotice\" class=\"article-storage-notice\" "
                 "data-zimantic-storage-notice role=\"status\" hidden>\n"
                 "<p>This article uses browser storage, which is isolated inside this "
@@ -1839,6 +1886,7 @@ iframe[data-zimantic-article] {
                 f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
             )
         )
+        + "</main>"
         + (ARTICLE_TOOLBAR_SCRIPT % json.dumps(base_path))
         + "\n</body>\n</html>"
     )

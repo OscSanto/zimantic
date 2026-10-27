@@ -62,6 +62,7 @@ from .searching.query import (
     _user_page_intent,
 )
 from .searching.sources import (
+    _book_identity,
     _bounded_catalog_url,
     _child_text,
     _find_archive_icon_path,
@@ -570,6 +571,46 @@ def _render_ranked_document(assessment: _RankedAssessment) -> dict[str, Any]:
         },
     })
     return output
+
+
+def _local_source_rank(source: SourceInfo) -> tuple:
+    """Preference order for one copy of a local book.
+
+    Readability and searchability come first, then the newest archive, then the
+    fuller/larger one. The final name terms keep the choice deterministic.
+    """
+    try:
+        article_count = int(source.article_count or 0)
+    except (TypeError, ValueError):
+        article_count = 0
+    try:
+        size = int(source.size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    name = source.name or ""
+    return (
+        bool(source.available),
+        bool(source.searchable),
+        str(source.date or ""),
+        article_count,
+        size,
+        -len(name),
+        name,
+    )
+
+
+def _choose_sources(sources: list[SourceInfo], identity) -> list[SourceInfo]:
+    """Keep the best source for each identity, preserving first-seen order."""
+    chosen: dict[str, tuple[tuple, SourceInfo]] = {}
+    for source in sources:
+        key = identity(source)
+        if not key:
+            key = f"name:{source.name or source.local_name or source.key}"
+        rank = _local_source_rank(source)
+        current = chosen.get(key)
+        if current is None or rank > current[0]:
+            chosen[key] = (rank, source)
+    return [source for _rank, source in chosen.values()]
 
 
 class Search:
@@ -1623,6 +1664,30 @@ class Search:
                     has_fulltext_index=metadata.get("HasFulltextIndex"),
                 )
 
+            if local:
+                chosen = _choose_sources(
+                    list(local.values()),
+                    lambda source: _book_identity(
+                        source.local_name or source.name or source.key
+                    ),
+                )
+                # Reassign keys after choosing a winner so the surviving
+                # version gets the canonical date-stripped key instead of a
+                # collision suffix assigned to a now-hidden sibling.
+                local = {}
+                used_keys: set[str] = set()
+                for source in chosen:
+                    local_name = source.local_name or source.name or source.key
+                    key = _zim_key(local_name)
+                    if key in used_keys:
+                        key = source.key or local_name
+                    suffix = 2
+                    while key in used_keys:
+                        key = f"{local_name}-{suffix}"
+                        suffix += 1
+                    used_keys.add(key)
+                    local[key] = replace(source, key=key)
+
             merged = dict(local)
             for entry in entries:
                 key = _zim_key(entry["book"])
@@ -1903,28 +1968,32 @@ class Search:
                 for source in self.sources.values()
                 if source.mode == "local" and source.local_name
             }
-            indexed_names = set(self.indexes)
-        # One card per UUID: prefer a readable copy, then a searchable one, then
-        # the larger file, then the shorter/lexicographically earlier name.
-        chosen: dict[str, tuple[tuple, SourceInfo]] = {}
+        # One card per UUID, then one per book identity (dated and
+        # flavour variants of the same local book collapse together). Prefer a
+        # readable, searchable copy, then the newest, fuller archive.
+        all_sources: list[SourceInfo] = []
         for zim_name, zim_path in sorted(self._library_zim_paths().items()):
             source = indexed.get(zim_name)
             if source is None:
                 source = self._inspect_library_archive(zim_name, zim_path)
-            identity = source.uuid or f"stem:{source.name}"
-            rank = (
-                source.available,
-                bool(source.local_name and source.local_name in indexed_names),
-                source.size or 0,
-                -len(source.name or ""),
-                source.name or "",
-            )
-            current = chosen.get(identity)
-            if current is None or rank > current[0]:
-                chosen[identity] = (rank, source)
+            all_sources.append(source)
+        chosen = _choose_sources(
+            all_sources,
+            lambda source: (
+                f"uuid:{source.uuid}"
+                if source.uuid
+                else f"name:{source.name or source.local_name or source.key}"
+            ),
+        )
+        chosen = _choose_sources(
+            chosen,
+            lambda source: _book_identity(
+                source.local_name or source.name or source.key
+            ),
+        )
         return [
             source.to_dict(include_metadata=True)
-            for _rank, source in chosen.values()
+            for source in chosen
         ]
 
     def library_version(
@@ -2591,11 +2660,17 @@ class Search:
         # its date-stripped key. Comparing base keys preserves those links
         # without overwriting the local source's own name/book metadata.
         wanted_keys = {_zim_key(value) for value in wanted}
+        wanted_books = {
+            _book_identity(value) for value in wanted if str(value or "").strip()
+        }
         selected = [
             source
             for source in available
             if wanted.intersection({source.key, source.name, source.book, source.local_name})
             or source.key in wanted_keys
+            or _book_identity(
+                source.local_name or source.name or source.key
+            ) in wanted_books
         ]
         if not selected:
             # A stale bookmark or a source removed since the URL was saved must
