@@ -88,7 +88,7 @@ keeps a setting from being fitted to the very queries used to judge it.
 Start the engines you want to measure, then:
 
 ```bash
-# a Zimantic server (any version with /api/search)
+# a Zimantic server (current versions serve /search; v0.1.x served /api/search)
 python evaluation/run.py --engine zimantic --url http://localhost:8090 --label my-branch --commit abc1234
 
 # Kiwix's full-text search; --zim-dir lets redirects in its results be followed
@@ -98,9 +98,22 @@ python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwi
 python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
 ```
 
+`run.py` finds the server's API itself. It probes `/api/zims` (v0.1.x), `/zims`, `/library.json` and
+`/sources` in that order, so it works with current versions and older ones; it reads `/config` when the
+server has it. Only ZIMs the server reports as **local and searchable** are measured: remote Kiwix
+catalog books and readable-but-unindexed archives are skipped, and so are queries for ZIMs the server
+does not have (listed in the output). Newer servers also report which source each hit came from; hits
+from another ZIM are ignored and counted in a warning, because a server that does not recognise the
+`zim` filter would otherwise silently search its whole library.
+
+The server caps how many results it keeps per query (`max_results` in `/config`, 100 by default) and how
+long a query may be; `run.py` lowers `--k` to the cap and leaves out over-long queries instead of
+recording a truncated or failed run. It says so when it does either.
+
 Useful options for `run.py`: `--zims`, `--suites`, `--sets`, `--langs` (run a subset), `--split`,
 `--k` (results requested, default 20), `--append` (add ZIMs served by another server to the same
-results file). Results are saved as `evaluation/results/<label>.json`.
+results file), `--results-dir` (write the results somewhere other than `evaluation/results`). Results
+are saved as `<results-dir>/<label>.json`.
 
 For a fair comparison, both runs must use the same ZIM files and, when a change affects how indexes are
 built, indexes built by each version's own code. Note it in the PR if they differ.
@@ -114,6 +127,14 @@ reference runs. To compare against them, use exactly:
   `wikipedia_en_medicine_maxi_2026-04.zim`, `wikipedia_en_astronomy_maxi_2025-11.zim`,
   `cooking.stackexchange.com_en_all_2026-07.zim`, `ted_mul_ocean_2026-09.zim`,
   `wikibooks_en_all_nopic_2026-01.zim`
+
+  Keep them in the git-ignored `evaluation.zims/` folder rather than the normal `zims/`, and run a
+  separate server for measurements (`zim_dir = "./evaluation.zims"`, `index_dir = "./evaluation.indexes"`)
+  so the scored source set is only the reference ZIMs. The astronomy `2025-11` and wikibooks `2026-01`
+  files are no longer published on Kiwix's server; the nearest releases on it are
+  `wikipedia_en_astronomy_maxi_2026-08` and `wikibooks_en_all_nopic_2026-04`, whose article paths do
+  not all match the queries. Ask the query-set author for the exact files, or regenerate queries for
+  the replacement releases (see [Adding a ZIM](#adding-a-zim)).
 - **Model:** multilingual-e5-small, int8 ONNX from
   [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small)
   (`onnx/model_quantized.onnx` saved as `model.onnx`), 384 dimensions, with the tokenizer from

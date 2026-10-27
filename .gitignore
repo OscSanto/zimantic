@@ -220,3 +220,6 @@ __marimo__/
 zims/
 model/
 indexes/
+evaluation.zims/
+evaluation.indexes/
+evaluation/results/
