@@ -29,6 +29,7 @@ from .catalog import (
     iter_zim_files,
     metadata_from_archive,
     perma_ref,
+    public_tags,
 )
 from .content.reader import (
     _READABLE_MIMETYPES,
@@ -149,49 +150,73 @@ def _catalog_book(href: str) -> str:
     return unquote(parts[-1]) if parts else ""
 
 
-def _archive_metadata(archive: Archive, zim_path: Path) -> dict[str, Any]:
-    """Read archive metadata through the shared catalog extractor.
+def _source_tags(metadata: dict[str, Any]) -> tuple[str, ...]:
+    value = metadata.get("public_tags")
+    if value is None:
+        value = metadata.get("tags", ())
+    if isinstance(value, str):
+        return tuple(tag for tag in public_tags(value).split(";") if tag)
+    return tuple(value or ())
 
-    The catalog and the archive-scan fallback used to maintain separate field
-    lists. Keeping the fallback on ``metadata_from_archive`` means both paths
-    expose the same names, normalization, and tag handling.
+
+def _source_info_from_metadata(
+    metadata: dict[str, Any],
+    *,
+    key: str,
+    local_name: str,
+    available: bool,
+    searchable: bool,
+    icon_url: str | None,
+    error: str | None = None,
+) -> SourceInfo:
+    """Build one local ``SourceInfo`` from canonical catalog/archive metadata.
+
+    Keeping this mapping in one place prevents the catalog-backed and
+    archive-scan fallback paths from drifting apart (for example, one returning
+    a bool ``has_fulltext_index`` and the other returning ``0``/``1``).
     """
-    try:
-        record = metadata_from_archive(archive, zim_path)
-    except (OSError, AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
-        logger.warning("zimantic: metadata unavailable for %s (%s)", zim_path, error)
-        return {}
-    tags = tuple(tag for tag in record["public_tags"].split(";") if tag)
-    return {
-        "Title": record["title"],
-        "Description": record["description"],
-        "LongDescription": record["long_description"],
-        "Creator": record["creator"],
-        "Publisher": record["publisher"],
-        "Language": record["language"],
-        "Date": record["date"],
-        "Tags": tags,
-        "Name": record["name"],
-        "Flavour": record["flavour"],
-        "License": record["license"],
-        "Scraper": record["scraper"],
-        "Source": record["source"],
-        "Attribution": record["attribution"],
-        "Relation": record["relation"],
-        "Counter": record["counter"],
-        "Homepage": record["homepage"],
-        "HasFulltextIndex": record["has_fulltext_index"],
-        "IconPath": record["icon_path"],
-        "UUID": record["uuid"],
-    }
-
-
-def _archive_has_illustration(archive: Archive) -> bool:
-    try:
-        value = getattr(archive, "has_illustration", False)
-        return bool(value() if callable(value) else value)
-    except (AttributeError, RuntimeError, TypeError, ValueError):
-        return False
+    raw_size = metadata.get("size")
+    raw_articles = metadata.get("article_count")
+    raw_media = metadata.get("media_count")
+    raw_fulltext = metadata.get("has_fulltext_index")
+    return SourceInfo(
+        key=key,
+        name=local_name,
+        book=local_name,
+        mode="local",
+        local_name=local_name,
+        available=available,
+        searchable=bool(searchable) and available,
+        error=error,
+        homepage=metadata.get("homepage") if available else None,
+        icon_path=metadata.get("icon_path") or None,
+        icon_url=icon_url,
+        intent_phrases=_intent_phrases(local_name),
+        title=metadata.get("title") or metadata.get("name") or None,
+        description=metadata.get("description") or None,
+        long_description=metadata.get("long_description") or None,
+        creator=metadata.get("creator") or None,
+        publisher=metadata.get("publisher") or None,
+        language=metadata.get("language") or None,
+        date=metadata.get("date") or None,
+        tags=_source_tags(metadata),
+        size=int(raw_size) if raw_size is not None else None,
+        article_count=int(raw_articles) if raw_articles is not None else None,
+        uuid=metadata.get("uuid") or None,
+        perma_ref=perma_ref(local_name),
+        flavour=metadata.get("flavour") or None,
+        category=metadata.get("category") or None,
+        media_count=int(raw_media) if raw_media is not None else None,
+        license=metadata.get("license") or None,
+        scraper=metadata.get("scraper") or None,
+        source=metadata.get("source") or None,
+        attribution=metadata.get("attribution") or None,
+        relation=metadata.get("relation") or None,
+        counter=metadata.get("counter") or None,
+        has_fulltext_index=(
+            None if raw_fulltext is None else bool(raw_fulltext)
+        ),
+    )
 
 
 def _readable_words(text: str) -> Iterator[str]:
@@ -576,8 +601,9 @@ def _render_ranked_document(assessment: _RankedAssessment) -> dict[str, Any]:
 def _local_source_rank(source: SourceInfo) -> tuple:
     """Preference order for one copy of a local book.
 
-    Readability and searchability come first, then the newest archive, then the
-    fuller/larger one. The final name terms keep the choice deterministic.
+    Readability and searchability come first, then the larger archive. A bigger
+    copy is usually the more complete download and may contain larger artwork
+    or media, so it wins over a newer but smaller flavour of the same book.
     """
     try:
         article_count = int(source.article_count or 0)
@@ -591,9 +617,9 @@ def _local_source_rank(source: SourceInfo) -> tuple:
     return (
         bool(source.available),
         bool(source.searchable),
-        str(source.date or ""),
-        article_count,
         size,
+        article_count,
+        str(source.date or ""),
         -len(name),
         name,
     )
@@ -628,6 +654,8 @@ class Search:
         # Fast mode skips FAISS and the model.
         self.semantic = bool(semantic)
         self._defer_faiss = self.semantic
+        # Filled from the configured model before deferred vectors are opened.
+        self._model_fingerprint: str | None = None
         self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
         self._state_lock = threading.RLock()
@@ -813,7 +841,17 @@ class Search:
             if incoming_size != kept_size:
                 contested.add(stem)
 
-        for path in iter_zim_files(zim_dir):
+        def _scan_error(error: OSError) -> None:
+            # os.walk otherwise drops an unreadable directory silently. Log it
+            # as an error so an operator can see why a source disappeared
+            # without aborting the rest of source/library discovery.
+            logger.error(
+                "zimantic: cannot list %s (%s); its sources are omitted",
+                error.filename or zim_dir,
+                error,
+            )
+
+        for path in iter_zim_files(zim_dir, on_error=_scan_error):
             try:
                 if path.is_file():
                     record(path)
@@ -930,8 +968,8 @@ class Search:
 
         # The UUID is the book identity. Two copies of the same ZIM (same
         # UUID, different filename/path) must not appear as two sources. Keep
-        # one deterministic copy, preferring a readable one, then an indexed
-        # one, then the larger file, then the shorter path.
+        # one deterministic copy: readable first, then one that can serve a
+        # search, then the larger file, then the shorter path.
         if self._catalog:
             chosen: dict[str, tuple[tuple, str]] = {}
             for stem, (kind, _path) in found.items():
@@ -939,9 +977,10 @@ class Search:
                 uuid_value = record.uuid if record is not None else ""
                 if not uuid_value:
                     continue
+                usable = kind == "sqlite" or bool(record.has_fulltext_index)
                 rank = (
                     bool(record.available),
-                    kind == "sqlite",
+                    usable,
                     record.size,
                     -len(record.path),
                 )
@@ -993,10 +1032,14 @@ class Search:
             size_row = db.execute(
                 "SELECT value FROM meta WHERE key = 'filesize'"
             ).fetchone()
+            fingerprint_row = db.execute(
+                "SELECT value FROM meta WHERE key = 'model_fingerprint'"
+            ).fetchone()
             try:
                 source_size = int(size_row[0]) if size_row else None
             except (TypeError, ValueError):
                 source_size = None
+            stored_fingerprint = str(fingerprint_row[0]) if fingerprint_row else ""
 
             faiss_index = None
             faiss_path = db_path.with_suffix(".faiss")
@@ -1007,23 +1050,35 @@ class Search:
                 and done_value == "1"
                 and faiss_path.exists()
             ):
-                try:
-                    # Fast mode does not need the FAISS import.
-                    import faiss
-
-                    faiss_index = faiss.read_index(
-                        str(faiss_path),
-                        faiss.IO_FLAG_MMAP_IFC | faiss.IO_FLAG_READ_ONLY,
-                    )
-                    if hasattr(faiss_index, "nprobe"):
-                        faiss_index.nprobe = _nprobe(faiss_index, self.cfg)
-                except Exception as error:  # corrupt/unreadable vectors: keep going
+                current_fingerprint = getattr(self, "_model_fingerprint", "")
+                if (
+                    stored_fingerprint
+                    and current_fingerprint
+                    and stored_fingerprint != current_fingerprint
+                ):
                     logger.warning(
-                        "%s: vectors unavailable (%s); using title and full-text search",
+                        "%s: vectors were built with a different model; "
+                        "using title and full-text search until it is rebuilt",
                         db_path.stem,
-                        error,
                     )
-                    faiss_index = None
+                else:
+                    try:
+                        # Fast mode does not need the FAISS import.
+                        import faiss
+
+                        faiss_index = faiss.read_index(
+                            str(faiss_path),
+                            faiss.IO_FLAG_MMAP_IFC | faiss.IO_FLAG_READ_ONLY,
+                        )
+                        if hasattr(faiss_index, "nprobe"):
+                            faiss_index.nprobe = _nprobe(faiss_index, self.cfg)
+                    except Exception as error:  # corrupt/unreadable vectors: keep going
+                        logger.warning(
+                            "%s: vectors unavailable (%s); using title and full-text search",
+                            db_path.stem,
+                            error,
+                        )
+                        faiss_index = None
 
             record = (
                 self._catalog.get_stem_size(db_path.stem, source_size)
@@ -1182,6 +1237,19 @@ class Search:
                     error,
                 )
                 return
+
+            model_dir = self.cfg.get("model_dir")
+            if model_dir:
+                try:
+                    from .embed import model_fingerprint
+
+                    self._model_fingerprint = model_fingerprint(model_dir)
+                except Exception as error:
+                    logger.warning(
+                        "zimantic: could not fingerprint the embedding model (%s); "
+                        "vectors will not be checked against it",
+                        error,
+                    )
 
             self._defer_faiss = False
             try:
@@ -1504,42 +1572,14 @@ class Search:
             bool(record.favicon or meta["icon_path"]),
             self.web_base_path,
         )
-        return SourceInfo(
+        return _source_info_from_metadata(
+            meta,
             key=key,
-            name=local_name,
-            book=local_name,
-            mode="local",
             local_name=local_name,
             available=available,
             searchable=searchable,
-            error=error,
-            # An unreadable archive has no openable homepage.
-            homepage=meta["homepage"] if available else None,
-            icon_path=meta["icon_path"],
             icon_url=icon_url,
-            intent_phrases=_intent_phrases(local_name),
-            title=meta["title"],
-            description=meta["description"],
-            long_description=meta["long_description"],
-            creator=meta["creator"],
-            publisher=meta["publisher"],
-            language=meta["language"],
-            date=meta["date"],
-            tags=meta["tags"],
-            size=meta["size"],
-            article_count=meta["article_count"],
-            uuid=meta["uuid"],
-            perma_ref=perma_ref(local_name),
-            flavour=meta["flavour"],
-            category=meta["category"],
-            media_count=meta["media_count"],
-            license=meta["license"],
-            scraper=meta["scraper"],
-            source=meta["source"],
-            attribution=meta["attribution"],
-            relation=meta["relation"],
-            counter=meta["counter"],
-            has_fulltext_index=meta["has_fulltext_index"],
+            error=error,
         )
 
     def _rebuild_sources(self, entries: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -1597,71 +1637,39 @@ class Search:
                         size=index.source_size,
                     )
                     continue
-                homepage = None
-                icon_path = None
                 metadata: dict[str, Any] = {}
                 try:
                     with index.read_lock:
-                        homepage = self._resolve_article_entry(archive).path
-                        icon_path = _find_archive_icon_path(archive, homepage)
-                        metadata = (
-                            _archive_metadata(archive, Path(index.zim_path))
-                            if index.zim_path
-                            else {}
-                        )
+                        if index.zim_path:
+                            metadata = metadata_from_archive(
+                                archive, Path(index.zim_path)
+                            )
                 except (
                     ArticleNotFoundError,
                     ArticleUnavailableError,
+                    OSError,
+                    AttributeError,
+                    KeyError,
                     RuntimeError,
+                    TypeError,
                     ValueError,
-                ):
-                    homepage = None
-                has_icon = bool(icon_path) or _archive_has_illustration(archive)
+                ) as error:
+                    logger.warning(
+                        "zimantic: metadata unavailable for %s (%s)",
+                        local_name,
+                        error,
+                    )
+                if metadata.get("size") is None and index.source_size is not None:
+                    metadata["size"] = index.source_size
+                has_icon = bool(metadata.get("favicon") or metadata.get("icon_path"))
                 icon_url = _source_icon_url(local_name, has_icon, web_base_path)
-                size = index.source_size
-                if size is None and index.zim_path:
-                    try:
-                        size = Path(index.zim_path).stat().st_size
-                    except OSError:
-                        size = None
-                article_count = None
-                try:
-                    article_count = getattr(archive, "article_count", None)
-                    if callable(article_count):
-                        article_count = article_count()
-                    article_count = int(article_count or 0)
-                except (AttributeError, RuntimeError, TypeError, ValueError):
-                    article_count = None
-                local[key] = SourceInfo(
+                local[key] = _source_info_from_metadata(
+                    metadata,
                     key=key,
-                    name=local_name,
-                    book=local_name,
-                    mode="local",
                     local_name=local_name,
-                    homepage=homepage,
-                    icon_path=icon_path,
+                    available=True,
+                    searchable=True,
                     icon_url=icon_url,
-                    intent_phrases=_intent_phrases(local_name),
-                    title=metadata.get("Title"),
-                    description=metadata.get("Description"),
-                    long_description=metadata.get("LongDescription"),
-                    creator=metadata.get("Creator"),
-                    publisher=metadata.get("Publisher"),
-                    language=metadata.get("Language"),
-                    date=metadata.get("Date"),
-                    tags=metadata.get("Tags", ()),
-                    size=size,
-                    article_count=article_count,
-                    uuid=metadata.get("UUID") or None,
-                    perma_ref=perma_ref(local_name),
-                    flavour=metadata.get("Flavour") or None,
-                    license=metadata.get("License") or None,
-                    scraper=metadata.get("Scraper") or None,
-                    source=metadata.get("Source") or None,
-                    attribution=metadata.get("Attribution") or None,
-                    relation=metadata.get("Relation") or None,
-                    counter=metadata.get("Counter") or None,
-                    has_fulltext_index=metadata.get("HasFulltextIndex"),
                 )
 
             if local:
@@ -1689,15 +1697,28 @@ class Search:
                     local[key] = replace(source, key=key)
 
             merged = dict(local)
+            local_identities = {
+                _book_identity(
+                    source.local_name or source.name or source.key
+                )
+                for source in local.values()
+            }
+            remote_identities: set[str] = set()
             for entry in entries:
+                identity = _book_identity(entry["book"])
                 key = _zim_key(entry["book"])
-                if merged.get(key) is not None:
+                if (
+                    identity in local_identities
+                    or identity in remote_identities
+                    or merged.get(key) is not None
+                ):
                     # A local source is authoritative for its own identity.
                     # Merging the remote catalog's display name here used to
                     # overwrite the local name (and made "is this indexed?"
                     # checks look at the wrong field); the local catalog and
                     # archive already provide the title.
                     continue
+                remote_identities.add(identity)
                 merged[key] = SourceInfo(
                     key=key,
                     name=entry["name"],
@@ -1810,9 +1831,12 @@ class Search:
             if not book:
                 continue
             item = {"name": title or book, "book": book, "updated": updated}
-            key = _zim_key(book)
+            key = _book_identity(book)
             previous = newest.get(key)
-            if not previous or (book, updated) > (previous["book"], previous["updated"]):
+            if not previous or (updated, book) > (
+                previous["updated"],
+                previous["book"],
+            ):
                 newest[key] = item
 
         items = list(newest.values())
@@ -1865,57 +1889,27 @@ class Search:
                 size=zim_path.stat().st_size if zim_path.exists() else None,
             )
 
-        homepage = None
+        metadata: dict[str, Any] = {}
         try:
-            homepage = self._resolve_article_entry(archive).path
-        except (ArticleNotFoundError, ArticleUnavailableError, RuntimeError, ValueError):
-            pass
-        icon_path = _find_archive_icon_path(archive, homepage)
-        metadata = _archive_metadata(archive, zim_path)
-        web_base_path = self.web_base_path
-        has_icon = bool(icon_path) or _archive_has_illustration(archive)
-        icon_url = _source_icon_url(zim_name, has_icon, web_base_path)
-        try:
-            size = zim_path.stat().st_size
-        except OSError:
-            size = None
-        try:
-            article_count = getattr(archive, "article_count", 0)
-            if callable(article_count):
-                article_count = article_count()
-            article_count = int(article_count or 0)
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            article_count = None
-        return SourceInfo(
+            metadata = metadata_from_archive(archive, zim_path)
+        except (OSError, AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
+            logger.warning(
+                "zimantic: library metadata unavailable for %s (%s)", zim_path, error
+            )
+        if metadata.get("size") is None:
+            try:
+                metadata["size"] = zim_path.stat().st_size
+            except OSError:
+                metadata["size"] = None
+        has_icon = bool(metadata.get("favicon") or metadata.get("icon_path"))
+        icon_url = _source_icon_url(zim_name, has_icon, self.web_base_path)
+        return _source_info_from_metadata(
+            metadata,
             key=_zim_key(zim_name),
-            name=zim_name,
-            book=zim_name,
-            mode="local",
             local_name=zim_name,
+            available=True,
             searchable=False,
-            homepage=homepage,
-            icon_path=icon_path,
             icon_url=icon_url,
-            title=metadata.get("Title"),
-            description=metadata.get("Description"),
-            long_description=metadata.get("LongDescription"),
-            creator=metadata.get("Creator"),
-            publisher=metadata.get("Publisher"),
-            language=metadata.get("Language"),
-            date=metadata.get("Date"),
-            tags=metadata.get("Tags", ()),
-            size=size,
-            article_count=article_count,
-            uuid=metadata.get("UUID") or None,
-            perma_ref=perma_ref(zim_name),
-            flavour=metadata.get("Flavour") or None,
-            license=metadata.get("License") or None,
-            scraper=metadata.get("Scraper") or None,
-            source=metadata.get("Source") or None,
-            attribution=metadata.get("Attribution") or None,
-            relation=metadata.get("Relation") or None,
-            counter=metadata.get("Counter") or None,
-            has_fulltext_index=metadata.get("HasFulltextIndex"),
         )
 
     def _library_cache_lock(self) -> threading.Lock:
@@ -2949,19 +2943,6 @@ class Search:
             "matched_by": final.get("matched_by"),
         }
 
-    def search(
-        self,
-        query: str,
-        zim: list[str] | None = None,
-        limit: int | None = None,
-        offset: int = 0,
-        source: str | list[str] | None = None,
-        debug: bool = False,
-    ) -> list[dict]:
-        """Return one page of the final result set."""
-        page = self.search_page(query, zim, limit, offset, source, debug)
-        return list(page["results"])
-
     def _cached_events(
         self,
         cached: Any,
@@ -2997,9 +2978,6 @@ class Search:
                 "total_sources": total_sources,
             }
         matched_by = self._matched_by(pool) if debug else None
-        yield self._event(
-            "snapshot", state, total_sources, total_sources, offset, page_size, matched_by
-        )
         yield self._event(
             "done", state, total_sources, total_sources, offset, page_size, matched_by
         )
@@ -3743,6 +3721,26 @@ class Search:
             status="partial" if errors else "ok",
         )
 
+    def _result_doc(
+        self, source: SourceInfo, path: str, title: str | None
+    ) -> dict[str, Any]:
+        """One local result document shared by indexed and archive fallbacks."""
+        return {
+            "id": f"{source.key}:{path}",
+            "source_key": source.key,
+            "source": source.name,
+            "source_icon": source.icon_url,
+            "title": title or path,
+            "lead": "",
+            "path": path,
+            "mimetype": None,
+            "url": (
+                f"{self.web_base_path}/content/"
+                f"{quote(source.local_name or source.book, safe='')}/"
+                f"{quote(path, safe='/')}"
+            ),
+        }
+
     def _fetch_archive_docs(
         self,
         source: SourceInfo,
@@ -3758,23 +3756,9 @@ class Search:
                 target = self._resolve_article_entry(archive, entry.path)
             except (ArticleNotFoundError, ArticleUnavailableError):
                 continue
-            path = target.path
-            title = getattr(target, "title", None) or path
-            docs[rowid] = {
-                "id": f"{source.key}:{path}",
-                "source_key": source.key,
-                "source": source.name,
-                "source_icon": source.icon_url,
-                "title": title,
-                "lead": "",
-                "path": path,
-                "mimetype": None,
-                "url": (
-                    f"{self.web_base_path}/content/"
-                    f"{quote(source.local_name or source.book, safe='')}/"
-                    f"{quote(path, safe='/')}"
-                ),
-            }
+            page_path = target.path
+            title = getattr(target, "title", None) or page_path
+            docs[rowid] = self._result_doc(source, page_path, title)
         return docs
 
     def _fetch_docs(
@@ -3837,22 +3821,7 @@ class Search:
             if not resolved:
                 continue
             _, (_, title, path, _) = resolved
-            doc = {
-                "id": f"{source.key}:{path}",
-                "source_key": source.key,
-                "source": source.name,
-                "source_icon": source.icon_url,
-                "title": title,
-                "lead": "",
-                "path": path,
-                "mimetype": None,
-                "url": (
-                    f"{self.web_base_path}/content/"
-                    f"{quote(source.local_name or source.book, safe='')}/"
-                    f"{quote(path, safe='/')}"
-                ),
-            }
-            docs[rowid] = doc
+            docs[rowid] = self._result_doc(source, path, title)
         return docs
 
     def _extract_previews(

@@ -114,6 +114,22 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(cfg["index_dir"], "./indexes")  # filled from the profile
             self.assertEqual(warnings, [])
 
+    def test_zero_worker_counts_warn_and_fall_back_to_automatic_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("build_workers = 0\nembedding_workers = 0\n", encoding="utf-8")
+            warnings = []
+            with (
+                patch.object(settings, "profile_for_hardware", return_value="desktop"),
+                patch.object(settings, "default_build_workers", return_value=5),
+                patch.object(settings, "default_embedding_workers", return_value=3),
+            ):
+                cfg = load_config(path, warn=warnings.append)
+        self.assertEqual(cfg["build_workers"], 5)
+        self.assertEqual(cfg["embedding_workers"], 3)
+        self.assertTrue(any("build_workers" in message for message in warnings))
+        self.assertTrue(any("embedding_workers" in message for message in warnings))
+
     def test_worker_defaults_are_dynamic_but_explicit_values_override(self):
         with patch.object(settings, "profile_for_hardware", return_value="desktop"):
             with patch.object(settings, "default_build_workers", return_value=5):

@@ -8,7 +8,7 @@ DEPLOY_PATH ?= /opt/iiab/zimantic
 .PHONY: build install dev test release release-dry-run deploy release-deploy
 
 build:
-	$(UV) build
+	$(UV) build --clear
 
 install:
 	$(UV) tool install .

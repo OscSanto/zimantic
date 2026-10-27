@@ -30,11 +30,17 @@ from zimantic.search import (
     _query_terms,
     _read_limited_response,
     _source_icon_url,
+    _source_info_from_metadata,
     _title_prefix_query,
     _title_query,
 )
 from zimantic.searching.config import _file_signature
 from zimantic.searching.sources import _book_identity, _html_attribute
+
+
+def _search_results(search, *args, **kwargs):
+    """Return one page of results from the public ``search_page`` API."""
+    return search.search_page(*args, **kwargs)["results"]
 
 
 def _bare_search(cfg):
@@ -134,6 +140,25 @@ def _title_search(rows, query, limit=1):
 
 
 class SearchContractTests(unittest.TestCase):
+    def test_source_info_metadata_fallback_uses_name_and_bool_capability(self):
+        source = _source_info_from_metadata(
+            {
+                "name": "Display Name",
+                "has_fulltext_index": 1,
+                "size": 10,
+                "article_count": 2,
+                "media_count": 3,
+            },
+            key="manual",
+            local_name="manual",
+            available=True,
+            searchable=True,
+            icon_url=None,
+        )
+        self.assertEqual(source.title, "Display Name")
+        self.assertIs(source.has_fulltext_index, True)
+        self.assertEqual(source.tags, ())
+
     def test_content_phrase_matching_keeps_stopwords_and_ignores_markup(self):
         text = (
             "<p>Ampiroxicam (INN) is a non-steroidal "
@@ -1179,9 +1204,35 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIn("manual", search.indexes)
             self.assertFalse(search.indexes["manual"].semantic)
 
-            results = search.search("tire change", limit=1)
+            results = _search_results(search, "tire change", limit=1)
             self.assertEqual(results[0]["title"], "Tire Change")
             self.assertEqual(results[0]["path"], "tire-change")
+            search._executor.shutdown(wait=True)
+
+    def test_index_vectors_built_with_a_different_model_are_ignored(self):
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            db_path = _write_index(
+                tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)]
+            )
+            db = sqlite3.connect(db_path)
+            db.execute(
+                "INSERT INTO meta VALUES ('model_fingerprint', 'old-model')"
+            )
+            db.commit()
+            db.close()
+            db_path.with_suffix(".faiss").write_bytes(b"vectors")
+
+            search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
+            search._defer_faiss = False
+            search._model_fingerprint = "new-model"
+            with self.assertLogs("zimantic.search", level="WARNING") as logs:
+                index = search._open_index(db_path)
+
+            self.assertIsNotNone(index)
+            self.assertIsNone(index.faiss_index)
+            self.assertTrue(any("different model" in line for line in logs.output))
             search._executor.shutdown(wait=True)
 
     def test_health_reports_ok_when_homepage_is_unavailable(self):
@@ -1286,7 +1337,7 @@ class GracefulDegradationTests(unittest.TestCase):
         self.assertEqual(library[0]["title"], "A broken book")
         search._executor.shutdown(wait=True)
 
-    def test_library_prefers_the_newest_version_of_one_book(self):
+    def test_library_prefers_the_larger_version_of_one_book(self):
         search = _bare_search({})
         self.addCleanup(search.close)
         search.sources = {
@@ -1323,8 +1374,10 @@ class GracefulDegradationTests(unittest.TestCase):
         ):
             library = search.library_dicts()
 
-        self.assertEqual([source["name"] for source in library], ["book_2026-01"])
-        self.assertEqual(library[0]["date"], "2026-01-01")
+        # A larger copy is usually the more complete download, even when an
+        # older date would otherwise win.
+        self.assertEqual([source["name"] for source in library], ["book_2025-01"])
+        self.assertEqual(library[0]["date"], "2025-01-01")
         search._executor.shutdown(wait=True)
 
     def test_library_prefers_a_readable_duplicate(self):
@@ -1549,7 +1602,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIsNotNone(search.cache.get(search._cache_key("tire change", None)))
 
             with patch.object(search, "_search_source", side_effect=AssertionError("cache miss")):
-                cached = search.search("tire change", limit=1)
+                cached = _search_results(search, "tire change", limit=1)
             self.assertEqual(cached[0]["title"], "Tire Change")
             search._executor.shutdown(wait=True)
 
@@ -1571,7 +1624,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
             self.assertEqual([event["type"] for event in cached_events], [
-                "started", "source", "snapshot", "done",
+                "started", "source", "done",
             ])
             self.assertEqual(cached_events[1]["source"]["key"], "manual")
             self.assertEqual(cached_events[1]["count"], 1)
@@ -1776,7 +1829,7 @@ class GracefulDegradationTests(unittest.TestCase):
             search.reload()
 
             self.assertIsNot(search.indexes["manual"], old_index)
-            self.assertEqual(search.search("new title", limit=1)[0]["title"], "New title")
+            self.assertEqual(_search_results(search, "new title", limit=1)[0]["title"], "New title")
             search._close_index(search.indexes["manual"])
             search._executor.shutdown(wait=True)
 
@@ -2043,10 +2096,10 @@ class PaginationTests(unittest.TestCase):
             search._load_indexes()
             search.refresh_sources()
 
-            page1 = search.search("tire change", limit=2, offset=0)
-            page2 = search.search("tire change", limit=2, offset=2)
-            page3 = search.search("tire change", limit=2, offset=4)
-            whole = search.search("tire change", limit=5, offset=0)
+            page1 = _search_results(search, "tire change", limit=2, offset=0)
+            page2 = _search_results(search, "tire change", limit=2, offset=2)
+            page3 = _search_results(search, "tire change", limit=2, offset=4)
+            whole = _search_results(search, "tire change", limit=5, offset=0)
 
             paged = [doc["id"] for doc in page1 + page2 + page3]
             self.assertEqual(paged, [doc["id"] for doc in whole])
@@ -2081,11 +2134,11 @@ class PaginationTests(unittest.TestCase):
             search._load_indexes()
             search.refresh_sources()
 
-            first = search.search("tire change", limit=2, offset=0)
+            first = _search_results(search, "tire change", limit=2, offset=0)
             pooled = search.cache.get(search._cache_key("tire change", None))
             self.assertEqual(len(pooled["pool"]), 5)
             # A different page must be answered from the same cached entry.
-            second = search.search("tire change", limit=2, offset=2)
+            second = _search_results(search, "tire change", limit=2, offset=2)
             self.assertIs(search.cache.get(search._cache_key("tire change", None)), pooled)
             self.assertNotEqual(first[0]["id"], second[0]["id"])
             search._executor.shutdown(wait=True)
@@ -2240,6 +2293,25 @@ class SourceScopeTests(unittest.TestCase):
         search.refresh_sources()
         return search
 
+    def test_scan_zim_paths_logs_unreadable_directories(self):
+        import zimantic.search as search_module
+
+        search = _bare_search({"zim_dir": "/zims"})
+        self.addCleanup(search.close)
+
+        def fake_iter_zim_files(_root, on_error=None):
+            assert on_error is not None
+            on_error(OSError(13, "Permission denied", "/zims/private"))
+            return iter(())
+
+        with (
+            patch.object(search_module, "iter_zim_files", side_effect=fake_iter_zim_files),
+            self.assertLogs("zimantic.search", level="ERROR") as logs,
+        ):
+            self.assertEqual(search._scan_zim_paths(), {})
+
+        self.assertTrue(any("/zims/private" in line for line in logs.output))
+
     def test_selective_limit_is_min_ten_or_thirty_five_percent(self):
         self.assertEqual(Search._selective_source_limit(1), 0)
         self.assertEqual(Search._selective_source_limit(3), 1)
@@ -2330,6 +2402,28 @@ class SourceScopeTests(unittest.TestCase):
             self.assertEqual([source.key for source in sources], ["local"])
         finally:
             search._executor.shutdown(wait=True)
+
+    def test_remote_catalog_does_not_duplicate_local_or_remote_variants(self):
+        search = _bare_search({})
+        index = types.SimpleNamespace(source_size=None, ensure_open=lambda: None)
+        search.indexes = {"medicine_maxi_2025-10": index}
+        sources = search._rebuild_sources(
+            [
+                {"name": "Remote mini", "book": "medicine_mini_2025-10"},
+                {"name": "Remote nopic", "book": "medicine_nopic_2025-10"},
+                {"name": "Other mini", "book": "other_mini_2025-10"},
+                {"name": "Other nopic", "book": "other_nopic_2025-10"},
+            ]
+        )
+        self.assertEqual(
+            sorted(source["key"] for source in sources),
+            ["medicine_maxi", "other_mini"],
+        )
+        self.assertEqual(
+            [source["name"] for source in sources if source["key"].startswith("other")],
+            ["Other mini"],
+        )
+        search._executor.shutdown(wait=True)
 
     def test_remote_catalog_does_not_overwrite_a_local_source_identity(self):
         search = _bare_search({})

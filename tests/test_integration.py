@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -123,6 +124,11 @@ def _create_sparse_zim(path: Path) -> None:
         creator.add_item(
             _Page("style.css", "Stylesheet", b"body {}", mimetype="text/css")
         )
+
+
+def _search_results(search, *args, **kwargs):
+    """Return one page of results from the public ``search_page`` API."""
+    return search.search_page(*args, **kwargs)["results"]
 
 
 def _config(root: Path, *, max_results: int = 100) -> dict:
@@ -321,7 +327,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(stream.status_code, 200)
             self.assertEqual(
                 [json.loads(line)["type"] for line in stream.text.splitlines()],
-                ["started", "source", "snapshot", "done"],
+                ["started", "source", "done"],
             )
             self.assertEqual(json.loads(stream.text.splitlines()[-1])["results"][0]["title"], "Beta")
 
@@ -386,7 +392,7 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
 
             self.assertEqual(search.local_names(), ["manual"])
-            result = search.search("rotors", limit=1)[0]
+            result = _search_results(search, "rotors", limit=1)[0]
             self.assertEqual(result["title"], "Beta")
             self.assertEqual(result["url"], "/content/manual/Beta")
             report = search.health()["indexes"][0]
@@ -523,7 +529,7 @@ class LocalIntegrationTests(unittest.TestCase):
             build_module.build(zim_path, indexes, embedder=None, batch_size=1)
             search = self._open_search(root)
 
-            results = search.search("photosynthesis", limit=5)
+            results = _search_results(search, "photosynthesis", limit=5)
             self.assertTrue(
                 any(result["title"] == "Photosynthesis" for result in results)
             )
@@ -550,7 +556,7 @@ class LocalIntegrationTests(unittest.TestCase):
             ]
             zim_path = self._build_fixture(root, pages=old_pages, fast=True)
             search = self._open_search(root)
-            self.assertEqual(search.search("old article", limit=1)[0]["title"], "Old article")
+            self.assertEqual(_search_results(search, "old article", limit=1)[0]["title"], "Old article")
 
             replacement = root / "zims" / "manual-replacement.zim"
             _create_zim(replacement, new_pages)
@@ -576,8 +582,8 @@ class LocalIntegrationTests(unittest.TestCase):
                         fast=False,
                     )
 
-            self.assertEqual(search.search("old article", limit=1)[0]["title"], "Old article")
-            self.assertEqual(search.search("new article", limit=1), [])
+            self.assertEqual(_search_results(search, "old article", limit=1)[0]["title"], "Old article")
+            self.assertEqual(_search_results(search, "new article", limit=1), [])
 
             build_module.build(
                 zim_path,
@@ -588,8 +594,8 @@ class LocalIntegrationTests(unittest.TestCase):
             )
             summary = search.reload()
             self.assertEqual(summary["upgraded"], [])
-            self.assertEqual(search.search("new article", limit=1)[0]["title"], "New article")
-            self.assertEqual(search.search("old article", limit=1), [])
+            self.assertEqual(_search_results(search, "new article", limit=1)[0]["title"], "New article")
+            self.assertEqual(_search_results(search, "old article", limit=1), [])
 
     def test_corrupt_vectors_degrade_and_missing_zim_is_ignored(self):
         with _temp_dir(self) as tmp:
@@ -600,7 +606,7 @@ class LocalIntegrationTests(unittest.TestCase):
 
             search = self._open_search(root, semantic=True)
             self.assertFalse(search.indexes["manual"].semantic)
-            self.assertEqual(search.search("alpha", limit=1)[0]["title"], "Alpha")
+            self.assertEqual(_search_results(search, "alpha", limit=1)[0]["title"], "Alpha")
 
             # Removing the archive orphans the finished index: it is ignored
             # entirely rather than served title-only, so the source disappears.
@@ -625,7 +631,7 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             client = TestClient(create_app(search))
 
-            redirect_results = search.search("breeze", limit=10)
+            redirect_results = _search_results(search, "breeze", limit=10)
             self.assertEqual(len(redirect_results), 1)
             self.assertEqual(redirect_results[0]["title"], "Air")
             self.assertEqual(redirect_results[0]["path"], "Air")
@@ -648,10 +654,10 @@ class LocalIntegrationTests(unittest.TestCase):
                 "/article/manual/Air",
             )
 
-            ordinary_results = search.search("air", limit=10)
+            ordinary_results = _search_results(search, "air", limit=10)
             self.assertEqual(ordinary_results[0]["title"], "Air")
 
-            disambiguation_results = search.search("air disambiguation", limit=10)
+            disambiguation_results = _search_results(search, "air disambiguation", limit=10)
             self.assertEqual(
                 disambiguation_results[0]["title"],
                 "Air (disambiguation)",
@@ -768,6 +774,7 @@ class LocalIntegrationTests(unittest.TestCase):
             library = search.library_dicts()
 
             self.assertEqual(library[0]["perma_ref"], "manual")
+            self.assertEqual(library[0]["title"], "A Display Name")
             self.assertEqual(library[0]["uuid"], search.catalog.get_stem("manual_2026-08").uuid)
 
     def test_xhtml_articles_get_the_article_bridge(self):
@@ -804,6 +811,8 @@ class LocalIntegrationTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"data-zimantic-bridge", response.content)
+            # The injected bridge must keep an XHTML document well-formed XML.
+            ET.fromstring(response.content)
 
     def test_unmounted_zim_dir_leaves_served_views_empty_until_remount(self):
         with _temp_dir(self) as tmp:

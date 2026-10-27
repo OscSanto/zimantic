@@ -347,7 +347,13 @@ def _index_entries(
         _save_rows(db, pending_rows, pending_next, future.result())
 
 
-def _finish_build(state: _BuildState, db_path: Path, faiss_path: Path, fast: bool) -> None:
+def _finish_build(
+    state: _BuildState,
+    db_path: Path,
+    faiss_path: Path,
+    fast: bool,
+    model_fingerprint: str = "",
+) -> None:
     db = state.db
     if db is None:
         raise RuntimeError("build database is already closed")
@@ -356,6 +362,7 @@ def _finish_build(state: _BuildState, db_path: Path, faiss_path: Path, fast: boo
             db.execute("DROP TABLE IF EXISTS vecs")
             db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
             db.execute("DELETE FROM meta WHERE key = 'build_mode'")
+            db.execute("DELETE FROM meta WHERE key = 'model_fingerprint'")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
         logger.debug(f"{db_path.stem}: title + full-text index ready")
@@ -369,6 +376,13 @@ def _finish_build(state: _BuildState, db_path: Path, faiss_path: Path, fast: boo
         db.execute("DELETE FROM meta WHERE key = 'build_mode'")
         db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
         db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
+        if model_fingerprint:
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('model_fingerprint', ?)",
+                (model_fingerprint,),
+            )
+        else:
+            db.execute("DELETE FROM meta WHERE key = 'model_fingerprint'")
     if state.publish_upgrade:
         db.close()
         state.db = None
@@ -427,7 +441,8 @@ def build(
             max_preview_chars,
             embedding_pipeline,
         )
-        _finish_build(state, db_path, faiss_path, fast)
+        fingerprint = getattr(embedder, "fingerprint", "") if embedder is not None else ""
+        _finish_build(state, db_path, faiss_path, fast, fingerprint)
     finally:
         if state.db is not None:
             state.db.close()

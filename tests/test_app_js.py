@@ -63,6 +63,41 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["displayOnlyScope"], [])
         self.assertFalse(payload["displayOnlyHasScope"])
 
+    def test_source_outside_a_full_search_pool_is_searched_explicitly(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+let current = {{question: "q", searchAll: true, searchKeys: ["inside"]}};
+let selectedSourceKeys = new Set();
+const calls = [];
+function selectionValues(values) {{
+  if (values instanceof Set) return [...values].filter(Boolean);
+  return (Array.isArray(values) ? values : values ? [values] : []).filter(Boolean);
+}}
+function setSelectedSources(values) {{ selectedSourceKeys = new Set(values); }}
+function loadPage(page) {{ calls.push(["load", page]); }}
+function runSearch(question, sources, page, scope) {{
+  calls.push(["run", question, sources, page, scope]);
+}}
+{_function_source(source, "function applySourceSelection(", "function makeStateUrl(")}
+applySourceSelection("q", ["inside"], 0, []);
+const inside = calls.at(-1);
+applySourceSelection("q", ["outside"], 0, ["outside"]);
+const outside = calls.at(-1);
+console.log(JSON.stringify({{inside, outside}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["inside"], ["load", 0])
+        self.assertEqual(
+            payload["outside"],
+            ["run", "q", ["outside"], 0, ["outside"]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

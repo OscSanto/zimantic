@@ -36,6 +36,11 @@ class _LazyEmbedder:
     def embed(self, *args, **kwargs):
         return self._get().embed(*args, **kwargs)
 
+    @property
+    def fingerprint(self) -> str:
+        """The loaded model's fingerprint, or empty when it was never needed."""
+        return getattr(self._value, "fingerprint", "") if self._value is not None else ""
+
 
 def _graceful_interrupt(_signum: int, _frame) -> None:
     """Turn SIGTERM (a systemd stop) into KeyboardInterrupt.
@@ -201,7 +206,7 @@ def _make_parser() -> argparse.ArgumentParser:
 
 def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
     """Expand CLI files and folders into unique ZIM paths."""
-    from .catalog import iter_zim_files
+    from .catalog import is_zim_filename, iter_zim_files
 
     zims: list[Path] = []
     seen: set[Path] = set()
@@ -209,6 +214,8 @@ def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
         if source.is_dir():
             matches = [zim for zim in iter_zim_files(source) if zim.is_file()]
         elif source.is_file():
+            if not is_zim_filename(source.name):
+                sys.exit(f"zimantic: not a ZIM file: {source}")
             matches = [source]
         else:
             sys.exit(f"zimantic: path not found: {source}")

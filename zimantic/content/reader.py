@@ -1086,16 +1086,36 @@ def read_entry(
             or _PLAIN_TEXT_ASSET.search(entry.title)
         ):
             return None
-        if (
-            mimetype in {"text/html", "application/xhtml+xml"}
-            and _HTML_ASSET_PATH.search(entry.path)
-        ):
+        if mimetype in {"text/html", "application/xhtml+xml"}:
+            try:
+                entry_limit = max(1, int(max_entry_bytes))
+            except (TypeError, ValueError):
+                entry_limit = DEFAULT_MAX_ENTRY_BYTES
+            entry_size = int(getattr(item, "size", 0) or 0)
+            if entry_size > entry_limit:
+                return None
             try:
                 head = bytes(item.content[:REFRESH_SCAN_BYTES])
             except (KeyError, RuntimeError, TypeError, ValueError):
                 return None
-            if not _HTML_TAG.search(head):
+            if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(head):
                 return None
+            # A fast index still needs the small amount of metadata that comes
+            # from the page itself: disambiguation suffixes, meta-refresh shell
+            # targets, and app-shell companions. Discard the excerpt afterwards
+            # because fast indexes do not store article text.
+            record = _read_html_entry(
+                cast(Archive, zim),
+                entry,
+                i,
+                head,
+                max_preview_chars,
+                max_entry_bytes=entry_limit,
+                truncated=entry_size > len(head),
+            )
+            if record is not None:
+                return EntryRecord(i, record.title, "", record.path, record.target_id)
+            return EntryRecord(i, entry.title, "", entry.path, None)
         return EntryRecord(i, entry.title, "", entry.path, None)
 
     try:

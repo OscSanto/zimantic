@@ -156,6 +156,3 @@ class WordPieceTokenizer:
         for token in self._basic_tokens(text):
             pieces.extend(self._wordpiece_tokens(token))
         return [self.vocab.get(piece, self.unk_id) for piece in pieces]
-
-    def token_count(self, text: str) -> int:
-        return len(self.encode(text))

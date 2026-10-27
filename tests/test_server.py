@@ -87,9 +87,6 @@ class FakeSearch:
             "matched_by": {"semantic": 1, "title": 2, "fulltext": 3},
         }
 
-    def search(self, query, zim, limit=None, offset=0, source=None, debug=False):
-        return self.search_page(query, zim, limit, offset, source, debug)["results"]
-
     def stream_search(self, query, zim, limit=None, offset=0, source=None, debug=False):
         self.stream_calls.append((query, zim, limit, offset, source, debug))
         result = {"id": "manual:page", "title": "Page"}

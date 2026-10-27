@@ -237,7 +237,12 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             )
         content = article["content"]
         if article["mimetype"] in web_app.HTML_MIMETYPES:
-            content = web_app._decorate_article_bridge(content, zim, base_path)
+            content = web_app._decorate_article_bridge(
+                content,
+                zim,
+                base_path,
+                xhtml=article["mimetype"] == "application/xhtml+xml",
+            )
         return web_app._article_content_response(content, article["mimetype"])
 
     def error_shell_article(

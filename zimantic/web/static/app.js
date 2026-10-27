@@ -2855,30 +2855,36 @@
                 }
             }
 
-            function applySourceSelection(question, selectedSources, page = 0) {
+            function applySourceSelection(question, selectedSources, page = 0, scopeSources) {
                 // The running search already knows its real scope. A full pool
-                // can serve any display filter, so selecting a source never
-                // refreshes it. A small pool only covers what it searched:
-                // narrowing is display-only, but adding sources (or choosing All
-                // Sources) needs a fresh search.
+                // can serve any selected source that it actually searched, so
+                // narrowing is display-only. A source outside that pool (for
+                // example a remote source beyond max_remote_sources) must be
+                // searched explicitly instead of filtering to an empty page.
                 const requested = [...new Set(selectionValues(selectedSources))];
-                if (current && current.question === question) {
-                    if (current.searchAll) {
+                if (!requested.length) {
+                    if (current && current.question === question && current.searchAll) {
                         setSelectedSources(requested);
                         loadPage(page);
                         return;
                     }
+                    runSearch(question, requested, page);
+                    return;
+                }
+                if (current && current.question === question) {
                     const scope = new Set(current.searchKeys || []);
-                    if (
-                        requested.length &&
-                        requested.every((key) => scope.has(key))
-                    ) {
+                    if (requested.every((key) => scope.has(key))) {
                         setSelectedSources(requested);
                         loadPage(page);
                         return;
                     }
                 }
-                runSearch(question, requested, page);
+                runSearch(
+                    question,
+                    requested,
+                    page,
+                    scopeSources === undefined ? requested : scopeSources,
+                );
             }
 
             function makeStateUrl(
@@ -3086,24 +3092,26 @@
                 }
                 const selected = [...selectedSourceKeys];
                 commitAutoSearchHistory();
-                const currentScope = current.searchAll
-                    ? []
-                    : [...new Set(current.searchKeys || [])];
+                const scopeKeys = [...new Set(current.searchKeys || [])];
                 const addsOutside = selected.some(
-                    (source) => !currentScope.includes(source),
+                    (source) => !scopeKeys.includes(source),
                 );
-                const nextScope = current.searchAll || !selected.length
+                const nextScope = !selected.length
                     ? []
-                    : addsOutside
-                      ? selected
-                      : currentScope;
+                    : current.searchAll
+                      ? addsOutside
+                        ? selected
+                        : []
+                      : addsOutside
+                        ? selected
+                        : scopeKeys;
                 history.pushState(
                     null,
                     "",
                     makeStateUrl(current.question, selected, 0, null, nextScope),
                 );
                 renderSourceFilters();
-                applySourceSelection(current.question, selected, 0);
+                applySourceSelection(current.question, selected, 0, nextScope);
             });
 
             $("results").addEventListener("click", (event) => {

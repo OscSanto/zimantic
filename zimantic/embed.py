@@ -107,25 +107,64 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
     )
 
 
-def verify_model_files(model_dir, warn=None) -> None:
-    """Warn (never fail) when a model file differs from the documented checksum."""
+def verify_model_files(model_dir, warn=None) -> dict[str, str]:
+    """Warn (never fail) when a model file differs from the documented checksum.
+
+    Returns the checksums that were actually computed so callers can build a
+    model fingerprint without hashing the same files twice.
+    """
     if warn is None:
         def warn_to_stderr(message):
             print(message, file=sys.stderr)
 
         warn = warn_to_stderr
+    actual_hashes: dict[str, str] = {}
     for name, expected in EXPECTED_CHECKSUMS.items():
         path = Path(model_dir) / name
         try:
             actual = _sha256(path)
         except OSError:
             continue  # a missing file fails later, with a clearer error
+        actual_hashes[name] = actual
         if actual != expected:
             warn(
                 f"zimantic: warning: {name} does not match the expected checksum "
                 f"(got {actual}, expected {expected}); search results may differ "
                 "from the documented model"
             )
+    return actual_hashes
+
+
+def model_fingerprint(model_dir, hashes: dict[str, str] | None = None) -> str:
+    """Return a stable fingerprint of the model graph and its tokenizer.
+
+    Vectors are model-specific. The fingerprint is stored in each index so a
+    later server can notice that the configured model changed instead of
+    silently searching with vectors from a different encoder. An empty string
+    means the files needed for a fingerprint are unavailable.
+    """
+    model_path = Path(model_dir) / "model.onnx"
+    try:
+        tokenizer_kind, tokenizer_path = _resolve_tokenizer(model_dir)
+    except (OSError, FileNotFoundError):
+        return ""
+    if not model_path.is_file():
+        return ""
+
+    cached = hashes or {}
+    digest = hashlib.sha256()
+    for label, path in (("model", model_path), (tokenizer_kind, tokenizer_path)):
+        value = cached.get(path.name)
+        if value is None:
+            try:
+                value = _sha256(path)
+            except OSError:
+                return ""
+        digest.update(label.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(value.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 class Embedder:
@@ -147,7 +186,7 @@ class Embedder:
         self.embedding_tokens = int(embedding_tokens)
         if self.embedding_tokens < SPECIAL_TOKEN_COUNT:
             raise ValueError(f"embedding_tokens must be at least {SPECIAL_TOKEN_COUNT}")
-        verify_model_files(model_dir)
+        hashes = verify_model_files(model_dir)
         self.threads = (
             int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
         )
@@ -175,6 +214,7 @@ class Embedder:
         # requires it. Feed only the inputs the graph declares.
         self._input_names = {item.name for item in self.session.get_inputs()}
         self.tokenizer_kind, tokenizer_path = _resolve_tokenizer(model_dir)
+        self.fingerprint = model_fingerprint(model_dir, hashes)
         if self.tokenizer_kind == "sentencepiece":
             # sentencepiece loads this vocabulary in ~45 MB; Hugging Face
             # `tokenizers` needed ~250 MB.

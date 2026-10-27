@@ -60,7 +60,7 @@ HTML_MIMETYPES = frozenset({"text/html", "application/xhtml+xml"})
 # Some JavaScript applications read ``document.cookie`` even when they do not
 # use cookies. The browser throws for that getter in the opaque-origin article
 # sandbox; expose the honest empty value so those applications can start.
-ARTICLE_COOKIE_SHIM = """<script data-zimantic-cookie-shim>
+ARTICLE_COOKIE_SHIM = """<script data-zimantic-cookie-shim="true">
 (() => {
   try {
     void document.cookie;
@@ -82,7 +82,7 @@ ARTICLE_COOKIE_SHIM = """<script data-zimantic-cookie-shim>
 # owns the page (freeCodeCamp's Pinia store is one example). Keep the page
 # running with an in-memory store and tell the shell, so it can offer the direct
 # /content/ view where the browser's real storage is available.
-ARTICLE_STORAGE_SHIM = """<script data-zimantic-storage-shim>
+ARTICLE_STORAGE_SHIM = """<script data-zimantic-storage-shim="true">
 (() => {
   const makeMemoryStorage = () => {
     const values = new Map();
@@ -178,14 +178,14 @@ ARTICLE_STORAGE_SHIM = """<script data-zimantic-storage-shim>
 </script>"""
 
 
-ARTICLE_INDEXEDDB_LOADER = """<script data-zimantic-indexeddb-loader>
+ARTICLE_INDEXEDDB_LOADER = """<script data-zimantic-indexeddb-loader="true">
 (() => {
   // The modal's sandbox has an opaque origin, where IndexedDB is unavailable.
   // Load the in-memory polyfill synchronously so page scripts see it.
   if (self.origin !== "null") return;
   const url = %s;
   document.write(
-    '<script src="' + url + '" data-zimantic-indexeddb-shim><' + '/script>'
+    '<script src="' + url + '" data-zimantic-indexeddb-shim="true"><' + '/script>'
   );
 })();
 </script>"""
@@ -924,10 +924,10 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 # left completely alone: its own stylesheet knows best. Only captures that never
 # opted in get the reader fallback below.
 ARTICLE_VIEWPORT_META = (
-    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1" />'
 )
 
-ARTICLE_MOBILE_STYLE = """<style data-zimantic-mobile>
+ARTICLE_MOBILE_STYLE = """<style data-zimantic-mobile="true">
 /* Conservative reader fallback for desktop-only captures. Most desktop pages
    anchor their layout in a fixed-width child of <body> (a 900px wrapper, say),
    so cap that child and let wide code and tables scroll inside their own box
@@ -969,7 +969,7 @@ MOBILE_LAYOUT_HINTS = (
     ("<devdocs-navbar", "_mobile"),
 )
 
-MOBILE_LAYOUT_SCRIPT = """<script data-zimantic-mobile>
+MOBILE_LAYOUT_SCRIPT = """<script data-zimantic-mobile="true">
 (() => {
   const classes = %s;
   const narrow = window.matchMedia("(max-width: 800px)");
@@ -989,7 +989,7 @@ MOBILE_LAYOUT_SCRIPT = """<script data-zimantic-mobile>
 # has no toolbar (that lives in the /content/ shell), so this tiny bridge turns
 # in-article link clicks into shell navigation. Without it, following a link
 # would leave the shell's breadcrumbs and modal URL pointing at the old article.
-ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge>
+ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
 (() => {
   const initialize = () => {
     const context = new URL(location.href);
@@ -1534,8 +1534,38 @@ def _article_toolbar(
 </nav>"""
 
 
+_SCRIPT_BLOCK = re.compile(
+    r"(<script\b[^>]*>)(.*?)(</script\s*>)", re.IGNORECASE | re.DOTALL
+)
+_STYLE_BLOCK = re.compile(
+    r"(<style\b[^>]*>)(.*?)(</style\s*>)", re.IGNORECASE | re.DOTALL
+)
+
+
+def _xml_safe_scripts(markup: str) -> str:
+    """Wrap injected inline scripts in CDATA for XHTML documents."""
+    def replace(match: re.Match[str]) -> str:
+        opening, body, closing = match.groups()
+        if "//<![CDATA[" in body:
+            return match.group(0)
+        return f"{opening}\n//<![CDATA[\n{body}\n//]]>\n{closing}"
+
+    return _SCRIPT_BLOCK.sub(replace, markup)
+
+
+def _xml_safe_styles(markup: str) -> str:
+    """Wrap injected stylesheets in CSS-compatible CDATA for XHTML documents."""
+    def replace(match: re.Match[str]) -> str:
+        opening, body, closing = match.groups()
+        if "/*<![CDATA[*/" in body:
+            return match.group(0)
+        return f"{opening}\n/*<![CDATA[*/\n{body}\n/*]]>*/\n{closing}"
+
+    return _STYLE_BLOCK.sub(replace, markup)
+
+
 def _decorate_article_bridge(
-    content: bytes | memoryview, zim: str, base_path: str = ""
+    content: bytes | memoryview, zim: str, base_path: str = "", xhtml: bool = False
 ) -> bytes | memoryview:
     """Add the shell-navigation bridge and mobile fallback to a raw article.
 
@@ -1558,23 +1588,41 @@ def _decorate_article_bridge(
     early = ARTICLE_INDEXEDDB_LOADER % json.dumps(
         f"{base_path}/indexeddb-shim.js"
     ) + ARTICLE_STORAGE_SHIM
-    head_open = re.search(r"<head\b[^>]*>", document, re.IGNORECASE)
-    if head_open:
-        position = head_open.end()
-        document = document[:position] + early + document[position:]
-    else:
-        document = early + document
     additions = (
         ARTICLE_COOKIE_SHIM
         + mobile_head
         + (ARTICLE_NAV_BRIDGE_SCRIPT % json.dumps(base_path))
     )
+    if xhtml:
+        early = _xml_safe_scripts(early)
+        additions = _xml_safe_styles(_xml_safe_scripts(additions))
+    head_open = re.search(r"<head\b[^>]*>", document, re.IGNORECASE)
+    if head_open:
+        position = head_open.end()
+        document = document[:position] + early + document[position:]
+    else:
+        html_open = re.search(r"<html\b[^>]*>", document, re.IGNORECASE)
+        if html_open:
+            position = html_open.end()
+            document = document[:position] + early + document[position:]
+        else:
+            document = early + document
     head_close = re.search(r"</head\s*>", document, re.IGNORECASE)
     if head_close:
         position = head_close.start()
         document = document[:position] + additions + document[position:]
     else:
-        document = additions + document
+        body_open = re.search(r"<body\b[^>]*>", document, re.IGNORECASE)
+        if body_open:
+            position = body_open.start()
+            document = document[:position] + additions + document[position:]
+        else:
+            html_open = re.search(r"<html\b[^>]*>", document, re.IGNORECASE)
+            if html_open:
+                position = html_open.end()
+                document = document[:position] + additions + document[position:]
+            else:
+                document = additions + document
     return document.encode("utf-8")
 
 

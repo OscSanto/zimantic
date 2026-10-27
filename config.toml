@@ -55,6 +55,7 @@ max_kiwix_response_bytes = 67108864
 
 # Independent ZIMs can be built concurrently. When unset, the default scales with
 # available CPU and RAM; set it explicitly to override the automatic worker count.
+# Values below 1 warn and fall back to the automatic default.
 # build_workers = 2
 
 # ONNX Runtime threads for embedding. Unset leaves a core for search and the web server.
@@ -63,7 +64,8 @@ max_kiwix_response_bytes = 67108864
 
 # Maximum simultaneous embedding calls when multiple ZIMs are being built.
 # When unset, the default accounts for build_workers, CPU threads and available RAM.
-# Only used when build_workers is greater than 1.
+# Only used when build_workers is greater than 1. Values below 1 warn and fall
+# back to the automatic default.
 # embedding_workers = 2
 
 # Maximum HTML read per article.

@@ -264,6 +264,13 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
     # Use the validated values in ``cfg``, not the raw user mapping: an
     # invalid worker type is skipped above and must still get a computed
     # default instead of leaving the key missing.
+    for key in ("build_workers", "embedding_workers"):
+        if key in cfg and cfg[key] < 1:
+            warn(
+                f"zimantic: warning: config key {key!r} in {path} "
+                "must be at least 1; using the automatic default"
+            )
+            del cfg[key]
     if "build_workers" not in cfg:
         cfg["build_workers"] = default_build_workers()
     if "embedding_workers" not in cfg:

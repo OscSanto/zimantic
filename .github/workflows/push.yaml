@@ -2,7 +2,9 @@ name: PyTest and Publish
 
 on:
   push:
+    branches: [main]
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
   # Manual runs execute the test matrix without publishing.
   workflow_dispatch:
     inputs:
@@ -14,56 +16,57 @@ on:
 
 jobs:
   test:
-    name: test (x86_64, py3.14)
+    name: test (x86_64, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@main
-
-      - name: Setup Python
-        uses: actions/setup-python@main
+      - uses: astral-sh/setup-uv@main
         with:
-          python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@main
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      - name: Run tests
-        run: uv run --locked pytest -q
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      # `dev` is a PEP 735 dependency group; `uv sync` installs it by default.
+      # `--locked` fails if uv.lock is out of date.
+      - run: uv sync --locked
+      - run: uv run pytest -q
 
   arm64:
     name: test (arm64, py3.14)
     needs: test
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
-
     steps:
       - uses: actions/checkout@main
-
-      - name: Setup Python
-        uses: actions/setup-python@main
+      - uses: actions/setup-python@main
         with:
           python-version: "3.14"
+      - uses: astral-sh/setup-uv@main
+      - run: uv sync --locked
+      - run: uv run pytest -q
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@main
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      - name: Run tests
-        run: uv run --locked pytest -q
+  windows:
+    name: test (windows x86_64, py3.14, non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@main
+      - uses: astral-sh/setup-uv@main
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest -q
 
   armhf:
     name: native dependency check (armhf)
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
       - uses: actions/checkout@main
       - uses: docker/setup-qemu-action@master
@@ -84,8 +87,8 @@ jobs:
             '
 
   publish:
-    needs: [test, arm64, armhf]
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
     environment: publish
     permissions:
@@ -106,7 +109,7 @@ jobs:
 
   release:
     needs: publish
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

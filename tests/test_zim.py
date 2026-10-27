@@ -772,6 +772,12 @@ class DisambiguationTests(unittest.TestCase):
         self.assertEqual(row[1], "Air (disambiguation)")
         self.assertEqual(len(row), 5)
 
+    def test_fast_read_entry_persists_disambiguation_suffix(self):
+        row = _read_entry(_DisambiguationArchive(), 0, fast=True)
+        self.assertEqual(row[1], "Air (disambiguation)")
+        self.assertEqual(row[2], "")
+        self.assertEqual(row[3], "Air")
+
 
 SPA_STUB = (
     b"<html><head><title>Collected Poems</title>"
@@ -874,6 +880,14 @@ class JavaScriptShellTests(unittest.TestCase):
         self.assertIn("real article about collected poems", row[2])
         self.assertEqual(row[3], "index/page_42")  # deep link, not the shell
         self.assertIsNone(row[4])                  # not a redirect onto index.html
+
+    def test_fast_spa_stub_uses_companion_json_and_keeps_its_own_path(self):
+        row = _read_entry(_SpaArchive(), 0, fast=True)
+
+        self.assertEqual(row[1], "Collected Poems")
+        self.assertEqual(row[2], "")               # fast indexes store no body text
+        self.assertEqual(row[3], "index/page_42")
+        self.assertIsNone(row[4])
 
     def test_media_bundle_video_description_is_indexed(self):
         stub = (

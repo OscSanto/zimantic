@@ -157,6 +157,51 @@ class BuildUpgradeTests(unittest.TestCase):
             self.assertEqual(faiss_ids, [0, 1])
             self.assertEqual(str(_meta(db_path)["done"]), "1")
 
+    def test_full_build_stores_model_fingerprint_and_fast_build_removes_it(self):
+        class _OneEntryArchive(_FakeArchive):
+            entry_count = 1
+
+        class _FingerprintEmbedder:
+            fingerprint = "model-fingerprint-1"
+
+            def truncate(self, text, prefix=""):
+                return text
+
+            def embed(self, texts):
+                return np.ones((len(texts), 4), dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
+            db_path = directory / "manual.sqlite"
+            rows = [EntryRecord(1, "Title", "Excerpt", "path", None)]
+
+            def write_fake_faiss(_db, path):
+                path.write_bytes(b"vectors")
+
+            with (
+                patch.object(build_module, "Archive", _OneEntryArchive),
+                patch.object(build_module, "read_entry", return_value=rows[0]),
+                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
+            ):
+                build_module.build(
+                    directory / "manual.zim", directory, _FingerprintEmbedder(), 1
+                )
+
+            self.assertEqual(
+                _meta(db_path)["model_fingerprint"], "model-fingerprint-1"
+            )
+
+            with (
+                patch.object(build_module, "Archive", _OneEntryArchive),
+                patch.object(build_module, "read_entry", return_value=rows[0]),
+            ):
+                build_module.build(
+                    directory / "manual.zim", directory, None, 1, fast=True, force=True
+                )
+
+            self.assertNotIn("model_fingerprint", _meta(db_path))
+
     def test_force_fast_rebuild_replaces_sqlite_and_removes_faiss(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / "indexes"

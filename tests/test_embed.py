@@ -34,6 +34,30 @@ class ModelChecksumTests(unittest.TestCase):
             self.assertEqual(warnings, [])
 
 
+class ModelFingerprintTests(unittest.TestCase):
+    def test_fingerprint_changes_with_model_or_tokenizer_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "model.onnx"
+            tokenizer = Path(tmp) / "sentencepiece.bpe.model"
+            model.write_bytes(b"model-v1")
+            tokenizer.write_bytes(b"vocab-v1")
+            first = embed.model_fingerprint(tmp)
+
+            tokenizer.write_bytes(b"vocab-v2")
+            second = embed.model_fingerprint(tmp)
+            model.write_bytes(b"model-v2")
+            third = embed.model_fingerprint(tmp)
+
+        self.assertTrue(first)
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(second, third)
+
+    def test_missing_model_has_no_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _sentencepiece_dir(tmp)
+            self.assertEqual(embed.model_fingerprint(tmp), "")
+
+
 class ThreadConfigTests(unittest.TestCase):
     def test_default_thread_budget_leaves_at_least_one_thread(self):
         self.assertEqual(embed.DEFAULT_EMBED_THREADS, max(1, (os.cpu_count() or 1) - 1))

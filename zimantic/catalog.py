@@ -774,11 +774,8 @@ class ZimCatalog:
             "SELECT * FROM zims WHERE path = ?", (str(Path(path).resolve()),)
         ).fetchone()
 
-    def rows(self, *, available_only: bool = False) -> list[CatalogRecord]:
-        query = "SELECT * FROM zims"
-        if available_only:
-            query += " WHERE available = 1"
-        query += " ORDER BY stem"
+    def rows(self) -> list[CatalogRecord]:
+        query = "SELECT * FROM zims ORDER BY stem"
         with self._lock:
             return [CatalogRecord.from_row(row) for row in self.db.execute(query)]
 

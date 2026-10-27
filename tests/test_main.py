@@ -148,6 +148,15 @@ class BuildWorkerTests(unittest.TestCase):
             self.assertEqual([path.name for path in selected], ["manual.zim"])
             self.assertEqual(selected[0].read_bytes(), b"a much larger copy")
 
+    def test_collect_zims_rejects_explicit_non_zim_files(self):
+        import zimantic.__main__ as main_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "notes.txt"
+            path.write_text("not a ZIM", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "not a ZIM file"):
+                main_module._collect_zims([path], Path(tmp))
+
     def test_build_stability_wait_is_opt_in(self):
         import zimantic.__main__ as main_module
         from zimantic import settings
