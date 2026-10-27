@@ -52,15 +52,18 @@ def zimantic(url, zim, query, k, timeout):
 
 def zimantic_api(url, timeout):
     """Find where this Zimantic version serves its API and which ZIMs it has: (api base, ZIM names)."""
-    for base in (f"{url}/api", url):
+    # v0.1.x: <url>/api/zims lists names. Later versions: <url>/zims, then <url>/sources listing objects.
+    for base, listing in ((f"{url}/api", "zims"), (url, "zims"), (url, "sources")):
         try:
-            with urllib.request.urlopen(f"{base}/zims", timeout=timeout) as response:
+            with urllib.request.urlopen(f"{base}/{listing}", timeout=timeout) as response:
                 names = json.load(response)
         except (urllib.error.HTTPError, ValueError):
             continue
+        if isinstance(names, list) and all(isinstance(n, dict) for n in names):
+            names = [n.get("name") or n.get("book") for n in names if n.get("available", True)]
         if isinstance(names, list) and all(isinstance(n, str) for n in names):
             return base, set(names)
-    sys.exit(f"no Zimantic API found at {url}/api/zims or {url}/zims")
+    sys.exit(f"no Zimantic API found at {url}/api/zims, {url}/zims or {url}/sources")
 
 
 def kiwix(url, zim, query, k, timeout):
