@@ -108,6 +108,13 @@ class Resolver:
         return out
 
 
+def dump(meta, results):
+    """The results file as JSON with one query per line, so it reads and diffs like the query files."""
+    line = lambda value: json.dumps(value, ensure_ascii=False)
+    rows = ",\n".join(f"{line(key)}: {line(value)}" for key, value in results.items())
+    return f'{{"meta": {line(meta)},\n"results": {{\n{rows}\n}}}}\n'
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", choices=ENGINES, required=True)
@@ -176,7 +183,7 @@ def main():
     meta = {"label": args.label, "engine": args.engine, "url": args.url, "commit": args.commit, "k": args.k,
             "date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), "unsupported": unsupported}
     RESULTS.mkdir(exist_ok=True)
-    out_path.write_text(json.dumps({"meta": meta, "results": results}, ensure_ascii=False, indent=0), encoding="utf-8")
+    out_path.write_text(dump(meta, results), encoding="utf-8")
     top1 = sum(1 for q in todo if results.get(f"{q['zim']}|{q['id']}", {}).get("rank") == 1)
     print(f"saved {out_path} | {len(results)} results | right article #1 for {top1}/{len(todo)} of this run's queries"
           + (f" | median {statistics.median(times):.0f} ms" if times else ""))
