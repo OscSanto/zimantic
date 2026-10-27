@@ -190,6 +190,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self._build_fixture(root)
             search = self._open_search(root)
             client = TestClient(create_app(search))
+            self.addCleanup(client.close)
 
             response = client.get("/search", params={"q": "rotors"})
             self.assertEqual(response.status_code, 200)
