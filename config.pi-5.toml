@@ -1,0 +1,45 @@
+# Settings tuned for a Raspberry Pi 5 (4 cores, 4-8 GB RAM).
+# Copy this file to config.toml to use them.
+
+zim_dir = "./zims"
+model_dir = "./model"
+index_dir = "./indexes"
+
+port = 8090
+# Optional URL of a running kiwix-serve HTTP API for catalog discovery and
+# remote full-text fallback; leave blank to use only local Zimantic indexes.
+kiwix_server = ""
+kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=50000"
+kiwix_catalog_limit = 50000
+max_kiwix_response_bytes = 67108864
+
+page_size = 10
+max_results = 100
+
+# Moderate batch size for a Pi 5.
+batch_size = 16
+
+# Independent ZIMs can be built concurrently; increase only with enough RAM.
+build_workers = 1
+
+max_html_bytes = 4_194_304
+max_entry_bytes = 1073741824
+max_article_bytes = 33_554_432
+max_preview_chars = 1_000
+
+# Leave one core for search and the web server.
+embed_threads = 3
+# Only used when build_workers is greater than 1.
+# embedding_workers = 2
+
+# nprobe = 64
+min_cosine_similarity = 0.85
+
+search_workers = 4
+max_concurrent_searches = 4
+candidate_count = 16
+max_stream_ranks = 16
+source_timeout = 12
+
+cache_size = 256
+cache_bytes = 33_554_432  # 32 MiB per cache

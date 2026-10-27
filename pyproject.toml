@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zimantic"
+version = "0.1.6"
+description = "Offline semantic search for Kiwix ZIM files"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "numpy",
+    "tqdm",
+    "onnxruntime",
+    "sentencepiece",
+    "faiss-cpu",
+    "libzim",
+    "fastapi",
+    "uvicorn",
+    "pymupdf",
+]
+
+[dependency-groups]
+# Development and test-only tools; the application does not need them at runtime.
+dev = [
+    "pytest",
+    "httpx2",
+]
+
+[project.scripts]
+zimantic = "zimantic.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["zimantic*"]
+
+[tool.setuptools.package-data]
+"zimantic.web" = [
+    "static/*",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+norecursedirs = [
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "node_modules",
+    "venv",
+    "__pypackages__",
+]
+
+[tool.ty.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+unresolved-attribute = "ignore"
+

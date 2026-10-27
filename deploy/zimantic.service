@@ -1,0 +1,64 @@
+# Zimantic search server (user unit).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/zimantic.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zimantic.service
+#
+# Install the CLI from the checkout first:
+#   cd ~/.local/share/zimantic
+#   uv sync --locked --no-dev --no-editable
+#   install -d ~/.local/bin
+#   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
+# The default data directory is ~/.local/share/zimantic.
+
+[Unit]
+Description=Zimantic search server
+After=network-online.target
+Wants=network-online.target
+# Do not restart forever when the server cannot fit in memory: after a few
+# starts in the interval, leave the unit failed so the OOM is visible.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/zimantic
+ExecStart=%h/.local/bin/zimantic serve
+Restart=always
+RestartSec=10
+OOMPolicy=stop
+Environment=PYTHONUNBUFFERED=1
+
+# Hardening: the server only needs to read zims/model and write indexes/ plus
+# its PID file, all under the XDG data directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/zimantic
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# Tune to the device, leaving headroom for the OS (and kiwix-serve). MemoryHigh
+# is the soft limit where the cgroup reclaims and throttles; MemoryMax is the
+# hard limit that OOM-kills Zimantic inside its own cgroup. OOMScoreAdjust>0
+# only breaks ties during a system-wide OOM (protecting sshd/kiwix-serve); it
+# does not cap memory by itself.
+# Raspberry Pi Zero 2 W (512 MB):
+#   MemoryHigh=400M
+#   MemoryMax=450M
+#   OOMScoreAdjust=200
+#
+# Raspberry Pi 5 (4-8 GB):
+#   MemoryHigh=900M
+#   MemoryMax=1G
+#   OOMScoreAdjust=0
+
+[Install]
+WantedBy=default.target

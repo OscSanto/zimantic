@@ -1,0 +1,108 @@
+name: PyTest and Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+  # Manual runs execute the test matrix without publishing.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the selected ref to PyPI after tests
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  test:
+    name: test (x86_64, py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@main
+      - uses: astral-sh/setup-uv@main
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      # `dev` is a PEP 735 dependency group; `uv sync` installs it by default.
+      # `--locked` fails if uv.lock is out of date.
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
+  arm64:
+    name: test (arm64, py3.14)
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@main
+      - uses: actions/setup-python@main
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@main
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
+  windows:
+    name: test (windows x86_64, py3.14, non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@main
+      - uses: astral-sh/setup-uv@main
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest -q
+
+  armhf:
+    name: native dependency check (armhf)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@main
+      - uses: docker/setup-qemu-action@master
+
+      - name: Install Debian native dependencies and smoke-test
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/app" -w /app \
+            arm32v7/debian:trixie-slim \
+            sh -euxc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                python3-faiss \
+                python3-libzim \
+                python3-onnxruntime \
+                python3-sentencepiece
+              PYTHONPATH=/app /usr/bin/python3 -c "import faiss, onnxruntime, sentencepiece; from libzim.reader import Archive; from libzim.search import Searcher; from zimantic.embed import Embedder; from zimantic.search import Search; print(onnxruntime.__version__)"
+            '
+
+  publish:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      contents: read
+      id-token: write
+
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@main
+      - uses: astral-sh/setup-uv@main
+
+      - name: Build package
+        run: uv build --no-sources --clear
+
+      - name: Publish package
+        run: uv publish
