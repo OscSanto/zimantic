@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import logging
 import os
 import signal
@@ -16,8 +15,7 @@ class _LazyEmbedder:
     """Create the embedding model only when the first real batch needs it.
 
     A full build of already-complete indexes should not fail (or spend time
-    loading a model) merely because ``model_dir`` is unavailable. File builds
-    that produce no indexable text likewise never touch the model.
+    loading a model) merely because ``model_dir`` is unavailable.
     """
 
     def __init__(self, factory):
@@ -145,7 +143,7 @@ def _make_parser() -> argparse.ArgumentParser:
         help="include ranking scores in results; in this mode SIGHUP restarts",
     )
 
-    build = commands.add_parser("build", help="index ZIM and other files")
+    build = commands.add_parser("build", help="index ZIM files")
     _add_verbosity_argument(build)
     build.add_argument(
         "paths",
@@ -153,64 +151,25 @@ def _make_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help=(
-            "files or folders to index; a folder means every matching file "
+            "ZIM files or folders containing *.zim; a folder means every .zim "
             "under it (recursively). Default: zim_dir"
-        ),
-    )
-    build.add_argument(
-        "--file-types",
-        action="append",
-        metavar="GLOB",
-        default=None,
-        help=(
-            "file types indexed when scanning folders. Extensions may be "
-            "written as epub, .epub or *.epub; repeat the option or separate "
-            "values with commas, for example 'zim,epub,pdf,txt,md,mp4'. "
-            "Named profiles expand to several formats: text, ebook, docs, "
-            "office, media, video, audio, image, comic, archive, all "
-            "(every supported type), and all+unknown (every file, using "
-            "content detection). Explicit file paths are always considered "
-            "even when their extension is unknown. Default: config "
-            "file_types (zim)"
-        ),
-    )
-    build.add_argument(
-        "--ocr",
-        action="store_true",
-        default=None,
-        help="OCR scanned PDFs, images and comic pages when tesseract is available",
-    )
-    build.add_argument(
-        "--asr",
-        action="store_true",
-        default=None,
-        help="transcribe media without subtitles when whisper is available",
-    )
-    build.add_argument(
-        "--archive-depth",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "recurse into N levels of archives after indexing their member "
-            "names (default: config archive_depth, 0 = list names only)"
         ),
     )
     build.add_argument(
         "--fast",
         action="store_true",
-        help="title and full-text only: skip the model and FAISS (much faster)",
+        help="title + ZIM full-text only: skip article bodies, the model and FAISS (much faster)",
     )
     build.add_argument(
         "--force",
         action="store_true",
-        help="rebuild the selected indexes even if they are already complete",
+        help="rebuild the selected ZIM indexes even if they are already complete",
     )
     build.add_argument(
         "--wait-stable",
         action="store_true",
         help=(
-            "wait until every source's size stops changing before indexing "
+            "wait until every ZIM's size stops changing before indexing "
             "(for downloaded files and systemd.path triggers)"
         ),
     )
@@ -220,7 +179,7 @@ def _make_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="build up to N independent sources concurrently (default: config build_workers)",
+        help="build up to N independent ZIMs concurrently (default: config build_workers)",
     )
 
     reload_cmd = commands.add_parser(
@@ -240,155 +199,73 @@ def _make_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _collect_sources(
-    paths: list[Path],
-    default_dir: str | Path,
-    patterns: tuple[str, ...],
-) -> list[Path]:
-    """Expand CLI files and folders into unique source paths.
+def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
+    """Expand CLI files and folders into unique ZIM paths."""
+    from .catalog import iter_zim_files
 
-    Explicit file arguments are honored regardless of the configured patterns;
-    ``file_types`` only decides what a recursive folder scan picks up.
-    """
-    from .catalog import iter_files
-
-    sources: list[Path] = []
+    zims: list[Path] = []
     seen: set[Path] = set()
     for source in (paths or [Path(default_dir)]):
         if source.is_dir():
-            matches = [item for item in iter_files(source, patterns) if item.is_file()]
+            matches = [zim for zim in iter_zim_files(source) if zim.is_file()]
         elif source.is_file():
             matches = [source]
         else:
             sys.exit(f"zimantic: path not found: {source}")
-        for item in matches:
-            resolved = item.resolve()
+        for zim in matches:
+            resolved = zim.resolve()
             if resolved not in seen:
                 seen.add(resolved)
-                sources.append(item)
-    return sources
+                zims.append(zim)
+    return zims
 
 
-def _select_build_sources(
-    sources: list[Path],
-    sizes: dict[Path, int],
-    index_dir: str | Path | None = None,
-) -> list[tuple[Path, str]]:
-    """Choose sources and the index name each one will use.
-
-    ZIMs sharing a stem keep the historical largest-copy rule. Ordinary files
-    that share a filename are all indexed: the flat index directory needs a
-    unique name, so each gets a short path-derived suffix instead of silently
-    discarding every copy but the largest. When ``index_dir`` is known, an
-    existing canonical index owned by another source is also treated as a
-    collision, so two separately built same-named files do not overwrite each
-    other.
-    """
-    from .catalog import (
-        is_zim_filename,
-        source_index_name,
-        unique_file_index_name,
-    )
-
+def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path]:
+    """Choose one archive per index identity, preferring the largest copy."""
     by_stem: dict[str, list[Path]] = {}
-    for source in sources:
-        by_stem.setdefault(source_index_name(source), []).append(source)
-
-    accepted: list[tuple[Path, str]] = []
+    for zim in zims:
+        by_stem.setdefault(zim.stem, []).append(zim)
+    accepted: list[Path] = []
     for stem, paths in sorted(by_stem.items()):
-        zims = [path for path in paths if is_zim_filename(path.name)]
-        files = [path for path in paths if not is_zim_filename(path.name)]
-
-        if zims:
-            chosen = max(zims, key=sizes.__getitem__)
-            if len({sizes[path] for path in zims}) > 1:
-                logger.warning(
-                    "zimantic: sources share index identity %r with different "
-                    "sizes; using the largest %s",
-                    stem,
-                    chosen,
-                )
-            elif len(zims) > 1:
-                logger.warning(
-                    "zimantic: ignoring duplicate sources with index identity "
-                    "%r: %s",
-                    stem,
-                    ", ".join(str(path) for path in zims if path != chosen),
-                )
-            accepted.append((chosen, stem))
-
-        if len(files) == 1 and not zims:
-            name = (
-                unique_file_index_name(files[0], index_dir)
-                if index_dir is not None
-                else stem
-            )
-            accepted.append((files[0], name))
-            continue
-        if files:
+        sizes = {zim_sizes[path] for path in paths}
+        # Build and serve use the largest copy for an ambiguous stem. The
+        # catalog keeps every row but resolves the stem to its largest file, so
+        # all three agree on which archive wins.
+        chosen = max(paths, key=zim_sizes.__getitem__)
+        if len(sizes) > 1:
             logger.warning(
-                "zimantic: %d ordinary files share the name %r; indexing each "
-                "with a unique index name",
-                len(files),
+                "zimantic: ZIM files share index identity %r with different sizes; "
+                "using the largest %s",
                 stem,
+                chosen,
             )
-            used: set[str] = set()
-            for path in sorted(files, key=lambda item: str(item.resolve())):
-                if index_dir is not None:
-                    name = unique_file_index_name(
-                        path,
-                        index_dir,
-                        reserved=used,
-                        force_digest=bool(zims),
-                    )
-                else:
-                    digest = hashlib.sha1(
-                        str(path.resolve()).encode("utf-8")
-                    ).hexdigest()[:10]
-                    name = f"{stem}-{digest}"
-                    suffix = 2
-                    while name in used:
-                        name = f"{stem}-{digest}-{suffix}"
-                        suffix += 1
-                used.add(name)
-                accepted.append((path, name))
-
-    return sorted(accepted, key=lambda item: sizes.get(item[0], 0))
+        elif len(paths) > 1:
+            logger.warning(
+                "zimantic: ignoring duplicate ZIM files with index identity %r: %s",
+                stem,
+                ", ".join(str(path) for path in paths if path != chosen),
+            )
+        accepted.append(chosen)
+    return sorted(accepted, key=zim_sizes.__getitem__)
 
 
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     from tqdm import tqdm
 
-    from .build import build as build_source
-    from .catalog import parse_file_patterns
-    from .content.extract import (
-        DEFAULT_ARCHIVE_DEPTH,
-        DEFAULT_ASR_MODEL,
-        DEFAULT_FILE_TIMEOUT,
-        DEFAULT_MAX_ARCHIVE_BYTES,
-        DEFAULT_MAX_ARCHIVE_MEMBERS,
-        DEFAULT_MAX_FILE_TEXT_CHARS,
-        DEFAULT_MAX_OCR_PAGES,
-        DEFAULT_OCR_LANGUAGES,
-        ExtractOptions,
-    )
+    from .build import build as build_zim
     from .content.reader import (
         DEFAULT_MAX_ENTRY_BYTES,
         DEFAULT_MAX_HTML_BYTES,
         DEFAULT_PREVIEW_CHARS,
     )
-    from .content.tools import log_capabilities
 
     sigterm = getattr(signal, "SIGTERM", None)
     if sigterm is not None:
         signal.signal(sigterm, _graceful_interrupt)
 
-    patterns = parse_file_patterns(
-        args.file_types if args.file_types is not None else cfg.get("file_types")
-    )
-    sources = _collect_sources(args.paths, cfg["zim_dir"], patterns)
-    if not sources:
-        logger.info("zimantic: no matching files to index (patterns: %s)", ", ".join(patterns))
+    zims = _collect_zims(args.paths, cfg["zim_dir"])
+    if not zims:
+        logger.info("zimantic: no .zim files to index")
         return
 
     workers = args.workers
@@ -397,53 +274,21 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     if workers < 1:
         parser.error("--workers must be at least 1")
 
-    archive_depth = (
-        args.archive_depth
-        if args.archive_depth is not None
-        else cfg.get("archive_depth", DEFAULT_ARCHIVE_DEPTH)
-    )
-    if archive_depth < 0:
-        parser.error("--archive-depth must be zero or greater")
-    extract_options = ExtractOptions(
-        max_text_chars=int(
-            cfg.get("max_file_text_chars", DEFAULT_MAX_FILE_TEXT_CHARS)
-        ),
-        timeout=cfg.get("file_timeout", DEFAULT_FILE_TIMEOUT),
-        archive_depth=archive_depth,
-        max_archive_members=int(
-            cfg.get("max_archive_members", DEFAULT_MAX_ARCHIVE_MEMBERS)
-        ),
-        max_archive_bytes=int(
-            cfg.get("max_archive_bytes", DEFAULT_MAX_ARCHIVE_BYTES)
-        ),
-        max_ocr_pages=int(cfg.get("max_ocr_pages", DEFAULT_MAX_OCR_PAGES)),
-        ocr=bool(cfg.get("ocr", False) if args.ocr is None else args.ocr),
-        ocr_languages=str(
-            cfg.get("ocr_languages", DEFAULT_OCR_LANGUAGES)
-        ),
-        asr=bool(cfg.get("asr", False) if args.asr is None else args.asr),
-        asr_model=str(cfg.get("asr_model", DEFAULT_ASR_MODEL)),
-    )
-    if any(not source.name.lower().endswith(".zim") for source in sources):
-        log_capabilities()
-
-    source_sizes = {source: source.stat().st_size for source in sources}
+    zim_sizes = {zim: zim.stat().st_size for zim in zims}
     # The stability poll exists for downloads and the systemd.path trigger; an
     # explicit CLI build of already-present files should start immediately.
     downloading = (
-        _find_downloading_sizes(source_sizes) if args.wait_stable else set()
+        _find_downloading_sizes(zim_sizes) if args.wait_stable else set()
     )
     if downloading:
         _wait_for_stable_sizes(downloading)
         # Selection prefers the largest copy of an ambiguous ZIM stem, so it
         # must see the finished sizes rather than the sizes observed before the
         # download completed.
-        source_sizes = {source: source.stat().st_size for source in sources}
-    selected = _select_build_sources(sources, source_sizes, cfg["index_dir"])
-    sources = [source for source, _index_name in selected]
-    index_names = dict(selected)
-    if not sources:
-        logger.info("zimantic: no matching files to index")
+        zim_sizes = {zim: zim.stat().st_size for zim in zims}
+    zims = _select_zim_paths(zims, zim_sizes)
+    if not zims:
+        logger.info("zimantic: no .zim files to index")
         return
 
     embedder = None
@@ -459,7 +304,7 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             )
 
         embedder = _LazyEmbedder(_make_embedder)
-        if workers > 1 and len(sources) > 1:
+        if workers > 1 and len(zims) > 1:
             embedding_workers = int(cfg.get("embedding_workers", 2))
             if embedding_workers < 1:
                 parser.error("embedding_workers must be at least 1")
@@ -469,19 +314,19 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
                 queue_size=max(2, workers * 2),
             )
     global_progress = None
-    if len(sources) > 1 and sys.stderr.isatty():
+    if len(zims) > 1 and sys.stderr.isatty():
         global_progress = tqdm(
-            total=sum(source_sizes[source] for source in sources),
-            desc="all sources",
+            total=sum(zim_sizes[zim] for zim in zims),
+            desc="all ZIMs",
             unit="B",
             unit_scale=True,
             file=sys.stderr,
         )
     failures: list[tuple[Path, BaseException]] = []
 
-    def run_build(source: Path) -> None:
-        build_source(
-            source,
+    def run_build(zim: Path) -> None:
+        build_zim(
+            zim,
             cfg["index_dir"],
             embedder,
             cfg["batch_size"],
@@ -491,39 +336,37 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
             force=args.force,
             embedding_pipeline=embedding_pipeline,
-            extract_options=extract_options,
-            index_name=index_names[source],
         )
 
     try:
-        if workers == 1 or len(sources) == 1:
-            for source in sources:
+        if workers == 1 or len(zims) == 1:
+            for zim in zims:
                 try:
-                    run_build(source)
+                    run_build(zim)
                 except Exception as error:
-                    logger.error("zimantic: failed to index %s: %s", source, error)
-                    failures.append((source, error))
+                    logger.error("zimantic: failed to index %s: %s", zim, error)
+                    failures.append((zim, error))
                 if global_progress is not None:
-                    global_progress.update(source_sizes[source])
+                    global_progress.update(zim_sizes[zim])
         else:
             pool = ThreadPoolExecutor(
-                max_workers=min(workers, len(sources)),
+                max_workers=min(workers, len(zims)),
                 thread_name_prefix="zimantic-build",
             )
             try:
-                futures = {pool.submit(run_build, source): source for source in sources}
+                futures = {pool.submit(run_build, zim): zim for zim in zims}
                 for future in as_completed(futures):
-                    source = futures[future]
+                    zim = futures[future]
                     try:
                         future.result()
                     except Exception as error:
-                        logger.error("zimantic: failed to index %s: %s", source, error)
-                        failures.append((source, error))
+                        logger.error("zimantic: failed to index %s: %s", zim, error)
+                        failures.append((zim, error))
                     if global_progress is not None:
-                        global_progress.update(source_sizes[source])
+                        global_progress.update(zim_sizes[zim])
             finally:
                 # On Ctrl-C/SIGTERM drop builds that have not started yet
-                # instead of running every queued source to completion.
+                # instead of running every queued ZIM to completion.
                 pool.shutdown(wait=True, cancel_futures=True)
     finally:
         if embedding_pipeline is not None:
@@ -541,9 +384,8 @@ def _run_serve(args, cfg: dict) -> None:
     search = Search(cfg, semantic=not args.fast)
     if not search.local_names():
         logger.warning(
-            "zimantic: no local sources are available; add a .zim to zim_dir, "
-            "index other files with `zimantic build --file-types ...`, "
-            "or run `zimantic build --fast`"
+            "zimantic: no local ZIM sources are available; "
+            "add a .zim to zim_dir or run `zimantic build --fast`"
         )
     if not args.fast:
         # Load the model off the critical path: the server answers title and

@@ -127,7 +127,7 @@ class StableSizeTests(unittest.TestCase):
 
 
 class BuildWorkerTests(unittest.TestCase):
-    def test_collect_sources_prefers_the_largest_conflicting_stem(self):
+    def test_collect_zims_prefers_the_largest_conflicting_stem(self):
         import zimantic.__main__ as main_module
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,76 +139,14 @@ class BuildWorkerTests(unittest.TestCase):
             first.write_bytes(b"small")
             second.write_bytes(b"a much larger copy")
 
-            zims = main_module._collect_sources([first, second], root, ("*.zim",))
-            selected = main_module._select_build_sources(
+            zims = main_module._collect_zims([first, second], root)
+            selected = main_module._select_zim_paths(
                 zims,
                 {path: path.stat().st_size for path in zims},
             )
 
-            self.assertEqual([path.name for path, _name in selected], ["manual.zim"])
-            self.assertEqual(selected[0][0].read_bytes(), b"a much larger copy")
-
-    def test_ordinary_files_with_the_same_name_get_unique_index_names(self):
-        import zimantic.__main__ as main_module
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            first = root / "one" / "book.pdf"
-            second = root / "two" / "book.pdf"
-            first.parent.mkdir()
-            second.parent.mkdir()
-            first.write_bytes(b"one")
-            second.write_bytes(b"two")
-
-            sources = main_module._collect_sources(
-                [first, second], root, ("*.pdf",)
-            )
-            selected = main_module._select_build_sources(
-                sources, {path: path.stat().st_size for path in sources}
-            )
-
-            self.assertEqual(len(selected), 2)
-            names = [name for _path, name in selected]
-            self.assertEqual(len(set(names)), 2)
-            self.assertTrue(all(name.startswith("book.pdf-") for name in names))
-
-    def test_same_named_files_consider_existing_indexes(self):
-        import zimantic.__main__ as main_module
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            index_dir = root / "indexes"
-            index_dir.mkdir()
-            first = root / "one" / "book.pdf"
-            second = root / "two" / "book.pdf"
-            first.parent.mkdir()
-            second.parent.mkdir()
-            first.write_bytes(b"one")
-            second.write_bytes(b"two")
-            # The canonical index is already owned by the first file; selecting
-            # both again must leave that name alone and suffix the second.
-            (index_dir / "book.pdf.sqlite").write_bytes(b"")
-            import sqlite3
-
-            db = sqlite3.connect(index_dir / "book.pdf.sqlite")
-            db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")
-            db.execute("CREATE TABLE docs(title TEXT, path TEXT, target TEXT)")
-            db.execute("INSERT INTO meta VALUES ('kind', 'file')")
-            db.execute("INSERT INTO meta VALUES ('source_path', ?)", (str(first.resolve()),))
-            db.commit()
-            db.close()
-
-            sources = main_module._collect_sources(
-                [first, second], root, ("*.pdf",)
-            )
-            selected = main_module._select_build_sources(
-                sources,
-                {path: path.stat().st_size for path in sources},
-                index_dir,
-            )
-            names = {path: name for path, name in selected}
-            self.assertEqual(names[first], "book.pdf")
-            self.assertTrue(names[second].startswith("book.pdf-"))
+            self.assertEqual([path.name for path in selected], ["manual.zim"])
+            self.assertEqual(selected[0].read_bytes(), b"a much larger copy")
 
     def test_build_stability_wait_is_opt_in(self):
         import zimantic.__main__ as main_module
@@ -217,8 +155,8 @@ class BuildWorkerTests(unittest.TestCase):
         build_module = importlib.import_module("zimantic.build")
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
-            source = directory / "note.txt"
-            source.write_text("A note about repairing a bicycle.", encoding="utf-8")
+            source = directory / "manual.zim"
+            source.write_bytes(b"ZIM\x04")
             config = {
                 "zim_dir": str(directory),
                 "index_dir": str(directory / "indexes"),

@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import mimetypes
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -129,40 +128,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         ) as error:
             raise web_app._article_http_error(error) from error
         return web_app._article_content_response(icon["content"], icon["mimetype"])
-
-    @app.get("/file/{source}", include_in_schema=False)
-    def original_file(source: str):
-        """Serve the original book, PDF, text file or video for a file source."""
-        get_path = getattr(search_class, "source_file_path", None)
-        if not callable(get_path):
-            raise HTTPException(status_code=404, detail="file source not found")
-        try:
-            path = get_path(source)
-        except (
-            ArticleNotFoundError,
-            ArticleTooLargeError,
-            ArticleUnavailableError,
-        ) as error:
-            raise web_app._article_http_error(error) from error
-        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        headers = {
-            "Cache-Control": "no-cache",
-            "X-Content-Type-Options": "nosniff",
-        }
-        if media_type in {
-            "text/html", "application/xhtml+xml",
-            "image/svg+xml", "application/xml", "text/xml",
-        }:
-            # Original files are served from the application's origin. An
-            # indexed HTML/SVG/XML file must not be able to run script in that
-            # origin; the sandbox directive keeps the document inert while
-            # still allowing it to be viewed.
-            headers["Content-Security-Policy"] = "sandbox"
-        return FileResponse(
-            path,
-            media_type=media_type,
-            headers=headers,
-        )
 
     @app.get("/config")
     def config(request: Request):
@@ -449,16 +414,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ArticleUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
-        url_of = getattr(search_class, "article_url", None)
-        location = (
-            url_of(zim, path)
-            if callable(url_of)
-            else web_app._content_url(zim, path, base_path)
-        )
         return Response(
             status_code=307,
             headers={
-                "Location": location,
+                "Location": web_app._content_url(zim, path, base_path),
                 "Cache-Control": "no-store",
             },
         )

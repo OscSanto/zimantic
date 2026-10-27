@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import math
-import mimetypes
 import posixpath
 import re
 import secrets
@@ -687,40 +686,6 @@ class Search:
         """Tolerate Search instances built without ``__init__`` (tests)."""
         return getattr(self, "catalog", None)
 
-    def _is_file_source(self, source: SourceInfo) -> bool:
-        """True when a local source is backed by an ordinary file index."""
-        if not source.local_name:
-            return False
-        index = getattr(self, "indexes", {}).get(source.local_name)
-        return index is not None and index.source_kind == "file"
-
-    def _source_url(self, source: SourceInfo, path: str) -> str:
-        """Public URL for one result document.
-
-        Ordinary files are served whole (with range support), so a search hit
-        opens the book, PDF or video itself. ZIM entries keep the article shell.
-        """
-        local_name = source.local_name or source.book
-        if self._is_file_source(source):
-            base = f"{self.web_base_path}/file/{quote(local_name, safe='')}"
-            # A file source can expose several entries (PDF pages, EPUB
-            # chapters, subtitle chunks). Keep the locator as a browser
-            # fragment so a PDF opens at the page and a video at the cue.
-            # The index identity may carry a digest suffix while entry paths
-            # keep the original filename, so parse against that name.
-            index = self.indexes.get(local_name)
-            source_name = getattr(index, "source_name", None)
-            if not source_name and index is not None and index.zim_path:
-                source_name = Path(index.zim_path).name
-            prefix = f"{source_name or local_name}#"
-            value = str(path or "")
-            locator = value[len(prefix):] if value.startswith(prefix) else ""
-            return f"{base}#{quote(locator, safe='=&')}" if locator else base
-        return (
-            f"{self.web_base_path}/content/"
-            f"{quote(local_name, safe='')}/{quote(path, safe='/')}"
-        )
-
     @staticmethod
     def _index_uri(db_path: Path) -> str:
         return db_path.resolve().as_uri() + "?mode=ro"
@@ -822,23 +787,35 @@ class Search:
         return found
 
     @staticmethod
-    def _read_index_meta(db_path: Path) -> dict[str, str] | None:
-        """Read one index's meta table, or None when it is not usable yet."""
+    def _read_index_state(db_path: Path) -> tuple[bool, int | None]:
+        """Return ``(finished, recorded_source_size)`` for one SQLite index.
+
+        An index still being written, or one that cannot be opened, reports
+        ``False`` so its archive's native full-text index keeps the source
+        searchable until the database is ready. The recorded source size is
+        ``None`` when absent or unparsable.
+        """
         try:
             db = sqlite3.connect(
                 Search._index_uri(db_path), uri=True, check_same_thread=False
             )
         except sqlite3.Error:
-            return None
+            return False, None
         try:
-            return {
-                str(key): str(value)
-                for key, value in db.execute("SELECT key, value FROM meta")
-            }
+            done = db.execute("SELECT value FROM meta WHERE key = 'done'").fetchone()
+            size_row = db.execute(
+                "SELECT value FROM meta WHERE key = 'filesize'"
+            ).fetchone()
         except sqlite3.Error:
-            return None
+            return False, None
         finally:
             db.close()
+        finished = done is not None and str(done[0]) in {"1", "fast"}
+        try:
+            source_size = int(size_row[0]) if size_row else None
+        except (TypeError, ValueError):
+            source_size = None
+        return finished, source_size
 
     def _stale_zim_archive(
         self, stem: str, source_size: int | None, scanned: Path
@@ -866,87 +843,23 @@ class Search:
         """Return finished SQLite indexes plus filesystem-only ZIM fallbacks.
 
         A SQLite stem is authoritative only once its build is finished and its
-        recorded source size still matches. An in-progress build, one whose
-        source is gone, or one whose source was replaced (size changed) is
-        ignored. ZIM indexes fall back to the archive's native full-text index;
-        ordinary-file indexes have no native fallback, so they are simply
-        skipped until rebuilt.
+        recorded source size still matches a same-stem archive. An in-progress
+        build, one whose ZIM is gone, or one whose ZIM was replaced (size
+        changed) is ignored so the archive's native full-text index keeps the
+        source searchable instead of a stale or unopenable index.
         """
         db_paths = sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))
         finished: dict[str, Path] = {}
         recorded_sizes: dict[str, int | None] = {}
-        kinds: dict[str, str] = {}
         for path in db_paths:
-            meta = self._read_index_meta(path)
-            if not meta:
-                continue
-            if str(meta.get("done", "")) not in {"1", "fast"}:
-                continue
-            try:
-                source_size = int(meta["filesize"]) if "filesize" in meta else None
-            except (TypeError, ValueError):
-                source_size = None
-            finished[path.stem] = path
-            recorded_sizes[path.stem] = source_size
-            kinds[path.stem] = str(meta.get("kind", "zim"))
+            done, source_size = self._read_index_state(path)
+            if done:
+                finished[path.stem] = path
+                recorded_sizes[path.stem] = source_size
 
         zim_paths = self._scan_zim_paths()
         found: dict[str, tuple[str, Path]] = {}
-        file_sources: dict[str, str] = {}
         for stem, db_path in finished.items():
-            if kinds.get(stem) == "file":
-                meta = self._read_index_meta(db_path) or {}
-                source_path = meta.get("source_path", "")
-                if not source_path:
-                    logger.info("zimantic: %s file index has no source path; ignoring", stem)
-                    continue
-                source = Path(source_path)
-                try:
-                    actual_size = source.stat().st_size
-                except OSError:
-                    logger.info("zimantic: %s file index source is missing; ignoring", stem)
-                    continue
-                if recorded_sizes[stem] is not None and actual_size != recorded_sizes[stem]:
-                    logger.warning(
-                        "zimantic: %s file index (recorded source %s bytes) does not "
-                        "match %s; ignoring it until the index is rebuilt",
-                        stem,
-                        recorded_sizes[stem],
-                        source,
-                    )
-                    continue
-                source_key = str(source.resolve())
-                existing = file_sources.get(source_key)
-                if existing is not None:
-                    # A collision-named index and a canonical rebuild can both
-                    # exist after one of two same-named files is removed. Keep
-                    # the canonical name, otherwise the lexicographically first.
-                    canonical = source.name
-                    if existing == canonical:
-                        keep, drop = existing, stem
-                    elif stem == canonical:
-                        keep, drop = stem, existing
-                    elif existing < stem:
-                        keep, drop = existing, stem
-                    else:
-                        keep, drop = stem, existing
-                    if drop == stem:
-                        logger.info(
-                            "zimantic: %s duplicates the file index %s; ignoring",
-                            stem,
-                            existing,
-                        )
-                        continue
-                    found.pop(drop, None)
-                    file_sources[source_key] = keep
-                    logger.info(
-                        "zimantic: %s replaces duplicate file index %s", keep, drop
-                    )
-                else:
-                    file_sources[source_key] = stem
-                found[stem] = ("sqlite", db_path)
-                continue
-
             scanned = zim_paths.get(stem)
             if scanned is None:
                 # The archive this index was built from is gone. Without a local
@@ -977,15 +890,10 @@ class Search:
         # The UUID is the book identity. Two copies of the same ZIM (same
         # UUID, different filename/path) must not appear as two sources. Keep
         # one deterministic copy, preferring a readable one, then an indexed
-        # one, then the larger file, then the shorter path. Ordinary-file
-        # indexes have no catalog UUID and must not be deduplicated against a
-        # same-named ZIM.
-        file_stems = {stem for stem, kind in kinds.items() if kind == "file"}
+        # one, then the larger file, then the shorter path.
         if self._catalog:
             chosen: dict[str, tuple[tuple, str]] = {}
             for stem, (kind, _path) in found.items():
-                if stem in file_stems and kind == "sqlite":
-                    continue
                 record = self._catalog.get_stem(stem)
                 uuid_value = record.uuid if record is not None else ""
                 if not uuid_value:
@@ -1021,8 +929,6 @@ class Search:
                     )
             keep = {stem for _rank, stem in chosen.values()}
             for stem in list(found):
-                if stem in file_stems and found[stem][0] == "sqlite":
-                    continue
                 record = self._catalog.get_stem(stem)
                 if record is not None and record.uuid and stem not in keep:
                     del found[stem]
@@ -1050,12 +956,6 @@ class Search:
                 source_size = int(size_row[0]) if size_row else None
             except (TypeError, ValueError):
                 source_size = None
-            meta_rows = dict(db.execute("SELECT key, value FROM meta"))
-            source_kind = str(meta_rows.get("kind", "zim"))
-            source_title = meta_rows.get("source_title")
-            source_description = meta_rows.get("source_description")
-            source_language = meta_rows.get("source_language")
-            source_creator = meta_rows.get("source_creator")
 
             faiss_index = None
             faiss_path = db_path.with_suffix(".faiss")
@@ -1083,41 +983,6 @@ class Search:
                         error,
                     )
                     faiss_index = None
-
-            if source_kind == "file":
-                source_path = meta_rows.get("source_path")
-                if not source_path:
-                    db.close()
-                    return None
-                db.close()
-                return _LocalIndex(
-                    None,
-                    faiss_index,
-                    None,
-                    None,
-                    threading.Lock(),
-                    db_path=uri,
-                    db_signature=_file_signature(db_path),
-                    faiss_signature=(
-                        _file_signature(faiss_path)
-                        if self.semantic and not defer_faiss
-                        else None
-                    ),
-                    done=done_value,
-                    source_size=source_size,
-                    zim_path=str(source_path),
-                    source_name=Path(source_path).name,
-                    zim_signature=_file_signature(Path(source_path)),
-                    has_fulltext_index=True,
-                    source_kind="file",
-                    source_title=source_title,
-                    source_description=source_description,
-                    source_language=source_language,
-                    source_creator=source_creator,
-                    source_article_count=_int_config(
-                        meta_rows, "source_article_count", 1, minimum=1
-                    ),
-                )
 
             record = (
                 self._catalog.get_stem_size(db_path.stem, source_size)
@@ -1353,23 +1218,15 @@ class Search:
                 expected_db_path = (
                     self._index_uri(path) if kind == "sqlite" else None
                 )
-                index_meta = (
-                    self._read_index_meta(path) if kind == "sqlite" else None
-                ) or {}
-                is_file_index = index_meta.get("kind") == "file"
                 matching_zim = (
                     self._find_zim_path(name, current.source_size)
-                    if kind == "sqlite" and current is not None and not is_file_index
+                    if kind == "sqlite" and current is not None
                     else None
                 )
                 expected_zim_path = (
                     str(path)
                     if kind == "zim"
-                    else (
-                        str(index_meta.get("source_path") or "")
-                        if is_file_index
-                        else str(matching_zim) if matching_zim is not None else None
-                    )
+                    else str(matching_zim) if matching_zim is not None else None
                 )
                 changed = (
                     current is not None
@@ -1388,12 +1245,6 @@ class Search:
                         or (
                             kind == "zim"
                             and current.zim_signature != zim_signature
-                        )
-                        or (
-                            is_file_index
-                            and expected_zim_path
-                            and current.zim_signature
-                            != _file_signature(Path(expected_zim_path))
                         )
                     )
                 )
@@ -1656,23 +1507,6 @@ class Search:
             local: dict[str, SourceInfo] = {}
             for local_name in self.indexes:
                 index = self.indexes[local_name]
-                if index.source_kind == "file":
-                    local[local_name] = SourceInfo(
-                        key=local_name,
-                        name=local_name,
-                        book=local_name,
-                        mode="local",
-                        local_name=local_name,
-                        title=index.source_title or local_name,
-                        description=index.source_description,
-                        creator=index.source_creator,
-                        language=index.source_language,
-                        size=index.source_size,
-                        article_count=index.source_article_count,
-                        perma_ref=local_name,
-                        has_fulltext_index=True,
-                    )
-                    continue
                 key = _zim_key(local_name)
                 if key in local:
                     # Two local ZIMs can share a base name (a dated archive and
@@ -2049,13 +1883,6 @@ class Search:
             if cached is not None and now - scanned_at < LIBRARY_SCAN_TTL_SECONDS:
                 return dict(cached)
         scanned = self._scan_zim_paths()
-        # Ordinary-file source indexes are discovered from index meta, not from
-        # a ZIM directory scan. Include their originals in the installed-library
-        # view as well so the card grid matches what search can answer.
-        with self._state_lock:
-            for name, index in self.indexes.items():
-                if index.source_kind == "file" and index.zim_path:
-                    scanned.setdefault(name, Path(index.zim_path))
         with lock:
             if getattr(self, "_library_scan_token", 0) == token:
                 self._library_scan_cache = dict(scanned)
@@ -2226,39 +2053,6 @@ class Search:
             "mimetype": mimetype,
             "content": content,
         }
-
-    def source_file_path(self, zim_name: str) -> Path:
-        """Return the original file for an ordinary-file source."""
-        with self._state_lock:
-            index = self.indexes.get(zim_name)
-        if index is None or index.source_kind != "file" or not index.zim_path:
-            raise ArticleNotFoundError("file source not found")
-        path = Path(index.zim_path)
-        if not path.is_file():
-            raise ArticleUnavailableError("source file is unavailable")
-        return path
-
-    def article_url(self, zim_name: str, path: str) -> str:
-        """Public URL for one document, matching search-result links.
-
-        ZIM entries use the article reader shell; ordinary files open the
-        original at ``/file/<name>`` with an optional locator fragment.
-        """
-        with self._state_lock:
-            source = next(
-                (
-                    source
-                    for source in self.sources.values()
-                    if source.mode == "local" and source.local_name == zim_name
-                ),
-                None,
-            )
-        if source is not None:
-            return self._source_url(source, path)
-        return (
-            f"{self.web_base_path}/content/"
-            f"{quote(zim_name, safe='')}/{quote(path, safe='/')}"
-        )
 
     def read_article(
         self,
@@ -2484,12 +2278,8 @@ class Search:
             "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
         ).fetchone():
             return None
-        archive = None if index.source_kind == "file" else index.ensure_open()
-        upper = (
-            max(1, int(getattr(archive, "entry_count", 0) or 0))
-            if archive is not None
-            else max(1, index.source_article_count)
-        )
+        archive = index.ensure_open()
+        upper = max(1, int(getattr(archive, "entry_count", 0) or 0)) if archive else 1
         # Entry rowids are dense entry ids, so sampling one and rejecting gaps,
         # unindexed entries and redirects gives every eligible row equal weight
         # in O(1) per probe. This is fine for normal indexes, but an archive can
@@ -2583,7 +2373,7 @@ class Search:
             index = self.indexes.get(zim_name)
         if index is None:
             raise ArticleSourceNotFoundError("ZIM not found")
-        if index.source_kind != "file" and index.ensure_open() is None:
+        if index.ensure_open() is None:
             raise ArticleUnavailableError("ZIM archive is unavailable")
 
         acquired = False
@@ -2633,7 +2423,7 @@ class Search:
 
             record = (
                 self._catalog.get_stem_size(name, index.source_size)
-                if self._catalog and index.source_kind != "file"
+                if self._catalog
                 else None
             )
             archive_path = (
@@ -2647,7 +2437,7 @@ class Search:
                 and (record is None or bool(record.available))
             )
             if not archive_current:
-                reasons.append("source unavailable")
+                reasons.append("ZIM archive unavailable")
 
             vectors_expected = (
                 self.semantic
@@ -2659,13 +2449,9 @@ class Search:
                 reasons.append("semantic vectors unavailable")
 
             fulltext_capability = (
-                True
-                if index.source_kind == "file"
-                else (
-                    bool(record.has_fulltext_index) and bool(record.available)
-                    if record is not None
-                    else index.ensure_searcher() is not None
-                )
+                bool(record.has_fulltext_index) and bool(record.available)
+                if record is not None
+                else index.ensure_searcher() is not None
             )
             report: dict[str, Any] = {
                 "name": name,
@@ -2690,13 +2476,6 @@ class Search:
                 if record.last_error:
                     report["issues"] = [*reasons, record.last_error]
                     report["status"] = "degraded"
-            elif index.source_kind == "file":
-                # File indexes are self-contained. Opening the FileArchive here
-                # would re-run extraction (and not with the build's OCR/ASR
-                # options), which is both expensive and misleading for /health.
-                report["entry_count"] = index.source_article_count
-                report["article_count"] = index.source_article_count
-                report["homepage"] = None
             elif archive_current:
                 acquired = False
                 try:
@@ -2919,8 +2698,8 @@ class Search:
     def _public(doc: dict[str, Any], debug: bool) -> dict[str, Any]:
         """A response copy. Ranking metadata is only shipped in debug mode.
 
-        Private bookkeeping keys (``_rowid`` and the transient ranking flags)
-        never leave the server, even in debug mode.
+        Private bookkeeping keys (those starting with ``_``) never leave the
+        server, even in debug mode.
         """
         if debug:
             return {
@@ -3108,15 +2887,6 @@ class Search:
         page = self.search_page(query, zim, limit, offset, source, debug)
         return list(page["results"])
 
-    @staticmethod
-    def _rowids_by_id(pool: list[dict[str, Any]]) -> dict[str, int]:
-        """Map result ids to their file-index rowids, when they have one."""
-        return {
-            doc["id"]: doc["_rowid"]
-            for doc in pool
-            if isinstance(doc.get("_rowid"), int)
-        }
-
     def _cached_events(
         self,
         cached: Any,
@@ -3132,7 +2902,7 @@ class Search:
         """Replay a cached pool as a finished stream (progress + one page)."""
         pool, cached_sources = self._unpack_cache(cached)
         state = self._page_state(pool, source, offset, page_size, debug)
-        self._hydrate_results(state["results"], self._rowids_by_id(pool))
+        self._hydrate_results(state["results"])
         total_sources = len(sources)
         yield {
             "type": "started",
@@ -3303,7 +3073,7 @@ class Search:
             pool = self._rank_results(source_results, query, pool_target)
         pool = self._enrich_pool(source_results, query, pool, pool_target)
         state = self._page_state(pool, source, offset, page_size, debug)
-        self._hydrate_results(state["results"], self._rowids_by_id(pool))
+        self._hydrate_results(state["results"])
         hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
         for doc in pool:
             if doc["id"] in hydrated:
@@ -3829,34 +3599,21 @@ class Search:
                 "SELECT rowid, bm25(docs) FROM docs "
                 "WHERE docs MATCH ? ORDER BY rank LIMIT ?"
             )
-            # File indexes also carry the body in FTS; keep title retrieval
-            # title-only so a body match cannot masquerade as a title match.
-            exact = (
-                f"title : ({title_query})"
-                if index.source_kind == "file"
-                else title_query
-            )
-            prefix = (
-                f"title : ({_title_prefix_query(query)})"
-                if index.source_kind == "file"
-                else _title_prefix_query(query)
-            )
-            title_rows = db.execute(title_search, (exact, count)).fetchall()
+            title_rows = db.execute(title_search, (title_query, count)).fetchall()
             if not title_rows:
                 # Exact title matching found nothing; retry with prefix tokens so a
                 # truncated or base-form word ("chang", "change" -> "Changes") still
                 # surfaces its title without broadening the common full-word case.
-                title_rows = db.execute(title_search, (prefix, count)).fetchall()
+                title_rows = db.execute(
+                    title_search, (_title_prefix_query(query), count)
+                ).fetchall()
             for rowid, bm25 in title_rows:
                 rowids.add(int(rowid))
                 keyword.append((float(bm25), {"rowid": int(rowid)}))
 
         fulltext_rows: list[tuple[int, int]] = []
         searcher = index.ensure_searcher()
-        # An ordinary-file index is self-contained: title, body and previews
-        # all live in SQLite. Opening its FileArchive here would re-parse the
-        # whole PDF/EPUB/video on the first search for no benefit.
-        archive = None if index.source_kind == "file" else index.ensure_open()
+        archive = index.ensure_open()
         if db is None and searcher is None and index.faiss_index is None:
             # Nothing can answer this source: no SQLite index, no libzim
             # full-text searcher and no vectors. Report an error instead of a
@@ -3885,22 +3642,6 @@ class Search:
                 except (RuntimeError, ValueError) as error:
                     errors.append(f"full-text search unavailable: {error}")
 
-        if index.source_kind == "file" and db is not None and fulltext_query.strip():
-            # Ordinary files have no libzim native index; their SQLite FTS body
-            # provides the full-text retrieval that a ZIM gets from libzim.
-            try:
-                file_rows = db.execute(
-                    "SELECT rowid FROM docs WHERE docs MATCH ? "
-                    "ORDER BY rank LIMIT ?",
-                    (fulltext_query, count),
-                ).fetchall()
-                for rank, (rowid,) in enumerate(file_rows):
-                    rowid = int(rowid)
-                    rowids.add(rowid)
-                    fulltext_rows.append((rank, rowid))
-            except sqlite3.Error as error:
-                errors.append(f"full-text search unavailable: {error}")
-
         docs = (
             self._fetch_docs(source, db, rowids)
             if db is not None
@@ -3911,9 +3652,6 @@ class Search:
             if doc:
                 semantic.append((score, doc))
         keyword = [(score, docs[row["rowid"]]) for score, row in keyword if row["rowid"] in docs]
-        # Full-text rows come from libzim for ZIMs and from the SQLite body for
-        # ordinary files. The latter must still render if the source file is
-        # temporarily unreadable: the index itself is self-contained.
         for rank, rowid in fulltext_rows:
             doc = docs.get(rowid)
             if doc:
@@ -3956,7 +3694,11 @@ class Search:
                 "lead": "",
                 "path": path,
                 "mimetype": None,
-                "url": self._source_url(source, path),
+                "url": (
+                    f"{self.web_base_path}/content/"
+                    f"{quote(source.local_name or source.book, safe='')}/"
+                    f"{quote(path, safe='/')}"
+                ),
             }
         return docs
 
@@ -4019,7 +3761,7 @@ class Search:
             resolved = final_row(rowid)
             if not resolved:
                 continue
-            final_id, (_, title, path, _) = resolved
+            _, (_, title, path, _) = resolved
             doc = {
                 "id": f"{source.key}:{path}",
                 "source_key": source.key,
@@ -4029,76 +3771,25 @@ class Search:
                 "lead": "",
                 "path": path,
                 "mimetype": None,
-                "url": self._source_url(source, path),
-                # Internal only: file-source previews and phrase checks read the
-                # body by rowid so they do not scan the UNINDEXED path column.
-                # _public() strips private keys before serialization.
-                "_rowid": final_id,
+                "url": (
+                    f"{self.web_base_path}/content/"
+                    f"{quote(source.local_name or source.book, safe='')}/"
+                    f"{quote(path, safe='/')}"
+                ),
             }
             docs[rowid] = doc
         return docs
-
-    @staticmethod
-    def _file_body_row(db, doc: dict[str, Any], rowid: int | None):
-        """Return the file index's ``(path, body)`` row for one result.
-
-        The rowid lookup avoids a full scan of the FTS table's UNINDEXED
-        ``path`` column. The stored path is verified before use so a stale
-        cached pool cannot show another entry's body; docs without a rowid (or
-        with a mismatched one) fall back to the historical path lookup.
-        """
-        if rowid is not None:
-            try:
-                row = db.execute(
-                    "SELECT path, body FROM docs WHERE rowid = ?", (rowid,)
-                ).fetchone()
-            except sqlite3.Error:
-                row = None
-            if row is not None and row[0] == doc["path"]:
-                return row
-        try:
-            row = db.execute(
-                "SELECT path, body FROM docs WHERE path = ? LIMIT 1",
-                (doc["path"],),
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        return row if row is not None and row[0] == doc["path"] else None
 
     def _extract_previews(
         self,
         local_name: str,
         docs: list[dict[str, Any]],
-        rowids: dict[str, int] | None = None,
     ) -> dict[str, str]:
         """Extract previews for one local source while holding its archive lock."""
         with self._state_lock:
             index = self.indexes.get(local_name)
         if index is None:
             return {doc["id"]: "" for doc in docs}
-        if index.source_kind == "file" and index.db_path is not None:
-            # File indexes keep the extracted body in SQLite FTS. Reading it
-            # back is cheap and avoids re-parsing a large PDF/EPUB for a
-            # preview (and avoids needing the build-time OCR/ASR flags here).
-            # Acquire the index so a concurrent reload cannot close the
-            # connection while it is in use.
-            try:
-                self._acquire_index(index)
-            except RuntimeError:
-                return {doc["id"]: "" for doc in docs}
-            try:
-                db = self._db_for(index)
-                if db is None:
-                    return {doc["id"]: "" for doc in docs}
-                previews: dict[str, str] = {}
-                for doc in docs:
-                    row = self._file_body_row(db, doc, (rowids or {}).get(doc["id"]))
-                    previews[doc["id"]] = (
-                        self._preview(str(row[1] or "")) if row else ""
-                    )
-                return previews
-            finally:
-                self._release_index(index)
         archive = index.ensure_open()
         if archive is None:
             return {doc["id"]: "" for doc in docs}
@@ -4151,7 +3842,6 @@ class Search:
     def _hydrate_results(
         self,
         docs: list[dict[str, Any]],
-        rowids: dict[str, int] | None = None,
     ) -> None:
         """Populate only the displayed local results, in parallel by source."""
         with self._state_lock:
@@ -4177,7 +3867,7 @@ class Search:
 
         futures = {
             self._executor.submit(
-                self._extract_previews, local_name, source_docs, rowids
+                self._extract_previews, local_name, source_docs
             ): (local_name, source_docs)
             for local_name, source_docs in grouped.items()
         }
@@ -4239,9 +3929,7 @@ class Search:
                 index = indexes.get(source.local_name)
                 if index is None:
                     continue
-                # File indexes answer phrase checks from their stored body; only
-                # ZIM sources need the archive to be opened.
-                if index.source_kind != "file" and index.ensure_open() is None:
+                if index.ensure_open() is None:
                     continue
                 phrase_ids.add(result["id"])
 
@@ -4256,14 +3944,6 @@ class Search:
         for local_name, result_docs in grouped.items():
             index = indexes.get(local_name)
             if index is None:
-                continue
-            if index.source_kind == "file":
-                found = (
-                    self._enrich_file_pool(
-                        index, result_docs, phrase_ids, phrase_words, docs
-                    )
-                    or found
-                )
                 continue
             archive = index.ensure_open()
             if archive is None:
@@ -4311,58 +3991,6 @@ class Search:
             finally:
                 self._release_index(index)
         return self._rank_results(source_results, query, limit) if found else pool
-
-    def _enrich_file_pool(
-        self,
-        index: _LocalIndex,
-        result_docs: list[dict[str, Any]],
-        phrase_ids: set[str],
-        phrase_words: list[str],
-        docs: dict[str, dict[str, Any]],
-    ) -> bool:
-        """Set MIME types and phrase flags from a file index's stored body.
-
-        Ordinary-file indexes are self-contained: reopening the original file
-        would re-parse a PDF/EPUB/video and could even produce a different entry
-        set when the build used OCR, ASR or nested-archive extraction.
-        """
-        try:
-            self._acquire_index(index)
-        except RuntimeError:
-            return False
-        found = False
-        try:
-            try:
-                db = self._db_for(index)
-            except sqlite3.Error:
-                return False
-            if db is None:
-                return False
-            mimetype = (
-                mimetypes.guess_type(str(index.zim_path or ""))[0]
-                or "text/plain"
-            )
-            for result in result_docs:
-                result["mimetype"] = mimetype
-                source_doc = docs.get(result["id"])
-                if source_doc is not None:
-                    source_doc["mimetype"] = mimetype
-                if result["id"] not in phrase_ids:
-                    continue
-                rowid = source_doc.get("_rowid") if source_doc is not None else None
-                row = self._file_body_row(db, result, rowid)
-                if row is None:
-                    continue
-                hit = _phrase_in_word_stream(
-                    str(row[1] or "").casefold(), phrase_words
-                )
-                if source_doc is not None:
-                    source_doc["_content_phrase"] = hit
-                if hit:
-                    found = True
-        finally:
-            self._release_index(index)
-        return found
 
     def _preview(self, text: str) -> str:
         limit = getattr(

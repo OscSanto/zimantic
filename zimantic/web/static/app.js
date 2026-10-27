@@ -530,8 +530,7 @@
                     const empty = document.createElement("p");
                     empty.className = "empty";
                     empty.textContent =
-                        "Add a .zim file, or index an ordinary file with " +
-                        "`zimantic build --file-types ...`, then reload the server.";
+                        "Add a .zim file to zim_dir, then reload the server.";
                     grid.appendChild(empty);
                     return;
                 }

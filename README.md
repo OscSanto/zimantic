@@ -19,7 +19,6 @@ Zero 2 W.
 ## Features
 
 - **Search by meaning**: questions and descriptions find articles even when they share no words with the title.
-- **Also index your own files** (opt-in): text, Markdown, HTML, PDF, EPUB, Office/OpenDocument, subtitles, media (embedded or sidecar subtitles, optional speech recognition), images/comics with optional OCR, and archive contents become searchable sources alongside your ZIMs.
 - **Alternate names and misspellings**: "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another. Strongest in widely used languages (see the results below).
 - **Several sources at once**: search a small selection of ZIMs directly, or search the full library and filter the ranked results by source.
@@ -27,7 +26,7 @@ Zero 2 W.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed. Selected sources stay visible, so choosing **Other** expands that group into its individual filters. A selection of at most `min(10, 35%)` of available sources is searched on its own when it starts a search and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed. Source filters chosen after a full search are display-only and reuse that pool.
-- **Installed library view**: browse local sources (ZIMs and indexed ordinary files) at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a source title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
+- **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`.
@@ -105,77 +104,6 @@ and Markdown bodies are subject to the same limit.
 HTML, XHTML, plain text and PDFs. PDF text is read from the file's embedded text layer, so scanned
 documents without one are skipped.
 
-**Ordinary files.** `build` can index files outside ZIMs when `file_types` (or
-`--file-types`) includes their extension. Extensions may be written as `epub`, `.epub` or
-`*.epub`. Explicit file paths are always considered; when the extension is missing or unknown
-(for example a downloaded `manual.bin`), the leading bytes are inspected and the file is routed to
-the right reader (PDF, EPUB, ZIP/Office, media, and so on). Use `--file-types all+unknown` to make a folder
-scan consider every file and let that content detection decide. The extractor is layered: a native
-reader is preferred, then a small optional command (`pdftotext`, `unrtf`, `catdoc`, `ps2ascii`,
-`tesseract`, `ffmpeg`), then calibre's `ebook-convert`, and a missing helper only skips that format
-instead of failing the build. Calibre 7.19+ uses its faster `pdftohtml` PDF engine; older Calibre
-builds keep the default engine. Two ordinary files with the same filename in
-different folders are both indexed; a colliding index name gets a short path-derived suffix so their
-SQLite/FAISS files cannot collide.
-
-Supported families include:
-
-- text, Markdown, HTML/XML/SVG, source code, JSON/CSV/YAML, EML messages, man pages, torrent
-  metadata and subtitles;
-- PDF (page text) and EPUB/EPUB3 (spine chapters);
-- Office/OpenDocument: DOCX, ODT, PPTX, XLSX and legacy DOC/XLS/PPT;
-- RTF, PostScript/EPS, CHM, MOBI/AZW3/FB2/DjVu (via calibre);
-- video and audio through embedded subtitle streams, sidecar subtitles
-  (`lesson.mp4` + `lesson.en.srt`, `lesson_en.srt`, `lesson - English.srt`, or a `subtitles/`/`subs/`
-  folder), or opt-in speech recognition;
-- images and comic archives with opt-in OCR. Images in formats tesseract does not read reliably
-  (WebP, AVIF, HEIC, JPEG 2000, JPEG XL, ...) are converted to PNG first;
-- archives: member names are always indexed; `archive_depth` optionally extracts and indexes
-  nested files. ZIP/7z/RAR and many aliases (`.zipx`, `.tar.lz4`, `.zstd`, `.lzh`, `.001`, `.r00`,
-  ...) are supported, and when `archive_depth` is greater than zero, subtitle-bearing media inside an archive is indexed like a standalone file. Archives are read with `7z` or `unar`.
-
-A PDF page, EPUB chapter, presentation slide, spreadsheet sheet and subtitle chunk become separate
-results. Locators are preserved in the result link, for example `/file/manual.pdf#page=12` or
-`/file/lesson.mp4#t=91.4`. A plain file with no sections remains one result when it fits the section
-budget; longer plain text is split into bounded results. Scanned PDFs and images
-are skipped unless OCR is enabled; a comic archive still exposes its page filenames when OCR is off.
-
-```bash
-# Index every text and ebook file below ./zims (plus the ZIMs).
-zimantic build --file-types 'zim,text,ebook'
-
-# OCR scanned PDFs/images and recurse one archive level.
-zimantic build --file-types 'zim,docs,archives' --ocr --archive-depth 1
-
-# Consider every file and rely on content detection for unknown extensions.
-zimantic build --file-types all+unknown
-
-# Index one explicit file regardless of file_types.
-zimantic build ~/Documents/manual.pdf
-```
-
-Named profiles are `text`, `ebook`, `docs`, `office`, `media`, `video`, `audio`, `image`, `comic`,
-`archive`, `all` (every supported type) and `all+unknown` (every file, using content detection). The
-same list belongs in `config.toml` so a later folder build uses it:
-
-```toml
-file_types = ["zim", "text", "docs", "ebook"]
-# ocr = true
-# archive_depth = 1
-# max_archive_bytes = 268435456
-# file_timeout = 120.0
-# max_file_text_chars = 2000000
-```
-
-`archive_depth` controls recursive archive extraction: `0` (the default) lists member names without
-unpacking files, `1` extracts and indexes supported direct members, and `2` also extracts and
-indexes supported members inside nested archives. `max_archive_bytes` is a separate per-archive
-limit on the total **uncompressed member data** extracted (256 MiB by default); archive metadata
-and member names do not count toward it. Compressed archives may still be streamed to read their
-directory, but member contents are only unpacked when the archive depth requires it. Each
-extraction is also bounded by `file_timeout`, `max_file_text_chars` and `max_archive_members`.
-A malformed file or a failing helper is logged and skipped without aborting the rest of the build.
-
 **Embedding.** Titles and transient excerpts are embedded with
 [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
 The model receives a fixed budget of 256 tokens. See
@@ -197,9 +125,8 @@ for the final displayed page.
   startup; archives and their libzim `Searcher` objects are opened lazily on first use. A missing or
   unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous
   catalog, rather than being mistaken for a library from which every ZIM disappeared. While the
-  directory is unavailable, ZIM-backed `/sources` and `/library.json` entries are empty; indexed
-  ordinary-file sources remain available. The catalog rows remain on disk for the next successful
-  scan once the directory is back.
+  directory is unavailable, the served `/sources` and `/library.json` lists are empty; the catalog
+  rows remain on disk for the next successful scan once the directory is back.
 
 The index identity is `(ZIM filename stem, source byte size)`, not the source path. A ZIM can
 move between nested folders below `zim_dir` without rebuilding. When files share a stem but have
@@ -235,7 +162,7 @@ so a partial or stale index never masks the ZIM that is actually available. Each
 once: a finished SQLite index takes precedence over the filesystem fallback, and an unfinished one
 leaves the stem to that fallback. FAISS and vector files load in the background during startup, so
 title-word and full-text searches are available while semantic search initializes.
-The page automatically lists local sources (ZIMs and indexed ordinary files). With `kiwix_server`, it also discovers catalog sources
+The page automatically lists local ZIM sources. With `kiwix_server`, it also discovers catalog sources
 and can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries
 and remote XML responses are capped at 64 MiB by default; both limits are configurable. An unscoped
 search uses at most `max_remote_sources` (default 100) of the discovered remote sources; selecting a
@@ -438,7 +365,7 @@ If your files are somewhere else (on a USB drive or another disk), point `zim_di
    ```bash
    sudo apt install python3-venv python3-numpy python3-tqdm python3-onnxruntime \
        python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
-       python3-chardet python3-fastapi python3-uvicorn
+       python3-fastapi python3-uvicorn
    python3 -m venv --system-site-packages .venv
    .venv/bin/pip install --no-deps .
    ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
@@ -647,19 +574,16 @@ zimantic serve --dev                  # alias for --debug
 zimantic reload                       # ask a running server to rescan indexes and ZIMs
 ```
 
-`build` accepts files or folders; a folder means every file matching `file_types` under it (the
-default profile is `*.zim`), and with no arguments it uses `zim_dir`. Existing indexes are skipped.
-Pass `--force` to rebuild selected indexes.
+`build` accepts files or folders; a folder means every `*.zim` file under it, and with no arguments
+it uses `zim_dir`. Existing ZIM indexes are skipped. Pass `--force` to rebuild selected indexes.
 Logging defaults to warnings, except that `serve` uses info when stderr is a terminal;
 repeat `--verbose`/`-v` for info and debug output.
 
 **Fast indexes.** `build --fast` stores titles and paths without reading article bodies or running the
-model. Title-word and ZIM full-text search work; a normal `build` creates the vector index. Ordinary
-files are the exception: their fast build still extracts the text that SQLite full-text search needs,
-but skips embeddings and FAISS.
+model. Title-word and ZIM full-text search work; a normal `build` creates the vector index.
 
 `build --wait-stable` polls source sizes until they stop changing before indexing. The systemd units
-below pass it so a file caught mid-download is not indexed; an ordinary CLI build starts immediately.
+below pass it so a file caught mid-download is not indexed; an explicit CLI build starts immediately.
 
 The desktop profile embeds 32 articles at a time (mobile 8, supercomputer 128). Independent ZIMs can
 be read and built concurrently with `--workers N` or the `build_workers` setting; when unset, the
@@ -687,7 +611,7 @@ indexes and reload the server as ZIMs become available:
 - `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run the full build
   (with meaning vectors) once a night.
 
-The path-triggered fast build runs for each matching source in `zims/` (ZIMs by default). The full build runs from 01:00–06:00
+The path-triggered fast build runs for each ZIM in `zims/`. The full build runs from 01:00–06:00
 local time by default; set its `ExecCondition` and timer to select a different window. A shared `flock`
 prevents overlapping builds.
 

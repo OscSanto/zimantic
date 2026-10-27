@@ -19,7 +19,6 @@ Why a separate catalog:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import re
@@ -68,93 +67,6 @@ def is_zim_filename(name: str) -> bool:
     return name.lower().endswith(".zim")
 
 
-DEFAULT_FILE_TYPES = ("*.zim",)
-
-
-def normalize_file_pattern(pattern: object) -> str:
-    """Normalize one file-type token into a match pattern.
-
-    Three extension notations are equivalent::
-
-        zim      -> *.zim
-        .zim     -> *.zim
-        *.zim    -> *.zim
-
-    Anything containing a glob character, a path separator or an inner dot
-    (for example ``*.tar.gz`` or ``book.epub``) is kept as written, so exact
-    filenames and explicit paths keep working.
-    """
-    value = str(pattern).strip()
-    if not value:
-        return ""
-    if any(character in value for character in "*?[") or "/" in value or "\\" in value:
-        return value
-    if value.startswith("."):
-        return "*" + value
-    if "." not in value:
-        return "*." + value
-    return value
-
-
-def parse_file_patterns(value: object) -> tuple[str, ...]:
-    """Normalize ``file_types`` from a config value or CLI option.
-
-    Accepts a TOML array, one comma/whitespace-separated string, or any other
-    iterable of strings. Extensions may be written as ``*.zim``, ``.zim`` or
-    ``zim``. An empty result falls back to the historical ZIM-only behavior so a
-    missing or blank setting never indexes unexpected files.
-    """
-    if value is None:
-        return DEFAULT_FILE_TYPES
-    if isinstance(value, str):
-        parts = value.replace(",", " ").split()
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        parts = []
-        for item in value:
-            if not isinstance(item, str):
-                continue
-            parts.extend(item.replace(",", " ").split())
-    else:
-        return DEFAULT_FILE_TYPES
-    from .content.formats import expand_file_type_token
-
-    expanded: list[str] = []
-    for part in parts:
-        expanded.extend(expand_file_type_token(part))
-    patterns = tuple(
-        dict.fromkeys(
-            normalized
-            for normalized in (normalize_file_pattern(part) for part in expanded)
-            if normalized
-        )
-    )
-    return patterns or DEFAULT_FILE_TYPES
-
-
-def matches_file_type(name: str, patterns: tuple[str, ...]) -> bool:
-    """True when ``name`` matches one of the configured glob patterns."""
-    from fnmatch import fnmatchcase
-
-    folded = str(name).casefold()
-    return any(
-        fnmatchcase(folded, normalize_file_pattern(pattern).casefold())
-        for pattern in patterns
-    )
-
-
-def iter_files(
-    root: Path | str,
-    patterns: tuple[str, ...] = DEFAULT_FILE_TYPES,
-    on_error=None,
-) -> Iterator[Path]:
-    """Yield files below ``root`` matching any pattern, in a stable order."""
-    for directory, dirnames, filenames in os.walk(root, onerror=on_error):
-        dirnames.sort()
-        for name in sorted(filenames):
-            if matches_file_type(name, patterns):
-                yield Path(directory, name)
-
-
 def iter_zim_files(root: Path | str, on_error=None) -> Iterator[Path]:
     """Yield ``*.zim`` files below ``root`` in a stable order.
 
@@ -163,93 +75,11 @@ def iter_zim_files(root: Path | str, on_error=None) -> Iterator[Path]:
     prevents their directory filters from drifting apart. ``on_error`` receives
     the ``OSError`` for unreadable directories, like ``os.walk``.
     """
-    yield from iter_files(root, DEFAULT_FILE_TYPES, on_error=on_error)
-
-
-def source_index_name(path: Path | str) -> str:
-    """Index identity for a source path.
-
-    ZIMs keep their historical stem (``manual.zim`` -> ``manual``). Ordinary
-    files keep their extension (``book.epub`` -> ``book.epub``) so a book and a
-    PDF with the same stem cannot overwrite each other's index.
-    """
-    path = Path(path)
-    return path.stem if is_zim_filename(path.name) else path.name
-
-
-def _index_owner(index_path: Path) -> tuple[str, bool] | None:
-    """Return ``(source_path, is_file_index)`` recorded in an index, if any.
-
-    An incomplete file build may not have written ``source_path`` yet, but its
-    ``docs`` table has a body column. Callers use that distinction to avoid
-    stealing a ZIM's index while still allowing an interrupted file build to
-    resume under its canonical name.
-    """
-    try:
-        db = sqlite3.connect(index_path)
-    except sqlite3.Error:
-        return None
-    try:
-        meta = dict(db.execute("SELECT key, value FROM meta"))
-        columns = {str(row[1]) for row in db.execute("PRAGMA table_info(docs)")}
-    except sqlite3.Error:
-        return None
-    finally:
-        db.close()
-    owner = str(meta.get("source_path") or "")
-    is_file = str(meta.get("kind", "")) == "file" or "body" in columns
-    return owner, is_file
-
-
-def unique_file_index_name(
-    path: Path | str,
-    index_dir: Path | str,
-    *,
-    reserved: set[str] | None = None,
-    force_digest: bool = False,
-) -> str:
-    """Return a non-colliding index name for an ordinary file.
-
-    Ordinary files normally keep their filename as the index identity. If that
-    identity is already occupied by a *different* source (including a ZIM whose
-    stem happens to match), append a short path-derived digest. The same digest
-    is reused when the same file is rebuilt, so repeated builds stay stable.
-    """
-    source = Path(path)
-    base = source_index_name(source)
-    index_dir = Path(index_dir)
-    reserved = reserved or set()
-
-    def available(candidate: str) -> bool:
-        if candidate in reserved:
-            return False
-        candidate_path = index_dir / f"{candidate}.sqlite"
-        if not candidate_path.exists():
-            return True
-        identity = _index_owner(candidate_path)
-        if identity is None:
-            return False
-        owner, is_file = identity
-        if owner:
-            try:
-                return Path(owner).resolve() == source.resolve()
-            except OSError:
-                return False
-        # An interrupted first build has the file schema but no source path
-        # yet. Resume it instead of creating an orphan beside it.
-        return is_file and not force_digest
-
-    if not force_digest and available(base):
-        return base
-
-    digest = hashlib.sha1(str(source.resolve()).encode("utf-8")).hexdigest()[:10]
-    candidate = f"{base}-{digest}"
-    suffix = 2
-    while not available(candidate):
-        candidate = f"{base}-{digest}-{suffix}"
-        suffix += 1
-    return candidate
-
+    for directory, dirnames, filenames in os.walk(root, onerror=on_error):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if is_zim_filename(name):
+                yield Path(directory, name)
 
 
 # Serializes schema creation between threads in one process. Cross-process

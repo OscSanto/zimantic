@@ -5,7 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -446,51 +446,6 @@ class EmbeddingPipelineTests(unittest.TestCase):
             self.assertEqual((directory / "manual.faiss").read_bytes(), b"vectors")
 
 
-class FileSourcePipelineTests(unittest.TestCase):
-    def test_file_batches_use_the_shared_pipeline_without_reordering(self):
-        class _Entry:
-            def __init__(self, index):
-                self.title = f"Title {index}"
-                self.body = f"Body {index}"
-                self.path = f"book.txt#page={index}"
-
-        class _Source:
-            entry_count = 4
-
-            @staticmethod
-            def _get_entry_by_id(index):
-                return _Entry(index)
-
-        class _Pipeline:
-            max_pending_per_build = 2
-
-            def __init__(self):
-                self.submitted = []
-
-            def submit(self, rows):
-                self.submitted.append([row.id for row in rows])
-                future = Future()
-                future.set_result({})
-                return future
-
-        db = sqlite3.connect(":memory:")
-        db.executescript(build_module.FILE_SCHEMA)
-        pipeline = _Pipeline()
-        try:
-            build_module._index_file_source(
-                _Source(), db, 0, 2, None, False, 100, pipeline
-            )
-            rows = [row[0] for row in db.execute("SELECT rowid FROM docs ORDER BY rowid")]
-            next_entry = db.execute(
-                "SELECT value FROM meta WHERE key = 'next'"
-            ).fetchone()[0]
-        finally:
-            db.close()
-        self.assertEqual(rows, [0, 1, 2, 3])
-        self.assertEqual(str(next_entry), "4")
-        self.assertEqual(pipeline.submitted, [[0, 1], [2, 3]])
-
-
 class FaissTrainingSamplingTests(unittest.TestCase):
     def test_training_samples_use_vector_positions_not_sparse_entry_ids(self):
         class _FakeIndex:
@@ -546,8 +501,6 @@ class BuildInterruptTests(unittest.TestCase):
                 faiss_path,
                 fast=True,
                 force=False,
-                schema=build_module.SCHEMA,
-                kind="zim",
             )
             self.assertIsNotNone(state)
             state.db.execute(
@@ -566,8 +519,6 @@ class BuildInterruptTests(unittest.TestCase):
                 faiss_path,
                 fast=True,
                 force=False,
-                schema=build_module.SCHEMA,
-                kind="zim",
             )
             self.assertIsNotNone(state)
             try:

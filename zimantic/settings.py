@@ -18,7 +18,6 @@ _COMMON = {
     "zim_dir": "./zims",
     "model_dir": "./model",
     "index_dir": "./indexes",
-    "file_types": ["*.zim"],
     "port": 8090,
     "web_base_path": "",
     "kiwix_server": "",
@@ -30,19 +29,6 @@ _COMMON = {
     "max_html_bytes": 4_194_304,
     "max_article_bytes": 33_554_432,
     "max_preview_chars": 1_000,
-    # Ordinary-file extraction bounds. A per-file deadline stops one hostile
-    # PDF/archive from holding a build worker forever; the character and
-    # archive limits bound memory even when the deadline is generous.
-    "max_file_text_chars": 2_000_000,
-    "file_timeout": 120.0,
-    "archive_depth": 0,
-    "max_archive_members": 10_000,
-    "max_archive_bytes": 268_435_456,
-    "max_ocr_pages": 50,
-    "ocr": False,
-    "ocr_languages": "eng",
-    "asr": False,
-    "asr_model": "tiny",
     "min_cosine_similarity": 0.85,
     "source_timeout": 12,
 }
@@ -111,22 +97,8 @@ def _coerce_config_value(key: str, value: object, default: object) -> object | N
     ``batch_size`` or ``port``), so reject it at load time and keep the profile
     default.
     """
-    if isinstance(default, bool):
-        # Boolean settings (ocr, asr) are opt-in and reject truthy strings.
+    if isinstance(default, bool):  # no boolean settings today, but be explicit
         return value if isinstance(value, bool) else None
-    if isinstance(default, (list, tuple)):
-        # ``file_types`` accepts a TOML array or a comma/space-separated string.
-        if isinstance(value, str):
-            items = value.replace(",", " ").split()
-        elif isinstance(value, (list, tuple)):
-            items = []
-            for item in value:
-                if not isinstance(item, str):
-                    return None
-                items.extend(item.replace(",", " ").split())
-        else:
-            return None
-        return [item.strip() for item in items if item.strip()] or None
     if isinstance(default, float):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
@@ -156,12 +128,8 @@ def _typed_user_values(
         default = defaults.get(key)
         corrected = _coerce_config_value(key, value, default)
         if corrected is None:
-            if isinstance(default, bool):
-                expected = "boolean"
-            elif key in _OPTIONAL_INT_KEYS or key == "embed_threads":
+            if key in _OPTIONAL_INT_KEYS or key == "embed_threads":
                 expected = "integer"
-            elif isinstance(default, (list, tuple)):
-                expected = "list of glob patterns"
             elif isinstance(default, float):
                 expected = "number"
             elif isinstance(default, int):

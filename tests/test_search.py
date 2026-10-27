@@ -2269,7 +2269,7 @@ class SourceScopeTests(unittest.TestCase):
         search = _bare_search({})
         search.indexes = {
             "manual": types.SimpleNamespace(
-                source_kind="zim", source_size=None, ensure_open=lambda: None
+                source_size=None, ensure_open=lambda: None
             )
         }
         sources = search._rebuild_sources(
@@ -2282,7 +2282,7 @@ class SourceScopeTests(unittest.TestCase):
     def test_colliding_local_source_keys_are_made_unique(self):
         search = _bare_search({})
         index = types.SimpleNamespace(
-            source_kind="zim", source_size=None, ensure_open=lambda: None
+            source_size=None, ensure_open=lambda: None
         )
         # Insert the dated stem first so the undated one hits the fallback.
         search.indexes = {"foo_2024-01": index, "foo": index}
@@ -2510,49 +2510,33 @@ class ProductionHardeningTests(unittest.TestCase):
                     None,
                     threading.Lock(),
                     done="1",
-                    source_kind="file",
+                    has_fulltext_index=False,
                     zim_path=str(archive),
                 )
             }
+            fake_archive = types.SimpleNamespace(entry_count=1)
             try:
-                report = search.health()
-                self.assertEqual(report["indexes"][0]["status"], "ok")
-                search._defer_faiss = False
-                report = search.health()
-                self.assertEqual(report["indexes"][0]["status"], "degraded")
-                self.assertIn(
-                    "semantic vectors unavailable",
-                    report["indexes"][0]["issues"],
-                )
+                with (
+                    patch.object(
+                        _LocalIndex, "ensure_open", return_value=fake_archive
+                    ),
+                    patch.object(
+                        Search,
+                        "_resolve_article_entry",
+                        return_value=types.SimpleNamespace(path="index"),
+                    ),
+                ):
+                    report = search.health()
+                    self.assertEqual(report["indexes"][0]["status"], "ok")
+                    search._defer_faiss = False
+                    report = search.health()
+                    self.assertEqual(report["indexes"][0]["status"], "degraded")
+                    self.assertIn(
+                        "semantic vectors unavailable",
+                        report["indexes"][0]["issues"],
+                    )
             finally:
                 search._executor.shutdown(wait=True)
-
-    def test_health_does_not_open_file_archives(self):
-        with _temp_dir(self) as tmp:
-            path = Path(tmp) / "notes.txt"
-            path.write_text("A note about bicycle repair.", encoding="utf-8")
-            index = _LocalIndex(
-                None,
-                None,
-                None,
-                None,
-                threading.Lock(),
-                done="fast",
-                source_kind="file",
-                zim_path=str(path),
-                source_article_count=4,
-            )
-            search = _bare_search({})
-            search.indexes = {"notes.txt": index}
-            with patch.object(
-                index, "ensure_open", side_effect=AssertionError("re-extracted")
-            ):
-                report = search.health()
-            self.assertEqual(report["indexes"][0]["entry_count"], 4)
-            self.assertEqual(
-                report["indexes"][0]["capabilities"]["fulltext"], True
-            )
-            search._executor.shutdown(wait=True)
 
     def test_unavailable_native_index_reports_an_error_not_an_empty_ok(self):
         source = SourceInfo(
@@ -2577,56 +2561,6 @@ class ProductionHardeningTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("cannot open archive", result.error)
         self.assertEqual(result.items, [])
-
-    def test_file_body_lookup_prefers_rowid_and_verifies_path(self):
-        db = sqlite3.connect(":memory:", check_same_thread=False)
-        db.execute(
-            "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, body, path UNINDEXED, target UNINDEXED)"
-        )
-        db.executemany(
-            "INSERT INTO docs(rowid, title, body, path, target) VALUES (?, ?, ?, ?, ?)",
-            [
-                (1, "One", "body one", "one", None),
-                (2, "Two", "body two", "two", None),
-            ],
-        )
-        try:
-            self.assertEqual(
-                Search._file_body_row(db, {"path": "one"}, 1), ("one", "body one")
-            )
-            # A stale/mismatched rowid falls back to the path after verifying it.
-            self.assertEqual(
-                Search._file_body_row(db, {"path": "one"}, 2), ("one", "body one")
-            )
-        finally:
-            db.close()
-
-    def test_file_results_report_the_original_mimetype(self):
-        db = sqlite3.connect(":memory:", check_same_thread=False)
-        db.execute(
-            "CREATE VIRTUAL TABLE docs USING fts5("
-            "title, body, path UNINDEXED, target UNINDEXED)"
-        )
-        index = _LocalIndex(
-            db,
-            None,
-            None,
-            None,
-            threading.Lock(),
-            source_kind="file",
-            zim_path="/library/lesson.mp4",
-        )
-        search = _bare_search({})
-        result = {"id": "lesson:clip", "path": "lesson.mp4#t=12.0", "mimetype": None}
-        docs = {"lesson:clip": dict(result)}
-        try:
-            search._enrich_file_pool(index, [result], set(), [], docs=docs)
-        finally:
-            search._executor.shutdown(wait=True)
-            db.close()
-        self.assertEqual(result["mimetype"], "video/mp4")
-        self.assertEqual(docs["lesson:clip"]["mimetype"], "video/mp4")
 
 
 class CatalogLocationTests(unittest.TestCase):

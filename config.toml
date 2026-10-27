@@ -7,35 +7,6 @@
 # ZIM files, downloaded from https://library.kiwix.org.
 zim_dir = "./zims"
 
-# File types that `zimantic build` indexes when scanning a folder. The default
-# indexes ZIMs only. Extensions may be written as `epub`, `.epub` or `*.epub`.
-# Named profiles expand to a group of formats: text, ebook, docs, office, media,
-# video, audio, image, comic, archive, all (every supported type) and
-# all+unknown (every file; content detection decides). Add other types to
-# index ebooks, text, PDFs, subtitles, and videos with subtitle sidecars, for
-# example:
-#   file_types = ["zim", "epub", "pdf", "txt", "md", "mp4"]
-#   file_types = ["zim", "text", "docs", "ebook"]
-# A single comma-separated string also works: file_types = "zim,epub,pdf,txt".
-# Explicit file paths passed to `build` are always considered, even when their
-# extension is unknown; the leading bytes are inspected to choose a reader.
-# file_types = ["zim"]
-
-# Ordinary-file extraction. `file_timeout` bounds one file across native
-# parsers and external helpers. Archive names are always indexed; set
-# archive_depth above 0 to recursively index extracted members. OCR and ASR
-# are opt-in because they are slow and need tesseract/whisper.
-# max_file_text_chars = 2000000
-# file_timeout = 120.0
-# archive_depth = 0
-# max_archive_members = 10000
-# max_archive_bytes = 268435456
-# max_ocr_pages = 50
-# ocr = false
-# ocr_languages = "eng"
-# asr = false
-# asr_model = "tiny"
-
 # Must contain model.onnx and either sentencepiece.bpe.model (multilingual-e5)
 # or vocab.txt (English e5-v2). See the README.
 model_dir = "./model"

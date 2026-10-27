@@ -15,9 +15,7 @@ from typing import TYPE_CHECKING
 from libzim.reader import Archive
 from tqdm import tqdm
 
-from .catalog import ZimCatalog, catalog_path, is_zim_filename, source_index_name
-from .content.extract import DEFAULT_MAX_FILE_TEXT_CHARS, ExtractOptions
-from .content.files import FileArchive, is_supported_file
+from .catalog import ZimCatalog, catalog_path
 from .content.reader import (
     DEFAULT_MAX_ENTRY_BYTES,
     DEFAULT_MAX_HTML_BYTES,
@@ -40,17 +38,6 @@ CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);
 -- vecs stores float16 vectors and is dropped once .faiss is written.
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
 -- meta.next is the resume entry; meta.done is 'fast' or 1.
-"""
-
-# Ordinary-file indexes have no libzim native full-text index, so the SQLite
-# FTS table carries the extracted body as well as the title. ZIM indexes keep
-# the compact title-only layout above.
-FILE_SCHEMA = """
-CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
-    title, body, path UNINDEXED, target UNINDEXED,
-    tokenize='unicode61 remove_diacritics 2');
-CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);
-CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
 """
 
 _FAISS_MIN_POINTS_PER_CENTROID = 39
@@ -124,9 +111,9 @@ class _BuildState:
     meta: dict[str, str]
 
 
-def _open_database(path: Path, schema: str = SCHEMA) -> sqlite3.Connection:
+def _open_database(path: Path) -> sqlite3.Connection:
     db = sqlite3.connect(path)
-    db.executescript(schema)
+    db.executescript(SCHEMA)
     return db
 
 
@@ -138,19 +125,17 @@ def _source_filesize(path: Path) -> int:
 
 
 def _prepare_build_state(
-    source_path: Path,
+    zim_path: Path,
     db_path: Path,
     faiss_path: Path,
     fast: bool,
     force: bool,
-    schema: str = SCHEMA,
-    kind: str = "zim",
 ) -> _BuildState | None:
     if force:
         _reset_index(db_path, faiss_path)
 
-    filesize = _source_filesize(source_path)
-    db = _open_database(db_path, schema)
+    filesize = _source_filesize(zim_path)
+    db = _open_database(db_path)
     try:
         meta = dict(db.execute("SELECT key, value FROM meta"))
         done = str(meta.get("done", ""))
@@ -167,13 +152,13 @@ def _prepare_build_state(
             logger.warning(
                 "%s: source changed size during an interrupted build "
                 "(%s -> %s bytes); restarting",
-                source_index_name(source_path),
+                zim_path.stem,
                 recorded_build_size,
                 filesize,
             )
             db.close()
             _reset_index(db_path, faiss_path)
-            db = _open_database(db_path, schema)
+            db = _open_database(db_path)
             meta = {}
             done = ""
         # A fast build has no vectors for the rows it wrote. Resuming it as a
@@ -190,76 +175,46 @@ def _prepare_build_state(
             logger.warning(
                 "%s: build mode changed during an interrupted build (%s -> %s); "
                 "restarting",
-                source_index_name(source_path),
+                zim_path.stem,
                 recorded_mode,
                 requested_mode,
             )
             db.close()
             _reset_index(db_path, faiss_path)
-            db = _open_database(db_path, schema)
+            db = _open_database(db_path)
             meta = {}
             done = ""
         # Existing indexes written before build_mode was introduced cannot be
         # distinguished reliably from a full build that had no embedder; they
         # keep the historical resume behavior.
-        # A source replaced under the same name must not keep its old index:
-        # rebuild when the source file's size no longer matches the recorded
-        # size. The same applies when a ZIM and an ordinary file collide on an
-        # index identity; their docs layouts differ. An interrupted build may
-        # not have written meta.kind yet, so inspect the actual columns too.
+        # A ZIM replaced under the same name must not keep its old index: rebuild
+        # when the source file's size no longer matches the recorded size.
         recorded_size = meta.get("filesize")
-        kind_changed = done in {"1", "fast"} and str(
-            meta.get("kind", "zim")
-        ) != kind
-        docs_columns = {
-            str(row[1]) for row in db.execute("PRAGMA table_info(docs)")
-        }
-        schema_changed = (
-            bool(docs_columns)
-            and (("body" in docs_columns) != (kind == "file"))
-        ) or (done in {"1", "fast"} and not docs_columns)
-        size_changed = (
+        if (
             done in {"1", "fast"}
             and recorded_size is not None
             and str(filesize) != recorded_size
-        )
-        if kind_changed or schema_changed or size_changed:
-            if kind_changed:
-                logger.warning(
-                    "%s: source kind changed (%s -> %s); rebuilding",
-                    source_index_name(source_path),
-                    meta.get("kind", "zim"),
-                    kind,
-                )
-            elif schema_changed:
-                logger.warning(
-                    "%s: index layout changed; rebuilding",
-                    source_index_name(source_path),
-                )
-            else:
-                logger.warning(
-                    "%s: source changed size (%s -> %s bytes); rebuilding",
-                    source_index_name(source_path),
-                    recorded_size,
-                    filesize,
-                )
+        ):
+            logger.warning(
+                "%s: source ZIM changed size (%s -> %s bytes); rebuilding",
+                zim_path.stem,
+                recorded_size,
+                filesize,
+            )
             db.close()
             _reset_index(db_path, faiss_path)
-            db = _open_database(db_path, schema)
+            db = _open_database(db_path)
             meta = {}
             done = ""
 
         if done == "1":
             if faiss_path.exists():
-                logger.info(
-                    "%s: already built (use --force to rebuild)",
-                    source_index_name(source_path),
-                )
+                logger.info("%s: already built (use --force to rebuild)", zim_path.stem)
                 db.close()
                 return None
             raise RuntimeError(
-                f"{source_index_name(source_path)}: index is marked done but "
-                f"{faiss_path} is missing; use --force to rebuild"
+                f"{zim_path.stem}: index is marked done but {faiss_path} is missing; "
+                "use --force to rebuild"
             )
 
         publish_upgrade = False
@@ -268,31 +223,30 @@ def _prepare_build_state(
         if done == "fast":
             if fast:
                 logger.info(
-                    "%s: already indexed for title/full-text search "
-                    "(use --force to rebuild)",
-                    source_index_name(source_path),
+                    f"{zim_path.stem}: already indexed for title/full-text search "
+                    "(use --force to rebuild)"
                 )
                 db.close()
                 return None
             logger.info(
                 "%s: upgrading title-only index to full "
                 "(re-reading entries beside current index)",
-                source_index_name(source_path),
+                zim_path.stem,
             )
             db.close()
             build_db_path, build_faiss_path = _upgrade_paths(db_path, faiss_path)
-            db = _open_database(build_db_path, schema)
+            db = _open_database(build_db_path)
             meta = dict(db.execute("SELECT key, value FROM meta"))
             staged_done = str(meta.get("done", ""))
             if staged_done == "1":
                 db.close()
                 _publish_upgrade(build_db_path, build_faiss_path, db_path, faiss_path)
-                logger.debug("%s: full index ready", source_index_name(source_path))
+                logger.debug("%s: full index ready", zim_path.stem)
                 return None
             if staged_done == "fast":
                 raise RuntimeError(
-                    f"{source_index_name(source_path)}: upgrade staging file is "
-                    "marked fast; delete it and retry"
+                    f"{zim_path.stem}: upgrade staging file is marked fast; "
+                    "delete it and retry"
                 )
             publish_upgrade = True
 
@@ -305,12 +259,12 @@ def _prepare_build_state(
                 logger.warning(
                     "%s: upgrade staging file was built from a different source "
                     "size; restarting the upgrade",
-                    source_index_name(source_path),
+                    zim_path.stem,
                 )
                 db.close()
                 build_db_path.unlink(missing_ok=True)
                 build_faiss_path.unlink(missing_ok=True)
-                db = _open_database(build_db_path, schema)
+                db = _open_database(build_db_path)
                 meta = {}
 
         with db:
@@ -393,99 +347,13 @@ def _index_entries(
         _save_rows(db, pending_rows, pending_next, future.result())
 
 
-def _index_file_source(
-    source: FileArchive,
-    db: sqlite3.Connection,
-    start: int,
-    batch_size: int,
-    embedder,
-    fast: bool,
-    max_preview_chars: int,
-    embedding_pipeline: EmbeddingPipeline | None,
-) -> None:
-    """Index every section a normal file exposes, including its FTS body.
-
-    A PDF page, EPUB chapter or subtitle chunk is a separate entry, so the
-    index stores one row and (for a full build) one vector per section. The
-    batch loop resumes at the last committed entry id.
-    """
-    batch_size = max(1, int(batch_size))
-    rows: list[EntryRecord] = []
-    bodies: dict[int, str] = {}
-    # Batches submitted to the shared embedding pipeline but not yet written.
-    # They are saved in submission order so meta.next only moves forward.
-    pending: list[tuple[Future, list[EntryRecord], int, dict[int, str]]] = []
-
-    def drain_one() -> None:
-        future, saved_rows, next_entry, saved_bodies = pending.pop(0)
-        _save_rows(db, saved_rows, next_entry, future.result(), bodies=saved_bodies)
-
-    def save(next_entry: int) -> None:
-        nonlocal rows, bodies
-        if not rows:
-            return
-        if fast:
-            # Fast builds never keep vectors. Skip the embedder entirely so a
-            # caller that supplies one (the CLI does not) cannot pay for work
-            # that _finish_build immediately throws away.
-            _save_rows(db, rows, next_entry, {}, bodies=bodies)
-        elif embedding_pipeline is not None:
-            pending.append((embedding_pipeline.submit(rows), rows, next_entry, bodies))
-            if len(pending) >= embedding_pipeline.max_pending_per_build:
-                drain_one()
-        else:
-            _save(db, embedder, rows, next_entry, bodies=bodies)
-        rows = []
-        bodies = {}
-
-    for i in range(max(0, start), source.entry_count):
-        entry = source._get_entry_by_id(i)
-        body = entry.body.strip()
-        if body:
-            rows.append(
-                EntryRecord(
-                    i,
-                    entry.title,
-                    entry.body[:max(1, int(max_preview_chars))],
-                    entry.path,
-                    None,
-                )
-            )
-            bodies[i] = entry.body
-        if len(rows) >= batch_size:
-            save(i + 1)
-    save(source.entry_count)
-    while pending:
-        drain_one()
-    # Ensure a resume starts at the end even when the trailing entries had no
-    # body (the final save() is a no-op then).
-    with db:
-        db.execute(
-            "INSERT OR REPLACE INTO meta VALUES ('next', ?)",
-            (source.entry_count,),
-        )
-
-
-def _finish_build(
-    state: _BuildState,
-    db_path: Path,
-    faiss_path: Path,
-    fast: bool,
-    kind: str = "zim",
-    metadata: dict[str, str] | None = None,
-) -> None:
+def _finish_build(state: _BuildState, db_path: Path, faiss_path: Path, fast: bool) -> None:
     db = state.db
     if db is None:
         raise RuntimeError("build database is already closed")
-    extra = [("kind", kind)] if kind != "zim" else []
-    for key, value in (metadata or {}).items():
-        if value is not None:
-            extra.append((key, str(value)))
     if fast:
         with db:
             db.execute("DROP TABLE IF EXISTS vecs")
-            for key, value in extra:
-                db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
             db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
             db.execute("DELETE FROM meta WHERE key = 'build_mode'")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
@@ -497,8 +365,6 @@ def _finish_build(
     with db:
         db.execute("DROP TABLE vecs")
         db.execute("DELETE FROM meta WHERE key = 'next'")
-        for key, value in extra:
-            db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
         db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
         db.execute("DELETE FROM meta WHERE key = 'build_mode'")
         db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
@@ -517,7 +383,7 @@ def _finish_build(
 
 
 def build(
-    source_path: Path,
+    zim_path: Path,
     index_dir,
     embedder,
     batch_size: int,
@@ -527,109 +393,30 @@ def build(
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     force: bool = False,
     embedding_pipeline: EmbeddingPipeline | None = None,
-    kind: str | None = None,
-    extract_options: ExtractOptions | None = None,
-    index_name: str | None = None,
 ) -> None:
-    """Index a ZIM or ordinary file, optionally without bodies or vectors.
-
-    ``index_name`` overrides the flat index identity; the CLI uses it to give
-    same-named ordinary files distinct indexes without changing their source
-    paths or titles.
-    """
-    source_path = Path(source_path)
-    if kind is None:
-        kind = "zim" if is_zim_filename(source_path.name) else "file"
-    if kind not in {"zim", "file"}:
-        raise ValueError(f"unknown source kind: {kind}")
-    if extract_options is None:
-        extract_options = ExtractOptions(
-            max_text_chars=DEFAULT_MAX_FILE_TEXT_CHARS
-        )
-    if kind == "file" and not is_supported_file(source_path):
-        logger.warning(
-            "%s: no reader for %s files; skipping",
-            source_path.name,
-            source_path.suffix or "(no extension)",
-        )
-        return
-
-    name = index_name or source_index_name(source_path)
-    if kind == "file" and index_name is None:
-        from .catalog import unique_file_index_name
-
-        name = unique_file_index_name(source_path, index_dir)
-    db_path = Path(index_dir) / f"{name}.sqlite"
+    """Index a ZIM, optionally without article bodies or vectors."""
+    db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    state = _prepare_build_state(
-        source_path,
-        db_path,
-        faiss_path,
-        fast,
-        force,
-        schema=FILE_SCHEMA if kind == "file" else SCHEMA,
-        kind=kind,
-    )
+    state = _prepare_build_state(zim_path, db_path, faiss_path, fast, force)
     if state is None:
         return
     try:
-        if kind == "file":
-            source = FileArchive(source_path, options=extract_options)
-            if source.entry_count == 0:
-                logger.warning(
-                    "%s: no indexable text found; skipping",
-                    source_path.name,
-                )
-                if state.db is not None:
-                    state.db.close()
-                    state.db = None
-                _reset_index(db_path, faiss_path)
-                return
-            if state.db is None:
-                raise RuntimeError("build database is unavailable")
-            _index_file_source(
-                source,
-                state.db,
-                int(state.meta.get("next", 0)),
-                batch_size,
-                embedder,
-                fast,
-                max_preview_chars,
-                embedding_pipeline,
-            )
-            _finish_build(
-                state,
-                db_path,
-                faiss_path,
-                fast,
-                kind=kind,
-                metadata={
-                    "source_path": str(source_path.resolve()),
-                    "source_title": source.title,
-                    "source_description": source.description,
-                    "source_language": source.language,
-                    "source_creator": source.creator,
-                    "source_article_count": str(source.entry_count),
-                },
-            )
-            return
-
-        zim = Archive(source_path)
+        zim = Archive(zim_path)
         # The archive is already open: store its catalog metadata now, so serve
         # can list sources without reopening every ZIM at startup.
         try:
             with ZimCatalog(catalog_path(index_dir)) as catalog:
-                catalog.upsert_from_archive(zim, source_path)
+                catalog.upsert_from_archive(zim, zim_path)
         except Exception as error:
             logger.warning(
-                "catalog metadata update failed for %s (%s)", source_path, error
+                "catalog metadata update failed for %s (%s)", zim_path, error
             )
         if state.db is None:
             raise RuntimeError("build database is unavailable")
         _index_entries(
             zim,
-            name,
+            zim_path.stem,
             state.db,
             int(state.meta.get("next", 0)),
             batch_size,
@@ -640,7 +427,7 @@ def build(
             max_preview_chars,
             embedding_pipeline,
         )
-        _finish_build(state, db_path, faiss_path, fast, kind=kind)
+        _finish_build(state, db_path, faiss_path, fast)
     finally:
         if state.db is not None:
             state.db.close()
@@ -739,32 +526,19 @@ def _save_rows(
     rows: list[EntryRecord],
     next_entry: int,
     vectors: dict[int, np.ndarray],
-    bodies: dict[int, str] | None = None,
 ) -> None:
     """Store a batch, vectors and the resume point in one transaction.
 
     EntryRecord excerpts are transient: they are used for embeddings but are
-    not written to new indexes. File indexes additionally store the extracted
-    body so SQLite FTS can provide the full-text retrieval that a ZIM gets from
-    libzim.
+    not written to new indexes.
     """
     import numpy as np
 
     with db:
-        if bodies is not None:
-            db.executemany(
-                "INSERT INTO docs(rowid, title, body, path, target) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [
-                    (row.id, row.title, bodies.get(row.id, ""), row.path, row.target_id)
-                    for row in rows
-                ],
-            )
-        else:
-            db.executemany(
-                "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
-                [(row.id, row.title, row.path, row.target_id) for row in rows],
-            )
+        db.executemany(
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+            [(row.id, row.title, row.path, row.target_id) for row in rows],
+        )
         db.executemany(
             "INSERT INTO vecs VALUES (?, ?)",
             [
@@ -781,16 +555,9 @@ def _save(
     embedder,
     rows: list[EntryRecord],
     next_entry: int,
-    bodies: dict[int, str] | None = None,
 ) -> None:
     """Embed and store a batch and the resume point in one transaction."""
-    _save_rows(
-        db,
-        rows,
-        next_entry,
-        _embed_rows(embedder, rows),
-        bodies=bodies,
-    )
+    _save_rows(db, rows, next_entry, _embed_rows(embedder, rows))
 
 
 def _load(rows):
