@@ -325,6 +325,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn("const openOfflineArticle = (target, fallbackUrl) =>", shell.text)
         self.assertIn("target.origin !== shellUrl.origin", shell.text)
         self.assertIn("offlineUrl,", shell.text)
+        self.assertIn('new URL(articleFrame.getAttribute("src")', shell.text)
+        self.assertIn("zimantic-app-navigate", shell.text)
         self.assertIn("if (location.hash) scrollArticleTo(location.hash)", shell.text)
         self.assertIn("zimantic-article-hash", shell.text)
 

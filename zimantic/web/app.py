@@ -465,9 +465,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         ? pathname.slice(appBasePath.length)
         : null;
     };
-    const shellPath = localPath(shellUrl.pathname) || "";
-    const articleUrl = new URL(shellUrl.href);
-    articleUrl.pathname = `${appBasePath}/article${shellPath.slice("/content".length)}`;
+    // The iframe src is the authoritative raw-article URL; deriving it from
+    // the shell path would repeat the server's route mapping and break if the
+    // shell were ever mounted somewhere other than /content.
+    const articleUrl = articleFrame
+      ? new URL(articleFrame.getAttribute("src") || shellUrl.href, shellUrl.href)
+      : null;
     const permalinkLabel = permalink ? permalink.innerHTML : "";
     let permalinkResetTimer = null;
     let selectedSearchText = "";
@@ -709,7 +712,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       return path ? path + route.url.search : null;
     };
     const handleArticleLink = data => {
-      const route = articleRoute(data?.url) || articleRoute(articleUrl.href);
+      const route = articleRoute(data?.url) ||
+        (articleUrl ? articleRoute(articleUrl.href) : null);
       if (!route) return;
       const href = String(data?.href || "");
       if (!href) return;
@@ -743,7 +747,17 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         return;
       }
       // Same-host links that are not article or shell pages belong to the app.
+      // Navigate the top-level shell directly; inside the modal, ask the host
+      // to navigate, because the shell frame has an opaque origin and cannot
+      // load app pages that fetch their own configuration.
       if (url.origin === shellUrl.origin) {
+        if (window.parent !== window) {
+          window.parent.postMessage({
+            type: "zimantic-app-navigate",
+            url: url.href,
+          }, "*");
+          return;
+        }
         location.href = url.href;
         return;
       }
@@ -1047,10 +1061,13 @@ MOBILE_LAYOUT_SCRIPT = """<script data-zimantic-mobile="true">
 
 
 # Injected into raw HTML articles served under /article/. The article itself
-# has no toolbar and does no URL classification: this thin bridge reports the
-# authored href to the /content/ shell, which owns navigation, offline-link
-# mapping and the external-link notice. A top-level /article/ visit hands off
-# to the shell so both routes offer one browsing experience.
+# has no toolbar and makes no navigation decisions: this thin bridge filters
+# clicks that should stay in the browser, then reports the authored href and
+# any <base> to the /content/ shell, which owns navigation, offline-link
+# mapping and the external-link notice. It reports the authored href (rather
+# than the rewritten href property) so replay shims cannot turn relative links
+# into live-site URLs. A top-level /article/ visit hands off to the shell so
+# both routes offer one browsing experience.
 ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
 (() => {
   const prefix = %s;
@@ -1540,10 +1557,10 @@ def _decorate_article_bridge(
 ) -> bytes | memoryview:
     """Add the link-reporting bridge and mobile fallback to a raw article.
 
-    The article keeps its own markup; a small script reports link clicks to the
-    /content/ shell, and desktop-only captures also get the mobile fallback
-    described above. Non-HTML entries and documents that already carry the
-    bridge are returned untouched.
+    The article keeps its own markup; a small script filters and reports link
+    clicks to the /content/ shell, and desktop-only captures also get the mobile
+    fallback described above. Non-HTML entries and documents that already carry
+    the bridge are returned untouched.
     """
     try:
         document = bytes(content).decode("utf-8")

@@ -1984,6 +1984,20 @@
                     handleExternalLink(event.data.url, event.data.offlineUrl, event.data.parent);
                     return;
                 }
+                if (event.data?.type === "zimantic-app-navigate") {
+                    // A same-origin app link from a captured article. The shell
+                    // runs with an opaque origin in the modal, so it cannot load
+                    // the app itself; navigate this top-level page instead.
+                    let url;
+                    try {
+                        url = new URL(String(event.data.url || ""), location.href);
+                    } catch (_) {
+                        return;
+                    }
+                    if (url.origin !== location.origin) return;
+                    location.href = url.href;
+                    return;
+                }
                 if (event.data?.type === "zimantic-open-article") {
                     const articleUrl = readModalUrl(event.data.url);
                     if (articleUrl) window.open(articleUrl.href, "_blank", "noopener");

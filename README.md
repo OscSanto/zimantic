@@ -686,11 +686,15 @@ JSON API examples:
   visible even when the article is missing or fails. Unreadable entries render a friendly error
   panel in the shell instead of showing the raw `/article` JSON error body. `GET /article/<zim>/<path>`
   serves the raw entry: redirects are followed, its assets resolve under the same route, and entries
-  larger than `max_article_bytes` return `413`. Opening that route as a top-level page redirects to
-  the matching `/content/` shell, so `/article/` stays the entry source for the iframe, assets and
-  offline fetches rather than a second browsing surface. Link clicks in the raw article report the
-  authored `href` to the shell, which resolves it against the article's local `/article/` URL and
-  owns the offline/app/external decision. This keeps replay shims such as zimit's `wombat.js` from
+  larger than `max_article_bytes` return `413`. With scripting enabled, opening that route as a
+  top-level page hands off to the matching `/content/` shell; without scripting, or when the entry is
+  fetched, it stays the raw entry. That keeps `/article/` as the entry source for the iframe, assets
+  and offline fetches rather than a second browsing surface. The raw article's bridge filters out
+  clicks the browser should keep (in-page fragments, modified clicks, downloads, non-HTTP(S) schemes
+  and links with a non-self target such as `_blank`, which open in a new tab) and reports the authored
+  `href` plus any `<base>` to the shell. The shell resolves it against the article's local `/article/`
+  URL and owns the offline/app/external decision, handing same-origin app links to the outer page when
+  the shell is embedded in the modal. This keeps replay shims such as zimit's `wombat.js` from
   turning relative links in the capture into live-site URLs. `max_html_bytes` limits how much
   HTML is parsed for indexing, previews and phrase checks; `max_article_bytes` limits the uncompressed
   response body because Zimantic reads each requested entry into memory, including binary assets. The
