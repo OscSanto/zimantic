@@ -685,8 +685,13 @@ JSON API examples:
   article itself from an inner iframe pointed at `/article/<zim>/<path>`, so the toolbar stays
   visible even when the article is missing or fails. Unreadable entries render a friendly error
   panel in the shell instead of showing the raw `/article` JSON error body. `GET /article/<zim>/<path>`
-  serves the raw entry: redirects are followed, article links and assets resolve under the same
-  route, and entries larger than `max_article_bytes` return `413`. `max_html_bytes` limits how much
+  serves the raw entry: redirects are followed, its assets resolve under the same route, and entries
+  larger than `max_article_bytes` return `413`. Opening that route as a top-level page redirects to
+  the matching `/content/` shell, so `/article/` stays the entry source for the iframe, assets and
+  offline fetches rather than a second browsing surface. Link clicks in the raw article report the
+  authored `href` to the shell, which resolves it against the article's local `/article/` URL and
+  owns the offline/app/external decision. This keeps replay shims such as zimit's `wombat.js` from
+  turning relative links in the capture into live-site URLs. `max_html_bytes` limits how much
   HTML is parsed for indexing, previews and phrase checks; `max_article_bytes` limits the uncompressed
   response body because Zimantic reads each requested entry into memory, including binary assets. The
   toolbar shell also uses the viewed article's own `<title>` and declared icon for the browser tab

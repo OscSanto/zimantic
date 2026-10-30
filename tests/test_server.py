@@ -301,26 +301,32 @@ class ServerTests(unittest.TestCase):
         self.assertIn("zimantic-external-link", shell.text)
         self.assertNotIn("Article body", shell.text)
 
-        # /article/ serves the raw article with the shell-navigation bridge
-        # and no toolbar of its own.
+        # /article/ serves the raw article and only reports link clicks; the
+        # shell owns all URL classification and no toolbar appears here.
         self.assertEqual(raw.status_code, 200)
         self.assertTrue(raw.headers["content-type"].startswith("text/html"))
         self.assertEqual(raw.headers["access-control-allow-origin"], "*")
         self.assertIn("Article body", raw.text)
         self.assertIn("data-zimantic-bridge", raw.text)
-        self.assertIn("zimantic-external-link", raw.text)
-        self.assertIn("const href = hrefFor(anchor)", raw.text)
+        self.assertIn("zimantic-article-link", raw.text)
         self.assertIn("anchor.getAttribute(\"href\")", raw.text)
-        self.assertIn("const contentPathFor = url =>", raw.text)
-        self.assertIn("const currentContentUrl = () =>", raw.text)
-        self.assertIn("offline.pathname === current.pathname", raw.text)
+        self.assertIn("location.replace(shell.href)", raw.text)
+        self.assertNotIn("offlineUrlFor", raw.text)
+        self.assertNotIn("contentPathFor", raw.text)
+        self.assertNotIn("zimantic-external-link", raw.text)
         self.assertIn("zimantic-article-hash", raw.text)
-        self.assertIn("offlineUrl: offlineUrl ? offlineUrl.href : null", shell.text)
-        self.assertIn("const offlineArticleUrl = value =>", shell.text)
+        self.assertNotIn("data-zimantic-toolbar", raw.text)
+
+        # The shell resolves the authored href, maps captured-host URLs to the
+        # offline copy, and sends everything else to the external-link notice.
+        self.assertIn("zimantic-article-link", shell.text)
+        self.assertIn("const offlineUrlFor = (url, route) =>", shell.text)
+        self.assertIn("const contentPathFor = url =>", shell.text)
         self.assertIn("const openOfflineArticle = (target, fallbackUrl) =>", shell.text)
+        self.assertIn("target.origin !== shellUrl.origin", shell.text)
+        self.assertIn("offlineUrl,", shell.text)
         self.assertIn("if (location.hash) scrollArticleTo(location.hash)", shell.text)
         self.assertIn("zimantic-article-hash", shell.text)
-        self.assertNotIn("data-zimantic-toolbar", raw.text)
 
         # The storage notice is part of the shell chrome, directly below the
         # toolbar and above the article iframe.

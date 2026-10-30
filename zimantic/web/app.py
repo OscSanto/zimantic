@@ -457,6 +457,17 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const parentNext = toolbar.querySelector("[data-zimantic-parent-next]");
     const actions = toolbar.querySelector(".zimantic-toolbar-actions");
     const articleFrame = document.querySelector("iframe[data-zimantic-article]");
+    const shellUrl = new URL(location.href);
+    const localPath = pathname => {
+      if (!appBasePath) return pathname;
+      if (pathname === appBasePath) return "/";
+      return pathname.startsWith(`${appBasePath}/`)
+        ? pathname.slice(appBasePath.length)
+        : null;
+    };
+    const shellPath = localPath(shellUrl.pathname) || "";
+    const articleUrl = new URL(shellUrl.href);
+    articleUrl.pathname = `${appBasePath}/article${shellPath.slice("/content".length)}`;
     const permalinkLabel = permalink ? permalink.innerHTML : "";
     let permalinkResetTimer = null;
     let selectedSearchText = "";
@@ -596,11 +607,13 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       } catch (_) {
         return null;
       }
-      if (target.origin !== location.origin) return null;
-      if (
-        target.pathname !== `${appBasePath}/content` &&
-        !target.pathname.startsWith(`${appBasePath}/content/`)
-      ) return null;
+      // The shell is loaded with an opaque origin in the modal, so compare
+      // parsed URLs instead of the null `location.origin`.
+      if (target.origin !== shellUrl.origin) return null;
+      const path = localPath(target.pathname);
+      if (path !== "/content" && !(path && path.startsWith("/content/"))) {
+        return null;
+      }
       return target;
     };
     window.addEventListener("message", event => {
@@ -614,42 +627,6 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
         location.href = target.href;
       }
     });
-    // A link click in the raw article knows the page it came from. In the modal
-    // the host owns history and parent navigation, so forward both URLs to it.
-    window.addEventListener("message", event => {
-      if (event.data?.type !== "zimantic-article-follow") return;
-      const target = contentUrl(event.data.url);
-      if (!target) return;
-      if (window.parent !== window) {
-        const parent = contentUrl(event.data.parent);
-        window.parent.postMessage({
-          type: "zimantic-article-follow",
-          url: target.href,
-          parent: parent ? parent.href : null,
-        }, "*");
-        return;
-      }
-      offlineRequest += 1;
-      location.href = target.href;
-    });
-    const offlineArticleUrl = value => {
-      const text = String(value || "");
-      if (!text) return null;
-      let url;
-      try {
-        url = new URL(text, location.href);
-      } catch (_) {
-        return null;
-      }
-      if (url.origin !== location.origin) return null;
-      if (
-        url.pathname !== `${appBasePath}/content` &&
-        !url.pathname.startsWith(`${appBasePath}/content/`)
-      ) {
-        return null;
-      }
-      return url;
-    };
     // A directly loaded /content/ view should make the same choice as the
     // modal: use the captured copy when it exists, and only go online when the
     // article is not in the ZIM.
@@ -671,7 +648,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           if (request !== offlineRequest) return;
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const resolved = new URL(response.url || probe.href);
-          if (resolved.origin !== location.origin) throw new Error("moved");
+          if (resolved.origin !== shellUrl.origin) throw new Error("moved");
           resolved.search = target.search;
           resolved.hash = hash;
           location.href = resolved.href;
@@ -681,31 +658,115 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           location.href = fallbackUrl;
         });
     };
-    window.addEventListener("message", event => {
-      if (event.data?.type !== "zimantic-external-link") return;
+    // The raw article reports the link it saw, not what it means. Resolve and
+    // classify every article link here so wombat and other replay shims cannot
+    // turn authored relative links into live-site URLs: the raw `href`
+    // attribute and the article's local /article/ URL are the source of truth.
+    const articleRoute = value => {
+      let target;
+      try {
+        target = new URL(String(value || ""), location.href);
+      } catch (_) {
+        return null;
+      }
+      if (target.origin !== shellUrl.origin) return null;
+      const path = localPath(target.pathname);
+      if (!path || (path !== "/article" && !path.startsWith("/article/"))) {
+        return null;
+      }
+      const parts = path.split("/").filter(Boolean);
+      return {url: target, path, zim: parts[1] || "", root: parts[2] || ""};
+    };
+    const contentPathFor = url => {
+      const path = localPath(url.pathname);
+      if (path === "/content" || (path && path.startsWith("/content/"))) {
+        return url.pathname;
+      }
+      if (path === "/article" || (path && path.startsWith("/article/"))) {
+        return `${appBasePath}/content${path.slice("/article".length)}`;
+      }
+      return null;
+    };
+    const comparableHost = value =>
+      String(value || "").toLowerCase().replace(/\\.$/, "").replace(/^www\\./, "");
+    const offlineUrlFor = (url, route) => {
+      let root = route.root;
+      try {
+        root = decodeURIComponent(root);
+      } catch (_) {}
+      if (!root || comparableHost(root) !== comparableHost(url.hostname)) {
+        return null;
+      }
+      const local = new URL(route.url.href);
+      local.pathname = `${appBasePath}/content/${route.zim}/` +
+        `${encodeURIComponent(root)}/${url.pathname.replace(/^\\/+/, "")}`;
+      local.search = url.search;
+      local.hash = url.hash;
+      return local.href;
+    };
+    const currentContentUrl = route => {
+      const path = contentPathFor(route.url);
+      return path ? path + route.url.search : null;
+    };
+    const handleArticleLink = data => {
+      const route = articleRoute(data?.url) || articleRoute(articleUrl.href);
+      if (!route) return;
+      const href = String(data?.href || "");
+      if (!href) return;
       let url;
       try {
-        url = new URL(String(event.data.url || ""), location.href);
+        const base = String(data?.base || "");
+        url = new URL(href, base ? new URL(base, route.url) : route.url);
       } catch (_) {
         return;
       }
       if (url.protocol !== "http:" && url.protocol !== "https:") return;
-      const offlineUrl = offlineArticleUrl(event.data.offlineUrl);
+      // A same-document link keeps the iframe's scroll position.
+      if (url.pathname === route.url.pathname && url.search === route.url.search) {
+        if (url.hash) scrollArticleTo(url.hash);
+        return;
+      }
+      const contentPath = contentPathFor(url);
+      if (url.origin === shellUrl.origin && contentPath) {
+        const target = new URL(url.href);
+        target.pathname = contentPath;
+        if (window.parent !== window) {
+          window.parent.postMessage({
+            type: "zimantic-article-follow",
+            url: target.href,
+            parent: currentContentUrl(route),
+          }, "*");
+          return;
+        }
+        offlineRequest += 1;
+        location.href = target.href;
+        return;
+      }
+      // Same-host links that are not article or shell pages belong to the app.
+      if (url.origin === shellUrl.origin) {
+        location.href = url.href;
+        return;
+      }
+      const offlineUrl = offlineUrlFor(url, route);
       if (window.parent !== window) {
-        const parent = contentUrl(event.data.parent);
         window.parent.postMessage({
           type: "zimantic-external-link",
           url: url.href,
-          offlineUrl: offlineUrl ? offlineUrl.href : null,
-          parent: parent ? parent.href : null,
+          offlineUrl,
+          parent: currentContentUrl(route),
         }, "*");
         return;
       }
       if (offlineUrl) {
-        openOfflineArticle(offlineUrl, url.href);
+        openOfflineArticle(new URL(offlineUrl), url.href);
         return;
       }
       location.href = url.href;
+    };
+    window.addEventListener("message", event => {
+      if (!articleFrame || event.source !== articleFrame.contentWindow) return;
+      if (event.data?.type !== "zimantic-article-link") return;
+      handleArticleLink(event.data);
     });
     // A capture can finish loading with nothing to show: a JavaScript shell that
     // renders content it never saved, a redirect to a page whose assets 404, or
@@ -986,78 +1047,31 @@ MOBILE_LAYOUT_SCRIPT = """<script data-zimantic-mobile="true">
 
 
 # Injected into raw HTML articles served under /article/. The article itself
-# has no toolbar (that lives in the /content/ shell), so this tiny bridge turns
-# in-article link clicks into shell navigation. Without it, following a link
-# would leave the shell's breadcrumbs and modal URL pointing at the old article.
+# has no toolbar and does no URL classification: this thin bridge reports the
+# authored href to the /content/ shell, which owns navigation, offline-link
+# mapping and the external-link notice. A top-level /article/ visit hands off
+# to the shell so both routes offer one browsing experience.
 ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
 (() => {
+  const prefix = %s;
+  const context = new URL(location.href);
+  const routePath = prefix && context.pathname.startsWith(`${prefix}/`)
+    ? context.pathname.slice(prefix.length)
+    : context.pathname;
+  // /article/ is the raw entry source for the /content/ shell, not a second
+  // browsing surface. A top-level visit hands off to the shell so both routes
+  // keep the same toolbar, URL and navigation behavior. The shell's own iframe
+  // has a parent window and stays here.
+  if (
+    window.parent === window &&
+    (routePath === "/article" || routePath.startsWith("/article/"))
+  ) {
+    const shell = new URL(context.href);
+    shell.pathname = `${prefix}/content${routePath.slice("/article".length)}`;
+    location.replace(shell.href);
+    return;
+  }
   const initialize = () => {
-    const context = new URL(location.href);
-    const prefix = %s;
-    const routePath = prefix && context.pathname.startsWith(`${prefix}/`)
-      ? context.pathname.slice(prefix.length)
-      : context.pathname;
-    const parts = routePath.split("/").filter(Boolean);
-    let zim = parts[1] || "";
-    try {
-      zim = decodeURIComponent(zim);
-    } catch (_) {}
-    const encodedZim = encodeURIComponent(zim);
-    const contentHome = `${prefix}/content/${encodedZim}`;
-    const articleHome = `${prefix}/article/${encodedZim}`;
-    const contentPrefix = `${contentHome}/`;
-    const articlePrefix = `${articleHome}/`;
-    const localArticleRoot = (() => {
-      const value = parts[2] || "";
-      try {
-        return decodeURIComponent(value);
-      } catch (_) {
-        return value;
-      }
-    })();
-    const comparableHost = value =>
-      String(value || "").toLowerCase().replace(/\\.$/, "").replace(/^www\\./, "");
-    const offlineUrlFor = url => {
-      if (
-        !localArticleRoot ||
-        comparableHost(localArticleRoot) !== comparableHost(url.hostname)
-      ) {
-        return null;
-      }
-      const local = new URL(
-        `${contentHome}/${localArticleRoot}${url.pathname || "/"}`,
-        context
-      );
-      local.search = url.search;
-      local.hash = url.hash;
-      return local.href;
-    };
-    const contentPathFor = url => {
-      const path = url.pathname;
-      if (path === contentHome || path.startsWith(contentPrefix)) return path;
-      if (path === articleHome || path.startsWith(articlePrefix)) {
-        return `${prefix}/content` + path.slice(`${prefix}/article`.length);
-      }
-      return null;
-    };
-    const currentContentUrl = () => {
-      const contentPath = contentPathFor(context);
-      return contentPath ? new URL(contentPath + context.search, context) : null;
-    };
-    const hasBaseUrl = () => Boolean(document.querySelector("base[href]"));
-    const hrefFor = anchor => {
-      // Wombat, used by zimit captures, rewrites the `href` property to the
-      // original site URL. The attribute still carries the link the page
-      // authored, so prefer it and keep relative links on this server. A
-      // capture that declares a real <base> needs the browser's resolution.
-      try {
-        if (!hasBaseUrl()) {
-          const attribute = anchor.getAttribute("href");
-          if (attribute) return attribute;
-        }
-      } catch (_) {}
-      return anchor.href;
-    };
     const normalizeText = value =>
       String(value || "").replace(/\\s+/g, " ").trim();
     const escapeRegExp = value =>
@@ -1234,8 +1248,11 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
         ? event.target.closest("a[href]")
         : null;
       if (!anchor) return;
-      const href = hrefFor(anchor);
-      if (!href) return;
+      // Wombat (zimit) rewrites the `href` property to the live site URL.
+      // Report the authored attribute and let the /content/ shell decide what
+      // it means: another offline entry, the app, or the live web.
+      const href = anchor.getAttribute("href");
+      if (!href || href.startsWith("#")) return;
       if (
         event.button !== 0 ||
         event.metaKey ||
@@ -1245,6 +1262,7 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
       ) {
         return;
       }
+      if (anchor.hasAttribute("download")) return;
       let url;
       try {
         url = new URL(href, context);
@@ -1252,68 +1270,21 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
         return;
       }
       if (url.protocol !== "http:" && url.protocol !== "https:") return;
-      if (anchor.hasAttribute("download")) return;
-      if (url.origin !== context.origin) {
-        const offlineUrl = offlineUrlFor(url);
-        const offline = offlineUrl ? new URL(offlineUrl, context) : null;
-        const current = currentContentUrl();
-        // Wombat also rewrites link properties to the original site URL, so a
-        // relative in-page fragment can arrive here looking external. When the
-        // mapped URL is the article we already show, keep it a fragment jump.
-        if (
-          offline &&
-          current &&
-          offline.pathname === current.pathname &&
-          (offline.search === current.search ||
-            (offline.hash && !offline.search))
-        ) {
-          event.preventDefault();
-          if (offline.hash) location.hash = offline.hash;
-          return;
-        }
-        event.preventDefault();
-        if (window.parent !== window) {
-          const parentPath = contentPathFor(context);
-          window.parent.postMessage({
-            type: "zimantic-external-link",
-            url: url.href,
-            offlineUrl,
-            parent: parentPath ? parentPath + context.search : null,
-          }, "*");
-        } else {
-          location.href = offlineUrl || url.href;
-        }
-        return;
-      }
       const target = String(anchor.target || "").toLowerCase();
-      if (
-        target &&
-        target !== "_self" &&
-        target !== "_top" &&
-        !(target === "_blank" && url.origin !== context.origin)
-      ) {
-        return;
-      }
-      if (event.defaultPrevented) return;
-      const contentPath = contentPathFor(url);
-      // Same-origin app pages and assets are left to the iframe.
-      if (!contentPath) return;
+      if (target && target !== "_self" && target !== "_top") return;
       // Same-document fragment links must scroll in place, not reload the shell.
       if (url.pathname === context.pathname && url.search === context.search) {
         return;
       }
+      if (event.defaultPrevented) return;
+      const baseTag = document.querySelector("base[href]");
       event.preventDefault();
-      const shellUrl = contentPath + url.search + url.hash;
-      if (window.parent !== window) {
-        const parentPath = contentPathFor(context);
-        window.parent.postMessage({
-          type: "zimantic-article-follow",
-          url: shellUrl,
-          parent: parentPath ? parentPath + context.search : null,
-        }, "*");
-      } else {
-        location.href = shellUrl;
-      }
+      window.parent.postMessage({
+        type: "zimantic-article-link",
+        href,
+        base: baseTag ? String(baseTag.getAttribute("href") || "") : "",
+        url: context.href,
+      }, "*");
     }, true);
   };
   if (document.readyState === "loading") {
@@ -1567,12 +1538,12 @@ def _xml_safe_styles(markup: str) -> str:
 def _decorate_article_bridge(
     content: bytes | memoryview, zim: str, base_path: str = "", xhtml: bool = False
 ) -> bytes | memoryview:
-    """Add the shell-navigation bridge and mobile fallback to a raw article.
+    """Add the link-reporting bridge and mobile fallback to a raw article.
 
-    The article keeps its own markup; a small script lets link clicks ask the
-    /content/ shell to navigate, and desktop-only captures also get the mobile
-    fallback described above. Non-HTML entries and documents that already carry
-    the bridge are returned untouched.
+    The article keeps its own markup; a small script reports link clicks to the
+    /content/ shell, and desktop-only captures also get the mobile fallback
+    described above. Non-HTML entries and documents that already carry the
+    bridge are returned untouched.
     """
     try:
         document = bytes(content).decode("utf-8")
