@@ -24,6 +24,13 @@ port = 8090
 # Optional URL path prefix when a reverse proxy strips it before forwarding.
 # web_base_path = "/zimantic"
 
+# Sandbox article documents in the browser (secure browsing). Off by default
+# because local ZIMs are trusted input and sandboxing isolates Web Storage and
+# IndexedDB (some offline sites lose persistence). Enable this when serving ZIMs
+# from untrusted sources; the shell itself stays trusted and the article is
+# isolated inside it.
+# secure_browsing = false
+
 # Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
 # sources that do not have a local Zimantic index. Leave blank to use local
 # indexes only. Point this at a running kiwix-serve HTTP API (not a ZIM folder);

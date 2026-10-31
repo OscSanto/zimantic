@@ -166,12 +166,9 @@ class ServerTests(unittest.TestCase):
         self.assertIn('src="app.js"', page.text)
         self.assertNotIn('id="libraryRandom"', page.text)
         self.assertIn('id="articleModalFrame"', page.text)
-        # Same-origin target="_blank" links (for example PDFs) must be able to
-        # open outside the article modal's sandbox.
-        self.assertIn(
-            'sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"',
-            page.text,
-        )
+        # The modal shell itself is trusted; the article document inside it is
+        # sandboxed only when secure_browsing is enabled.
+        self.assertNotIn('sandbox="allow-scripts allow-popups', page.text)
 
         css = self.client.get("/app.css")
         self.assertEqual(css.status_code, 200)
@@ -320,6 +317,9 @@ class ServerTests(unittest.TestCase):
         # The shell resolves the authored href, maps captured-host URLs to the
         # offline copy, and sends everything else to the external-link notice.
         self.assertIn("zimantic-article-link", shell.text)
+        self.assertIn("const secureBrowsing = false;", shell.text)
+        self.assertNotIn('sandbox="allow-scripts allow-popups', shell.text)
+        self.assertIn('referrerpolicy="same-origin"', shell.text)
         self.assertIn("const offlineUrlFor = (url, route) =>", shell.text)
         self.assertIn("const contentPathFor = url =>", shell.text)
         self.assertIn("const openOfflineArticle = (target, fallbackUrl) =>", shell.text)
@@ -478,6 +478,82 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"pages": []})
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
+
+    def test_missing_mathjax_font_uses_vendored_copy(self):
+        search = FakeSearch()
+
+        def missing(_zim, _path):
+            raise ArticleNotFoundError("missing")
+
+        search.read_article = missing
+        client = TestClient(create_app(search))
+
+        response = client.get(
+            "/article/manual/static/js/fonts/HTML-CSS/TeX/woff/"
+            "MathJax_Main-Regular.woff"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("font/woff"))
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
+        self.assertGreater(len(response.content), 1000)
+
+        absent = client.get("/article/manual/missing.png")
+        self.assertEqual(absent.status_code, 404)
+        self.assertEqual(absent.headers["access-control-allow-origin"], "*")
+
+    def test_root_absolute_capture_asset_uses_referer_zim(self):
+        search = FakeSearch()
+
+        def read_article(_zim, path):
+            if path == "-/mw/banner.jpg":
+                return {
+                    "path": path,
+                    "title": "Banner",
+                    "mimetype": "image/png",
+                    "content": b"banner",
+                }
+            raise ArticleNotFoundError("missing")
+
+        search.read_article = read_article
+        client = TestClient(create_app(search))
+
+        response = client.get(
+            "/w/images/5/54/banner.jpg",
+            headers={"referer": "http://testserver/article/manual/page"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"banner")
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
+
+        no_referer = client.get("/w/images/5/54/banner.jpg")
+        self.assertEqual(no_referer.status_code, 404)
+
+        unknown = client.get(
+            "/w/images/5/54/other.png",
+            headers={"referer": "http://testserver/article/manual/page"},
+        )
+        self.assertEqual(unknown.status_code, 404)
+
+    def test_secure_browsing_sandboxes_article_documents(self):
+        search = FakeSearch()
+        search.cfg = {"secure_browsing": True}
+        search.read_article = lambda zim, path: {
+            "path": path,
+            "title": "Page",
+            "mimetype": "text/html",
+            "content": b"<html><head></head><body>Page</body></html>",
+        }
+        client = TestClient(create_app(search))
+
+        shell = client.get("/content/manual/page")
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn(
+            'sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"',
+            shell.text,
+        )
+        self.assertIn("const secureBrowsing = true;", shell.text)
+        self.assertIn('referrerpolicy="same-origin"', shell.text)
 
     def test_raw_html_shims_cookie_access_in_opaque_sandboxes(self):
         raw = self._raw_article(b"<html><head></head><body>Article</body></html>")

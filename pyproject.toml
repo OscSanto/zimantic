@@ -39,6 +39,9 @@ include = ["zimantic*"]
 [tool.setuptools.package-data]
 "zimantic.web" = [
     "static/*",
+    "static/mathjax/LICENSE",
+    "static/mathjax/README.md",
+    "static/mathjax/HTML-CSS/TeX/woff/*.woff",
 ]
 
 [tool.pytest.ini_options]

@@ -1282,9 +1282,10 @@
                 }
             }
 
-            // The modal loads a /content/ shell in a sandboxed iframe, so the shell
-            // cannot touch this document. It reports the viewed article's title and
-            // favicon through postMessage and we mirror them on the browser tab.
+            // The modal loads a trusted /content/ shell; the article inside it is
+            // sandboxed only when secure browsing is enabled. The shell reports the
+            // viewed article's title and favicon through postMessage and we mirror
+            // them on the browser tab.
             function applyArticleDocumentMeta(title, icon) {
                 const articleTitle = String(title || "").trim();
                 if (articleTitle) document.title = articleTitle;

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from urllib.parse import unquote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -19,12 +20,77 @@ from ..searching.query import MAX_QUERY_LENGTH, STOPWORDS
 from . import app as web_app
 
 
+_CAPTURE_ASSET_PREFIXES = (
+    "w/",
+    "assets/",
+    "static/",
+    "images/",
+    "skins/",
+    "extensions/",
+    "resources/",
+    "wiki/",
+)
+
+
+def _capture_asset_candidates(path: str) -> list[str]:
+    """Return archive paths worth trying for a root-absolute capture asset."""
+    rel = unquote(str(path or "")).lstrip("/")
+    if not rel:
+        return []
+    if not (
+        rel == "load.php"
+        or any(rel.startswith(prefix) for prefix in _CAPTURE_ASSET_PREFIXES)
+    ):
+        return []
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        value = value.lstrip("/")
+        if value and value not in candidates:
+            candidates.append(value)
+
+    add(rel)
+    # mwoffliner captures keep MediaWiki resources under -/mw/. CMS pages often
+    # emit root-absolute /w/images/... URLs with an extra hash directory while
+    # the archive stores the file by basename.
+    if rel.startswith("w/images/"):
+        add("-/mw/" + rel.rsplit("/", 1)[-1])
+    if rel.startswith("w/"):
+        add("-/mw/" + rel[len("w/") :])
+    if rel.startswith("images/"):
+        add("-/mw/" + rel.rsplit("/", 1)[-1])
+    if rel.startswith("assets/"):
+        add("-/assets/" + rel[len("assets/") :])
+    if rel.startswith("static/"):
+        add("-/static/" + rel[len("static/") :])
+    if rel.startswith(("skins/", "extensions/", "resources/")):
+        add("-/mw/" + rel)
+    return candidates
+
+
+def _referer_article_zim(referer: str | None) -> str | None:
+    """Extract the ZIM name from an /article/ or /content/ referrer."""
+    if not referer:
+        return None
+    path = urlsplit(referer).path
+    for marker in ("/article/", "/content/"):
+        index = path.find(marker)
+        if index < 0:
+            continue
+        remainder = path[index + len(marker) :]
+        zim = remainder.split("/", 1)[0]
+        return unquote(zim) if zim else None
+    return None
+
+
 def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     """Register browser, article, discovery, and search endpoints."""
 
     # Serialized-JSON memo owned by this app instance (see _json_response).
     memos: dict = {}
     base_path = web_app._search_base_path(search_class)
+    cfg = getattr(search_class, "cfg", {}) or {}
+    secure_browsing = bool(cfg.get("secure_browsing", False))
     dev_cache_headers = {"Cache-Control": "no-store"} if debug else None
 
     def paged_json_response(
@@ -217,11 +283,15 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     ):
         try:
             article = search_class.read_article(zim, path)
-        except (
-            ArticleNotFoundError,
-            ArticleTooLargeError,
-            ArticleUnavailableError,
-        ) as error:
+        except ArticleNotFoundError as error:
+            # Some Stack Exchange captures reference MathJax fonts the ZIM did
+            # not save. Serve the vendored MathJax 2.7.5 WOFF set for those
+            # known paths instead of failing the whole equation.
+            font = web_app._vendored_mathjax_font(path or "")
+            if font is None:
+                raise web_app._article_http_error(error) from error
+            return web_app._article_content_response(font.read_bytes(), "font/woff")
+        except (ArticleTooLargeError, ArticleUnavailableError) as error:
             raise web_app._article_http_error(error) from error
 
         requested_path = None if path is None else path
@@ -343,6 +413,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 highlight,
                 path_exists=path_exists,
                 error=error_info,
+                secure_browsing=secure_browsing,
             )
 
         if requested_path != article["path"]:
@@ -362,6 +433,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             base_path=base_path,
             highlight=highlight,
             path_exists=path_exists,
+            secure_browsing=secure_browsing,
         )
 
     @app.get("/content/{zim}")
@@ -501,3 +573,40 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @app.api_route(
+        "/{path:path}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        include_in_schema=False,
+    )
+    def capture_asset_fallback(path: str, request: Request):
+        """Serve root-absolute capture assets from the referring article's ZIM.
+
+        Some CMS and MediaWiki captures emit ``/w/...``, ``/assets/...`` and
+        similar URLs. Inside the article iframe those resolve against the app
+        origin instead of the ZIM. When such a request misses every app route,
+        use the article referrer to find the ZIM and try the capture's common
+        archived equivalents.
+        """
+        if request.method not in {"GET", "HEAD"}:
+            raise HTTPException(status_code=404, detail="not found")
+        zim = _referer_article_zim(request.headers.get("referer"))
+        if not zim:
+            raise HTTPException(status_code=404, detail="not found")
+        for candidate in _capture_asset_candidates(path):
+            try:
+                article = search_class.read_article(zim, candidate)
+            except (
+                ArticleNotFoundError,
+                ArticleTooLargeError,
+                ArticleUnavailableError,
+            ):
+                continue
+            content = article.get("content")
+            if content is None:
+                continue
+            return web_app._article_content_response(
+                content,
+                article.get("mimetype") or "application/octet-stream",
+            )
+        raise HTTPException(status_code=404, detail="not found")

@@ -32,6 +32,10 @@ _COMMON = {
     "preview_limit": 10,
     "min_cosine_similarity": 0.85,
     "source_timeout": 12,
+    # Sandbox article documents (and therefore isolate their Web Storage).
+    # Off by default: local ZIMs are trusted input and article functionality
+    # (especially persistent browser storage) matters more than isolation.
+    "secure_browsing": False,
 }
 
 MOBILE = {  # ~512 MB - 2 GB RAM: Raspberry Pi Zero 2 W and similar
@@ -98,7 +102,7 @@ def _coerce_config_value(key: str, value: object, default: object) -> object | N
     ``batch_size`` or ``port``), so reject it at load time and keep the profile
     default.
     """
-    if isinstance(default, bool):  # no boolean settings today, but be explicit
+    if isinstance(default, bool):
         return value if isinstance(value, bool) else None
     if isinstance(default, float):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -131,6 +135,8 @@ def _typed_user_values(
         if corrected is None:
             if key in _OPTIONAL_INT_KEYS or key == "embed_threads":
                 expected = "integer"
+            elif isinstance(default, bool):
+                expected = "boolean"
             elif isinstance(default, float):
                 expected = "number"
             elif isinstance(default, int):

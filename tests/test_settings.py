@@ -114,6 +114,25 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(cfg["index_dir"], "./indexes")  # filled from the profile
             self.assertEqual(warnings, [])
 
+    def test_secure_browsing_defaults_off_and_accepts_boolean(self):
+        self.assertFalse(PROFILES["desktop"]["secure_browsing"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("secure_browsing = true\n", encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+            self.assertTrue(cfg["secure_browsing"])
+            self.assertEqual(warnings, [])
+
+    def test_secure_browsing_rejects_non_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('secure_browsing = "yes"\n', encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+            self.assertFalse(cfg["secure_browsing"])
+            self.assertTrue(any("secure_browsing" in message for message in warnings))
+
     def test_zero_worker_counts_warn_and_fall_back_to_automatic_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

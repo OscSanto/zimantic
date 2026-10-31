@@ -39,7 +39,9 @@ class ArticleNavigationScriptTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.bridge = _inline_script(web_app.ARTICLE_NAV_BRIDGE_SCRIPT)
-        toolbar = _inline_script(web_app.ARTICLE_TOOLBAR_SCRIPT % json.dumps(""))
+        toolbar = _inline_script(
+            web_app.ARTICLE_TOOLBAR_SCRIPT % (json.dumps(""), json.dumps(False))
+        )
         cls.local_source = _section(
             toolbar, "const localPath = pathname =>", "const permalinkLabel"
         )

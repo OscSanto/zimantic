@@ -195,6 +195,15 @@ location /zimantic/ {
 Generated links, assets and API requests then stay under `/zimantic/`; open the
 page with the trailing slash.
 
+**Trusted vs. untrusted archives.** By default the `/content/` shell is trusted and the article
+document inside it is **not** sandboxed. This keeps functionality intact, including persistent Web
+Storage and IndexedDB used by some offline sites. Set `secure_browsing = true` to sandbox the
+article document instead; the shell stays trusted, while the article runs with an opaque origin and
+gets the in-memory storage fallbacks described below. Secure browsing protects the app from
+untrusted ZIM scripts, but it also isolates storage everywhere (including standalone
+`/content/` links), so it is off by default. A raw `/article/...` URL opened directly is a
+top-level document and is still not sandboxed; use the `/content/` shell for the bounded view.
+
 **Reloading indexes without a restart.** `zimantic reload` sends `SIGHUP` to a normal server,
 which rescans `index_dir` and `catalog.sqlite` and reconciles the available indexes. `kill -HUP <pid>` also works.
 In `serve --debug` mode (also available as the `serve --dev` alias), SIGHUP restarts the
@@ -713,10 +722,14 @@ JSON API examples:
   URL can be shared.
   Selecting text adds the passage to that URL and to the toolbar's Copy link action; reopening the
   link scrolls to and highlights the passage. Fragment links scroll inside the article without
-  reloading the shell. The modal's sandbox has an opaque origin, so articles that use Web Storage
-  get an in-memory fallback and IndexedDB loads an in-memory polyfill, then the modal offers to open
-  the same `/content/` view in a new tab, where the browser's persistent storage is available. The
-  IndexedDB polyfill bundles `fake-indexeddb` (Apache-2.0; see `indexeddb-shim.LICENSE`).
+  reloading the shell. With `secure_browsing = true`, the article iframe has an opaque origin, so
+  articles that use Web Storage get an in-memory fallback and IndexedDB loads an in-memory polyfill.
+  The shell then offers the standalone `/content/` view only when secure browsing is off, because a
+  sandboxed standalone view cannot provide persistent storage either. The IndexedDB polyfill bundles
+  `fake-indexeddb` (Apache-2.0; see `indexeddb-shim.LICENSE`). Stack Exchange captures that omit their
+  MathJax font files are served the vendored MathJax 2.7.5 WOFF set. Root-absolute capture assets
+  such as `/w/images/...` are resolved through the article referrer against the common archived
+  locations (`-/mw/...` and friends) when no app route matches.
   `GET /random?zim=<name>`
   redirects to a random indexed article's shell. `GET /random` without `zim` redirects to the
   homepage of a random available local source; the article toolbar's Random control uses the first

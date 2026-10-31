@@ -37,6 +37,10 @@ APPLE_TOUCH_ICON = ASSET_DIR / "apple-touch-icon.png"
 ANDROID_CHROME_192 = ASSET_DIR / "android-chrome-192x192.png"
 ANDROID_CHROME_512 = ASSET_DIR / "android-chrome-512x512.png"
 WEB_MANIFEST = ASSET_DIR / "site.webmanifest"
+MATHJAX_FONT_DIR = ASSET_DIR / "mathjax" / "HTML-CSS" / "TeX" / "woff"
+_MATHJAX_FONT_RE = re.compile(
+    r"(?:^|/)fonts/HTML-CSS/TeX/woff/(MathJax_[A-Za-z0-9_.-]+\.woff)$"
+)
 PID_FILE = Path("zimantic.pid")
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,8 @@ HTML_MIMETYPES = frozenset({"text/html", "application/xhtml+xml"})
 
 # Some JavaScript applications read ``document.cookie`` even when they do not
 # use cookies. The browser throws for that getter in the opaque-origin article
-# sandbox; expose the honest empty value so those applications can start.
+# sandbox used by secure browsing; expose the honest empty value so those
+# applications can start.
 ARTICLE_COOKIE_SHIM = """<script data-zimantic-cookie-shim="true">
 (() => {
   try {
@@ -77,11 +82,11 @@ ARTICLE_COOKIE_SHIM = """<script data-zimantic-cookie-shim="true">
 </script>"""
 
 
-# Web Storage is unavailable in the opaque-origin article sandbox used by the
-# modal. Read access throws a SecurityError, which aborts the application that
-# owns the page (freeCodeCamp's Pinia store is one example). Keep the page
-# running with an in-memory store and tell the shell, so it can offer the direct
-# /content/ view where the browser's real storage is available.
+# Web Storage is unavailable in the opaque-origin article sandbox used by
+# secure browsing. Read access throws a SecurityError, which aborts the
+# application that owns the page (freeCodeCamp's Pinia store is one example).
+# Keep the page running with an in-memory store and tell the shell. When secure
+# browsing is off, the article stays same-origin and uses real browser storage.
 ARTICLE_STORAGE_SHIM = """<script data-zimantic-storage-shim="true">
 (() => {
   const makeMemoryStorage = () => {
@@ -180,8 +185,8 @@ ARTICLE_STORAGE_SHIM = """<script data-zimantic-storage-shim="true">
 
 ARTICLE_INDEXEDDB_LOADER = """<script data-zimantic-indexeddb-loader="true">
 (() => {
-  // The modal's sandbox has an opaque origin, where IndexedDB is unavailable.
-  // Load the in-memory polyfill synchronously so page scripts see it.
+  // Secure browsing's sandbox has an opaque origin, where IndexedDB is
+  // unavailable. Load the in-memory polyfill synchronously so page scripts see it.
   if (self.origin !== "null") return;
   const url = %s;
   document.write(
@@ -408,6 +413,7 @@ script[data-zimantic-toolbar] { display: none !important; }
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
 (() => {
   const appBasePath = %s;
+  const secureBrowsing = %s;
   const storageNotice = document.querySelector("[data-zimantic-storage-notice]");
   const storageNoticeOpen = document.querySelector(
     "[data-zimantic-storage-notice-open]"
@@ -416,9 +422,12 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     "[data-zimantic-storage-notice-dismiss]"
   );
   let storageNoticeDismissed = false;
+  // Secure browsing sandboxes the article document, so a standalone /content/
+  // tab is isolated too. Do not offer it as a persistent-storage escape hatch.
+  if (storageNoticeOpen) storageNoticeOpen.hidden = secureBrowsing;
   const showStorageNotice = () => {
     if (storageNoticeDismissed || !storageNotice) return;
-    if (storageNoticeOpen) storageNoticeOpen.href = location.href;
+    if (storageNoticeOpen && !secureBrowsing) storageNoticeOpen.href = location.href;
     storageNotice.hidden = false;
   };
   if (storageNoticeDismiss) {
@@ -430,8 +439,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     });
   }
   if (storageNoticeOpen) {
-    // Ask the host to open the standalone view so it does not depend on the
-    // modal iframe's sandbox popup permissions.
+    // Ask the host to open the standalone view; an embedded shell may not be
+    // allowed to open a top-level tab itself.
     storageNoticeOpen.addEventListener("click", event => {
       if (window.parent === window) return;
       event.preventDefault();
@@ -442,8 +451,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     });
   }
   // Error shells are shown inside the modal too. A normal link there would
-  // navigate the sandboxed shell to the app, which cannot fetch its config in
-  // an opaque-origin frame. Let the host close the modal instead.
+  // navigate the shell frame instead of the top-level app. Let the host close
+  // the modal and return to search instead.
   document.addEventListener("click", event => {
     const target = event.target instanceof Element
       ? event.target.closest("[data-zimantic-search-home]")
@@ -626,8 +635,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       } catch (_) {
         return null;
       }
-      // The shell is loaded with an opaque origin in the modal, so compare
-      // parsed URLs instead of the null `location.origin`.
+      // Compare parsed URLs rather than relying on location.origin, which is
+      // null for any shell that is served in a secure-mode article sandbox.
       if (target.origin !== shellUrl.origin) return null;
       const path = localPath(target.pathname);
       if (path !== "/content" && !(path && path.startsWith("/content/"))) {
@@ -764,8 +773,7 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       }
       // Same-host links that are not article or shell pages belong to the app.
       // Navigate the top-level shell directly; inside the modal, ask the host
-      // to navigate, because the shell frame has an opaque origin and cannot
-      // load app pages that fetch their own configuration.
+      // to navigate so the toolbar and modal state stay in sync.
       if (url.origin === shellUrl.origin) {
         if (window.parent !== window) {
           window.parent.postMessage({
@@ -987,8 +995,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           }, "*");
         };
         if (window.parent !== window) {
-          // Clipboard access is blocked in the modal's sandbox (notably in
-          // Chromium), so let the top-level page perform the write.
+          // Let the top-level page perform the write; this also works when
+          // secure browsing's sandbox blocks clipboard access.
           delegate();
         } else if (!navigator.clipboard || !navigator.clipboard.writeText) {
           announce("Copy unavailable");
@@ -1384,10 +1392,10 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
       }, "*");
     }, true);
     if (window.parent !== window) {
-      // A framed article can be cross-origin (the modal sandbox gives it an
-      // opaque origin), so the shell may not be able to inspect it directly.
-      // Report whether there is anything to show and let the shell decide
-      // whether to display its empty-capture notice.
+      // A framed article can be cross-origin when secure browsing sandboxes
+      // it, so the shell may not be able to inspect it directly. Report whether
+      // there is anything to show and let the shell decide whether to display
+      // its empty-capture notice.
       const reportVisibleContent = () => {
         const body = document.body;
         if (!body) return;
@@ -1826,6 +1834,7 @@ def _content_shell(
     highlight: str | None = None,
     path_exists=None,
     error: dict | None = None,
+    secure_browsing: bool = False,
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -1841,6 +1850,11 @@ def _content_shell(
     iframe_url = _append_highlight(
         _article_url(zim, article_url_path, base_path),
         highlight,
+    )
+    iframe_sandbox = (
+        ' sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"'
+        if secure_browsing
+        else ""
     )
     toolbar = _article_toolbar(
         zim,
@@ -2038,11 +2052,14 @@ iframe[data-zimantic-article] {
                 '<button type="button" data-zimantic-capture-notice-dismiss>Dismiss</button>'
                 "</div>\n"
                 + f'<iframe data-zimantic-article title="{title}" '
-                f'src="{iframe_url}" referrerpolicy="no-referrer"></iframe>\n'
+                f'src="{iframe_url}" referrerpolicy="same-origin"{iframe_sandbox}></iframe>\n'
             )
         )
         + "</main>"
-        + (ARTICLE_TOOLBAR_SCRIPT % json.dumps(base_path))
+        + (
+            ARTICLE_TOOLBAR_SCRIPT
+            % (json.dumps(base_path), json.dumps(bool(secure_browsing)))
+        )
         + "\n</body>\n</html>"
     )
     return Response(
@@ -2076,6 +2093,23 @@ def _article_content_response(content: bytes | memoryview, mimetype: str) -> Res
         media_type=mimetype,
         headers={"Cache-Control": "no-cache", **ARTICLE_CORS_HEADERS},
     )
+
+
+def _vendored_mathjax_font(path: str) -> Path | None:
+    """Return a bundled MathJax WOFF font for a missing article font path."""
+    match = _MATHJAX_FONT_RE.search(str(path or ""))
+    if not match:
+        return None
+    name = match.group(1)
+    if name != Path(name).name:
+        return None
+    root = MATHJAX_FONT_DIR.resolve()
+    candidate = (root / name).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
 
 
 def _memoized_json(memo_key: str, version, payload_factory, memos):
