@@ -63,6 +63,45 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["displayOnlyScope"], [])
         self.assertFalse(payload["displayOnlyHasScope"])
 
+    def test_page_parameter_is_canonicalized(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/?q=q&page=0");
+let replaced = null;
+const history = {{
+  state: null,
+  replaceState(state, _title, url) {{ replaced = String(url); }},
+}};
+const MAX_QUERY_LENGTH = 4096;
+{_function_source(source, "function normalizePageParam(", "function readLocationState(")}
+normalizePageParam();
+const zero = replaced;
+location.href = "http://example.test/?q=q&page=1";
+replaced = null;
+normalizePageParam();
+const one = replaced;
+location.href = "http://example.test/?q=q&page=2.5";
+replaced = null;
+normalizePageParam();
+const decimal = replaced;
+location.href = "http://example.test/?q=q&page=999";
+replaced = null;
+normalizePageParam();
+const high = replaced;
+console.log(JSON.stringify({{zero, one, decimal, high}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["zero"], "/?q=q")
+        self.assertEqual(payload["one"], "/?q=q")
+        self.assertEqual(payload["decimal"], "/?q=q&page=2")
+        self.assertIsNone(payload["high"])
+
     def test_source_outside_a_full_search_pool_is_searched_explicitly(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""

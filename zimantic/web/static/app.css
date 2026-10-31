@@ -626,12 +626,18 @@ body.library-info-open {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 14px;
+    display: flex;
+    flex-direction: column;
     margin: 0 auto;
     max-height: 88vh;
     max-width: 760px;
-    overflow: auto;
+    overflow: hidden;
     padding: 24px;
     position: relative;
+}
+.library-info-content {
+    min-height: 0;
+    overflow: auto;
 }
 .library-info-close {
     background: transparent;

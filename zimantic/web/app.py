@@ -387,6 +387,22 @@ script[data-zimantic-toolbar] { display: none !important; }
     display: inline !important;
   }
 }
+/* Very narrow phones: the toolbar's primary navigation (close, adjacent
+   results, random, home) must stay visible. The breadcrumb/permalink is
+   redundant with the article title and the browser address bar, so drop it
+   before making controls scroll off-screen. */
+@media (max-width: 480px) {
+  [data-zimantic-toolbar] .zimantic-toolbar-breadcrumbs {
+    display: none !important;
+  }
+}
+@media (max-width: 360px) {
+  [data-zimantic-toolbar] a,
+  [data-zimantic-toolbar] button {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+}
 </style>"""
 
 ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
@@ -779,6 +795,15 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     };
     window.addEventListener("message", event => {
       if (!articleFrame || event.source !== articleFrame.contentWindow) return;
+      if (event.data?.type === "zimantic-article-content") {
+        articleContentReport = Boolean(event.data.hasContent);
+        if (articleContentReport) {
+          hideCaptureNotice();
+        } else if (!captureNoticeDismissed) {
+          scheduleCaptureCheck();
+        }
+        return;
+      }
       if (event.data?.type !== "zimantic-article-link") return;
       handleArticleLink(event.data);
     });
@@ -791,7 +816,9 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     );
     let captureNoticeTimer = null;
     let captureNoticeDismissed = false;
+    let articleContentReport = null;
     const captureHasVisibleContent = () => {
+      if (articleContentReport !== null) return articleContentReport;
       if (!articleFrame) return true;
       let frameDocument = null;
       try {
@@ -848,7 +875,10 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     if (articleFrame) {
       // Every navigation in the frame fires load, including a page's own
       // script redirect, so a blank redirect target still gets an explanation.
-      articleFrame.addEventListener("load", scheduleCaptureCheck);
+      articleFrame.addEventListener("load", () => {
+        articleContentReport = null;
+        scheduleCaptureCheck();
+      });
     }
     const fitToolbarLabels = () => {
       if (!actions) return;
@@ -1088,6 +1118,56 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
     location.replace(shell.href);
     return;
   }
+  // Article captures often reference images that were not saved with the ZIM
+  // (Stack Exchange profile avatars are the common case). Hide the browser's
+  // broken-image glyph without changing the article layout.
+  const markBrokenImage = image => {
+    if (!image || image.tagName !== "IMG") return;
+    if (!(image.currentSrc || image.getAttribute("src"))) return;
+    if (image.complete && image.naturalWidth === 0) {
+      image.setAttribute("data-zimantic-broken", "true");
+    }
+  };
+  const scanBrokenImages = () => {
+    if (typeof document.querySelectorAll !== "function") return;
+    for (const image of document.querySelectorAll("img")) markBrokenImage(image);
+  };
+  document.addEventListener("error", event => {
+    const image = event.target;
+    if (image && image.tagName === "IMG") {
+      image.setAttribute("data-zimantic-broken", "true");
+    }
+  }, true);
+  document.addEventListener("load", event => {
+    const image = event.target;
+    if (image && image.tagName === "IMG" && image.naturalWidth > 0) {
+      image.removeAttribute("data-zimantic-broken");
+    }
+  }, true);
+  if (
+    typeof document.createElement === "function" &&
+    (document.head || document.documentElement) &&
+    (!document.querySelector ||
+      !document.querySelector("style[data-zimantic-broken-images]"))
+  ) {
+    const brokenImageStyle = document.createElement("style");
+    brokenImageStyle.setAttribute("data-zimantic-broken-images", "true");
+    brokenImageStyle.textContent =
+      "img[data-zimantic-broken] { visibility: hidden !important; }";
+    (document.head || document.documentElement).appendChild(brokenImageStyle);
+  }
+  document.addEventListener("DOMContentLoaded", scanBrokenImages, { once: true });
+  let imageScanTimer = null;
+  const scheduleImageScan = () => {
+    clearTimeout(imageScanTimer);
+    imageScanTimer = setTimeout(scanBrokenImages, 100);
+  };
+  if (typeof MutationObserver === "function" && document.documentElement) {
+    new MutationObserver(scheduleImageScan).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  }
   const initialize = () => {
     const normalizeText = value =>
       String(value || "").replace(/\\s+/g, " ").trim();
@@ -1303,6 +1383,38 @@ ARTICLE_NAV_BRIDGE_SCRIPT = """<script data-zimantic-bridge="true">
         url: context.href,
       }, "*");
     }, true);
+    if (window.parent !== window) {
+      // A framed article can be cross-origin (the modal sandbox gives it an
+      // opaque origin), so the shell may not be able to inspect it directly.
+      // Report whether there is anything to show and let the shell decide
+      // whether to display its empty-capture notice.
+      const reportVisibleContent = () => {
+        const body = document.body;
+        if (!body) return;
+        let hasContent = Boolean(String(body.innerText || "").trim());
+        if (!hasContent) {
+          const media = body.querySelectorAll(
+            "img, svg, canvas, video, audio, iframe, object, embed, " +
+            "input, textarea, select"
+          );
+          for (const node of media) {
+            const rect = node.getBoundingClientRect();
+            if (rect.width < 8 || rect.height < 8) continue;
+            if (node.tagName === "IMG" && !node.naturalWidth) continue;
+            hasContent = true;
+            break;
+          }
+        }
+        window.parent.postMessage({
+          type: "zimantic-article-content",
+          hasContent,
+        }, "*");
+      };
+      reportVisibleContent();
+      setTimeout(reportVisibleContent, 700);
+      setTimeout(reportVisibleContent, 1600);
+      setTimeout(reportVisibleContent, 3000);
+    }
   };
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initialize, {once: true});
@@ -1349,7 +1461,14 @@ def _article_http_error(error: Exception) -> HTTPException:
         ),
         500,
     )
-    return HTTPException(status_code=status, detail=str(error))
+    # Missing entries are fetched from opaque-origin article sandboxes too.
+    # Return the same CORS grant as successful assets so a missing file reads
+    # as an honest 404 instead of a misleading CORS failure.
+    return HTTPException(
+        status_code=status,
+        detail=str(error),
+        headers=ARTICLE_CORS_HEADERS,
+    )
 
 
 def _search_base_path(search) -> str:

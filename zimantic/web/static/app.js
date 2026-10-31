@@ -41,6 +41,7 @@
             let SOURCE_FILTER_LIMIT = 10;
             const SOURCE_FILTER_QUERY_LIMIT = 30;
             let sourceFilterShowAll = false;
+            let sourceFilterShowOther = false;
             const SOURCE_CACHE_KEY = "zimantic.sources.v2";
             const LIBRARY_CACHE_KEY = "zimantic.library.v5";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -67,6 +68,8 @@
             let lastRenderedItems = null;
             let modalPreviousFocus = null;
             let libraryInfoPreviousFocus = null;
+            let libraryInfoCurrentKey = null;
+            let libraryInfoHistoryPushed = false;
             let activeModalUrl = null;
             let activeSearchResult = null;
             let activeLibraryArticleUrl = null;
@@ -310,17 +313,32 @@
 
             function searchWithinLibrarySource(source) {
                 if (source.searchable === false) return;
-                closeLibraryInfo();
+                // The search page replaces this document, so do not try to pop
+                // a history entry for the details modal on the way out.
+                closeLibraryInfo({ navigateHistory: false });
                 const key = source.key || source.local_name || source.book || source.name;
                 if (!key) return;
                 const target = new URL(makeStateUrl("", [key], 0), location.href);
                 target.pathname = appPath("/");
+                // The search view has no library filter.
+                target.searchParams.delete("filter");
                 window.location.assign(target.toString());
             }
 
-            function closeLibraryInfo() {
+            function libraryInfoSourceKey(source) {
+                return String(
+                    source.key || source.local_name || source.book || source.name || "",
+                );
+            }
+
+            function closeLibraryInfo({ navigateHistory = true } = {}) {
                 const modal = $("libraryInfoModal");
                 if (!modal || modal.hidden) return;
+                const state = history.state;
+                const hadHistoryEntry = Boolean(state?.zimanticLibraryInfo);
+                const pushedEntry = libraryInfoHistoryPushed;
+                libraryInfoHistoryPushed = false;
+                libraryInfoCurrentKey = null;
                 modal.hidden = true;
                 document.body.classList.remove("library-info-open");
                 const wrap = document.querySelector(".wrap");
@@ -332,12 +350,48 @@
                     libraryInfoPreviousFocus.focus();
                 }
                 libraryInfoPreviousFocus = null;
+                if (!navigateHistory || !hadHistoryEntry) return;
+                if (pushedEntry) {
+                    // Drop the entry we added when the details dialog opened;
+                    // this returns to the same library URL without leaving the
+                    // page, and the popstate handler ignores the hidden modal.
+                    history.back();
+                    return;
+                }
+                // Arrived here with Forward from an older entry: remove the
+                // marker in place so closing the dialog does not add history.
+                const next = { ...state };
+                delete next.zimanticLibraryInfo;
+                history.replaceState(
+                    Object.keys(next).length ? next : null,
+                    "",
+                    location.href,
+                );
             }
 
-            function showLibraryInfo(source) {
+            function syncLibraryInfo(key) {
+                if (!key || location.pathname !== appPath("/library")) {
+                    closeLibraryInfo({ navigateHistory: false });
+                    return;
+                }
+                const source = librarySources.find(
+                    (item) => libraryInfoSourceKey(item) === String(key),
+                );
+                if (!source) {
+                    closeLibraryInfo({ navigateHistory: false });
+                    return;
+                }
+                if (!$("libraryInfoModal").hidden && libraryInfoCurrentKey === String(key)) {
+                    return;
+                }
+                showLibraryInfo(source, { pushHistory: false });
+            }
+
+            function showLibraryInfo(source, { pushHistory = true } = {}) {
                 const modal = $("libraryInfoModal");
                 const content = $("libraryInfoContent");
                 if (!modal || !content) return;
+                libraryInfoCurrentKey = libraryInfoSourceKey(source);
                 libraryInfoPreviousFocus = document.activeElement;
                 const title = libraryTitle(source);
                 const homepage = libraryHomepageUrl(source);
@@ -471,6 +525,17 @@
                 const wrap = document.querySelector(".wrap");
                 if (wrap) wrap.inert = true;
                 $("libraryInfoClose")?.focus();
+                if (pushHistory && libraryInfoCurrentKey) {
+                    history.pushState(
+                        {
+                            ...(history.state || {}),
+                            zimanticLibraryInfo: libraryInfoCurrentKey,
+                        },
+                        "",
+                        location.href,
+                    );
+                    libraryInfoHistoryPushed = true;
+                }
             }
 
             function shuffleLibrary() {
@@ -515,6 +580,44 @@
                     if (cached) return { payload: cached, stale: true, error };
                     throw error;
                 }
+            }
+
+            function readLibraryFilter() {
+                return new URLSearchParams(location.search).get("filter") || "";
+            }
+
+            function updateLibraryFilterUrl() {
+                if (location.pathname !== appPath("/library")) return;
+                const filter = $("libraryFilter")?.value.trim() || "";
+                const url = new URL(location.href);
+                if (filter) {
+                    if (url.searchParams.get("filter") === filter) return;
+                    url.searchParams.set("filter", filter);
+                } else {
+                    if (!url.searchParams.has("filter")) return;
+                    url.searchParams.delete("filter");
+                }
+                history.replaceState(
+                    history.state,
+                    "",
+                    url.pathname + url.search + url.hash,
+                );
+            }
+
+            function sortLibrarySources(sources) {
+                return [...sources].sort((left, right) => {
+                    const byTitle = libraryTitle(left).localeCompare(
+                        libraryTitle(right),
+                        undefined,
+                        { sensitivity: "base", numeric: true },
+                    );
+                    if (byTitle) return byTitle;
+                    return String(
+                        left.key || left.local_name || left.name || "",
+                    ).localeCompare(
+                        String(right.key || right.local_name || right.name || ""),
+                    );
+                });
             }
 
             function renderLibrary() {
@@ -849,9 +952,15 @@
                     otherOutcomes.forEach((outcome) => visibleKeys.add(outcome.source.key));
                     otherOutcomes = [];
                 }
+                if (!query && sourceFilterShowOther) {
+                    otherOutcomes.forEach((outcome) =>
+                        visibleKeys.add(outcome.source.key),
+                    );
+                    otherOutcomes = [];
+                }
                 const showOther = query
                     ? otherOutcomes.length > 0
-                    : otherCount > 1;
+                    : otherCount > 1 && otherOutcomes.length > 0;
                 return {
                     outcomes,
                     query,
@@ -899,7 +1008,8 @@
                 panel.classList.remove("empty-selection");
                 const layout = sourceFilterLayout();
                 panel.hidden = false;
-                toolbar.hidden = !layout.query && !layout.showOther;
+                toolbar.hidden =
+                    !layout.query && !layout.showOther && !sourceFilterShowOther;
 
                 const all = document.createElement("button");
                 all.className = "secondary source-filter-option";
@@ -943,9 +1053,15 @@
                     if (!layout.query) {
                         other.setAttribute("aria-pressed", "false");
                     }
-                    other.textContent = layout.query
-                        ? `Show ${layout.otherOutcomes.length} more`
-                        : `Other: ${layout.otherCount}`;
+                    if (layout.query) {
+                        other.textContent = `Show ${layout.otherOutcomes.length} more`;
+                    } else {
+                        const count = layout.otherOutcomes.length;
+                        other.textContent = `Other: ${count} source${count === 1 ? "" : "s"}`;
+                        other.title =
+                            `Show ${count} more sources ` +
+                            `(${layout.otherCount} results)`;
+                    }
                     entries.push(other);
                 }
                 options.replaceChildren(all, ...entries);
@@ -1225,11 +1341,13 @@
                 const frame = $("articleModalFrame");
                 const wrap = document.querySelector(".wrap");
                 if (notice) notice.hidden = true;
-                if (frame) {
-                    frame.inert = false;
-                    frame.focus();
-                }
-                if (wrap) wrap.inert = false;
+                if (frame) frame.inert = false;
+                // The notice is only one layer. If the article modal is still
+                // open, the page behind it must stay inert; otherwise closing
+                // the notice lets Tab escape into the hidden page.
+                const articleModal = $("articleModal");
+                if (wrap) wrap.inert = Boolean(articleModal && !articleModal.hidden);
+                if (frame && articleModal && !articleModal.hidden) frame.focus();
             }
 
             async function copyTextToClipboard(text) {
@@ -1364,6 +1482,10 @@
                 modal.hidden = false;
                 document.documentElement.classList.add("modal-open");
                 document.body.classList.add("modal-open");
+                // Keep the page behind the article modal out of the tab order
+                // and the accessibility tree while the dialog is open.
+                const wrap = document.querySelector(".wrap");
+                if (wrap) wrap.inert = true;
                 frame.focus();
             }
 
@@ -1914,6 +2036,8 @@
                 modal.hidden = true;
                 document.documentElement.classList.remove("modal-open");
                 document.body.classList.remove("modal-open");
+                const wrap = document.querySelector(".wrap");
+                if (wrap) wrap.inert = false;
                 activeModalUrl = null;
                 activeSearchResult = null;
                 activeLibraryArticleUrl = null;
@@ -2684,6 +2808,7 @@
                 question = question.trim();
                 if (!question) return;
                 sourceFilterShowAll = false;
+                sourceFilterShowOther = false;
                 if (requestController) requestController.abort();
                 if (pageController) pageController.abort();
                 cancelStreamRender();
@@ -2962,6 +3087,18 @@
                 }
                 if (page > 0) url.searchParams.set("page", String(page + 1));
                 if (modal) url.searchParams.set("modal", modal);
+                // Search state owns q/source/zim/page/modal, but a library view
+                // also has its filter in the URL. Keep it when opening an
+                // article or another history entry from /library.
+                if (
+                    typeof appPath === "function" &&
+                    location.pathname === appPath("/library")
+                ) {
+                    const filter =
+                        ($("libraryFilter")?.value || "").trim() ||
+                        readLibraryFilter();
+                    if (filter) url.searchParams.set("filter", filter);
+                }
                 return url.pathname + url.search;
             }
 
@@ -2985,6 +3122,32 @@
                     url.searchParams.delete("modal");
                 }
                 history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+            }
+
+            function normalizePageParam() {
+                // Direct links can carry page=0, page=abc or a non-canonical
+                // spelling. Keep the value the app actually uses, and remove
+                // the first-page parameter instead of leaving a stale value in
+                // the address bar.
+                const params = new URLSearchParams(location.search);
+                if (!params.has("page")) return;
+                const raw = params.get("page");
+                const page = Number.parseInt(raw || "", 10);
+                const canonical =
+                    Number.isInteger(page) && page >= 1 ? String(page) : null;
+                if (raw === canonical && canonical !== "1") return;
+                if (canonical && canonical !== "1") {
+                    params.set("page", canonical);
+                } else {
+                    params.delete("page");
+                }
+                const url = new URL(location.href);
+                url.search = params.toString();
+                history.replaceState(
+                    history.state,
+                    "",
+                    url.pathname + url.search + url.hash,
+                );
             }
 
             function readLocationState() {
@@ -3040,6 +3203,7 @@
 
             $("sourceFilterSearch").addEventListener("input", () => {
                 sourceFilterShowAll = false;
+                sourceFilterShowOther = false;
                 renderSourceFilters();
             });
 
@@ -3094,11 +3258,21 @@
                     if (next) next.focus({ preventScroll: true });
                     return;
                 } else if (button.dataset.sourceAction === "other") {
-                    // Use the same layout the visible "Other" button was rendered
-                    // from, so selecting it matches the number it displayed.
-                    setSelectedSources(
-                        sourceFilterLayout().otherOutcomes.map((outcome) => outcome.source.key),
+                    // "Other" is a disclosure, not a filter. Reveal the group's
+                    // individual source chips so the reader can pick sources
+                    // deliberately instead of silently selecting all of them.
+                    const hidden = sourceFilterLayout().otherOutcomes.map(
+                        (outcome) => outcome.source,
                     );
+                    sourceFilterShowOther = true;
+                    renderSourceFilters();
+                    const next = hidden.length
+                        ? [
+                              ...$("sourceFilterOptions").querySelectorAll("button"),
+                          ].find((item) => item.dataset.source === hidden[0].key)
+                        : null;
+                    if (next) next.focus({ preventScroll: true });
+                    return;
                 } else if (selectedSourceKeys.has(key)) {
                     selectedSourceKeys.delete(key);
                 } else {
@@ -3156,7 +3330,9 @@
                 if (!link || modifiedClick(event)) return;
                 if (new URL(link.href, location.href).origin !== location.origin) return;
                 event.preventDefault();
-                closeLibraryInfo();
+                // The article modal adds its own history entry; keep the
+                // details marker so Back can return to the details view.
+                closeLibraryInfo({ navigateHistory: false });
                 navigateArticleModal(new URL(link.href, location.href), "library");
             });
             $("libraryInfoClose").addEventListener("click", closeLibraryInfo);
@@ -3182,7 +3358,10 @@
                     first.focus();
                 }
             });
-            $("libraryFilter").addEventListener("input", renderLibrary);
+            $("libraryFilter").addEventListener("input", () => {
+                updateLibraryFilterUrl();
+                renderLibrary();
+            });
             $("libraryShuffle").addEventListener("click", shuffleLibrary);
 
             $("pager").addEventListener("click", (event) => {
@@ -3233,6 +3412,17 @@
                     first.focus();
                 }
             });
+            // The article modal is an iframe, so Tab can move focus out of the
+            // frame to the parent document. The page behind the modal is inert,
+            // but the body itself can still receive focus; send it back to the
+            // article instead of leaving the dialog.
+            document.addEventListener("focusin", (event) => {
+                const modal = $("articleModal");
+                if (!modal || modal.hidden || modal.contains(event.target)) return;
+                const frame = $("articleModalFrame");
+                if (frame) frame.focus();
+            });
+
             window.addEventListener("keydown", (event) => {
                 if (event.key === "Escape" && !$("externalLinkNotice").hidden) {
                     event.preventDefault();
@@ -3254,6 +3444,7 @@
                 // Clear everything a search painted, without touching history. Removes
                 // search-active so the empty page re-centers like a fresh load.
                 sourceFilterShowAll = false;
+                sourceFilterShowOther = false;
                 clearTimeout(autoSubmitTimer);
                 autoSubmitTimer = null;
                 cancelAutoSearchHistory();
@@ -3533,8 +3724,21 @@
 
             window.addEventListener("popstate", () => {
                 cancelAutoSearchHistory();
+                const libraryView = location.pathname === appPath("/library");
+                if (libraryView) {
+                    const filter = readLibraryFilter();
+                    if ($("libraryFilter").value !== filter) {
+                        $("libraryFilter").value = filter;
+                        renderLibrary();
+                    }
+                }
                 const state = readLocationState();
                 syncArticleModal(state.modal);
+                if (!$("articleModal").hidden) {
+                    closeLibraryInfo({ navigateHistory: false });
+                } else {
+                    syncLibraryInfo(history.state?.zimanticLibraryInfo || null);
+                }
                 if (!state.question) {
                     // Navigated back/forward to the no-search entry: match it.
                     resetResults();
@@ -3565,7 +3769,9 @@
             });
 
             async function initialize() {
+                normalizePageParam();
                 const libraryView = location.pathname === appPath("/library");
+                if (libraryView) $("libraryFilter").value = readLibraryFilter();
                 const state = readLocationState();
                 // Apply the URL state before the discovery fetches below: a query typed
                 // while they are in flight must keep the URL's source selection.
@@ -3615,7 +3821,7 @@
                         // why they cannot be opened. Readable archives without a
                         // homepage are also kept; the card can offer a random
                         // article when the source is searchable.
-                        librarySources = data.payload;
+                        librarySources = sortLibrarySources(data.payload);
                         renderLibrary();
                     } else {
                         sources = data.payload;
@@ -3640,6 +3846,11 @@
                     }
                 }
                 syncArticleModal(state.modal);
+                if (!$("articleModal").hidden) {
+                    closeLibraryInfo({ navigateHistory: false });
+                } else if (libraryView) {
+                    syncLibraryInfo(history.state?.zimanticLibraryInfo || null);
+                }
                 if (state.question) {
                     $("question").value = state.question;
                     runSearch(
