@@ -18,6 +18,7 @@ dev:
 	$(UV) run python -m zimantic serve & \
 		server_pid=$$!; \
 		trap 'kill $$server_pid 2>/dev/null || true' EXIT INT TERM; \
+		sleep 2; \
 		$(UV) run python -m webbrowser http://127.0.0.1:8090/; \
 		wait $$server_pid
 

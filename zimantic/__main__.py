@@ -186,6 +186,21 @@ def _make_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="build up to N independent ZIMs concurrently (default: config build_workers)",
     )
+    build.add_argument(
+        "--no-wait-lock",
+        action="store_true",
+        help=(
+            "exit with status 75 instead of waiting when another build already "
+            "holds the index lock (for systemd.path and timer triggers)"
+        ),
+    )
+    build.add_argument(
+        "--lock-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="stop waiting for the index lock after SECONDS (default: wait forever)",
+    )
 
     reload_cmd = commands.add_parser(
         "reload",
@@ -439,6 +454,47 @@ def _run_reload(pid_file: Path) -> None:
     logger.info("zimantic: reload signal (SIGHUP) sent to PID %s", pid)
 
 
+def _run_build_locked(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
+    """Run a build under the index lock shared by every entry point."""
+    from .locking import (
+        BUILD_BUSY_EXIT,
+        BuildLock,
+        BuildLockError,
+        build_lock_path,
+    )
+
+    lock = BuildLock(build_lock_path(cfg["index_dir"]))
+    try:
+        try:
+            acquired = lock.try_acquire()
+            if not acquired:
+                if args.no_wait_lock:
+                    logger.warning(
+                        "zimantic: another build is already running (lock %s); "
+                        "skipping this build",
+                        lock.path,
+                    )
+                    sys.exit(BUILD_BUSY_EXIT)
+                logger.warning(
+                    "zimantic: another build is already running; waiting for %s",
+                    lock.path,
+                )
+                acquired = lock.acquire(timeout=args.lock_timeout)
+                if not acquired:
+                    logger.warning(
+                        "zimantic: gave up waiting for the build lock after %s "
+                        "seconds; another build is still running (lock %s)",
+                        args.lock_timeout,
+                        lock.path,
+                    )
+                    sys.exit(BUILD_BUSY_EXIT)
+        except BuildLockError as error:
+            sys.exit(str(error))
+        _run_build(args, cfg, parser)
+    finally:
+        lock.release()
+
+
 def main() -> None:
     parser = _make_parser()
 
@@ -455,7 +511,9 @@ def main() -> None:
         cfg = {}
 
     if args.command == "build":
-        _run_build(args, cfg, parser)
+        if args.lock_timeout is not None and args.lock_timeout < 0:
+            parser.error("--lock-timeout must not be negative")
+        _run_build_locked(args, cfg, parser)
     elif args.command == "serve":
         _run_serve(args, cfg)
     elif args.command == "reload":

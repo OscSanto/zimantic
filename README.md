@@ -596,6 +596,8 @@ zimantic build /media/usb             # every .zim in a folder
 zimantic build zims/a.zim /media/usb  # mix files and folders
 zimantic build --fast                 # quick title-word + full-text index (no vectors)
 zimantic build --wait-stable          # wait for changing download sizes, then index
+zimantic build --no-wait-lock         # exit 75 if another build holds the lock
+zimantic build --lock-timeout 600     # wait at most ten minutes for the lock
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
 zimantic serve                        # web page; unindexed ZIMs use native full-text search
 zimantic serve --fast                 # start without a model or vectors
@@ -617,6 +619,14 @@ excerpts. Title-word and ZIM full-text search work; a normal `build` creates the
 `build --wait-stable` polls source sizes until they stop changing before indexing. The systemd units
 below pass it so a file caught mid-download is not indexed; an explicit CLI build starts immediately.
 
+Every build takes an advisory lock at `<index_dir>/../.build.lock` (beside `catalog.sqlite`), so a
+manual build, a `systemd.path` trigger, and a timer cannot write the same indexes at once. A second
+build waits by default; `--no-wait-lock` exits with status 75 (`EX_TEMPFAIL`) immediately, which the IIAB
+units use to skip a trigger without marking it failed. `--lock-timeout` bounds the wait. The kernel
+releases the lock when the process exits, so a killed build leaves no stale lock behind. Run manual
+builds as the same user as the server: a lock or index owned by another user (for example after
+`sudo zimantic build`) produces a `cannot open the build lock` error that names the file to fix.
+
 The desktop profile embeds 32 articles at a time (mobile 8, supercomputer 128). Independent ZIMs can
 be read and built concurrently with `--workers N` or the `build_workers` setting; when unset, the
 default scales with CPU and RAM. Full builds use a bounded shared embedding pipeline: at most
@@ -624,8 +634,9 @@ default scales with CPU and RAM. Full builds use a bounded shared embedding pipe
 waiting for embedding. When unset, `embedding_workers` also accounts for `embed_threads` so the model
 is not oversubscribed. The pipeline is only used when multiple sources are built concurrently
 (`build_workers` or `--workers` greater than 1). Tune `batch_size`, `build_workers`,
-`embedding_workers` and `embed_threads` in `config.toml` for different hardware. Do not run concurrent builds that target the same ZIM index
-identity (filename stem and source byte size).
+`embedding_workers` and `embed_threads` in `config.toml` for different hardware. Builds that target
+the same `index_dir` are serialized by the build lock; builds with different `index_dir` values
+still compete for CPU and memory, so size `--workers` for the host.
 
 **Hardware profiles.** Tuning keys in `config.toml` are commented out by default, so Zimantic selects
 mobile, desktop or supercomputer defaults from the machine's resources. Copy
@@ -644,8 +655,9 @@ indexes and reload the server as ZIMs become available:
   (with meaning vectors) once a night.
 
 The path-triggered fast build runs for each ZIM in `zims/`. The full build runs from 01:00–06:00
-local time by default; set its `ExecCondition` and timer to select a different window. A shared `flock`
-prevents overlapping builds.
+local time by default; set its `ExecCondition` and timer to select a different window. Both units pass
+`--no-wait-lock`, so a build that finds the index lock held exits 75 and the unit treats it as a skip
+instead of overlapping the build that is already running.
 
 The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server
 that cannot fit its archives fails visibly instead of looping through OOM kills. Check

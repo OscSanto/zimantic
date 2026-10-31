@@ -2243,6 +2243,11 @@
                 setResultUrl(node, item);
                 const snippet = node.querySelector(".result-snippet");
                 const lead = item.lead || "";
+                // While a search is streaming, previews have not been extracted
+                // yet. Show only the title and breadcrumb rows rather than a
+                // placeholder, so each pending result stays roughly 3em tall.
+                const pendingPreview = !lead && Boolean(current?.streaming);
+                snippet.hidden = pendingPreview;
                 if (lead) {
                     snippet.className = "result-snippet";
                     const blocks = previewBlocks(lead);
@@ -2253,16 +2258,14 @@
                         .map((block) => `<p>${highlight(block, current ? current.terms : [])}</p>`)
                         .join("");
                 } else {
-                    snippet.className = current?.streaming
-                        ? "result-snippet loading"
-                        : "result-snippet none";
-                    snippet.textContent = current?.streaming
-                        ? "Loading preview…"
-                        : "No preview available for this result.";
+                    snippet.className = pendingPreview ? "result-snippet" : "result-snippet none";
+                    snippet.textContent = pendingPreview ? "" : "No preview available for this result.";
                 }
                 setResultDebug(node, item);
                 let thumb = node.querySelector(".result-thumb");
-                if (item.url) {
+                // Thumbnails are only fetched once the stream is done, so an
+                // empty slot would stretch a pending row well past 3em.
+                if (item.url && !pendingPreview) {
                     if (!thumb) {
                         thumb = document.createElement("div");
                         thumb.className = "result-thumb";
