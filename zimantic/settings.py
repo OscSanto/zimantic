@@ -7,6 +7,23 @@ from pathlib import Path
 
 DEFAULT_EMBEDDING_TOKENS = 256
 
+# Accepted embed_device values. Kept here (instead of embed.py) so config values
+# are validated at load time, before a model is loaded and even in --fast mode.
+# embed.py maps these aliases to ONNX Runtime provider names.
+EMBED_DEVICES = frozenset(
+    {
+        "auto",
+        "gpu",
+        "cpu",
+        "cuda",
+        "rocm",
+        "directml",
+        "dml",
+        "openvino",
+        "coreml",
+    }
+)
+
 # Fallback settings selected automatically when config.toml is missing (or a key
 # is missing from it). Any value present in config.toml always wins; unset keys
 # fall back to the profile that matches the machine running Zimantic.
@@ -26,6 +43,7 @@ _COMMON = {
     "max_kiwix_response_bytes": 64 * 1024 * 1024,
     "max_remote_sources": 100,
     "page_size": 10,
+    "embed_device": "auto",
     "max_html_bytes": 4_194_304,
     "max_article_bytes": 33_554_432,
     "max_preview_chars": 1_000,
@@ -264,6 +282,21 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
     for key in sorted(set(user) - KNOWN_KEYS):
         warn(f"zimantic: warning: unknown config key {key!r} in {path} (ignored)")
     cfg.update(_typed_user_values(user, cfg, path, warn))
+    # Validate embed_device here rather than in embed.py: a typo should not stay
+    # hidden until the first embedding call (or forever in --fast mode).
+    device = cfg.get("embed_device")
+    normalized = device.strip().casefold() if isinstance(device, str) else "auto"
+    if normalized in ("", "auto"):
+        cfg["embed_device"] = "auto"
+    elif normalized in EMBED_DEVICES:
+        cfg["embed_device"] = normalized
+    else:
+        warn(
+            f"zimantic: warning: config key 'embed_device' in {path} "
+            f"must be one of {', '.join(sorted(EMBED_DEVICES))} "
+            f"(got {device!r}); using 'auto'"
+        )
+        cfg["embed_device"] = "auto"
     # Worker counts are intentionally computed at load time so missing config
     # keys adapt to the machine instead of inheriting fixed profile values.
     # Apply this after user settings so embed_threads participates in the

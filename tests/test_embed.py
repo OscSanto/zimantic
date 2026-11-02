@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -128,6 +130,385 @@ class LowMemoryArenaTests(unittest.TestCase):
         with patch.object(embed, "_reclaim_native_memory") as reclaim:
             normal.embed(["passage: a", "passage: b"])
             reclaim.assert_not_called()
+
+
+class DeviceSelectionTests(unittest.TestCase):
+    """embed_device maps to ONNX Runtime providers with a CPU fallback."""
+
+    def test_auto_tries_every_available_gpu_provider_in_priority_order(self):
+        providers, warning = embed.resolve_providers(
+            "auto",
+            ["CPUExecutionProvider", "ROCMExecutionProvider", "CUDAExecutionProvider"],
+        )
+        self.assertEqual(
+            providers,
+            [
+                "CUDAExecutionProvider",
+                "ROCMExecutionProvider",
+                "CPUExecutionProvider",
+            ],
+        )
+        self.assertIsNone(warning)
+
+    def test_auto_does_not_select_coreml(self):
+        providers, warning = embed.resolve_providers(
+            "auto", ["CPUExecutionProvider", "CoreMLExecutionProvider"]
+        )
+        self.assertEqual(providers, ["CPUExecutionProvider"])
+        self.assertIsNone(warning)
+
+    def test_explicit_coreml_is_still_available(self):
+        providers, warning = embed.resolve_providers(
+            "coreml", ["CPUExecutionProvider", "CoreMLExecutionProvider"]
+        )
+        self.assertEqual(
+            providers, ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        )
+        self.assertIsNone(warning)
+
+    def test_every_documented_alias_resolves(self):
+        from zimantic import settings
+
+        self.assertEqual(
+            set(settings.EMBED_DEVICES),
+            (embed.AUTO_DEVICES - {""}) | set(embed.DEVICE_PROVIDERS),
+        )
+        available = [
+            "CPUExecutionProvider",
+            "CUDAExecutionProvider",
+            "ROCMExecutionProvider",
+            "DmlExecutionProvider",
+            "OpenVINOExecutionProvider",
+            "CoreMLExecutionProvider",
+        ]
+        for device in settings.EMBED_DEVICES:
+            with self.subTest(device=device):
+                providers, warning = embed.resolve_providers(device, available)
+                self.assertIsNone(warning)
+
+    def test_auto_falls_back_to_cpu_quietly(self):
+        providers, warning = embed.resolve_providers(
+            "auto", ["CPUExecutionProvider"]
+        )
+        self.assertEqual(providers, ["CPUExecutionProvider"])
+        self.assertIsNone(warning)
+
+    def test_gpu_without_a_gpu_provider_warns_and_uses_cpu(self):
+        providers, warning = embed.resolve_providers("gpu", ["CPUExecutionProvider"])
+        self.assertEqual(providers, ["CPUExecutionProvider"])
+        self.assertIn("no accelerated", warning)
+
+    def test_explicit_provider_keeps_the_cpu_fallback(self):
+        providers, warning = embed.resolve_providers(
+            "cuda", ["CPUExecutionProvider", "CUDAExecutionProvider"]
+        )
+        self.assertEqual(
+            providers, ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        )
+        self.assertIsNone(warning)
+
+    def test_unavailable_provider_warns_and_uses_cpu(self):
+        providers, warning = embed.resolve_providers(
+            "cuda", ["CPUExecutionProvider"]
+        )
+        self.assertEqual(providers, ["CPUExecutionProvider"])
+        self.assertIn("not available", warning)
+        self.assertIn("onnxruntime-gpu", warning)
+
+    def test_unknown_device_warns_and_uses_cpu(self):
+        providers, warning = embed.resolve_providers(
+            "tensor-core", ["CPUExecutionProvider"]
+        )
+        self.assertEqual(providers, ["CPUExecutionProvider"])
+        self.assertIn("unknown embedding device", warning)
+
+    def test_cpu_is_forced(self):
+        providers, warning = embed.resolve_providers(
+            "cpu", ["CPUExecutionProvider", "CUDAExecutionProvider"]
+        )
+        self.assertEqual(providers, ["CPUExecutionProvider"])
+        self.assertIsNone(warning)
+
+    def test_openvino_requests_automatic_device_selection(self):
+        self.assertEqual(
+            embed.provider_entries(
+                ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+            ),
+            [
+                ("OpenVINOExecutionProvider", {"device_type": "AUTO"}),
+                "CPUExecutionProvider",
+            ],
+        )
+
+
+class SessionProviderTests(unittest.TestCase):
+    def test_requests_the_resolved_providers(self):
+        captured = {}
+
+        def capture_load(path, sess_opts, providers=None):
+            captured["providers"] = providers
+            return MagicMock()
+
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "CUDAExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", side_effect=capture_load),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp)
+        self.assertEqual(
+            captured["providers"], ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        )
+        self.assertEqual(embedder.provider, "CUDAExecutionProvider")
+
+    def test_directml_disables_memory_pattern_and_parallel_execution(self):
+        captured = {}
+
+        def capture_load(path, sess_opts, providers=None):
+            captured["providers"] = providers
+            captured["mem_pattern"] = sess_opts.enable_mem_pattern
+            captured["execution_mode"] = sess_opts.execution_mode
+            session = MagicMock()
+            session.get_providers.return_value = [
+                "DmlExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+            return session
+
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "DmlExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", side_effect=capture_load),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp, device="directml")
+        self.assertEqual(
+            captured["providers"],
+            ["DmlExecutionProvider", "CPUExecutionProvider"],
+        )
+        self.assertFalse(captured["mem_pattern"])
+        self.assertEqual(
+            captured["execution_mode"], embed.ort.ExecutionMode.ORT_SEQUENTIAL
+        )
+        self.assertIsNotNone(embedder._run_lock)
+
+    def test_runtime_failure_falls_back_to_cpu(self):
+        calls = []
+
+        class FailingSession:
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def get_providers(self):
+                return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+            def run(self, _outputs, _inputs):
+                raise RuntimeError("CUDA out of memory")
+
+        class CpuSession:
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def get_providers(self):
+                return ["CPUExecutionProvider"]
+
+            def run(self, _outputs, _inputs):
+                return [np.ones((1, 4, 4), dtype=np.float32)]
+
+        def load(path, sess_opts, providers=None):
+            calls.append(providers)
+            return FailingSession() if len(calls) == 1 else CpuSession()
+
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = [1, 2]
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "CUDAExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", side_effect=load),
+            patch.object(
+                embed.sentencepiece,
+                "SentencePieceProcessor",
+                return_value=tokenizer,
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp)
+            with self.assertLogs(embed.logger, level="WARNING"):
+                result = embedder.embed(["query: test"])
+        self.assertEqual(result.shape, (1, 4))
+        self.assertEqual(calls[-1], ["CPUExecutionProvider"])
+        self.assertEqual(embedder.provider, "CPUExecutionProvider")
+        self.assertEqual(embedder.providers, ["CPUExecutionProvider"])
+
+    def test_cpu_runtime_errors_are_not_swallowed(self):
+        class FailingSession:
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def get_providers(self):
+                return ["CPUExecutionProvider"]
+
+            def run(self, _outputs, _inputs):
+                raise RuntimeError("bad input shape")
+
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = [1, 2]
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=FailingSession()),
+            patch.object(
+                embed.sentencepiece,
+                "SentencePieceProcessor",
+                return_value=tokenizer,
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp)
+            with self.assertRaisesRegex(RuntimeError, "bad input shape"):
+                embedder.embed(["query: test"])
+
+    def test_failed_gpu_session_falls_back_to_cpu(self):
+        captured = []
+
+        def load(path, sess_opts, providers=None):
+            captured.append(providers)
+            if len(captured) == 1:
+                raise RuntimeError("CUDA driver missing")
+            return MagicMock()
+
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "CUDAExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", side_effect=load),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            with self.assertLogs(embed.logger, level="WARNING"):
+                embedder = embed.Embedder(tmp)
+        self.assertEqual(captured[-1], ["CPUExecutionProvider"])
+        self.assertEqual(embedder.provider, "CPUExecutionProvider")
+
+    def test_cpu_session_errors_are_not_swallowed(self):
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+            ]),
+            patch.object(
+                embed.ort,
+                "InferenceSession",
+                side_effect=RuntimeError("bad model"),
+            ),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            with self.assertRaisesRegex(RuntimeError, "bad model"):
+                embed.Embedder(tmp)
+
+    def test_internal_provider_fallback_is_reported(self):
+        session = MagicMock()
+        session.get_providers.return_value = ["CPUExecutionProvider"]
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "CUDAExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=session),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            with self.assertLogs(embed.logger, level="WARNING") as logs:
+                embedder = embed.Embedder(tmp)
+        self.assertEqual(embedder.provider, "CPUExecutionProvider")
+        self.assertEqual(embedder.providers, ["CPUExecutionProvider"])
+        self.assertIn("selected CPUExecutionProvider instead of CUDAExecutionProvider", logs.output[0])
+
+
+class DirectMLConcurrencyTests(unittest.TestCase):
+    def test_directml_serializes_session_runs(self):
+        state_lock = threading.Lock()
+        state = {"active": 0, "max_active": 0}
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = [1, 2]
+
+        class Session:
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def get_providers(self):
+                return ["DmlExecutionProvider", "CPUExecutionProvider"]
+
+            def run(self, _outputs, _inputs):
+                with state_lock:
+                    state["active"] += 1
+                    state["max_active"] = max(state["max_active"], state["active"])
+                time.sleep(0.02)
+                with state_lock:
+                    state["active"] -= 1
+                return [np.ones((1, 4, 4), dtype=np.float32)]
+
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "DmlExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=Session()),
+            patch.object(
+                embed.sentencepiece,
+                "SentencePieceProcessor",
+                return_value=tokenizer,
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp)
+
+        errors = []
+
+        def run(text):
+            try:
+                embedder.embed([text])
+            except BaseException as error:  # noqa: BLE001 - re-raised below
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=run, args=(f"query: {index}",))
+            for index in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(state["max_active"], 1)
 
 
 class TokenizerSelectionTests(unittest.TestCase):

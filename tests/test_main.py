@@ -50,6 +50,27 @@ class LoggingTests(unittest.TestCase):
         self.assertEqual(main_module._get_log_level("serve", 2), main_module.logging.DEBUG)
 
 
+class DeviceArgumentTests(unittest.TestCase):
+    def test_build_and_serve_accept_device(self):
+        import zimantic.__main__ as main_module
+
+        parser = main_module._make_parser()
+        for command in ("build", "serve"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    parser.parse_args([command, "--device", " CUDA "]).device,
+                    "cuda",
+                )
+                self.assertIsNone(parser.parse_args([command]).device)
+
+    def test_unknown_device_is_rejected(self):
+        import zimantic.__main__ as main_module
+
+        parser = main_module._make_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["build", "--device", "tensor-core"])
+
+
 class StableSizeTests(unittest.TestCase):
     def test_waits_until_size_is_unchanged_regardless_of_file_size(self):
         import zimantic.__main__ as main_module

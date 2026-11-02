@@ -3,6 +3,7 @@
 import ctypes
 import hashlib
 import json
+import logging
 import os
 import sys
 import threading
@@ -15,7 +16,110 @@ import sentencepiece
 from .settings import DEFAULT_EMBEDDING_TOKENS, _system_memory_gb
 from .wordpiece import WordPieceTokenizer
 
+logger = logging.getLogger(__name__)
+
 SPECIAL_TOKEN_COUNT = 2
+
+CPU_PROVIDER = "CPUExecutionProvider"
+DML_PROVIDER = "DmlExecutionProvider"
+OPENVINO_PROVIDER = "OpenVINOExecutionProvider"
+OPENVINO_PROVIDER_OPTIONS = {"device_type": "AUTO"}
+
+# Accelerated ONNX Runtime providers, best first. "auto" tries every provider
+# the installed onnxruntime build reports (and otherwise stays on the CPU) so a
+# broken first choice does not hide a working second one. The provider names are
+# stable across onnxruntime-gpu, -rocm, -directml and -openvino; a plain
+# onnxruntime wheel only exposes CPUExecutionProvider. CoreML is deliberately
+# excluded: stock macOS wheels include it, and its dynamic-shape handling can be
+# slower than the CPU for this model, so it must be requested explicitly.
+AUTO_PROVIDERS = (
+    "CUDAExecutionProvider",
+    "ROCMExecutionProvider",
+    DML_PROVIDER,
+    OPENVINO_PROVIDER,
+)
+
+# Accepted values for the embed_device setting, mapped to their provider.
+DEVICE_PROVIDERS = {
+    "cpu": CPU_PROVIDER,
+    "cuda": "CUDAExecutionProvider",
+    "rocm": "ROCMExecutionProvider",
+    "directml": DML_PROVIDER,
+    "dml": DML_PROVIDER,
+    "openvino": OPENVINO_PROVIDER,
+    "coreml": "CoreMLExecutionProvider",
+}
+AUTO_DEVICES = frozenset({"", "auto", "gpu"})
+
+
+def resolve_providers(
+    device: str = "auto", available: list[str] | None = None
+) -> tuple[list[str], str | None]:
+    """Map a configured device to the ONNX Runtime provider list to try.
+
+    Returns the provider list and an optional warning for a request that cannot
+    be honored. Accelerated providers always keep the CPU as a fallback so that
+    graph nodes the device does not implement still run, and so a provider that
+    is listed but cannot initialize (for example a missing CUDA library) does
+    not make the build fail. "auto" tries every available accelerated provider
+    in priority order before the CPU.
+    """
+    requested = str(device or "auto").strip().casefold()
+    if available is None:
+        available = list(ort.get_available_providers())
+    available = list(available)
+
+    if requested == "cpu":
+        return [CPU_PROVIDER], None
+
+    if requested in AUTO_DEVICES:
+        providers = [name for name in AUTO_PROVIDERS if name in available]
+        warning = None
+        if not providers:
+            if requested == "gpu":
+                warning = (
+                    "no accelerated ONNX Runtime provider is available; "
+                    "embedding on CPU (install onnxruntime-gpu, onnxruntime-rocm, "
+                    "onnxruntime-directml or onnxruntime-openvino for GPU support)"
+                )
+            return [CPU_PROVIDER], warning
+        return _with_cpu_fallback(providers, available), warning
+
+    provider = DEVICE_PROVIDERS.get(requested)
+    if provider is None:
+        supported = ", ".join(sorted({"auto", "gpu", *DEVICE_PROVIDERS}))
+        return [CPU_PROVIDER], (
+            f"unknown embedding device {device!r} (use {supported}); "
+            "embedding on CPU"
+        )
+    if provider not in available:
+        return [CPU_PROVIDER], (
+            f"embedding device {device!r} is not available in this ONNX Runtime "
+            f"build (providers: {', '.join(available)}); embedding on CPU. "
+            "Install the ONNX Runtime build that includes this provider (for "
+            "example onnxruntime-gpu for CUDA) to enable it"
+        )
+    return _with_cpu_fallback([provider], available), None
+
+
+def _with_cpu_fallback(providers: list[str], available: list[str]) -> list[str]:
+    if CPU_PROVIDER in available and CPU_PROVIDER not in providers:
+        return [*providers, CPU_PROVIDER]
+    return list(providers)
+
+
+def provider_entries(providers: list[str]) -> list[str | tuple[str, dict[str, str]]]:
+    """Add provider options where a bare provider name is not enough.
+
+    OpenVINO's default target comes from the wheel's build-time configuration;
+    passing only the provider name can silently keep running on the CPU. AUTO
+    lets OpenVINO choose its best device (GPU, NPU or CPU) at runtime.
+    """
+    return [
+        (name, dict(OPENVINO_PROVIDER_OPTIONS)) if name == OPENVINO_PROVIDER else name
+        for name in providers
+    ]
+
 
 # Hosts with up to this much RAM get the embedding budget trimmed. ONNX
 # Runtime's CPU arena keeps the largest batch's working set for the session's
@@ -174,6 +278,7 @@ class Embedder:
         embedding_tokens: int = DEFAULT_EMBEDDING_TOKENS,
         threads: int | None = None,
         low_memory: bool | None = None,
+        device: str = "auto",
     ):
         """model_dir holds model.onnx and one tokenizer vocabulary.
 
@@ -181,7 +286,11 @@ class Embedder:
         ``vocab.txt`` selects the English BERT WordPiece tokenizer. low_memory
         disables ONNX Runtime's CPU memory arena and hands freed heap back to
         the OS after batched embeddings. By default (None) it is enabled
-        automatically on hosts with LOW_MEMORY_GB or less of RAM.
+        automatically on hosts with LOW_MEMORY_GB or less of RAM. device is
+        "auto" (try every accelerated provider the installed onnxruntime
+        offers), "cpu", "gpu", or a provider alias such as "cuda", "rocm",
+        "directml" or "openvino"; an unavailable device falls back to the CPU
+        with a warning, as does a run that fails after initialization.
         """
         self.embedding_tokens = int(embedding_tokens)
         if self.embedding_tokens < SPECIAL_TOKEN_COUNT:
@@ -191,6 +300,11 @@ class Embedder:
             int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
         )
         self.low_memory = _low_memory_host() if low_memory is None else low_memory
+        self.providers, device_warning = resolve_providers(device)
+        if device_warning:
+            logger.warning("zimantic: %s", device_warning)
+        self.provider = self.providers[0]
+        logger.info("zimantic: embedding with %s", self.provider)
         opts = ort.SessionOptions()  # ty: ignore[possibly-missing-attribute]
         opts.intra_op_num_threads = self.threads
         opts.inter_op_num_threads = 1
@@ -199,15 +313,36 @@ class Embedder:
         # RAM to spare, but on small hosts a batch_size=32 build can retain
         # hundreds of MB; disable it there and malloc per call instead.
         opts.enable_cpu_mem_arena = not self.low_memory
+        if DML_PROVIDER in self.providers:
+            # DirectML rejects ONNX Runtime's memory-pattern optimisation and
+            # parallel execution; without this the session fails to initialize
+            # and every DML request silently falls back to the CPU.
+            opts.enable_mem_pattern = False
+            opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         # Prevent idle ORT threads from busy-waiting between batches.
         try:
             opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         except Exception:
             pass
-        self.session = ort.InferenceSession(
-            str(Path(model_dir) / "model.onnx"),
-            opts,
-            providers=["CPUExecutionProvider"],
+        self._model_path = str(Path(model_dir) / "model.onnx")
+        self._session_options = opts
+        self._fallback_lock = threading.Lock()
+        self.session = self._create_session(self._model_path, opts)
+        actual_providers = list(self.session.get_providers())
+        if actual_providers:
+            if actual_providers[0] != self.provider:
+                logger.warning(
+                    "zimantic: ONNX Runtime selected %s instead of %s; "
+                    "embedding on %s",
+                    actual_providers[0],
+                    self.provider,
+                    actual_providers[0],
+                )
+            self.providers = actual_providers
+            self.provider = actual_providers[0]
+        # DirectML does not support concurrent Run calls on one session.
+        self._run_lock = (
+            threading.Lock() if self.provider == DML_PROVIDER else None
         )
         # Exported graphs differ: some XLM-R models (for example
         # multilingual-e5-base) omit token_type_ids, while multilingual-e5-small
@@ -229,9 +364,72 @@ class Embedder:
             # [unused0] in a standard BERT vocabulary.
             self.pad_id = self.tokenizer.pad_id
         # The tokenizer is not safe for concurrent encode calls from several
-        # search threads; serialize access to it. ONNX inference itself is
-        # thread-safe and needs no lock.
+        # search threads; serialize access to it. DirectML also requires
+        # session runs to be serialized; other providers use the session
+        # concurrently.
         self._tokenizer_lock = threading.Lock()
+
+    def _create_session(self, model_path: str, opts):
+        """Create the ONNX session, falling back to CPU if a GPU cannot start."""
+        providers = provider_entries(self.providers)
+        try:
+            return ort.InferenceSession(model_path, opts, providers=providers)
+        except Exception as error:
+            if self.provider == CPU_PROVIDER:
+                raise
+            logger.warning(
+                "zimantic: could not create a session with %s (%s); "
+                "retrying on CPU",
+                self.provider,
+                error,
+            )
+            self.providers = [CPU_PROVIDER]
+            self.provider = CPU_PROVIDER
+            return ort.InferenceSession(
+                model_path, opts, providers=[CPU_PROVIDER]
+            )
+
+    def _fall_back_to_cpu(self, error: Exception) -> bool:
+        """Rebuild the session on CPU after a device run fails.
+
+        Initialization failures are handled in ``_create_session``. A device can
+        also fail later, most commonly when a batch exhausts GPU memory; retrying
+        on the CPU turns that into a slow but successful build instead of a
+        failed one. The lock keeps concurrent workers from rebuilding repeatedly.
+        """
+        with self._fallback_lock:
+            if self.provider == CPU_PROVIDER:
+                return True
+            logger.warning(
+                "zimantic: embedding failed on %s (%s); retrying on CPU",
+                self.provider,
+                error,
+            )
+            try:
+                session = ort.InferenceSession(
+                    self._model_path,
+                    self._session_options,
+                    providers=[CPU_PROVIDER],
+                )
+            except Exception as cpu_error:
+                logger.error(
+                    "zimantic: CPU fallback also failed (%s)", cpu_error
+                )
+                return False
+            self.session = session
+            self.providers = [CPU_PROVIDER]
+            self.provider = CPU_PROVIDER
+            self._run_lock = None
+            return True
+
+    def _run_once(self, inputs):
+        lock = self._run_lock
+        if lock is None:
+            return self.session.run(None, inputs)[0]
+        with lock:
+            # Read the session inside the lock: a fallback may replace it while
+            # another DirectML run is waiting.
+            return self.session.run(None, inputs)[0]
 
     def token_count(self, text: str, prefix: str = "") -> int:
         """Count special tokens and tokenizer pieces for the full input."""
@@ -295,7 +493,13 @@ class Embedder:
         inputs = {"input_ids": ids, "attention_mask": mask}
         if "token_type_ids" in self._input_names:
             inputs["token_type_ids"] = np.zeros_like(ids)
-        hidden = self.session.run(None, inputs)[0]
+        provider = self.provider
+        try:
+            hidden = self._run_once(inputs)
+        except Exception as error:
+            if provider == CPU_PROVIDER or not self._fall_back_to_cpu(error):
+                raise
+            hidden = self._run_once(inputs)
         weights = mask[..., None].astype(np.float32)
         vectors = (hidden * weights).sum(1) / weights.sum(1)
         result = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)

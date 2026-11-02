@@ -69,6 +69,31 @@ def _add_verbosity_argument(parser: argparse.ArgumentParser, default=argparse.SU
     )
 
 
+def _device_argument(value: str) -> str:
+    from .settings import EMBED_DEVICES
+
+    normalized = value.strip().casefold()
+    if normalized not in EMBED_DEVICES:
+        supported = ", ".join(sorted(EMBED_DEVICES))
+        raise argparse.ArgumentTypeError(
+            f"unknown device {value!r} (use {supported})"
+        )
+    return normalized
+
+
+def _add_device_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--device",
+        metavar="DEVICE",
+        type=_device_argument,
+        help=(
+            "embedding device: auto (default), gpu, cpu, cuda, rocm, "
+            "directml/dml, openvino or coreml; overrides embed_device in "
+            "config.toml"
+        ),
+    )
+
+
 def _get_log_level(command: str, verbosity: int) -> int:
     if command == "serve" and verbosity == 0 and sys.stderr.isatty():
         return logging.INFO
@@ -147,6 +172,7 @@ def _make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include ranking scores in results; in this mode SIGHUP restarts",
     )
+    _add_device_argument(serve_cmd)
 
     build = commands.add_parser("build", help="index ZIM files")
     _add_verbosity_argument(build)
@@ -170,6 +196,7 @@ def _make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="rebuild the selected ZIM indexes even if they are already complete",
     )
+    _add_device_argument(build)
     build.add_argument(
         "--wait-stable",
         action="store_true",
@@ -285,6 +312,11 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     if sigterm is not None:
         signal.signal(sigterm, _graceful_interrupt)
 
+    if args.fast and getattr(args, "device", None):
+        logger.warning(
+            "zimantic: --device is ignored with --fast (no embeddings are computed)"
+        )
+
     zims = _collect_zims(args.paths, cfg["zim_dir"])
     if not zims:
         logger.info("zimantic: no .zim files to index")
@@ -323,6 +355,7 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             return Embedder(
                 cfg["model_dir"],
                 threads=cfg.get("embed_threads"),
+                device=getattr(args, "device", None) or cfg.get("embed_device"),
             )
 
         embedder = _LazyEmbedder(_make_embedder)
@@ -403,6 +436,11 @@ def _run_serve(args, cfg: dict) -> None:
     from .search import Search
     from .web.app import serve
 
+    if args.fast and getattr(args, "device", None):
+        logger.warning(
+            "zimantic: --device is ignored with --fast (no embeddings are computed)"
+        )
+
     search = Search(cfg, semantic=not args.fast)
     if not search.local_names():
         logger.warning(
@@ -419,6 +457,7 @@ def _run_serve(args, cfg: dict) -> None:
             return Embedder(
                 cfg["model_dir"],
                 threads=cfg.get("embed_threads"),
+                device=getattr(args, "device", None) or cfg.get("embed_device"),
             )
 
         search.start_embedder(_make_embedder)

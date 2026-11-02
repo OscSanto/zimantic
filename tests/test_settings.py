@@ -177,6 +177,49 @@ class LoadConfigTests(unittest.TestCase):
                 load_config(path, warn=lambda _: None)
         workers.assert_called_once_with(build_workers=5, embed_threads=3)
 
+    def test_embed_device_defaults_to_auto_and_accepts_a_string(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('embed_device = "cuda"\n', encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+            self.assertEqual(cfg["embed_device"], "cuda")
+            self.assertEqual(warnings, [])
+
+        with patch.object(settings, "profile_for_hardware", return_value="desktop"):
+            cfg = load_config("/nonexistent/config.toml", warn=lambda _: None)
+        self.assertEqual(cfg["embed_device"], "auto")
+
+    def test_embed_device_is_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('embed_device = "  CUDA  "\n', encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+        self.assertEqual(cfg["embed_device"], "cuda")
+        self.assertEqual(warnings, [])
+
+    def test_embed_device_rejects_an_unknown_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text('embed_device = "tensor-core"\n', encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+        self.assertEqual(cfg["embed_device"], "auto")
+        self.assertTrue(
+            any("embed_device" in message and "tensor-core" in message
+                for message in warnings)
+        )
+
+    def test_embed_device_rejects_non_string(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("embed_device = 1\n", encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+        self.assertEqual(cfg["embed_device"], "auto")
+        self.assertTrue(any("embed_device" in message for message in warnings))
+
     def test_unknown_keys_warn_but_known_keys_still_apply(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

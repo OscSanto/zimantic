@@ -599,8 +599,10 @@ zimantic build --wait-stable          # wait for changing download sizes, then i
 zimantic build --no-wait-lock         # exit 75 if another build holds the lock
 zimantic build --lock-timeout 600     # wait at most ten minutes for the lock
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
+zimantic build --device cuda          # embed with a CUDA GPU (see below)
 zimantic serve                        # web page; unindexed ZIMs use native full-text search
 zimantic serve --fast                 # start without a model or vectors
+zimantic serve --device cuda          # keep a CUDA GPU for query embedding
 zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
 zimantic serve --dev                  # alias for --debug
 zimantic reload                       # ask a running server to rescan indexes and ZIMs
@@ -641,6 +643,36 @@ still compete for CPU and memory, so size `--workers` for the host.
 **Hardware profiles.** Tuning keys in `config.toml` are commented out by default, so Zimantic selects
 mobile, desktop or supercomputer defaults from the machine's resources. Copy
 `config.pi-zero-2w.toml` or `config.pi-5.toml` to pin settings.
+
+**GPU acceleration.** Embedding can run on a GPU through ONNX Runtime's accelerated execution
+providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX
+Runtime build exposes, in CUDA, ROCm, DirectML and OpenVINO order, and otherwise stays on the CPU.
+Supported values are `auto`, `gpu` (require an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm`
+(AMD), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection) and
+`coreml` (Apple); `--device` overrides the setting for one `build` or `serve` run. CoreML is never
+selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be
+slower than the CPU for this model. The provider comes from the ONNX Runtime package, not from
+Zimantic: replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`,
+`onnxruntime-directml` or `onnxruntime-openvino`. If the requested provider is missing, or cannot
+initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so
+the same configuration also runs on machines without a GPU. If a run fails on the device after
+initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead
+of failing the build.
+
+```bash
+pip uninstall -y onnxruntime   # only one onnxruntime distribution provides the module
+pip install onnxruntime-gpu    # or onnxruntime-rocm/-directml/-openvino
+zimantic build --device cuda   # or embed_device = "cuda" in config.toml
+```
+
+When Zimantic is managed with `uv`, `uv sync` reinstalls the plain `onnxruntime` dependency, so
+install the GPU wheel after syncing (or change the dependency in the project environment).
+
+GPU acceleration helps full index builds the most, because they embed every article; raising
+`batch_size` uses the device more efficiently. Lower it if a batch exhausts GPU memory. Query
+embedding also runs on the device, but a single short query is too small to gain much. Vector search
+(FAISS) deliberately stays on the CPU: the indexes are memory-mapped, and copying one to GPU memory
+to search a single query vector would cost more than the search itself.
 
 As a rule of thumb, keep enough free disk space when building indexes: about **20% of total ZIM file size**.
 
