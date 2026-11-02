@@ -20,14 +20,14 @@ Zero 2 W.
 
 - **Search by meaning**: questions and descriptions find articles even when they share no words with the title.
 - **Alternate names and misspellings**: "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
-- **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another. Strongest in widely used languages (see the results below).
+- **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another. Strongest in widely used languages (see [the results below](#compared-with-kiwix-search)).
 - **Several sources at once**: search a small selection of ZIMs directly, or search the full library and filter the ranked results by source.
 - **Best of three searches**: meaning, title-word and full-text retrieval are fused into a single ranking.
 - **Clean results and previews**: redirects are merged into their article, so each article appears once, with a bounded excerpt as its preview.
 - **Progressive results**: sources run in parallel and the page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed, while searching sources shows up to 30 matches plus a **Show N more** control for the rest. Selected sources stay visible, so choosing **Other** expands that group into its individual filters. A selection of at most `min(10, 35%)` of available sources is searched on its own when it starts a search and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed. Source filters chosen after a full search are display-only and reuse that pool when the source was part of it. Selecting a source that the full search did not include (for example one beyond `max_remote_sources`) starts a new scoped search instead of filtering an empty page. Dated and flavour variants of one book are collapsed to a single source here as well as in the library view.
 - **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. Dated and flavour variants of the same local book are collapsed to one card, keeping the largest readable/searchable copy (a larger archive is usually the more complete download and may contain larger artwork or media). **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
-- **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving.
+- **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving (see [Measured memory use](#measured-memory-use)).
 - **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`. Small one-off source selections are intentionally not cached (see the source-aware UI note above).
 - **Built-in article serving**: local result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
@@ -38,7 +38,521 @@ Zimantic can search and serve articles from its local ZIM archives. An optional
 [kiwix-serve](https://kiwix.org/en/applications/) remains useful for sources that are only
 available through a Kiwix server, but local indexed results do not require it.
 
-### Measured memory use
+## Requirements
+
+- Python 3.11–3.14 with the current native dependency wheels. `libzim` ships
+  wheels for specific Python ABIs and platforms, so choose an interpreter
+  with a compatible wheel; update this range when the native dependencies add
+  support for a newer Python version.
+- 32-bit Linux platforms (such as armhf/armv7) have no prebuilt wheels for the
+  native dependencies. They work when those dependencies are installed as
+  distribution packages instead; Debian 13/trixie or newer ships
+  `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`
+  and `python3-pymupdf` for armhf. Create the environment with
+  `--system-site-packages` so Zimantic can use them.
+- About 120 MB for the default embedding model, plus your ZIM files (the English-only `e5-small-v2`
+  is about 35 MB on disk).
+- Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks).
+- Local indexed results are served directly by Zimantic, so `kiwix-serve` is not required.
+  With `kiwix_server` set, remote-only results open through the links returned by kiwix-serve's own
+  search API.
+
+## Install
+
+1. **Get the code and enter the data directory.** `config.toml` is optional; missing values use
+   hardware-based defaults.
+
+   ```bash
+   mkdir -p ~/.local/share
+   git clone https://github.com/OscSanto/zimantic.git ~/.local/share/zimantic
+   cd ~/.local/share/zimantic
+   ```
+
+2. **Install the CLI with uv.** This installs the locked runtime dependencies without the
+   development tools, then exposes the executable at `~/.local/bin/zimantic`:
+
+   ```bash
+   uv sync --locked --no-dev --no-editable
+   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
+   ```
+
+   For development, use `uv sync` and `. .venv/bin/activate` instead.
+
+   On 32-bit armhf, where the native dependencies have no wheels, install the
+   Debian packages instead and let the environment use them:
+
+   ```bash
+   sudo apt install python3-venv python3-numpy python3-tqdm python3-onnxruntime \
+       python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
+       python3-fastapi python3-uvicorn
+   python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install --no-deps .
+   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
+   ```
+
+3. **Download the default multilingual model into `model/`:**
+
+   ```bash
+   mkdir -p model
+   curl -L -o model/model.onnx https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
+   curl -L -o model/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
+   ```
+
+   English-only and larger multilingual models use the same `model_dir` layout; see
+   [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns if
+   `model.onnx` or `sentencepiece.bpe.model` differs from the documented default checksum, but still runs.
+
+4. **Put your ZIM files in `zims/`.** Download them from
+   [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
+
+5. **Check `config.toml`.** Point `zim_dir`, `model_dir` and `index_dir` at your folders if needed.
+   Set `kiwix_server` only if you also want remote Kiwix sources.
+
+6. **Check the installation:**
+
+   ```bash
+   zimantic --help
+   ```
+
+   For a development runtime check, follow
+   [Development install](CONTRIBUTING.md#development-install), then run
+   `python -m pytest tests/test_runtime_api.py`; use `python -m pytest` for the full suite.
+
+### Windows
+
+Zimantic supports 64-bit Windows (x86-64) on Python 3.11–3.14. Windows ARM64 and
+32-bit Windows are not supported because `libzim`, `faiss-cpu` and `onnxruntime`
+do not publish wheels for those targets.
+
+The steps above work with the Windows equivalents:
+
+```powershell
+git clone https://github.com/OscSanto/zimantic.git zimantic
+cd zimantic
+uv sync --locked --no-dev
+.venv\Scripts\activate
+zimantic --help
+```
+
+Download the model with PowerShell instead of `curl`:
+
+```powershell
+New-Item -ItemType Directory -Force model | Out-Null
+Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model\model.onnx
+Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model\sentencepiece.bpe.model
+```
+
+`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`; restart
+`zimantic serve` instead. Stop the server before replacing or deleting a ZIM or
+index file, since Windows does not allow an open file to be replaced in place.
+
+## Where your files go
+
+The installed CLI is separate from runtime data. Relative paths in `config.toml` are resolved against
+the process working directory, and `config.toml` itself is read from the working directory. The
+recommended layout is `~/.local/share/zimantic`; the install steps above clone the checkout there and
+the systemd units set `WorkingDirectory` to it, so the relative defaults point at these folders:
+
+```
+~/.local/share/zimantic/
+├── config.toml          ← settings (paths below are its defaults)
+├── model/               ← model_dir: model.onnx + tokenizer vocabulary      (you download)
+├── zims/                ← zim_dir:   your .zim files                          (you download)
+├── indexes/             ← index_dir: <name>.sqlite (+ <name>.faiss for full indexes)
+├── catalog.sqlite       ← shared ZIM metadata cache (metadata only, no vectors)
+└── zimantic.pid         ← server PID (present while serving)
+```
+
+If you run the installed CLI from another directory, its relative paths and `config.toml` resolve
+there instead. Use absolute paths in `config.toml`, or run from the data directory, when that is not
+what you want.
+
+If your files are somewhere else (on a USB drive or another disk), point `zim_dir`, `model_dir` or
+`index_dir` in `config.toml` at them instead.
+
+### Copying finished indexes to another machine
+
+Embeddings live only in `<name>.faiss`. Its row IDs refer to `docs.rowid` in the matching
+`<name>.sqlite`, which holds titles, paths, the title full-text index and build metadata, so copy the
+two files as a pair. A `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without
+its `.faiss` provides title and full-text search only. A full index whose `.faiss` is missing still
+serves title and full-text results, but a later full build requires `--force` to replace it.
+
+Copying a subset is safe: each ZIM's pair is independent, and the index identity is the ZIM filename
+stem plus the source byte size recorded in `meta.filesize`, not the path. Keep the same filename stem
+and the same ZIM bytes on the target. Moving a ZIM between subfolders of `zim_dir` does not invalidate
+its index; renaming it does. The target must use the same embedding model, or `serve` ignores those
+vectors and falls back to title and full-text search. The target does not need the GPU used to build
+them: vector search runs on the CPU.
+
+For example, to copy two completed indexes:
+
+```bash
+for stem in wikipedia_en_all_nopic_2025-09 wikimed_en_all_2025-09; do
+    printf '%s\n' "$stem.sqlite"
+    test -f "indexes/$stem.faiss" && printf '%s\n' "$stem.faiss"
+done > /tmp/index-pairs.txt
+
+rsync -a --files-from=/tmp/index-pairs.txt indexes/ pi@rpi:~/.local/share/zimantic/indexes/
+```
+
+`rsync -a` copies only files whose size or mtime changed. Do not copy `*.upgrade`, `*.tmp`,
+`*.sqlite-wal` or `*.sqlite-shm`; the `.upgrade` files are unfinished fast-to-full staging files, not
+indexes. If a running server watches `indexes/`, copy into a staging directory first, then move the
+`.faiss` and finally the `.sqlite` into place, so a reload never opens a half-written pair, and run
+`zimantic reload` afterwards.
+
+`catalog.sqlite` is optional for the copy. It contains metadata and favicons, never vectors, and a
+missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute paths, so copying it
+only avoids the first scan when the target resolves `zim_dir` to the same absolute paths; otherwise
+those rows are treated as new and rescanned. The scan opens each ZIM once for metadata, illustration and
+counts, not article bodies, so it costs I/O rather than embedding time. A catalog written by a
+different schema version is also rebuilt.
+
+## Use
+
+### Commands
+
+```bash
+zimantic build                        # index every .zim in zim_dir (the default)
+zimantic -v build                     # show info-level logging
+zimantic build -vv                    # show debug-level logging
+zimantic build zims/x.zim             # index one file
+zimantic build zims/a.zim zims/b.zim  # several files
+zimantic build --workers 4            # build up to four independent ZIMs at once
+zimantic build /media/usb             # every .zim in a folder
+zimantic build zims/a.zim /media/usb  # mix files and folders
+zimantic build --fast                 # quick title-word + full-text index (no vectors)
+zimantic build --wait-stable          # wait for changing download sizes, then index
+zimantic build --no-wait-lock         # exit 75 if another build holds the lock
+zimantic build --lock-timeout 600     # wait at most ten minutes for the lock
+zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
+zimantic build --device cuda          # embed with a CUDA GPU (see below)
+zimantic serve                        # web page; unindexed ZIMs use native full-text search
+zimantic serve --fast                 # start without a model or vectors
+zimantic serve --device cuda          # keep a CUDA GPU for query embedding
+zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
+zimantic serve --dev                  # alias for --debug
+zimantic reload                       # ask a running server to rescan indexes and ZIMs
+```
+
+`build` accepts files or folders; a folder means every `*.zim` file under it, and with no arguments
+it uses `zim_dir`. Existing ZIM indexes are skipped. Pass `--force` to rebuild selected indexes.
+Logging defaults to warnings, except that `serve` uses info when stderr is a terminal;
+repeat `--verbose`/`-v` for info and debug output.
+
+### Build behavior and locking
+
+**Fast indexes.** `build --fast` stores titles and paths without running the model or creating FAISS
+vectors. It reads a small bounded HTML prefix per entry so disambiguation suffixes, meta-refresh
+shell targets and app-shell companion deep links are still recovered; it does not store article
+excerpts. Title-word and ZIM full-text search work; a normal `build` creates the vector index.
+
+`build --wait-stable` polls source sizes until they stop changing before indexing. The systemd units
+below pass it so a file caught mid-download is not indexed; an explicit CLI build starts immediately.
+
+Every build takes an advisory lock at `<index_dir>/../.build.lock` (beside `catalog.sqlite`), so a
+manual build, a `systemd.path` trigger, and a timer cannot write the same indexes at once. A second
+build waits by default; `--no-wait-lock` exits with status 75 (`EX_TEMPFAIL`) immediately, which the IIAB
+units use to skip a trigger without marking it failed. `--lock-timeout` bounds the wait. The kernel
+releases the lock when the process exits, so a killed build leaves no stale lock behind. Run manual
+builds as the same user as the server: a lock or index owned by another user (for example after
+`sudo zimantic build`) produces a `cannot open the build lock` error that names the file to fix.
+
+The desktop profile embeds 32 articles at a time (mobile 8, supercomputer 128). Independent ZIMs can
+be read and built concurrently with `--workers N` or the `build_workers` setting; when unset, the
+default scales with CPU and RAM. Full builds use a bounded shared embedding pipeline: at most
+`embedding_workers` model calls run at once, and each ZIM can have only a small number of batches
+waiting for embedding. When unset, `embedding_workers` also accounts for `embed_threads` so the model
+is not oversubscribed. The pipeline is only used when multiple sources are built concurrently
+(`build_workers` or `--workers` greater than 1). Tune `batch_size`, `build_workers`,
+`embedding_workers` and `embed_threads` in `config.toml` for different hardware. Builds that target
+the same `index_dir` are serialized by the build lock; builds with different `index_dir` values
+still compete for CPU and memory, so size `--workers` for the host.
+
+As a rule of thumb, keep enough free disk space when building indexes: about **20% of total ZIM file size**.
+
+### Hardware profiles
+
+Tuning keys in `config.toml` are commented out by default, so Zimantic selects mobile, desktop or
+supercomputer defaults from the machine's resources. Copy `config.pi-zero-2w.toml` or
+`config.pi-5.toml` to pin settings.
+
+### GPU acceleration
+
+Embedding can run on a GPU through ONNX Runtime's accelerated execution
+providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX
+Runtime build exposes, in CUDA, ROCm, DirectML and OpenVINO order, and otherwise stays on the CPU.
+Supported values are `auto`, `gpu` (require an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm`
+(AMD), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection) and
+`coreml` (Apple); `--device` overrides the setting for one `build` or `serve` run. CoreML is never
+selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be
+slower than the CPU for this model. The provider comes from the ONNX Runtime package, not from
+Zimantic: replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`,
+`onnxruntime-directml` or `onnxruntime-openvino`. If the requested provider is missing, or cannot
+initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so
+the same configuration also runs on machines without a GPU. If a run fails on the device after
+initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead
+of failing the build.
+
+```bash
+pip uninstall -y onnxruntime   # only one onnxruntime distribution provides the module
+pip install onnxruntime-gpu    # or onnxruntime-rocm/-directml/-openvino
+zimantic build --device cuda   # or embed_device = "cuda" in config.toml
+```
+
+When Zimantic is managed with `uv`, `uv sync` reinstalls the plain `onnxruntime` dependency, so
+install the GPU wheel after syncing (or change the dependency in the project environment).
+
+GPU acceleration helps full index builds the most, because they embed every article; raising
+`batch_size` uses the device more efficiently. Lower it if a batch exhausts GPU memory. Query
+embedding also runs on the device, but a single short query is too small to gain much. Vector search
+(FAISS) deliberately stays on the CPU: the indexes are memory-mapped, and copying one to GPU memory
+to search a single query vector would cost more than the search itself.
+
+### Automatic indexing with systemd
+
+Ready-to-copy user units in `deploy/` watch `zims/`, build indexes and reload the server as ZIMs
+become available:
+
+- `deploy/zimantic.service` — the server, with `Restart=always`, restart rate limiting, and
+  sandboxing. Copy it to `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
+- `deploy/zimantic-indexing-fast.path` + `deploy/zimantic-indexing-fast.service` — watch `zims/` and run a fast build
+  followed by `reload` as a ZIM becomes available.
+- `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run the full build
+  (with meaning vectors) once a night.
+
+The path-triggered fast build runs for each ZIM in `zims/`. The full build runs from 01:00–06:00
+local time by default; set its `ExecCondition` and timer to select a different window. Both units pass
+`--no-wait-lock`, so a build that finds the index lock held exits 75 and the unit treats it as a skip
+instead of overlapping the build that is already running.
+
+The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server
+that cannot fit its archives fails visibly instead of looping through OOM kills. Check
+`systemctl --user status zimantic` and `journalctl --user -u zimantic`; after fixing the cause,
+`systemctl --user reset-failed zimantic` clears the rate limit. Its header also shows
+`MemoryHigh`/`MemoryMax` pairs for a Pi Zero 2 W and a Pi 5; uncomment and adjust them for the
+device, leaving headroom for the OS and kiwix-serve. `MemoryHigh` throttles first; `MemoryMax` is the
+hard limit that OOM-kills only Zimantic.
+
+Each unit has install instructions in its header. The units assume runtime data at the default XDG
+data directory, `~/.local/share/zimantic`, and the CLI installed at `~/.local/bin/zimantic`.
+Adjust `WorkingDirectory` and `ExecStart` if you use a custom `XDG_DATA_HOME` or install the CLI
+elsewhere.
+
+The units call the installed `~/.local/bin/zimantic` executable, while `WorkingDirectory` keeps
+configuration, model files, ZIMs, indexes and `zimantic.pid` under the data directory. `reload`
+does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by default, or
+from the file passed with `--pid`. A stale PID file (left over after a crash or a
+signal-triggered shutdown) is reported and ignored.
+
+Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you
+[copy finished indexes from another machine](#copying-finished-indexes-to-another-machine), watch
+`indexes/` and run only `reload`.
+
+A running `serve` discovers indexes with `zimantic reload`; a fast index remains
+searchable while a full index builds.
+
+### JSON API
+
+The JSON API includes these endpoints:
+
+- `GET /search?q=...&zim=<name>&limit=10&offset=0&source=<key>` returns one page of results.
+  A small `zim` selection searches only those sources. A selection larger than `min(10, 35%)` of
+  the available sources is promoted to a full search so its cached pool can be shared; pass
+  `source=<key>` to narrow the displayed results. An explicit `zim` selection that includes a remote
+  source outside `max_remote_sources` is searched as its own uncached scope. Totals are in
+  `X-Total-Count`, `X-Has-More`, `X-Offset`, `X-Page` and `X-Page-Count` headers. An offset past the
+  last page is clamped to the last real page, and `X-Offset`/`X-Page`/stream `offset`/`page` report
+  that effective position.
+- `GET /search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
+  events and result snapshots. `snapshot` and `done` events carry the effective `page` and
+  `page_count`. While sources are still working, the stream emits a `progress` heartbeat about every
+  700 ms; when a source finishes in between, a fresh snapshot is emitted instead. A source that
+  finishes between ranking passes reports no count until the next snapshot; the final `done` event
+  always carries the complete per-source count map. A cached search replays `started`, the cached
+  source events and a single `done` (its final page), without a duplicate `snapshot`.
+- `GET /content/<zim>/<path>` serves a toolbar shell for a local ZIM entry; `GET /content/<zim>`
+  serves the resolved ZIM homepage. The shell keeps the navigation bar in the page and loads the
+  article itself from an inner iframe pointed at `/article/<zim>/<path>`, so the toolbar stays
+  visible even when the article is missing or fails. Unreadable entries render a friendly error
+  panel in the shell instead of showing the raw `/article` JSON error body. `GET /article/<zim>/<path>`
+  serves the raw entry: redirects are followed, its assets resolve under the same route, and entries
+  larger than `max_article_bytes` return `413`. With scripting enabled, opening that route as a
+  top-level page hands off to the matching `/content/` shell; without scripting, or when the entry is
+  fetched, it stays the raw entry. That keeps `/article/` as the entry source for the iframe, assets
+  and offline fetches rather than a second browsing surface. The raw article's bridge filters out
+  clicks the browser should keep (in-page fragments, modified clicks, downloads, non-HTTP(S) schemes
+  and links with a non-self target such as `_blank`, which open in a new tab) and reports the authored
+  `href` plus any `<base>` to the shell. The shell resolves it against the article's local `/article/`
+  URL and owns the offline/app/external decision, handing same-origin app links to the outer page when
+  the shell is embedded in the modal. This keeps replay shims such as zimit's `wombat.js` from
+  turning relative links in the capture into live-site URLs. `max_html_bytes` limits how much
+  HTML is parsed for indexing, previews and phrase checks; `max_article_bytes` limits the uncompressed
+  response body because Zimantic reads each requested entry into memory, including binary assets. The
+  toolbar shell also uses the viewed article's own `<title>` and declared icon for the browser tab
+  title and favicon (falling back to the ZIM's source icon); when the shell is embedded in the modal,
+  the outer page mirrors them and restores its own title and favicon when the modal closes. HTML and
+  XHTML articles include a small navigation bar with Close, Home, Random, Permalink and a Zimantic
+  search control. Alt-clicking Random opens the homepage of a random available ZIM. Modal articles also expose
+  icon-only navigation through visible search results and, for nested articles, the adjacent article
+  links listed on the article's parent page. When a modal article opens another modal article,
+  the preceding article can also provide the navigation context. Back navigation uses browser
+  history when available, otherwise the Close control attempts to close the tab. In a directly
+  loaded `/content/` view, Close closes the tab or window when the browser allows it; otherwise it
+  goes back through history, or opens the library when the article is the first history entry.
+  Article views keep the current ZIM and path in the address bar, including from `/library`, so the
+  URL can be shared.
+  Selecting text adds the passage to that URL and to the toolbar's Copy link action; reopening the
+  link scrolls to and highlights the passage. Fragment links scroll inside the article without
+  reloading the shell. With `secure_browsing = true`, the article iframe has an opaque origin, so
+  articles that use Web Storage get an in-memory fallback and IndexedDB loads an in-memory polyfill.
+  The shell then offers the standalone `/content/` view only when secure browsing is off, because a
+  sandboxed standalone view cannot provide persistent storage either. The IndexedDB polyfill bundles
+  `fake-indexeddb` (Apache-2.0; see `indexeddb-shim.LICENSE`). Stack Exchange captures that omit their
+  MathJax font files are served the vendored MathJax 2.7.5 WOFF set. Root-absolute capture assets
+  such as `/w/images/...` are resolved through the article referrer against the common archived
+  locations (`-/mw/...` and friends) when no app route matches.
+  `GET /random?zim=<name>`
+  redirects to a random indexed article's shell. `GET /random` without `zim` redirects to the
+  homepage of a random available local source; the article toolbar's Random control uses the first
+  form, and Alt-clicking it uses the second. Links from an offline article to an external
+  `http` or `https` site show an in-modal notice identifying the destination as online and offer
+  to open it in a new tab, avoiding failures from sites that disallow iframe embedding. A directly
+  loaded `/content/` view tries the captured copy for same-site links before leaving for the live
+  site, so only links that are missing from the ZIM go online.
+- Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
+  search endpoints. Debug result objects additionally include a `ranking` breakdown with each
+  semantic/title/full-text rank and contribution, title-match signals, intent and
+  disambiguation adjustments. Stream `snapshot` and `done` events always carry source progress and
+  a per-source result count, and in debug mode add `matched_by` match-method counts; the
+  non-streaming endpoint exposes those match counts in the `X-Matched-By` header, and the web UI
+  renders them above the results. Debug output is configured for the whole server; it is not a
+  URL parameter.
+  SIGHUP restarts the whole server in debug mode; `serve --dev` is an alias for this mode.
+- `GET /sources`, `/config`, `/library.json` and `/health` return source,
+  configuration, local-library and health information. `/sources` describes the searchable
+  sources (local and remote) and includes catalog metadata when available. `/library.json`
+  describes every distinct local book, including unreadable archives and archives that are not
+  searchable yet. Source records include a `homepage` path when the local ZIM exposes one, plus
+  `available`, `searchable` and `error` flags.
+  `/library.json` also exposes
+  `uuid`, `publisher`, `perma_ref`, `flavour`, `category`, `media_count`, `license`, `scraper`,
+  `source`, `attribution`, `relation`, `counter`, and `has_fulltext_index` from the catalog. The
+  UUID is the book identity: exact duplicate copies of the same ZIM are collapsed to one source,
+  preferring a readable copy. Dated or flavour variants of one local book
+  (`medicine_mini_2025-10` and `medicine_nopic_2025-10`, for example) also collapse to the largest
+  readable, searchable copy; the search source list uses the same collapse so the UI does not show
+  the same book twice. An unreadable archive stays in `/library.json` with
+  `available: false` and an `error` so the library page can explain why it cannot be opened. Health
+  is read-only and reports index/archive capabilities, entry counts, homepage resolution, embedding
+  state, and search and preview cache statistics.
+
+Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
+`kill -HUP <pid>`.
+
+### Caches
+
+Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` (32 MiB per cache by default).
+The ranked pool is shared across pages and display filters for a given search scope, and invalidated
+when the set of searchable sources differs. Small source selections get their own scope so each
+selected ZIM contributes a larger share of the pool, but that scope is not cached; larger selections
+share the cached full-search pool, except a selection that names a remote source outside
+`max_remote_sources`, which is searched as its own uncached scope.
+For large libraries, `search_workers` controls how many ZIM indexes are searched in
+parallel. `max_stream_ranks` limits completion-spaced intermediate ranking passes; timed snapshots
+are additionally emitted about every 700 ms so a slow query keeps updating, and the final result
+still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. The
+automatic profiles use 8 workers and 16 completion-spaced passes on desktops, and 2 workers and 8
+passes on low-memory devices.
+
+## Using a different embedding model
+
+The default is `multilingual-e5-small`, but Zimantic loads whatever ONNX graph and tokenizer
+vocabulary are in `model_dir`. Two tokenizer formats are supported:
+
+- `sentencepiece.bpe.model` selects the XLM-R SentencePiece tokenizer used by the multilingual-e5
+  models.
+- `vocab.txt` selects the BERT WordPiece tokenizer used by the English e5-v2 models.
+
+Zimantic chooses by which vocabulary file is present. If a directory contains both, it reads
+`tokenizer_config.json` when available; otherwise it keeps the historical SentencePiece choice. The
+ONNX graph itself cannot reliably identify its tokenizer, so this file-based switch is the dependable
+signal. Apart from the vocabulary, the model must follow the same e5 contract: `input_ids` and
+`attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state`
+output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes.
+
+For example, to try the larger multilingual model:
+
+```bash
+mkdir -p model-e5-base
+curl -L -o model-e5-base/model.onnx https://huggingface.co/Xenova/multilingual-e5-base/resolve/main/onnx/model_quantized.onnx
+curl -L -o model-e5-base/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-base/resolve/main/sentencepiece.bpe.model
+```
+
+Replace `base` with `large` in both URLs to try `multilingual-e5-large`. For the English-only
+`e5-small-v2`, download its WordPiece vocabulary instead:
+
+```bash
+mkdir -p model-e5-small-v2
+curl -L -o model-e5-small-v2/model.onnx https://huggingface.co/Xenova/e5-small-v2/resolve/main/onnx/model_quantized.onnx
+curl -L -o model-e5-small-v2/vocab.txt https://huggingface.co/Xenova/e5-small-v2/resolve/main/vocab.txt
+```
+
+The same layout works for other BERT WordPiece e5-v2 models such as `e5-base-v2`.
+
+Point `model_dir` at the new folder, use a separate `index_dir` so the old indexes stay usable, and
+rebuild every index:
+
+```toml
+model_dir = "./model-e5-small-v2"
+index_dir = "./indexes-e5-small-v2"
+```
+
+```bash
+zimantic build --force
+zimantic serve
+```
+
+Vectors are model-specific. Each full index records a fingerprint of `model.onnx` and the tokenizer
+vocabulary; a server configured with a different model ignores those vectors and serves title and
+full-text results until the index is rebuilt. You should still rebuild after switching models,
+because otherwise meaning search is unavailable. A checksum warning for a non-default model is
+expected; the check is informational.
+
+These measurements use 256-token passages, batch size 32 and 4 CPU threads on one x86-64 host.
+Absolute numbers vary with CPU, but the ratios show the trade-off:
+
+| Model | Int8 ONNX | Vector dim | Extra RSS¹ | Embedding² | Notes |
+|---|---:|---:|---:|---:|---|
+| `multilingual-e5-small` | 118 MB | 384 | ~190 MB | 68/s (1×) | Default; 100+ languages |
+| `multilingual-e5-base` | 279 MB | 768 | ~340 MB | 26/s (0.38×) | 100+ languages; ~2.7× slower |
+| `multilingual-e5-large` | 562 MB | 1,024 | ~730 MB | 9/s (0.13×) | 100+ languages; ~7.8× slower |
+| `e5-small-v2` | 34 MB | 384 | ~65 MB | 64/s (0.93×) | English only; WordPiece |
+
+¹ Additional resident memory for the model and vocabulary after loading, excluding ONNX Runtime's
+batch arena. Add this to the server's baseline footprint (see **Measured memory use**); leave about
+0.5 GB of headroom for base and 1 GB for large. On hosts with 2 GB RAM or less the arena is disabled,
+so builds stay closer to these figures.
+
+² Passages per second while embedding 256 passages in batches of 32. A single query embedding takes
+about 14 ms with either small model, 39 ms with base and 110 ms with large, so query latency rises in
+the same direction.
+
+`e5-small-v2` has the same 12-layer, 384-hidden encoder as `multilingual-e5-small`; the smaller file
+comes from a 30k-entry instead of a 250k-entry embedding table. It therefore saves roughly 125 MB of
+resident memory but embeds at about the same speed, and it cannot search non-English text. Choose it
+only for an English-only library on a RAM-constrained host; otherwise the default gives much broader
+coverage for the same compute.
+
+Vector storage also grows with dimension: an 8-bit IVF index stores one byte per dimension per article
+(384 B, 768 B and 1 KB), while a flat index for under 10,000 articles stores float32 vectors
+(1.5 KB, 3 KB and 4 KB). FAISS flat indexes do not provide float16 storage; the SQLite staging table
+uses float16 while a build runs, but vectors are widened to float32 when written to FAISS. For a
+mostly English library on a small device, keep the default; base is
+a reasonable upgrade when cross-language recall matters; large needs a machine with more RAM.
+
+## Measured memory use
 
 As a reference point, a clean benchmark using `wikipedia_en_100_2026-08.zim` (5,056 articles) and
 one local index measured these peak resident set sizes:
@@ -118,12 +632,18 @@ for the final displayed page.
 
 **Storage.** Each ZIM gets two files in `index_dir`, plus one shared catalog:
 - `<name>.sqlite`: titles, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
-- `<name>.faiss`: the vectors, in one of two layouts depending on article count.
+  Its `vecs` table exists only while a build is in progress and is dropped once the `.faiss` file is
+  written, so a finished index stores no vectors here.
+- `<name>.faiss`: the vectors (the only place finished embeddings are stored), in one of two layouts
+  depending on article count. A fast index has no `.faiss` file.
+- `<name>.sqlite.upgrade` and `<name>.faiss.upgrade` (when present): temporary staging files used while
+  replacing a fast index with a full one. They are not finished indexes and should not be copied.
 - `catalog.sqlite` (beside `index_dir`, not inside it): one row per local ZIM with the metadata used
   by `/sources` and `/library.json` (title, description, language, creator, publisher, date, UUID,
   perma-ref, flavour, category, normalized tags, article/media/entry counts, license, scraper, source,
   attribution, relation, content-type counts, homepage, full-text capability, availability, and the
-  favicon as a BLOB). It is a disposable cache: the ZIM files are the source of truth, and deleting it
+  favicon as a BLOB). It contains metadata and favicons only, never vectors. It is a disposable cache:
+  the ZIM files are the source of truth, and deleting it
   makes the next scan rebuild it. A warm catalog lets `serve` list sources without opening every
   archive; the startup scan still opens each new, resized or previously failing ZIM to refresh its
   row, and the first scan after deleting the catalog opens every archive. After that, archives and
@@ -139,7 +659,8 @@ move between nested folders below `zim_dir` without rebuilding. There is still o
 stem, so when files share a stem but have different sizes, build and serve discovery use the largest
 copy, log a warning, and the smaller copy is not searchable; the catalog keeps both rows and resolves
 the stem to its largest file. A truncated download beside a complete archive therefore does not hide
-the readable one.
+the readable one. To copy a subset of finished indexes to another machine, see
+[Copying finished indexes to another machine](#copying-finished-indexes-to-another-machine).
 
 | ZIM size | Vector index | Why |
 |---|---|---|
@@ -320,507 +841,3 @@ purpose-built translations, so less common languages may contain mistakes.
   each article's title and bounded content excerpt.
 - **No setup.** Kiwix search works as soon as a ZIM is available. Zimantic indexes each ZIM first.
 - **Smaller footprint.** Zimantic stores a `.sqlite` and `.faiss` per ZIM and needs more RAM.
-
-## Requirements
-
-- Python 3.11–3.14 with the current native dependency wheels. `libzim` ships
-  wheels for specific Python ABIs and platforms, so choose an interpreter
-  with a compatible wheel; update this range when the native dependencies add
-  support for a newer Python version.
-- 32-bit Linux platforms (such as armhf/armv7) have no prebuilt wheels for the
-  native dependencies. They work when those dependencies are installed as
-  distribution packages instead; Debian 13/trixie or newer ships
-  `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`
-  and `python3-pymupdf` for armhf. Create the environment with
-  `--system-site-packages` so Zimantic can use them.
-- About 120 MB for the default embedding model, plus your ZIM files (the English-only `e5-small-v2`
-  is about 35 MB on disk).
-- Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find useful content blocks).
-- Local indexed results are served directly by Zimantic, so `kiwix-serve` is not required.
-  With `kiwix_server` set, remote-only results open through the links returned by kiwix-serve's own
-  search API.
-
-## Where your files go
-
-The installed CLI is separate from runtime data. Relative paths in `config.toml` are resolved against
-the process working directory, and `config.toml` itself is read from the working directory. The
-recommended layout is `~/.local/share/zimantic`; the install steps below clone the checkout there and
-the systemd units set `WorkingDirectory` to it, so the relative defaults point at these folders:
-
-```
-~/.local/share/zimantic/
-├── config.toml          ← settings (paths below are its defaults)
-├── model/               ← model_dir: model.onnx + tokenizer vocabulary      (you download)
-├── zims/                ← zim_dir:   your .zim files                          (you download)
-├── indexes/             ← index_dir: <name>.sqlite + <name>.faiss for each ZIM
-├── catalog.sqlite       ← shared ZIM metadata cache (beside indexes/, not a ZIM index)
-└── zimantic.pid         ← server PID (present while serving)
-```
-
-If you run the installed CLI from another directory, its relative paths and `config.toml` resolve
-there instead. Use absolute paths in `config.toml`, or run from the data directory, when that is not
-what you want.
-
-If your files are somewhere else (on a USB drive or another disk), point `zim_dir`, `model_dir` or
-`index_dir` in `config.toml` at them instead.
-
-## Install
-
-1. **Get the code and enter the data directory.** `config.toml` is optional; missing values use
-   hardware-based defaults.
-
-   ```bash
-   mkdir -p ~/.local/share
-   git clone https://github.com/OscSanto/zimantic.git ~/.local/share/zimantic
-   cd ~/.local/share/zimantic
-   ```
-
-2. **Install the CLI with uv.** This installs the locked runtime dependencies without the
-   development tools, then exposes the executable at `~/.local/bin/zimantic`:
-
-   ```bash
-   uv sync --locked --no-dev --no-editable
-   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
-   ```
-
-   For development, use `uv sync` and `. .venv/bin/activate` instead.
-
-   On 32-bit armhf, where the native dependencies have no wheels, install the
-   Debian packages instead and let the environment use them:
-
-   ```bash
-   sudo apt install python3-venv python3-numpy python3-tqdm python3-onnxruntime \
-       python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
-       python3-fastapi python3-uvicorn
-   python3 -m venv --system-site-packages .venv
-   .venv/bin/pip install --no-deps .
-   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
-   ```
-
-3. **Download the default multilingual model into `model/`:**
-
-   ```bash
-   mkdir -p model
-   curl -L -o model/model.onnx https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
-   curl -L -o model/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
-   ```
-
-   English-only and larger multilingual models use the same `model_dir` layout; see
-   [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns if
-   `model.onnx` or `sentencepiece.bpe.model` differs from the documented default checksum, but still runs.
-
-4. **Put your ZIM files in `zims/`.** Download them from
-   [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
-
-5. **Check `config.toml`.** Point `zim_dir`, `model_dir` and `index_dir` at your folders if needed.
-   Set `kiwix_server` only if you also want remote Kiwix sources.
-
-6. **Check the installation:**
-
-   ```bash
-   zimantic --help
-   ```
-
-   For a development runtime check, activate the `uv` environment and run
-   `python -m pytest tests/test_runtime_api.py`; use `python -m pytest` for the full suite.
-
-### Windows
-
-Zimantic supports 64-bit Windows (x86-64) on Python 3.11–3.14. Windows ARM64 and
-32-bit Windows are not supported because `libzim`, `faiss-cpu` and `onnxruntime`
-do not publish wheels for those targets.
-
-The steps above work with the Windows equivalents:
-
-```powershell
-git clone https://github.com/OscSanto/zimantic.git zimantic
-cd zimantic
-uv sync --locked --no-dev
-.venv\Scripts\activate
-zimantic --help
-```
-
-Download the model with PowerShell instead of `curl`:
-
-```powershell
-New-Item -ItemType Directory -Force model | Out-Null
-Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model\model.onnx
-Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model\sentencepiece.bpe.model
-```
-
-`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`; restart
-`zimantic serve` instead. Stop the server before replacing or deleting a ZIM or
-index file, since Windows does not allow an open file to be replaced in place.
-
-### Using a different embedding model
-
-The default is `multilingual-e5-small`, but Zimantic loads whatever ONNX graph and tokenizer
-vocabulary are in `model_dir`. Two tokenizer formats are supported:
-
-- `sentencepiece.bpe.model` selects the XLM-R SentencePiece tokenizer used by the multilingual-e5
-  models.
-- `vocab.txt` selects the BERT WordPiece tokenizer used by the English e5-v2 models.
-
-Zimantic chooses by which vocabulary file is present. If a directory contains both, it reads
-`tokenizer_config.json` when available; otherwise it keeps the historical SentencePiece choice. The
-ONNX graph itself cannot reliably identify its tokenizer, so this file-based switch is the dependable
-signal. Apart from the vocabulary, the model must follow the same e5 contract: `input_ids` and
-`attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state`
-output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes.
-
-For example, to try the larger multilingual model:
-
-```bash
-mkdir -p model-e5-base
-curl -L -o model-e5-base/model.onnx https://huggingface.co/Xenova/multilingual-e5-base/resolve/main/onnx/model_quantized.onnx
-curl -L -o model-e5-base/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-base/resolve/main/sentencepiece.bpe.model
-```
-
-Replace `base` with `large` in both URLs to try `multilingual-e5-large`. For the English-only
-`e5-small-v2`, download its WordPiece vocabulary instead:
-
-```bash
-mkdir -p model-e5-small-v2
-curl -L -o model-e5-small-v2/model.onnx https://huggingface.co/Xenova/e5-small-v2/resolve/main/onnx/model_quantized.onnx
-curl -L -o model-e5-small-v2/vocab.txt https://huggingface.co/Xenova/e5-small-v2/resolve/main/vocab.txt
-```
-
-The same layout works for other BERT WordPiece e5-v2 models such as `e5-base-v2`.
-
-Point `model_dir` at the new folder, use a separate `index_dir` so the old indexes stay usable, and
-rebuild every index:
-
-```toml
-model_dir = "./model-e5-small-v2"
-index_dir = "./indexes-e5-small-v2"
-```
-
-```bash
-zimantic build --force
-zimantic serve
-```
-
-Vectors are model-specific. Each full index records a fingerprint of `model.onnx` and the tokenizer
-vocabulary; a server configured with a different model ignores those vectors and serves title and
-full-text results until the index is rebuilt. You should still rebuild after switching models,
-because otherwise meaning search is unavailable. A checksum warning for a non-default model is
-expected; the check is informational.
-
-These measurements use 256-token passages, batch size 32 and 4 CPU threads on one x86-64 host.
-Absolute numbers vary with CPU, but the ratios show the trade-off:
-
-| Model | Int8 ONNX | Vector dim | Extra RSS¹ | Embedding² | Notes |
-|---|---:|---:|---:|---:|---|
-| `multilingual-e5-small` | 118 MB | 384 | ~190 MB | 68/s (1×) | Default; 100+ languages |
-| `multilingual-e5-base` | 279 MB | 768 | ~340 MB | 26/s (0.38×) | 100+ languages; ~2.7× slower |
-| `multilingual-e5-large` | 562 MB | 1,024 | ~730 MB | 9/s (0.13×) | 100+ languages; ~7.8× slower |
-| `e5-small-v2` | 34 MB | 384 | ~65 MB | 64/s (0.93×) | English only; WordPiece |
-
-¹ Additional resident memory for the model and vocabulary after loading, excluding ONNX Runtime's
-batch arena. Add this to the server's baseline footprint (see **Measured memory use**); leave about
-0.5 GB of headroom for base and 1 GB for large. On hosts with 2 GB RAM or less the arena is disabled,
-so builds stay closer to these figures.
-
-² Passages per second while embedding 256 passages in batches of 32. A single query embedding takes
-about 14 ms with either small model, 39 ms with base and 110 ms with large, so query latency rises in
-the same direction.
-
-`e5-small-v2` has the same 12-layer, 384-hidden encoder as `multilingual-e5-small`; the smaller file
-comes from a 30k-entry instead of a 250k-entry embedding table. It therefore saves roughly 125 MB of
-resident memory but embeds at about the same speed, and it cannot search non-English text. Choose it
-only for an English-only library on a RAM-constrained host; otherwise the default gives much broader
-coverage for the same compute.
-
-Vector storage also grows with dimension: an 8-bit IVF index stores one byte per dimension per article
-(384 B, 768 B and 1 KB), while a flat index for under 10,000 articles stores float32 vectors
-(1.5 KB, 3 KB and 4 KB). FAISS flat indexes do not provide float16 storage; the SQLite staging table
-uses float16 while a build runs, but vectors are widened to float32 when written to FAISS. For a
-mostly English library on a small device, keep the default; base is
-a reasonable upgrade when cross-language recall matters; large needs a machine with more RAM.
-
-## Development install
-
-For a development environment based on the checkout:
-
-```bash
-uv sync
-. .venv/bin/activate              # Windows: .venv\Scripts\activate
-```
-
-`uv sync --no-dev` omits test tools. `pip install .` also works in a virtual environment.
-
-## Release and deploy
-
-The Makefile can increment the patch version, update `uv.lock`, commit and publish an
-annotated tag:
-
-```bash
-make release                 # 0.1.4 -> 0.1.5
-make release VERSION=1.0.0  # explicit version override
-```
-
-To deploy a published tag to the default test box:
-
-```bash
-make deploy VERSION=v0.1.5
-make release-deploy           # release, then deploy the new version
-```
-
-Set `DEPLOY_HOST` and `DEPLOY_PATH` to override the SSH target and remote checkout.
-The deploy target updates the existing checkout, reinstalls the package, restarts
-`zimantic.service`, and verifies the HTTP service and installed package version.
-
-For a development deploy, stage the changes to send and apply them to the existing
-remote checkout without checking out a tag. Before applying the patch, the deploy
-resets tracked files in the remote checkout to `HEAD`, discarding previous
-development-deploy changes:
-
-```bash
-git add path/to/changed-file
-./scripts/deploy.sh --dev
-# or: make deploy DEV=1
-```
-
-The development deploy leaves the newly applied changes in the remote checkout.
-
-## Use
-
-```bash
-zimantic build                        # index every .zim in zim_dir (the default)
-zimantic -v build                     # show info-level logging
-zimantic build -vv                    # show debug-level logging
-zimantic build zims/x.zim             # index one file
-zimantic build zims/a.zim zims/b.zim  # several files
-zimantic build --workers 4            # build up to four independent ZIMs at once
-zimantic build /media/usb             # every .zim in a folder
-zimantic build zims/a.zim /media/usb  # mix files and folders
-zimantic build --fast                 # quick title-word + full-text index (no vectors)
-zimantic build --wait-stable          # wait for changing download sizes, then index
-zimantic build --no-wait-lock         # exit 75 if another build holds the lock
-zimantic build --lock-timeout 600     # wait at most ten minutes for the lock
-zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
-zimantic build --device cuda          # embed with a CUDA GPU (see below)
-zimantic serve                        # web page; unindexed ZIMs use native full-text search
-zimantic serve --fast                 # start without a model or vectors
-zimantic serve --device cuda          # keep a CUDA GPU for query embedding
-zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
-zimantic serve --dev                  # alias for --debug
-zimantic reload                       # ask a running server to rescan indexes and ZIMs
-```
-
-`build` accepts files or folders; a folder means every `*.zim` file under it, and with no arguments
-it uses `zim_dir`. Existing ZIM indexes are skipped. Pass `--force` to rebuild selected indexes.
-Logging defaults to warnings, except that `serve` uses info when stderr is a terminal;
-repeat `--verbose`/`-v` for info and debug output.
-
-**Fast indexes.** `build --fast` stores titles and paths without running the model or creating FAISS
-vectors. It reads a small bounded HTML prefix per entry so disambiguation suffixes, meta-refresh
-shell targets and app-shell companion deep links are still recovered; it does not store article
-excerpts. Title-word and ZIM full-text search work; a normal `build` creates the vector index.
-
-`build --wait-stable` polls source sizes until they stop changing before indexing. The systemd units
-below pass it so a file caught mid-download is not indexed; an explicit CLI build starts immediately.
-
-Every build takes an advisory lock at `<index_dir>/../.build.lock` (beside `catalog.sqlite`), so a
-manual build, a `systemd.path` trigger, and a timer cannot write the same indexes at once. A second
-build waits by default; `--no-wait-lock` exits with status 75 (`EX_TEMPFAIL`) immediately, which the IIAB
-units use to skip a trigger without marking it failed. `--lock-timeout` bounds the wait. The kernel
-releases the lock when the process exits, so a killed build leaves no stale lock behind. Run manual
-builds as the same user as the server: a lock or index owned by another user (for example after
-`sudo zimantic build`) produces a `cannot open the build lock` error that names the file to fix.
-
-The desktop profile embeds 32 articles at a time (mobile 8, supercomputer 128). Independent ZIMs can
-be read and built concurrently with `--workers N` or the `build_workers` setting; when unset, the
-default scales with CPU and RAM. Full builds use a bounded shared embedding pipeline: at most
-`embedding_workers` model calls run at once, and each ZIM can have only a small number of batches
-waiting for embedding. When unset, `embedding_workers` also accounts for `embed_threads` so the model
-is not oversubscribed. The pipeline is only used when multiple sources are built concurrently
-(`build_workers` or `--workers` greater than 1). Tune `batch_size`, `build_workers`,
-`embedding_workers` and `embed_threads` in `config.toml` for different hardware. Builds that target
-the same `index_dir` are serialized by the build lock; builds with different `index_dir` values
-still compete for CPU and memory, so size `--workers` for the host.
-
-**Hardware profiles.** Tuning keys in `config.toml` are commented out by default, so Zimantic selects
-mobile, desktop or supercomputer defaults from the machine's resources. Copy
-`config.pi-zero-2w.toml` or `config.pi-5.toml` to pin settings.
-
-**GPU acceleration.** Embedding can run on a GPU through ONNX Runtime's accelerated execution
-providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX
-Runtime build exposes, in CUDA, ROCm, DirectML and OpenVINO order, and otherwise stays on the CPU.
-Supported values are `auto`, `gpu` (require an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm`
-(AMD), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection) and
-`coreml` (Apple); `--device` overrides the setting for one `build` or `serve` run. CoreML is never
-selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be
-slower than the CPU for this model. The provider comes from the ONNX Runtime package, not from
-Zimantic: replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`,
-`onnxruntime-directml` or `onnxruntime-openvino`. If the requested provider is missing, or cannot
-initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so
-the same configuration also runs on machines without a GPU. If a run fails on the device after
-initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead
-of failing the build.
-
-```bash
-pip uninstall -y onnxruntime   # only one onnxruntime distribution provides the module
-pip install onnxruntime-gpu    # or onnxruntime-rocm/-directml/-openvino
-zimantic build --device cuda   # or embed_device = "cuda" in config.toml
-```
-
-When Zimantic is managed with `uv`, `uv sync` reinstalls the plain `onnxruntime` dependency, so
-install the GPU wheel after syncing (or change the dependency in the project environment).
-
-GPU acceleration helps full index builds the most, because they embed every article; raising
-`batch_size` uses the device more efficiently. Lower it if a batch exhausts GPU memory. Query
-embedding also runs on the device, but a single short query is too small to gain much. Vector search
-(FAISS) deliberately stays on the CPU: the indexes are memory-mapped, and copying one to GPU memory
-to search a single query vector would cost more than the search itself.
-
-As a rule of thumb, keep enough free disk space when building indexes: about **20% of total ZIM file size**.
-
-**Automatic indexing with systemd.** Ready-to-copy user units in `deploy/` watch `zims/`, build
-indexes and reload the server as ZIMs become available:
-
-- `deploy/zimantic.service` — the server, with `Restart=always`, restart rate limiting, and
-  sandboxing. Copy it to `~/.config/systemd/user/`, then `systemctl --user enable --now zimantic`.
-- `deploy/zimantic-indexing-fast.path` + `deploy/zimantic-indexing-fast.service` — watch `zims/` and run a fast build
-  followed by `reload` as a ZIM becomes available.
-- `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run the full build
-  (with meaning vectors) once a night.
-
-The path-triggered fast build runs for each ZIM in `zims/`. The full build runs from 01:00–06:00
-local time by default; set its `ExecCondition` and timer to select a different window. Both units pass
-`--no-wait-lock`, so a build that finds the index lock held exits 75 and the unit treats it as a skip
-instead of overlapping the build that is already running.
-
-The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server
-that cannot fit its archives fails visibly instead of looping through OOM kills. Check
-`systemctl --user status zimantic` and `journalctl --user -u zimantic`; after fixing the cause,
-`systemctl --user reset-failed zimantic` clears the rate limit. Its header also shows
-`MemoryHigh`/`MemoryMax` pairs for a Pi Zero 2 W and a Pi 5; uncomment and adjust them for the
-device, leaving headroom for the OS and kiwix-serve. `MemoryHigh` throttles first; `MemoryMax` is the
-hard limit that OOM-kills only Zimantic.
-
-Each unit has install instructions in its header. The units assume runtime data at the default XDG
-data directory, `~/.local/share/zimantic`, and the CLI installed at `~/.local/bin/zimantic`.
-Adjust `WorkingDirectory` and `ExecStart` if you use a custom `XDG_DATA_HOME` or install the CLI
-elsewhere.
-
-The units call the installed `~/.local/bin/zimantic` executable, while `WorkingDirectory` keeps
-configuration, model files, ZIMs, indexes and `zimantic.pid` under the data directory. `reload`
-does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by default, or
-from the file passed with `--pid`. A stale PID file (left over after a crash or a
-signal-triggered shutdown) is reported and ignored.
-
-Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you copy finished indexes from
-another machine, watch `indexes/` and run only `reload`.
-
-A running `serve` discovers indexes with `zimantic reload`; a fast index remains
-searchable while a full index builds.
-
-JSON API examples:
-
-- `GET /search?q=...&zim=<name>&limit=10&offset=0&source=<key>` returns one page of results.
-  A small `zim` selection searches only those sources. A selection larger than `min(10, 35%)` of
-  the available sources is promoted to a full search so its cached pool can be shared; pass
-  `source=<key>` to narrow the displayed results. An explicit `zim` selection that includes a remote
-  source outside `max_remote_sources` is searched as its own uncached scope. Totals are in
-  `X-Total-Count`, `X-Has-More`, `X-Offset`, `X-Page` and `X-Page-Count` headers. An offset past the
-  last page is clamped to the last real page, and `X-Offset`/`X-Page`/stream `offset`/`page` report
-  that effective position.
-- `GET /search/stream?q=...&limit=10&offset=0&source=<key>` returns newline-delimited progress
-  events and result snapshots. `snapshot` and `done` events carry the effective `page` and
-  `page_count`. While sources are still working, the stream emits a `progress` heartbeat about every
-  700 ms; when a source finishes in between, a fresh snapshot is emitted instead. A source that
-  finishes between ranking passes reports no count until the next snapshot; the final `done` event
-  always carries the complete per-source count map. A cached search replays `started`, the cached
-  source events and a single `done` (its final page), without a duplicate `snapshot`.
-- `GET /content/<zim>/<path>` serves a toolbar shell for a local ZIM entry; `GET /content/<zim>`
-  serves the resolved ZIM homepage. The shell keeps the navigation bar in the page and loads the
-  article itself from an inner iframe pointed at `/article/<zim>/<path>`, so the toolbar stays
-  visible even when the article is missing or fails. Unreadable entries render a friendly error
-  panel in the shell instead of showing the raw `/article` JSON error body. `GET /article/<zim>/<path>`
-  serves the raw entry: redirects are followed, its assets resolve under the same route, and entries
-  larger than `max_article_bytes` return `413`. With scripting enabled, opening that route as a
-  top-level page hands off to the matching `/content/` shell; without scripting, or when the entry is
-  fetched, it stays the raw entry. That keeps `/article/` as the entry source for the iframe, assets
-  and offline fetches rather than a second browsing surface. The raw article's bridge filters out
-  clicks the browser should keep (in-page fragments, modified clicks, downloads, non-HTTP(S) schemes
-  and links with a non-self target such as `_blank`, which open in a new tab) and reports the authored
-  `href` plus any `<base>` to the shell. The shell resolves it against the article's local `/article/`
-  URL and owns the offline/app/external decision, handing same-origin app links to the outer page when
-  the shell is embedded in the modal. This keeps replay shims such as zimit's `wombat.js` from
-  turning relative links in the capture into live-site URLs. `max_html_bytes` limits how much
-  HTML is parsed for indexing, previews and phrase checks; `max_article_bytes` limits the uncompressed
-  response body because Zimantic reads each requested entry into memory, including binary assets. The
-  toolbar shell also uses the viewed article's own `<title>` and declared icon for the browser tab
-  title and favicon (falling back to the ZIM's source icon); when the shell is embedded in the modal,
-  the outer page mirrors them and restores its own title and favicon when the modal closes. HTML and
-  XHTML articles include a small navigation bar with Close, Home, Random, Permalink and a Zimantic
-  search control. Alt-clicking Random opens the homepage of a random available ZIM. Modal articles also expose
-  icon-only navigation through visible search results and, for nested articles, the adjacent article
-  links listed on the article's parent page. When a modal article opens another modal article,
-  the preceding article can also provide the navigation context. Back navigation uses browser
-  history when available, otherwise the Close control attempts to close the tab. In a directly
-  loaded `/content/` view, Close closes the tab or window when the browser allows it; otherwise it
-  goes back through history, or opens the library when the article is the first history entry.
-  Article views keep the current ZIM and path in the address bar, including from `/library`, so the
-  URL can be shared.
-  Selecting text adds the passage to that URL and to the toolbar's Copy link action; reopening the
-  link scrolls to and highlights the passage. Fragment links scroll inside the article without
-  reloading the shell. With `secure_browsing = true`, the article iframe has an opaque origin, so
-  articles that use Web Storage get an in-memory fallback and IndexedDB loads an in-memory polyfill.
-  The shell then offers the standalone `/content/` view only when secure browsing is off, because a
-  sandboxed standalone view cannot provide persistent storage either. The IndexedDB polyfill bundles
-  `fake-indexeddb` (Apache-2.0; see `indexeddb-shim.LICENSE`). Stack Exchange captures that omit their
-  MathJax font files are served the vendored MathJax 2.7.5 WOFF set. Root-absolute capture assets
-  such as `/w/images/...` are resolved through the article referrer against the common archived
-  locations (`-/mw/...` and friends) when no app route matches.
-  `GET /random?zim=<name>`
-  redirects to a random indexed article's shell. `GET /random` without `zim` redirects to the
-  homepage of a random available local source; the article toolbar's Random control uses the first
-  form, and Alt-clicking it uses the second. Links from an offline article to an external
-  `http` or `https` site show an in-modal notice identifying the destination as online and offer
-  to open it in a new tab, avoiding failures from sites that disallow iframe embedding. A directly
-  loaded `/content/` view tries the captured copy for same-site links before leaving for the live
-  site, so only links that are missing from the ZIM go online.
-- Start the server with `zimantic serve --debug` to include ranking scores and explanations in both
-  search endpoints. Debug result objects additionally include a `ranking` breakdown with each
-  semantic/title/full-text rank and contribution, title-match signals, intent and
-  disambiguation adjustments. Stream `snapshot` and `done` events always carry source progress and
-  a per-source result count, and in debug mode add `matched_by` match-method counts; the
-  non-streaming endpoint exposes those match counts in the `X-Matched-By` header, and the web UI
-  renders them above the results. Debug output is configured for the whole server; it is not a
-  URL parameter.
-  SIGHUP restarts the whole server in debug mode; `serve --dev` is an alias for this mode.
-- `GET /sources`, `/config`, `/library.json` and `/health` return source,
-  configuration, local-library and health information. `/sources` describes the searchable
-  sources (local and remote) and includes catalog metadata when available. `/library.json`
-  describes every distinct local book, including unreadable archives and archives that are not
-  searchable yet. Source records include a `homepage` path when the local ZIM exposes one, plus
-  `available`, `searchable` and `error` flags.
-  `/library.json` also exposes
-  `uuid`, `publisher`, `perma_ref`, `flavour`, `category`, `media_count`, `license`, `scraper`,
-  `source`, `attribution`, `relation`, `counter`, and `has_fulltext_index` from the catalog. The
-  UUID is the book identity: exact duplicate copies of the same ZIM are collapsed to one source,
-  preferring a readable copy. Dated or flavour variants of one local book
-  (`medicine_mini_2025-10` and `medicine_nopic_2025-10`, for example) also collapse to the largest
-  readable, searchable copy; the search source list uses the same collapse so the UI does not show
-  the same book twice. An unreadable archive stays in `/library.json` with
-  `available: false` and an `error` so the library page can explain why it cannot be opened. Health
-  is read-only and reports index/archive capabilities, entry counts, homepage resolution, embedding
-  state, and search and preview cache statistics.
-
-Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic reload` or
-`kill -HUP <pid>`.
-
-Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` (32 MiB per cache by default).
-The ranked pool is shared across pages and display filters for a given search scope, and invalidated
-when the set of searchable sources differs. Small source selections get their own scope so each
-selected ZIM contributes a larger share of the pool, but that scope is not cached; larger selections
-share the cached full-search pool, except a selection that names a remote source outside
-`max_remote_sources`, which is searched as its own uncached scope.
-For large libraries, `search_workers` controls how many ZIM indexes are searched in
-parallel. `max_stream_ranks` limits completion-spaced intermediate ranking passes; timed snapshots
-are additionally emitted about every 700 ms so a slow query keeps updating, and the final result
-still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. The
-automatic profiles use 8 workers and 16 completion-spaced passes on desktops, and 2 workers and 8
-passes on low-memory devices.

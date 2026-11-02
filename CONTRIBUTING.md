@@ -24,6 +24,17 @@ Please keep these in mind; they guide what gets merged:
 To pick up changes from `main` while your PR is open, sync your fork (GitHub's **Sync fork** button,
 or `git pull upstream main`).
 
+## Development install
+
+For a development environment based on the checkout:
+
+```bash
+uv sync
+. .venv/bin/activate              # Windows: .venv\Scripts\activate
+```
+
+`uv sync --no-dev` omits test tools. `pip install .` also works in a virtual environment.
+
 ## Before you open a pull request
 
 - **Tests:** if you add or change behaviour that can be tested, add tests in `tests/` (pytest) and make
@@ -54,9 +65,42 @@ or `git pull upstream main`).
 Match the surrounding code: plain, readable Python, comments that explain *why*. Keep dependencies few;
 anything that must run on the Pi should be checked for memory use.
 
+## Release and deploy
+
+The Makefile can increment the patch version, update `uv.lock`, commit and publish an
+annotated tag:
+
+```bash
+make release                 # 0.1.4 -> 0.1.5
+make release VERSION=1.0.0  # explicit version override
+```
+
+To deploy a published tag to the default test box:
+
+```bash
+make deploy VERSION=v0.1.5
+make release-deploy           # release, then deploy the new version
+```
+
+Set `DEPLOY_HOST` and `DEPLOY_PATH` to override the SSH target and remote checkout.
+The deploy target updates the existing checkout, reinstalls the package, restarts
+`zimantic.service`, and verifies the HTTP service and installed package version.
+
+For a development deploy, stage the changes to send and apply them to the existing
+remote checkout without checking out a tag. Before applying the patch, the deploy
+resets tracked files in the remote checkout to `HEAD`, discarding previous
+development-deploy changes:
+
+```bash
+git add path/to/changed-file
+./scripts/deploy.sh --dev
+# or: make deploy DEV=1
+```
+
+The development deploy leaves the newly applied changes in the remote checkout.
+
 ## Licensing
 
 Zimantic is licensed under the **GNU General Public License v3.0 or later** (see [LICENSE](LICENSE)).
 By contributing, you agree that your contributions are licensed under the same terms. Content-derived
 files (such as evaluation queries quoting Wikipedia) keep their own licenses, noted where they are used.
-
