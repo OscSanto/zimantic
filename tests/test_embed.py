@@ -60,6 +60,59 @@ class ModelFingerprintTests(unittest.TestCase):
             self.assertEqual(embed.model_fingerprint(tmp), "")
 
 
+class ModelProbeTests(unittest.TestCase):
+    def test_serialize_round_trip(self):
+        texts = ["first probe", "second probe"]
+        vectors = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+        meta = embed.serialize_model_probes(texts, vectors)
+        loaded = embed.load_model_probes(meta)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded[0], texts)
+        np.testing.assert_allclose(loaded[1], vectors)
+
+    def test_missing_or_corrupt_probes_are_ignored(self):
+        self.assertIsNone(embed.load_model_probes({}))
+        meta = embed.serialize_model_probes(["one"], np.ones((1, 2), dtype=np.float32))
+        meta["model_probe_shape"] = "2x2"
+        self.assertIsNone(embed.load_model_probes(meta))
+
+    def test_match_accepts_close_models_and_rejects_distant_ones(self):
+        stored = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+        class _Embedder:
+            def __init__(self, vectors):
+                self.vectors = vectors
+
+            def embed(self, _texts):
+                return self.vectors
+
+        close = np.array([[1.0, 0.01], [0.01, 1.0]], dtype=np.float32)
+        compatible, mean, minimum = embed.model_probes_match(
+            ["one", "two"], stored, _Embedder(close)
+        )
+        self.assertTrue(compatible)
+        self.assertGreater(mean, 0.99)
+        self.assertGreater(minimum, 0.98)
+
+        distant = np.array([[1.0, 0.0], [-1.0, 0.0]], dtype=np.float32)
+        compatible, _mean, _minimum = embed.model_probes_match(
+            ["one", "two"], stored, _Embedder(distant)
+        )
+        self.assertFalse(compatible)
+
+    def test_match_rejects_a_different_dimension(self):
+        class _Embedder:
+            def embed(self, _texts):
+                return np.ones((2, 3), dtype=np.float32)
+
+        compatible, _mean, _minimum = embed.model_probes_match(
+            ["one", "two"], np.ones((2, 2), dtype=np.float32), _Embedder()
+        )
+        self.assertFalse(compatible)
+
+
 class ThreadConfigTests(unittest.TestCase):
     def test_default_thread_budget_leaves_at_least_one_thread(self):
         self.assertEqual(embed.DEFAULT_EMBED_THREADS, max(1, (os.cpu_count() or 1) - 1))

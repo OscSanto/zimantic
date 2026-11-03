@@ -23,6 +23,12 @@ from .content.reader import (
     EntryRecord,
     read_entry,
 )
+from .model_meta import (
+    MODEL_FINGERPRINT_KEY,
+    MODEL_PROBE_SHAPE_KEY,
+    MODEL_PROBE_TEXTS_KEY,
+    MODEL_PROBE_VECTORS_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +359,7 @@ def _finish_build(
     faiss_path: Path,
     fast: bool,
     model_fingerprint: str = "",
+    model_probes: dict[str, object] | None = None,
 ) -> None:
     db = state.db
     if db is None:
@@ -362,7 +369,10 @@ def _finish_build(
             db.execute("DROP TABLE IF EXISTS vecs")
             db.execute("DELETE FROM meta WHERE key = 'build_filesize'")
             db.execute("DELETE FROM meta WHERE key = 'build_mode'")
-            db.execute("DELETE FROM meta WHERE key = 'model_fingerprint'")
+            db.execute("DELETE FROM meta WHERE key = ?", (MODEL_FINGERPRINT_KEY,))
+            db.execute("DELETE FROM meta WHERE key = ?", (MODEL_PROBE_TEXTS_KEY,))
+            db.execute("DELETE FROM meta WHERE key = ?", (MODEL_PROBE_VECTORS_KEY,))
+            db.execute("DELETE FROM meta WHERE key = ?", (MODEL_PROBE_SHAPE_KEY,))
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
         logger.debug(f"{db_path.stem}: title + full-text index ready")
@@ -378,11 +388,24 @@ def _finish_build(
         db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
         if model_fingerprint:
             db.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('model_fingerprint', ?)",
-                (model_fingerprint,),
+                "INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                (MODEL_FINGERPRINT_KEY, model_fingerprint),
             )
         else:
-            db.execute("DELETE FROM meta WHERE key = 'model_fingerprint'")
+            db.execute("DELETE FROM meta WHERE key = ?", (MODEL_FINGERPRINT_KEY,))
+        if model_probes:
+            for key, value in model_probes.items():
+                db.execute(
+                    "INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                    (key, value),
+                )
+        else:
+            for key in (
+                MODEL_PROBE_TEXTS_KEY,
+                MODEL_PROBE_VECTORS_KEY,
+                MODEL_PROBE_SHAPE_KEY,
+            ):
+                db.execute("DELETE FROM meta WHERE key = ?", (key,))
     if state.publish_upgrade:
         db.close()
         state.db = None
@@ -442,7 +465,29 @@ def build(
             embedding_pipeline,
         )
         fingerprint = getattr(embedder, "fingerprint", "") if embedder is not None else ""
-        _finish_build(state, db_path, faiss_path, fast, fingerprint)
+        model_probes = None
+        if not fast and embedder is not None:
+            try:
+                from .embed import embed_model_probes, serialize_model_probes
+
+                probe_texts, probe_vectors = embed_model_probes(embedder)
+                model_probes = serialize_model_probes(probe_texts, probe_vectors)
+            except Exception as error:
+                logger.warning(
+                    "could not compute model compatibility probes for %s (%s); "
+                    "a later serve with a different model file will not reuse "
+                    "these vectors",
+                    zim_path.stem,
+                    error,
+                )
+        _finish_build(
+            state,
+            db_path,
+            faiss_path,
+            fast,
+            fingerprint,
+            model_probes,
+        )
     finally:
         if state.db is not None:
             state.db.close()

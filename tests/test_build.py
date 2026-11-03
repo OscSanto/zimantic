@@ -188,9 +188,11 @@ class BuildUpgradeTests(unittest.TestCase):
                     directory / "manual.zim", directory, _FingerprintEmbedder(), 1
                 )
 
-            self.assertEqual(
-                _meta(db_path)["model_fingerprint"], "model-fingerprint-1"
-            )
+            meta = _meta(db_path)
+            self.assertEqual(meta["model_fingerprint"], "model-fingerprint-1")
+            self.assertIn("model_probe_texts", meta)
+            self.assertIn("model_probe_vectors", meta)
+            self.assertIn("model_probe_shape", meta)
 
             with (
                 patch.object(build_module, "Archive", _OneEntryArchive),
@@ -200,7 +202,11 @@ class BuildUpgradeTests(unittest.TestCase):
                     directory / "manual.zim", directory, None, 1, fast=True, force=True
                 )
 
-            self.assertNotIn("model_fingerprint", _meta(db_path))
+            meta = _meta(db_path)
+            self.assertNotIn("model_fingerprint", meta)
+            self.assertNotIn("model_probe_texts", meta)
+            self.assertNotIn("model_probe_vectors", meta)
+            self.assertNotIn("model_probe_shape", meta)
 
     def test_force_fast_rebuild_replaces_sqlite_and_removes_faiss(self):
         with tempfile.TemporaryDirectory() as tmp:

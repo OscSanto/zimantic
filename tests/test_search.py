@@ -1334,6 +1334,95 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertTrue(any("different model" in line for line in logs.output))
             search._executor.shutdown(wait=True)
 
+    def test_matching_probes_allow_vectors_from_another_model_file(self):
+        class _ProbeEmbedder:
+            def __init__(self, vectors):
+                self.vectors = vectors
+
+            def embed(self, _texts):
+                return self.vectors
+
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            db_path = _write_index(
+                tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)]
+            )
+            probes = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
+            db = sqlite3.connect(db_path)
+            db.execute("INSERT INTO meta VALUES ('model_fingerprint', 'old-model')")
+            from zimantic.embed import serialize_model_probes
+
+            for key, value in serialize_model_probes(
+                ["first probe", "second probe"], probes
+            ).items():
+                db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+            db.commit()
+            db.close()
+            db_path.with_suffix(".faiss").write_bytes(b"vectors")
+
+            search = _bare_search(self._cfg(tmp))
+            search._defer_faiss = False
+            search._model_fingerprint = "new-model"
+            search.embedder = _ProbeEmbedder(probes)
+            try:
+                with (
+                    patch.object(
+                        sys.modules["faiss"],
+                        "read_index",
+                        return_value=object(),
+                        create=True,
+                    ),
+                    self.assertLogs("zimantic.search", level="WARNING") as logs,
+                ):
+                    index = search._open_index(db_path)
+            finally:
+                search._executor.shutdown(wait=True)
+
+            self.assertIsNotNone(index)
+            self.assertIsNotNone(index.faiss_index)
+            self.assertTrue(any("probes match" in line for line in logs.output))
+
+    def test_mismatched_probes_keep_vectors_disabled(self):
+        class _ProbeEmbedder:
+            def __init__(self, vectors):
+                self.vectors = vectors
+
+            def embed(self, _texts):
+                return self.vectors
+
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            db_path = _write_index(
+                tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)]
+            )
+            stored = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
+            current = np.array([[1, 0, 0, 0], [1, 0, 0, 0]], dtype=np.float32)
+            db = sqlite3.connect(db_path)
+            db.execute("INSERT INTO meta VALUES ('model_fingerprint', 'old-model')")
+            from zimantic.embed import serialize_model_probes
+
+            for key, value in serialize_model_probes(
+                ["first probe", "second probe"], stored
+            ).items():
+                db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+            db.commit()
+            db.close()
+            db_path.with_suffix(".faiss").write_bytes(b"vectors")
+
+            search = _bare_search(self._cfg(tmp))
+            search._defer_faiss = False
+            search._model_fingerprint = "new-model"
+            search.embedder = _ProbeEmbedder(current)
+            try:
+                with self.assertLogs("zimantic.search", level="WARNING") as logs:
+                    index = search._open_index(db_path)
+            finally:
+                search._executor.shutdown(wait=True)
+
+            self.assertIsNotNone(index)
+            self.assertIsNone(index.faiss_index)
+            self.assertTrue(any("different model" in line for line in logs.output))
+
     def test_health_reports_ok_when_homepage_is_unavailable(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
@@ -1599,6 +1688,64 @@ class GracefulDegradationTests(unittest.TestCase):
             ):
                 search.start_faiss()
                 self.assertTrue(reloaded.wait(2))
+
+            self.assertTrue(search.indexes["manual"].semantic)
+
+    def test_deferred_faiss_waits_for_embedder_and_accepts_matching_probes(self):
+        class _ProbeEmbedder:
+            def __init__(self, vectors):
+                self.vectors = vectors
+
+            def embed(self, _texts):
+                return self.vectors
+
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            db_path = _write_index(
+                tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)]
+            )
+            probes = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
+            db = sqlite3.connect(db_path)
+            db.execute("INSERT INTO meta VALUES ('model_fingerprint', 'old-model')")
+            from zimantic.embed import serialize_model_probes
+
+            for key, value in serialize_model_probes(
+                ["first probe", "second probe"], probes
+            ).items():
+                db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
+            db.commit()
+            db.close()
+            db_path.with_suffix(".faiss").write_bytes(b"vectors")
+
+            cfg = self._cfg(tmp)
+            cfg["model_dir"] = str(tmp)
+            search = Search(cfg, semantic=True, archive_factory=object)
+            self.addCleanup(search._executor.shutdown, wait=True)
+
+            reloaded = threading.Event()
+            original_reload = search.reload
+
+            def reload(**kwargs):
+                try:
+                    return original_reload(**kwargs)
+                finally:
+                    reloaded.set()
+
+            with (
+                patch(
+                    "zimantic.embed.model_fingerprint", return_value="new-model"
+                ),
+                patch.object(
+                    sys.modules["faiss"],
+                    "read_index",
+                    return_value=object(),
+                    create=True,
+                ),
+                patch.object(search, "reload", side_effect=reload),
+            ):
+                search.start_embedder(lambda: _ProbeEmbedder(probes))
+                search.start_faiss()
+                self.assertTrue(reloaded.wait(5))
 
             self.assertTrue(search.indexes["manual"].semantic)
 

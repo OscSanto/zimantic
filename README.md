@@ -23,7 +23,7 @@ Meaning search performs best in widely spoken languages. Coverage varies by lang
 - **Progressive results.** Sources run in parallel. The page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Library view.** Browse installed ZIMs at `/library` with artwork, descriptions, metadata, and links to each homepage or a random article. See [Library view](#library-view).
 - **Low resource use.** Runs on low-resource devices such as a Raspberry Pi Zero 2 W (512 MB RAM) using roughly 250–325 MB while serving; see [Measured memory use](#measured-memory-use).
-- **Graceful degradation.** Title-word and full-text search work as soon as an index exists. Vectors are optional, and a ZIM with no index remains searchable through its native full-text index. A missing model, a missing FAISS file, or a model fingerprint mismatch falls back to lexical search instead of failing the server.
+- **Graceful degradation.** Title-word and full-text search work as soon as an index exists. Vectors are optional, and a ZIM with no index remains searchable through its native full-text index. A missing model, a missing FAISS file, or a different model whose probe embeddings do not match falls back to lexical search instead of failing the server.
 - **Concurrent searches.** `max_concurrent_searches` bounds simultaneous searches. Identical in-flight queries share one computation, and repeated queries are answered from an in-memory cache bounded by `cache_size` and `cache_bytes`. Small one-off source selections are intentionally not cached; see [Source selection](#source-selection).
 - **Built-in article serving.** Result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
 - **Web interface and JSON API.** Search from any browser on the network or from custom programs. Routes use short paths such as `/search`, `/library`, `/content/<zim>/<path>`, `/article/<zim>/<path>`, and `/health`.
@@ -136,7 +136,7 @@ If the files are on a USB drive or another disk, point `zim_dir`, `model_dir`, o
 
 Embeddings live only in `<name>.faiss`. Its row IDs refer to `docs.rowid` in the matching `<name>.sqlite`, which holds titles, paths, the title full-text index, and build metadata. Copy the two files as a pair. A `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and full-text search only. A full index whose `.faiss` is missing still serves title and full-text results, but a later full build requires `--force` to replace it.
 
-Copying a subset is safe: each ZIM's pair is independent, and the index identity is the ZIM filename stem plus the source byte size recorded in `meta.filesize`, not the path. Keep the same filename stem and the same ZIM bytes on the target. Moving a ZIM between subfolders of `zim_dir` does not invalidate its index; renaming it does. The target must use the same embedding model, or `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
+Copying a subset is safe: each ZIM's pair is independent, and the index identity is the ZIM filename stem plus the source byte size recorded in `meta.filesize`, not the path. Keep the same filename stem and the same ZIM bytes on the target. Moving a ZIM between subfolders of `zim_dir` does not invalidate its index; renaming it does. The target must use the same embedding model, or an export whose probe embeddings match it (for example FP32 and int8 exports of the same encoder); otherwise `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
 
 To copy two completed indexes:
 
@@ -347,6 +347,8 @@ zimantic serve
 ```
 
 Vectors are model-specific. Each full index records a fingerprint of `model.onnx` and the tokenizer vocabulary. A server configured with a different model ignores those vectors and serves title and full-text results until the index is rebuilt. Rebuild after switching models, because otherwise meaning search is unavailable. A checksum warning for a non-default model is expected; the check is informational.
+
+A full build also stores a small set of fixed probe sentences and their embeddings. When the model fingerprint differs, `serve` re-embeds those stored probes with the configured model and reuses the index if the mean cosine similarity is at least 0.99 (and the minimum is at least 0.98). This lets an index built with the FP32 export be served with the int8 export of the same model, for example. It does not accept a different model or tokenizer, and indexes built before this feature have no probes, so they still require the same model file. The check is deliberately conservative: a different fine-tune with the same architecture should fail it.
 
 These measurements use 256-token passages, batch size 32, and 4 CPU threads on one x86-64 host. Absolute numbers vary with CPU, but the ratios show the trade-off:
 

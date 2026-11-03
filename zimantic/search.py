@@ -40,6 +40,11 @@ from .content.reader import (
     truncate_at_word_boundary,
 )
 from .contracts import SourceInfo, SourceResult
+from .model_meta import (
+    MODEL_PROBE_SHAPE_KEY,
+    MODEL_PROBE_TEXTS_KEY,
+    MODEL_PROBE_VECTORS_KEY,
+)
 from .redirects import RedirectError, resolve_redirect_entry
 from .searching.config import _file_signature, _float_config, _int_config
 from .searching.index import _LocalIndex, _nprobe
@@ -656,6 +661,15 @@ class Search:
         self._defer_faiss = self.semantic
         # Filled from the configured model before deferred vectors are opened.
         self._model_fingerprint: str | None = None
+        # `start_faiss` may need to embed probes before it can decide whether an
+        # index built with another model file is still compatible. `start_embedder`
+        # signals this event once the model has loaded (or failed to load).
+        self._embedder_ready = threading.Event()
+        self._embedder_started = False
+        # Probe embeddings are identical for every index built with the same
+        # probe list; compute them once per serve process.
+        self._probe_cache: dict[tuple[str, ...], Any] = {}
+        self._probe_cache_lock = threading.Lock()
         self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
         self._state_lock = threading.RLock()
@@ -1018,6 +1032,69 @@ class Search:
                     del found[stem]
         return found
 
+    def _model_probes_compatible(self, db, db_path: Path) -> tuple[bool, str]:
+        """Compare an index's stored probes with the current embedding model.
+
+        A mismatched file fingerprint is not necessarily a different model:
+        FP32 and int8 exports of the same encoder are different files but
+        produce nearly identical vectors. The probes stored by a full build let
+        serving distinguish that case from a genuinely different model.
+        """
+        rows = dict(
+            db.execute(
+                "SELECT key, value FROM meta WHERE key IN (?, ?, ?)",
+                (
+                    MODEL_PROBE_TEXTS_KEY,
+                    MODEL_PROBE_VECTORS_KEY,
+                    MODEL_PROBE_SHAPE_KEY,
+                ),
+            ).fetchall()
+        )
+        if not rows:
+            return False, "no compatibility probes"
+        # Probe comparisons need the current model. Wait for `start_embedder`
+        # so an FP32-built index can be accepted when serving with the int8
+        # export of the same encoder. The server is already answering title and
+        # full-text searches on other threads.
+        ready = getattr(self, "_embedder_ready", None)
+        if getattr(self, "_embedder_started", False) and ready is not None:
+            if not ready.wait(timeout=60):
+                return False, "timed out waiting for the embedding model"
+        # Imported lazily: fast mode never needs the ONNX Runtime model stack.
+        from .embed import embed_probe_texts, load_model_probes, model_probes_match
+
+        probes = load_model_probes(rows)
+        if probes is None:
+            return False, "unreadable compatibility probes"
+        embedder = getattr(self, "embedder", None)
+        if embedder is None:
+            return False, "embedding model is unavailable"
+        texts, stored_vectors = probes
+        key = tuple(texts)
+        cache = getattr(self, "_probe_cache", None)
+        lock = getattr(self, "_probe_cache_lock", None)
+        current = None
+        if cache is not None and lock is not None:
+            with lock:
+                current = cache.get(key)
+        if current is None:
+            try:
+                current = embed_probe_texts(embedder, texts)
+            except Exception as error:  # a broken probe must not hide the index
+                return False, f"probe embedding failed: {error}"
+            if cache is not None and lock is not None:
+                with lock:
+                    cache[key] = current
+        try:
+            compatible, mean_cosine, min_cosine = model_probes_match(
+                texts, stored_vectors, current=current
+            )
+        except Exception as error:  # a broken probe must not hide the index
+            return False, f"probe comparison failed: {error}"
+        return compatible, (
+            f"mean cosine {mean_cosine:.4f}, minimum {min_cosine:.4f}"
+        )
+
     def _open_index(self, db_path: Path) -> _LocalIndex | None:
         """Open one finished index. Missing or unreadable vectors degrade the
         index to title + full-text only instead of failing the whole server."""
@@ -1055,17 +1132,30 @@ class Search:
                 and faiss_path.exists()
             ):
                 current_fingerprint = getattr(self, "_model_fingerprint", "")
-                if (
+                model_changed = bool(
                     stored_fingerprint
                     and current_fingerprint
                     and stored_fingerprint != current_fingerprint
-                ):
-                    logger.warning(
-                        "%s: vectors were built with a different model; "
-                        "using title and full-text search until it is rebuilt",
-                        db_path.stem,
-                    )
-                else:
+                )
+                if model_changed:
+                    compatible, detail = self._model_probes_compatible(db, db_path)
+                    if compatible:
+                        logger.warning(
+                            "%s: vectors were built with a different model file, "
+                            "but embedding probes match (%s); using them",
+                            db_path.stem,
+                            detail,
+                        )
+                        model_changed = False
+                    else:
+                        logger.warning(
+                            "%s: vectors were built with a different model; "
+                            "using title and full-text search until it is rebuilt "
+                            "(%s)",
+                            db_path.stem,
+                            detail,
+                        )
+                if not model_changed:
                     try:
                         # Fast mode does not need the FAISS import.
                         import faiss
@@ -1211,6 +1301,8 @@ class Search:
         as soon as `factory()` returns. Searches issued meanwhile degrade
         gracefully; `_query_vector` treats a missing embedder as no vectors.
         """
+        self._embedder_started = True
+
         def _load() -> None:
             try:
                 embedder = factory()
@@ -1220,10 +1312,12 @@ class Search:
                     "using title and full-text search",
                     error,
                 )
-                return
-            with self._state_lock:
-                self.embedder = embedder
-            logger.info("zimantic: embedding model ready; semantic search enabled")
+            else:
+                with self._state_lock:
+                    self.embedder = embedder
+                logger.info("zimantic: embedding model ready; semantic search enabled")
+            finally:
+                self._embedder_ready.set()
 
         threading.Thread(target=_load, name="zimantic-embedder", daemon=True).start()
 

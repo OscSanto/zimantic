@@ -13,6 +13,14 @@ import numpy as np
 import onnxruntime as ort
 import sentencepiece
 
+from .model_meta import (
+    MODEL_PROBE_MEAN_COSINE,
+    MODEL_PROBE_MIN_COSINE,
+    MODEL_PROBE_SHAPE_KEY,
+    MODEL_PROBE_TEXTS,
+    MODEL_PROBE_TEXTS_KEY,
+    MODEL_PROBE_VECTORS_KEY,
+)
 from .settings import DEFAULT_EMBEDDING_TOKENS, _system_memory_gb
 from .wordpiece import WordPieceTokenizer
 
@@ -269,6 +277,100 @@ def model_fingerprint(model_dir, hashes: dict[str, str] | None = None) -> str:
         digest.update(value.encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def embed_probe_texts(embedder, texts):
+    """Embed probe texts as passages with the current model."""
+    return np.asarray(
+        embedder.embed(["passage: " + text for text in texts]),
+        dtype=np.float32,
+    )
+
+
+def embed_model_probes(embedder, texts=MODEL_PROBE_TEXTS):
+    """Return fixed probe texts and their passage embeddings.
+
+    The probes let ``serve`` distinguish a different model from a different
+    export of the same model (for example FP32 versus int8). The returned
+    vectors are stored in the index; the texts are stored too, so a later
+    version of this module can still re-embed an older index's probes.
+    """
+    probe_texts = list(texts)
+    return probe_texts, embed_probe_texts(embedder, probe_texts)
+
+
+def serialize_model_probes(texts, vectors) -> dict[str, object]:
+    """Serialize probe texts and vectors into ``meta`` key/value pairs."""
+    probe_texts = list(texts)
+    array = np.asarray(vectors, dtype="<f4")
+    if array.ndim != 2 or array.shape[0] != len(probe_texts):
+        raise ValueError("model probes must be a 2-D array with one row per text")
+    return {
+        MODEL_PROBE_TEXTS_KEY: json.dumps(probe_texts, ensure_ascii=False),
+        MODEL_PROBE_VECTORS_KEY: array.tobytes(order="C"),
+        MODEL_PROBE_SHAPE_KEY: f"{array.shape[0]}x{array.shape[1]}",
+    }
+
+
+def load_model_probes(meta) -> tuple[list[str], np.ndarray] | None:
+    """Decode probe metadata, returning ``None`` when it is absent or invalid."""
+    texts_raw = meta.get(MODEL_PROBE_TEXTS_KEY)
+    vectors_raw = meta.get(MODEL_PROBE_VECTORS_KEY)
+    shape_raw = meta.get(MODEL_PROBE_SHAPE_KEY)
+    if not texts_raw or not vectors_raw or not shape_raw:
+        return None
+    if not isinstance(vectors_raw, (bytes, bytearray, memoryview)):
+        return None
+    try:
+        texts = json.loads(str(texts_raw))
+        if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+            return None
+        rows, dim = (int(part) for part in str(shape_raw).lower().split("x", 1))
+        array = np.frombuffer(vectors_raw, dtype="<f4")
+        if rows != len(texts) or array.size != rows * dim:
+            return None
+        return texts, array.reshape(rows, dim).astype(np.float32, copy=False)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def model_probes_match(
+    stored_texts,
+    stored_vectors,
+    embedder=None,
+    *,
+    current=None,
+    mean_threshold: float = MODEL_PROBE_MEAN_COSINE,
+    min_threshold: float = MODEL_PROBE_MIN_COSINE,
+) -> tuple[bool, float, float]:
+    """Compare stored probes with the current model's embeddings.
+
+    Returns ``(compatible, mean_cosine, min_cosine)``. Pass ``current`` to
+    reuse embeddings that were already computed for the same probe texts.
+    Both sides are normalized here so the check also works with embedders or
+    older vectors that are not unit length.
+    """
+    if current is None:
+        if embedder is None:
+            raise ValueError("an embedder or current probe vectors are required")
+        current = embed_probe_texts(embedder, stored_texts)
+    current = np.asarray(current, dtype=np.float32)
+    stored = np.asarray(stored_vectors, dtype=np.float32)
+    if current.shape != stored.shape or current.ndim != 2 or current.shape[0] == 0:
+        return False, 0.0, 0.0
+
+    def _normalize(values):
+        norms = np.linalg.norm(values, axis=1, keepdims=True)
+        return values / np.where(norms == 0.0, 1.0, norms)
+
+    scores = np.sum(_normalize(stored) * _normalize(current), axis=1)
+    mean_cosine = float(scores.mean())
+    min_cosine = float(scores.min())
+    return (
+        mean_cosine >= mean_threshold and min_cosine >= min_threshold,
+        mean_cosine,
+        min_cosine,
+    )
 
 
 class Embedder:
