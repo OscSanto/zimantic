@@ -61,11 +61,24 @@ def _bare_search(cfg):
     search.source_workers = 2
     search.max_concurrent_searches = 2
     search._search_slots = threading.BoundedSemaphore(2)
+    search._drain_slots = threading.BoundedSemaphore(2)
     search._executor = ThreadPoolExecutor(max_workers=2)
     search._inflight = {}
     search._inflight_lock = threading.Lock()
     search.cache = QueryCache(16)
     return search
+
+
+class _CountingSemaphore(threading.BoundedSemaphore):
+    """BoundedSemaphore that records successful releases for assertions."""
+
+    def __init__(self, value):
+        super().__init__(value)
+        self.releases = 0
+
+    def release(self):
+        super().release()
+        self.releases += 1
 
 
 @contextmanager
@@ -2511,9 +2524,12 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual(first[-1]["results"], second[-1]["results"])
             search._executor.shutdown(wait=True)
 
-    def test_disconnected_stream_finishes_shared_search(self):
-        search = _bare_search({})
-        self.addCleanup(search.close)
+    def _begin_abandoned_stream(self, search):
+        """Start a two-source stream whose slow worker blocks until released.
+
+        Consumes `started` and the first `source` event, leaving the stream
+        suspended while `slow` is still running.
+        """
         quick = SourceInfo("quick", "Quick", "quick", "local", local_name="quick")
         slow = SourceInfo("slow", "Slow", "slow", "local", local_name="slow")
         search.sources = {source.key: source for source in (quick, slow)}
@@ -2528,10 +2544,16 @@ class PaginationTests(unittest.TestCase):
 
         search._search_source = search_source
         stream = search.stream_search("anything", limit=1)
+        self.assertEqual(next(stream)["type"], "started")
+        self.assertEqual(next(stream)["type"], "source")
+        self.assertTrue(slow_started.wait(timeout=5))
+        return stream, release
+
+    def test_disconnected_stream_finishes_shared_search(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        stream, release = self._begin_abandoned_stream(search)
         try:
-            self.assertEqual(next(stream)["type"], "started")
-            self.assertEqual(next(stream)["type"], "source")
-            self.assertTrue(slow_started.wait(timeout=5))
             stream.close()
 
             self.assertTrue(search._inflight)
@@ -2542,6 +2564,147 @@ class PaginationTests(unittest.TestCase):
             self.assertFalse(search._inflight)
             cached = list(search.stream_search("anything", limit=1))
             self.assertEqual(cached[-1]["type"], "done")
+        finally:
+            release.set()
+            search._executor.shutdown(wait=True)
+
+    def test_disconnected_stream_releases_the_search_slot(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search._search_slots = threading.BoundedSemaphore(1)
+        search._drain_slots = _CountingSemaphore(2)
+        stream, release = self._begin_abandoned_stream(search)
+        try:
+            stream.close()
+
+            # The abandoned finalizer may still be draining `slow`, but it must
+            # not keep the user-facing slot while doing so.
+            self.assertTrue(search._search_slots.acquire(blocking=False))
+            search._search_slots.release()
+
+            release.set()
+            deadline = time.monotonic() + 5
+            while search._inflight and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(search._inflight)
+            # The background work releases its own slot exactly once, and the
+            # user-facing slot stays free after it finishes.
+            self.assertEqual(search._drain_slots.releases, 1)
+            self.assertTrue(search._search_slots.acquire(blocking=False))
+            search._search_slots.release()
+        finally:
+            release.set()
+            search._executor.shutdown(wait=True)
+
+    def test_abandoned_search_keeps_admission_when_drain_slots_are_exhausted(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search._search_slots = _CountingSemaphore(1)
+        search._drain_slots = threading.BoundedSemaphore(1)
+        self.assertTrue(search._drain_slots.acquire(blocking=False))
+        stream, release = self._begin_abandoned_stream(search)
+        pending = next(iter(search._inflight.values()))
+        try:
+            stream.close()
+
+            self.assertFalse(search._search_slots.acquire(blocking=False))
+            self.assertIs(next(iter(search._inflight.values())), pending)
+            self.assertFalse(pending.done())
+            with patch("zimantic.search.SEARCH_CLAIM_WAIT_SECONDS", 0):
+                retry = list(search.stream_search("anything", limit=1))
+            self.assertTrue(retry[0]["busy"])
+            self.assertIs(next(iter(search._inflight.values())), pending)
+
+            release.set()
+            search._executor.shutdown(wait=True)
+            self.assertFalse(search._inflight)
+            self.assertTrue(pending.done())
+            self.assertEqual(search._search_slots.releases, 1)
+            self.assertEqual(search.cache.stats()["size"], 1)
+            self.assertTrue(search._search_slots.acquire(blocking=False))
+            search._search_slots.release()
+        finally:
+            release.set()
+            search._drain_slots.release()
+            search._executor.shutdown(wait=True)
+
+    def test_undrained_queued_search_prevents_abandoned_retry_buildup(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search._search_slots = _CountingSemaphore(1)
+        search._drain_slots = threading.BoundedSemaphore(1)
+        self.assertTrue(search._drain_slots.acquire(blocking=False))
+        search.stream_update_interval = 0.001
+        source = SourceInfo("queued", "Queued", "queued", "local", local_name="queued")
+        search.sources = {source.key: source}
+        release = threading.Event()
+        started = [threading.Event(), threading.Event()]
+        calls = []
+
+        def occupy_worker(started):
+            started.set()
+            release.wait(timeout=5)
+
+        def search_source(source, *_args):
+            calls.append(source.key)
+            return SourceResult(source=source)
+
+        search._search_source = search_source
+        for event in started:
+            search._executor.submit(occupy_worker, event)
+        stream = search.stream_search("queued", limit=1)
+        try:
+            self.assertTrue(all(event.wait(timeout=5) for event in started))
+            with patch.object(
+                search._executor, "submit", wraps=search._executor.submit
+            ) as submit:
+                self.assertEqual(next(stream)["type"], "started")
+                self.assertEqual(next(stream)["type"], "progress")
+                pending = next(iter(search._inflight.values()))
+                stream.close()
+
+                self.assertFalse(pending.done())
+                for query in ("retry one", "retry two", "retry three"):
+                    retry = list(search.stream_search(query, limit=1))
+                    self.assertTrue(retry[0]["busy"])
+                self.assertEqual(submit.call_count, 1)
+
+            release.set()
+            search._executor.shutdown(wait=True)
+            self.assertEqual(calls, ["queued"])
+            self.assertTrue(pending.done())
+            self.assertFalse(search._inflight)
+            self.assertEqual(search._search_slots.releases, 1)
+        finally:
+            release.set()
+            stream.close()
+            search._drain_slots.release()
+            search._executor.shutdown(wait=True)
+
+    def test_abandoned_search_keeps_admission_when_finalizer_cannot_start(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search._search_slots = _CountingSemaphore(1)
+        search._drain_slots = _CountingSemaphore(1)
+        stream, release = self._begin_abandoned_stream(search)
+        pending = next(iter(search._inflight.values()))
+        try:
+            with patch(
+                "zimantic.search.threading.Thread.start",
+                side_effect=RuntimeError("cannot start finalizer"),
+            ):
+                stream.close()
+
+            self.assertEqual(search._drain_slots.releases, 1)
+            self.assertFalse(search._search_slots.acquire(blocking=False))
+            self.assertIs(next(iter(search._inflight.values())), pending)
+            self.assertFalse(pending.done())
+
+            release.set()
+            search._executor.shutdown(wait=True)
+            self.assertFalse(search._inflight)
+            self.assertTrue(pending.done())
+            self.assertEqual(search._search_slots.releases, 1)
         finally:
             release.set()
             search._executor.shutdown(wait=True)

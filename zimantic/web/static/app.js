@@ -32,7 +32,20 @@
             // Source/snapshot events coalesce into one render per interval so a
             // burst of completions can't thrash the DOM.
             const STREAM_RENDER_DELAY = 700;
-            const STREAM_SEARCH_TIMEOUT = 15000;
+            // A cold search on a Pi can run for a while before its first byte.
+            // Once data starts, the server emits a progress line roughly every
+            // 0.7 s, so a long silence means the transport stalled (mobile
+            // proxy, buffering gateway), not that the search is merely slow. A
+            // fixed wall-clock timeout used to abort healthy searches at 15 s
+            // and leave the server finishing them in the background.
+            // A waiter for an identical in-flight search can stay silent for
+            // SEARCH_CLAIM_WAIT_SECONDS (60 s) before it replays the result, so
+            // allow more than that before falling back to the JSON endpoint.
+            const STREAM_FIRST_BYTE_TIMEOUT = 90000;
+            const STREAM_IDLE_TIMEOUT = 30000;
+            // Safety net for a stream that keeps sending progress but never
+            // finishes. A healthy cold search is far shorter than this.
+            const STREAM_TOTAL_TIMEOUT = 300000;
             const BUSY_RETRY_BASE_DELAY = 1000;
             const BUSY_RETRY_MAX_DELAY = 8000;
             const BUSY_RETRY_LIMIT = 5;
@@ -2705,7 +2718,12 @@
                 });
             }
 
-            async function consumeStream(response, sequence) {
+            function retryStatusText(status, delay) {
+                const reason = status === 504 ? "Search gateway timed out" : "Server is busy";
+                return `${reason}; retrying in ${delay / 1000}s…`;
+            }
+
+            async function consumeStream(response, sequence, onPart) {
                 if (!response.body) throw new Error("streaming response has no body");
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -2791,6 +2809,9 @@
                 while (true) {
                     const part = await reader.read();
                     if (part.done) break;
+                    // Any chunk proves the stream is alive; restart the idle
+                    // timer rather than counting from the request start.
+                    if (onPart) onPart();
                     buffer += decoder.decode(part.value, { stream: true });
                     const lines = buffer.split("\n");
                     buffer = lines.pop() || "";
@@ -2885,20 +2906,35 @@
                     while (true) {
                         const streamController = new AbortController();
                         const abortStream = () => streamController.abort();
-                        const streamTimeout = setTimeout(
-                            () => streamController.abort(),
-                            STREAM_SEARCH_TIMEOUT,
-                        );
+                        let streamTimer = null;
+                        const armStreamTimeout = (delay) => {
+                            clearTimeout(streamTimer);
+                            streamTimer = setTimeout(abortStream, delay);
+                        };
+                        armStreamTimeout(STREAM_FIRST_BYTE_TIMEOUT);
+                        const streamDeadline = setTimeout(abortStream, STREAM_TOTAL_TIMEOUT);
                         controller.signal.addEventListener("abort", abortStream, { once: true });
                         let busy;
                         try {
                             const response = await fetch(appPath("/search/stream") + "?" + params, {
                                 signal: streamController.signal,
                             });
-                            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                            busy = await consumeStream(response, sequence);
+                            if (!response.ok) {
+                                const error = new Error(`HTTP ${response.status}`);
+                                error.status = response.status;
+                                try {
+                                    await response.body?.cancel();
+                                } catch (_) {
+                                    // The body was already closed.
+                                }
+                                throw error;
+                            }
+                            busy = await consumeStream(response, sequence, () =>
+                                armStreamTimeout(STREAM_IDLE_TIMEOUT),
+                            );
                         } finally {
-                            clearTimeout(streamTimeout);
+                            clearTimeout(streamTimer);
+                            clearTimeout(streamDeadline);
                             controller.signal.removeEventListener("abort", abortStream);
                         }
                         if (!busy || busyRetries >= BUSY_RETRY_LIMIT || sequence !== searchSequence) break;
@@ -2907,12 +2943,17 @@
                             BUSY_RETRY_BASE_DELAY * 2 ** (busyRetries - 1),
                             BUSY_RETRY_MAX_DELAY,
                         );
-                        $("status").textContent = `Server is busy; retrying in ${delay / 1000}s…`;
+                        $("status").textContent = retryStatusText(503, delay);
                         await waitForRetry(delay, controller.signal);
                     }
                 } catch (error) {
+                    // A gateway 503/504 on the stream usually means the request
+                    // never got its first byte (for example, while waiting for
+                    // an identical in-flight search). The JSON endpoint retries
+                    // those, so use the same path instead of a hard failure.
+                    const retryableStatus = error.status === 503 || error.status === 504;
                     if (
-                        error.name === "AbortError" &&
+                        (error.name === "AbortError" || retryableStatus) &&
                         !controller.signal.aborted &&
                         sequence === searchSequence
                     ) {
@@ -2921,7 +2962,11 @@
                         // that transport without changing the search result.
                         current.streaming = false;
                         await loadPage(pageIndex);
-                    } else if (error.name !== "AbortError" && sequence === searchSequence) {
+                    } else if (
+                        error.name !== "AbortError" &&
+                        !controller.signal.aborted &&
+                        sequence === searchSequence
+                    ) {
                         $("status").textContent = `Search failed: ${error.message}`;
                         announceSearchStatus($("status").textContent);
                     }
@@ -2960,10 +3005,46 @@
                 searchScopeParams(params, current.searchAll ? [] : current.searchKeys || []);
                 $("status").textContent = "Loading page…";
                 try {
-                    const response = await fetch(appPath("/search") + "?" + params, {
-                        signal: controller.signal,
-                    });
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    let response;
+                    let busyRetries = 0;
+                    while (true) {
+                        response = await fetch(appPath("/search") + "?" + params, {
+                            signal: controller.signal,
+                        });
+                        if (response.ok) break;
+                        // 503 is Zimantic's "all search slots are busy" reply;
+                        // 504 is a gateway giving up on a cold search. Both
+                        // usually succeed once the in-flight search finishes,
+                        // so retry instead of showing a hard failure.
+                        if (
+                            (response.status === 503 || response.status === 504) &&
+                            busyRetries < BUSY_RETRY_LIMIT &&
+                            sequence === searchSequence
+                        ) {
+                            // Release the discarded response so the connection
+                            // does not stay pinned until garbage collection.
+                            try {
+                                await response.body?.cancel();
+                            } catch (_) {
+                                // The body was already closed.
+                            }
+                            const retryAfter = Number(response.headers.get("Retry-After"));
+                            const delay = Math.min(
+                                retryAfter > 0
+                                    ? retryAfter * 1000
+                                    : BUSY_RETRY_BASE_DELAY * 2 ** busyRetries,
+                                BUSY_RETRY_MAX_DELAY,
+                            );
+                            busyRetries++;
+                            $("status").textContent = retryStatusText(
+                                response.status,
+                                delay,
+                            );
+                            await waitForRetry(delay, controller.signal);
+                            continue;
+                        }
+                        throw new Error(`HTTP ${response.status}`);
+                    }
                     const items = await response.json();
                     if (sequence !== searchSequence || controller !== pageController) return;
                     current.page = pageIndex;

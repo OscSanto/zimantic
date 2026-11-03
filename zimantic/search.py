@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -701,6 +701,11 @@ class Search:
             cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
+        # Abandoned streams keep their source futures running to warm the
+        # cache, but that background work needs its own bound: releasing the
+        # user-facing slot must not let disconnects pile up unbounded work on a
+        # memory-constrained host.
+        self._drain_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
         self._slot_condition = threading.Condition()
         self._executor = ThreadPoolExecutor(
             max_workers=self.source_workers,
@@ -3520,28 +3525,62 @@ class Search:
             raise
         finally:
             if abandoned and futures:
-                threading.Thread(
-                    target=self._finish_abandoned_search,
-                    args=(
-                        query,
-                        cache_key,
-                        generation,
-                        pending,
-                        sources,
-                        source,
-                        offset,
-                        page_size,
-                        debug,
-                        selective,
-                        futures,
-                        completed_futures,
-                        completed,
-                        reported_counts,
-                        acquired,
-                    ),
-                    name="zimantic-abandoned-search",
-                    daemon=True,
-                ).start()
+                # Transfer admission to a bounded background drain. If none is
+                # available, retain the search slot and in-flight key until
+                # the source futures really finish.
+                drain_slot = self._acquire_drain_slot()
+                if drain_slot:
+                    try:
+                        threading.Thread(
+                            target=self._finish_abandoned_search,
+                            args=(
+                                query,
+                                cache_key,
+                                generation,
+                                pending,
+                                sources,
+                                source,
+                                offset,
+                                page_size,
+                                debug,
+                                selective,
+                                futures,
+                                completed_futures,
+                                completed,
+                                reported_counts,
+                                drain_slot,
+                            ),
+                            name="zimantic-abandoned-search",
+                            daemon=True,
+                        ).start()
+                    except Exception:
+                        self._release_drain_slot()
+                        drain_slot = False
+                if drain_slot and acquired:
+                    self._release_search_slot()
+                if not drain_slot:
+                    def finish_without_drain_slot() -> None:
+                        self._finish_abandoned_search(
+                            query,
+                            cache_key,
+                            generation,
+                            pending,
+                            sources,
+                            source,
+                            offset,
+                            page_size,
+                            debug,
+                            selective,
+                            futures,
+                            completed_futures,
+                            completed,
+                            reported_counts,
+                            False,
+                        )
+
+                    self._finish_undrained_search(
+                        futures, finish_without_drain_slot
+                    )
             else:
                 for future in futures:
                     future.cancel()
@@ -3565,7 +3604,7 @@ class Search:
         completed_futures: set[Future[SourceResult]],
         completed: list[SourceResult],
         reported_counts: dict[str, int | None],
-        acquired: bool,
+        holds_drain_slot: bool,
     ) -> None:
         """Finish a search after its streaming client has disconnected."""
         inflight_key = (generation, cache_key)
@@ -3620,9 +3659,51 @@ class Search:
         except Exception:
             logger.exception("zimantic: abandoned search finalization failed")
         finally:
-            if acquired:
-                self._release_search_slot()
+            if holds_drain_slot:
+                self._release_drain_slot()
             self._finish_inflight(inflight_key, pending, cache_value)
+
+    def _finish_undrained_search(
+        self,
+        futures: list[Future[SourceResult]],
+        finish: Callable[[], None],
+    ) -> None:
+        """Finalize without a drain slot after all abandoned source work finishes."""
+        remaining = len(futures)
+        lock = threading.Lock()
+
+        def source_done(_future: Future[SourceResult]) -> None:
+            nonlocal remaining
+            with lock:
+                remaining -= 1
+                if remaining:
+                    return
+            try:
+                finish()
+            finally:
+                self._release_search_slot()
+
+        # Cancelling queued futures leaves their work items in the executor
+        # queue. Let them run before admitting more work, even if none has
+        # started yet, so repeated disconnects cannot grow that queue.
+        for future in futures:
+            future.add_done_callback(source_done)
+
+    def _acquire_drain_slot(self) -> bool:
+        """Take a background-drain slot without blocking.
+
+        Test doubles without the semaphore always drain, matching the old
+        behaviour.
+        """
+        slots = getattr(self, "_drain_slots", None)
+        if slots is None:
+            return True
+        return slots.acquire(blocking=False)
+
+    def _release_drain_slot(self) -> None:
+        slots = getattr(self, "_drain_slots", None)
+        if slots is not None:
+            slots.release()
 
     def _release_search_slot(self) -> None:
         self._search_slots.release()
