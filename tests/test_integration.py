@@ -1,7 +1,10 @@
+import gc
 import itertools
 import json
 import os
+import shutil
 import tempfile
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
@@ -42,11 +45,29 @@ def _temp_dir(test_case):
     """Yield a temporary directory and register its cleanup early.
 
     unittest runs cleanups in LIFO order, so a Search created later is closed
-    before Windows tries to delete the files it still has open.
+    before Windows tries to delete the files it still has open. Windows can
+    also briefly keep a freshly written archive locked (antivirus or the search
+    indexer), so retry the removal before giving up on a best-effort cleanup.
     """
-    directory = tempfile.TemporaryDirectory()
-    test_case.addCleanup(directory.cleanup)
-    yield Path(directory.name)
+    directory = Path(tempfile.mkdtemp())
+
+    def cleanup():
+        for delay in (0, 0.05, 0.1, 0.25, 0.5):
+            if delay:
+                time.sleep(delay)
+            try:
+                shutil.rmtree(directory)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                # Native handles close when their last Python reference goes
+                # away; collect before retrying in case a finalizer is pending.
+                gc.collect()
+        shutil.rmtree(directory, ignore_errors=True)
+
+    test_case.addCleanup(cleanup)
+    yield directory
 
 
 class _Page(Item):
