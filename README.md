@@ -207,7 +207,10 @@ missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolu
 only avoids the first scan when the target resolves `zim_dir` to the same absolute paths; otherwise
 those rows are treated as new and rescanned. The scan opens each ZIM once for metadata, illustration and
 counts, not article bodies, so it costs I/O rather than embedding time. A catalog written by a
-different schema version is also rebuilt.
+different schema version is also rebuilt. Both `build` and `serve` can create it: `build` upserts the
+metadata for each ZIM it actually indexes, while `serve` scans `zim_dir` and reconciles the complete
+catalog. If `build` skips an already-complete index, it does not need to open that ZIM just to update
+the catalog; starting `serve` or forcing a rebuild populates missing metadata.
 
 ## Use
 
@@ -676,6 +679,16 @@ Builds resume from the last saved batch. FAISS files are published atomically, a
 remains available while a full index builds. Changing between `--fast` and a full build after an
 interruption restarts that index, because fast rows have no vectors to reuse. `build --force` applies
 the configured extraction and preview settings while rebuilding the selected indexes.
+
+Use `--force` when a completed index must be regenerated even though its ZIM still has the same
+filename stem and byte size. This includes changing the embedding model or tokenizer, changing
+text-extraction/indexing behavior, replacing a ZIM with different content but the same size, converting
+a full index back to `--fast`, repairing a completed index whose `.faiss` file is missing, or
+intentionally replacing a suspect index. It is not normally needed when a ZIM's size changes (that
+automatically triggers a rebuild), when resuming an interrupted build, or when upgrading a fast index
+to a full index (which is automatic). `--force` deletes the existing SQLite, FAISS, and upgrade files
+before rebuilding, so use a separate `index_dir` for model migrations when the old indexes should be
+preserved.
 
 ### 2. Starting the server
 
