@@ -33,7 +33,7 @@ EMBED_DEVICES = frozenset(
 # profile keys: load_config computes them from the host unless the user sets them.
 _COMMON = {
     "zim_dir": "./zims",
-    "model_dir": "./model",
+    "model_dir": "./model/int8",
     "index_dir": "./indexes",
     "port": 8090,
     "web_base_path": "",

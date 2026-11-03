@@ -95,7 +95,7 @@ def _add_device_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _get_log_level(command: str, verbosity: int) -> int:
-    if command == "serve" and verbosity == 0 and sys.stderr.isatty():
+    if command in {"serve", "model"} and verbosity == 0 and sys.stderr.isatty():
         return logging.INFO
     return (logging.WARNING, logging.INFO, logging.DEBUG)[min(verbosity, 2)]
 
@@ -242,6 +242,49 @@ def _make_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("zimantic.pid"),
         help="file holding the server's PID (default: ./zimantic.pid)",
+    )
+
+    model_cmd = commands.add_parser(
+        "model",
+        help="download ONNX model files and tokenizer vocabularies",
+    )
+    _add_verbosity_argument(model_cmd)
+    model_cmd.add_argument(
+        "precision",
+        nargs="*",
+        choices=("fp32", "fp16", "int8"),
+        metavar="PRECISION",
+        help=(
+            "fp32, fp16 or int8; repeat for several. Default: int8 for CPU; "
+            "use fp16 with a GPU. The default model writes <dir>/<precision>; "
+            "other models write <dir>/<model>/<precision>"
+        ),
+    )
+    model_cmd.add_argument(
+        "--model",
+        default="multilingual-e5-small",
+        metavar="NAME",
+        help=(
+            "model to download: multilingual-e5-small (default), "
+            "multilingual-e5-base, multilingual-e5-large, e5-small-v2, "
+            "e5-base-v2 or e5-large-v2"
+        ),
+    )
+    model_cmd.add_argument(
+        "--dir",
+        type=Path,
+        metavar="DIR",
+        help="destination model root (default: model_dir from config.toml)",
+    )
+    model_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="re-download and replace existing files, even mismatched ones",
+    )
+    model_cmd.add_argument(
+        "--list",
+        action="store_true",
+        help="list supported models and precisions, then exit",
     )
     return parser
 
@@ -467,6 +510,49 @@ def _run_serve(args, cfg: dict) -> None:
     serve(search, cfg["port"], debug=args.debug)
 
 
+def _run_model(args, cfg: dict) -> None:
+    from .model_files import (
+        DEFAULT_MODEL,
+        DEFAULT_PRECISION,
+        MODEL_SPECS,
+        ModelDownloadError,
+        default_output_dir,
+        download_model,
+    )
+
+    if args.list:
+        for name, spec in sorted(MODEL_SPECS.items()):
+            marker = " (default)" if name == DEFAULT_MODEL else ""
+            print(f"{name}{marker}: {', '.join(spec.precisions())}")
+        print(f"default precision: {DEFAULT_PRECISION} (CPU); use fp16 with a GPU")
+        return
+
+    precisions = args.precision or [DEFAULT_PRECISION]
+    configured_dir = Path(cfg["model_dir"])
+    output_dir = (
+        args.dir
+        if args.dir is not None
+        else default_output_dir(args.model, configured_dir)
+    )
+    try:
+        downloads = download_model(
+            args.model, precisions, output_dir, force=args.force
+        )
+    except ModelDownloadError as error:
+        sys.exit(f"zimantic: {error}")
+
+    for precision, directory in downloads:
+        print(f"zimantic: {args.model} {precision} -> {directory}")
+    folders = [directory for _precision, directory in downloads]
+    if len(folders) == 1 and folders[0] != configured_dir:
+        print(f'zimantic: set model_dir = "{folders[0]}" to use this export')
+    elif len(folders) > 1:
+        print(
+            "zimantic: point model_dir at one of these folders; "
+            "use a separate index_dir when switching models and rebuild"
+        )
+
+
 def _run_reload(pid_file: Path) -> None:
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
@@ -541,8 +627,10 @@ def main() -> None:
     log_level = _get_log_level(args.command, args.verbose)
     _configure_logging(log_level)
 
-    # `reload` only needs the PID file.
-    if args.command in {"build", "serve"}:
+    # `reload` only needs the PID file, and `model --list` only needs the registry.
+    if args.command in {"build", "serve"} or (
+        args.command == "model" and not args.list
+    ):
         from .settings import load_config
 
         cfg = load_config()
@@ -555,6 +643,8 @@ def main() -> None:
         _run_build_locked(args, cfg, parser)
     elif args.command == "serve":
         _run_serve(args, cfg)
+    elif args.command == "model":
+        _run_model(args, cfg)
     elif args.command == "reload":
         _run_reload(args.pid)
 

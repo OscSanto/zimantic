@@ -68,19 +68,25 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
    ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
    ```
 
-3. **Download the default multilingual model into `model/`.**
+3. **Download the default multilingual model.**
 
    ```bash
-   mkdir -p model
-   curl -L -o model/model.onnx https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
-   curl -L -o model/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
+   zimantic model
    ```
 
-   English-only and larger multilingual models use the same `model_dir` layout; see [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns when `model.onnx` or `sentencepiece.bpe.model` differs from the documented default checksum, but continues to run.
+   This downloads the int8 export to `model/int8/model.onnx` and its tokenizer vocabulary. The example `config.toml` already points `model_dir` there. On a GPU host, download fp16 instead with `zimantic model fp16`; fp16 is faster on CUDA, ROCm, DirectML, and OpenVINO, while int8 is the smallest CPU-oriented default. In that case set `model_dir = "./model/fp16"`. `zimantic model --list` shows the other supported e5 models, and `zimantic model --help` shows the options. The equivalent manual download is:
+
+   ```bash
+   mkdir -p model/int8
+   curl -L -o model/int8/model.onnx https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
+   curl -L -o model/int8/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
+   ```
+
+   English-only and larger multilingual models use the same layout; see [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns when `model.onnx` or `sentencepiece.bpe.model` differs from a documented checksum, but continues to run.
 
 4. **Put ZIM files in `zims/`.** Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. **Check `config.toml`.** Set `zim_dir`, `model_dir`, and `index_dir` if the folders differ from the defaults. Set `kiwix_server` only when remote Kiwix sources are also needed.
+5. **Check `config.toml`.** The example already sets `model_dir = "./model/int8"`; change it if you downloaded a different precision or model. Also set `zim_dir` and `index_dir` if the folders differ from the defaults. Set `kiwix_server` only when remote Kiwix sources are also needed.
 
 6. **Verify the installation.**
 
@@ -104,12 +110,18 @@ uv sync --locked --no-dev
 zimantic --help
 ```
 
-Download the model with PowerShell instead of `curl`:
+Download the default model with the CLI:
 
 ```powershell
-New-Item -ItemType Directory -Force model | Out-Null
-Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model\model.onnx
-Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model\sentencepiece.bpe.model
+zimantic model
+```
+
+The example `config.toml` already points `model_dir` at `./model/int8`. On a GPU host use `zimantic model fp16` and change it to `./model/fp16`. The PowerShell equivalent of the manual int8 download is:
+
+```powershell
+New-Item -ItemType Directory -Force model\int8 | Out-Null
+Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model\int8\model.onnx
+Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model\int8\sentencepiece.bpe.model
 ```
 
 `zimantic reload` is unavailable on Windows because it relies on `SIGHUP`; restart `zimantic serve` instead. Stop the server before replacing or deleting a ZIM or index file, because Windows does not allow an open file to be replaced in place.
@@ -121,7 +133,7 @@ The installed CLI is separate from runtime data. Relative paths in `config.toml`
 ```
 ~/.local/share/zimantic/
 ├── config.toml          ← settings (paths below are its defaults)
-├── model/               ← model_dir: model.onnx + tokenizer vocabulary      (you download)
+├── model/               ← downloaded models; model/int8/ is model_dir         (you download)
 ├── zims/                ← zim_dir:   your .zim files                          (you download)
 ├── indexes/             ← index_dir: <name>.sqlite (+ <name>.faiss for full indexes)
 ├── catalog.sqlite       ← shared ZIM metadata cache (metadata only, no vectors)
@@ -178,9 +190,15 @@ zimantic serve --device cuda          # keep a CUDA GPU for query embedding
 zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
 zimantic serve --dev                  # alias for --debug
 zimantic reload                       # ask a running server to rescan indexes and ZIMs
+zimantic model                        # download the int8 export (CPU default)
+zimantic model fp16                   # download fp16; recommended with a GPU
+zimantic model fp32 fp16              # download selected precisions
+zimantic model --model e5-small-v2    # download another supported e5 model
+zimantic model --dir ./models         # write models/<precision>/ instead of model/
+zimantic model --list                 # show supported models and precisions
 ```
 
-`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it uses `zim_dir`. Existing ZIM indexes are skipped; pass `--force` to rebuild selected indexes. Logging defaults to warnings, except that `serve` uses info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
+`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it uses `zim_dir`. Existing ZIM indexes are skipped; pass `--force` to rebuild selected indexes. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
 
 ### Build behavior and locking
 
@@ -203,6 +221,8 @@ Tuning keys in `config.toml` are commented out by default, so Zimantic selects m
 Embedding can run on a GPU through ONNX Runtime's accelerated execution providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX Runtime build exposes, in CUDA, ROCm, DirectML, and OpenVINO order, and otherwise stays on the CPU.
 
 Supported values are `auto`, `gpu` (require an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm` (AMD), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection), and `coreml` (Apple). `--device` overrides the setting for one `build` or `serve` run. CoreML is never selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be slower than the CPU for this model.
+
+**Use the fp16 model with a GPU.** Download it with `zimantic model fp16` and point `model_dir` at that folder. Accelerated providers usually run fp16 faster than the default quantized int8 export, which is tuned for CPUs. Keep int8 for CPU-only hosts and small devices.
 
 The provider comes from the ONNX Runtime package, not from Zimantic. Replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`, `onnxruntime-directml`, or `onnxruntime-openvino`. If the requested provider is missing or cannot initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so the same configuration also runs on machines without a GPU. If a run fails on the device after initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead of failing the build.
 
@@ -316,28 +336,26 @@ The default is `multilingual-e5-small`, but Zimantic loads whatever ONNX graph a
 
 Zimantic chooses by which vocabulary file is present. If a directory contains both, it reads `tokenizer_config.json` when available; otherwise it keeps the historical SentencePiece choice. The ONNX graph cannot reliably identify its tokenizer, so this file-based switch is the dependable signal. Apart from the vocabulary, the model must follow the same e5 contract: `input_ids` and `attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state` output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes.
 
+`zimantic model` downloads the Xenova ONNX exports from a pinned revision and verifies each file's SHA-256 before replacing the destination. For the default model, fp32 is about 470 MB, fp16 about 235 MB, and int8 about 118 MB (the int8 export is Xenova's `model_quantized.onnx`). The default is int8, which is the smallest download and is optimized for CPU inference. **If you run embeddings on a GPU, prefer `zimantic model fp16`**: accelerated providers generally execute fp16 faster than quantized int8. Use fp32 only when comparing against a full-precision baseline. The probe check described below lets indexes built with one precision be served with another without re-embedding.
+
 To try the larger multilingual model:
 
 ```bash
-mkdir -p model-e5-base
-curl -L -o model-e5-base/model.onnx https://huggingface.co/Xenova/multilingual-e5-base/resolve/main/onnx/model_quantized.onnx
-curl -L -o model-e5-base/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-base/resolve/main/sentencepiece.bpe.model
+zimantic model int8 --model multilingual-e5-base
 ```
 
-Replace `base` with `large` in both URLs to try `multilingual-e5-large`. For the English-only `e5-small-v2`, download its WordPiece vocabulary instead:
+Replace `base` with `large` in the model name to try `multilingual-e5-large`. Non-default models get their own folder under the model root, so the base example writes `model/multilingual-e5-base/int8` (and does not replace the default model). For the English-only `e5-small-v2`, the command selects its WordPiece vocabulary automatically:
 
 ```bash
-mkdir -p model-e5-small-v2
-curl -L -o model-e5-small-v2/model.onnx https://huggingface.co/Xenova/e5-small-v2/resolve/main/onnx/model_quantized.onnx
-curl -L -o model-e5-small-v2/vocab.txt https://huggingface.co/Xenova/e5-small-v2/resolve/main/vocab.txt
+zimantic model int8 --model e5-small-v2 --dir model-e5-small-v2
 ```
 
-The same layout works for other BERT WordPiece e5-v2 models such as `e5-base-v2`.
+The same command works for other BERT WordPiece e5-v2 models such as `e5-base-v2` and `e5-large-v2`; run `zimantic model --list` for the full set. Each precision goes into its own folder (`model-e5-small-v2/int8`, for example), so you can compare or switch without redownloading. Pass `--force` to replace an existing file whose checksum does not match.
 
-Point `model_dir` at the new folder, use a separate `index_dir` so the old indexes stay usable, and rebuild every index:
+Point `model_dir` at one precision folder from the new model, use a separate `index_dir` so the old indexes stay usable, and rebuild every index:
 
 ```toml
-model_dir = "./model-e5-small-v2"
+model_dir = "./model-e5-small-v2/int8"
 index_dir = "./indexes-e5-small-v2"
 ```
 
@@ -436,7 +454,7 @@ The page automatically lists local ZIM sources. With `kiwix_server`, it also dis
 | No index, archive has a native full-text index | no | no | yes |
 | No index, no native full-text index | no | no | no — library only, not searchable |
 
-`serve --fast` skips the model and all vectors, leaving title-word and full-text search. A normal `serve` loads the model in the background; if `model/` is missing or unreadable it logs a warning and keeps serving lexical results. Vectors built with a different embedding model are ignored in the same way. `kiwix-serve` is not involved in any local row of the table: the ZIM archive is searched directly, and its embedded full-text index is not a separate Kiwix index file. With `kiwix_server` set, remote Kiwix catalog sources are searched through kiwix-serve's full-text API instead.
+`serve --fast` skips the model and all vectors, leaving title-word and full-text search. A normal `serve` loads the model in the background; if `model_dir` is missing or unreadable it logs a warning and keeps serving lexical results. Vectors built with a different embedding model are ignored in the same way. `kiwix-serve` is not involved in any local row of the table: the ZIM archive is searched directly, and its embedded full-text index is not a separate Kiwix index file. With `kiwix_server` set, remote Kiwix catalog sources are searched through kiwix-serve's full-text API instead.
 
 FastAPI serves a lightweight HTML page that is accessible from any browser at `http://<host>:8090` (the `port` in `config.toml`). To serve it under a path such as `/zimantic`, set `web_base_path = "/zimantic"` and point a reverse proxy at the server with that prefix stripped:
 

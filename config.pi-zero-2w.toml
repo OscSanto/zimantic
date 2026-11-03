@@ -2,7 +2,8 @@
 # Copy this file to config.toml to use them. Build indexes elsewhere or use `build --fast`.
 
 zim_dir = "./zims"
-model_dir = "./model"
+# Matches `zimantic model` (int8 default). Use ./model/fp16 with a GPU.
+model_dir = "./model/int8"
 index_dir = "./indexes"
 
 port = 8090

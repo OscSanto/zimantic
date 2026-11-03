@@ -311,5 +311,76 @@ class BuildWorkerTests(unittest.TestCase):
                 main_module.main()
 
 
+class ModelCommandTests(unittest.TestCase):
+    def test_accepts_multiple_precisions_and_model_options(self):
+        import zimantic.__main__ as main_module
+
+        parser = main_module._make_parser()
+        args = parser.parse_args(
+            ["model", "fp32", "int8", "--model", "e5-small-v2", "--dir", "models"]
+        )
+
+        self.assertEqual(args.precision, ["fp32", "int8"])
+        self.assertEqual(args.model, "e5-small-v2")
+        self.assertEqual(args.dir, Path("models"))
+        self.assertFalse(args.force)
+
+    def test_unknown_precision_is_rejected(self):
+        import zimantic.__main__ as main_module
+
+        parser = main_module._make_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["model", "int4"])
+
+    def test_list_does_not_load_config(self):
+        import contextlib
+        import io
+
+        import zimantic.__main__ as main_module
+        from zimantic import settings
+
+        output = io.StringIO()
+        with (
+            patch.object(main_module.sys, "argv", ["zimantic", "model", "--list"]),
+            patch.object(
+                settings,
+                "load_config",
+                side_effect=AssertionError("config loaded for --list"),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            main_module.main()
+
+        self.assertIn("multilingual-e5-small (default): fp32, fp16, int8", output.getvalue())
+        self.assertIn("default precision: int8 (CPU)", output.getvalue())
+
+    def test_omitted_precisions_download_int8_only(self):
+        import zimantic.__main__ as main_module
+        from zimantic import model_files, settings
+
+        seen = []
+
+        def fake_download(model, precisions, output_dir, force=False):
+            seen.append((model, precisions, output_dir, force))
+            return [(precision, output_dir / precision) for precision in precisions]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"model_dir": str(Path(tmp) / "model")}
+            with (
+                patch.object(
+                    main_module.sys, "argv", ["zimantic", "model"]
+                ),
+                patch.object(settings, "load_config", return_value=config),
+                patch.object(main_module, "_configure_logging"),
+                patch.object(model_files, "download_model", side_effect=fake_download),
+            ):
+                main_module.main()
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], "multilingual-e5-small")
+        self.assertEqual(seen[0][1], ["int8"])
+        self.assertEqual(seen[0][2], Path(config["model_dir"]))
+
+
 if __name__ == "__main__":
     unittest.main()

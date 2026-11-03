@@ -13,6 +13,7 @@ import numpy as np
 import onnxruntime as ort
 import sentencepiece
 
+from .model_files import DEFAULT_MODEL_CHECKSUMS
 from .model_meta import (
     MODEL_PROBE_MEAN_COSINE,
     MODEL_PROBE_MIN_COSINE,
@@ -159,11 +160,10 @@ def _low_memory_host() -> bool:
     return 0.0 < total_gb <= LOW_MEMORY_GB
 
 
-# Checksums for the model files documented in the README.
-EXPECTED_CHECKSUMS = {
-    "model.onnx": "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193",
-    "sentencepiece.bpe.model": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
-}
+# Checksums for the model files documented in the README. Every documented
+# precision of the default model is accepted, so downloading fp32 or fp16 does
+# not produce a checksum warning for a file this project downloaded itself.
+EXPECTED_CHECKSUMS = DEFAULT_MODEL_CHECKSUMS
 
 # Leave a core for search and the web server.
 DEFAULT_EMBED_THREADS = max(1, (os.cpu_count() or 1) - 1)
@@ -238,10 +238,16 @@ def verify_model_files(model_dir, warn=None) -> dict[str, str]:
         except OSError:
             continue  # a missing file fails later, with a clearer error
         actual_hashes[name] = actual
-        if actual != expected:
+        if isinstance(expected, str):
+            matches = actual == expected
+            documented = expected
+        else:
+            matches = actual in expected
+            documented = ", ".join(sorted(expected))
+        if not matches:
             warn(
-                f"zimantic: warning: {name} does not match the expected checksum "
-                f"(got {actual}, expected {expected}); search results may differ "
+                f"zimantic: warning: {name} does not match a documented checksum "
+                f"(got {actual}, expected {documented}); search results may differ "
                 "from the documented model"
             )
     return actual_hashes
