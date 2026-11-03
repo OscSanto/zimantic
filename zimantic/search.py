@@ -40,6 +40,7 @@ from .content.reader import (
     truncate_at_word_boundary,
 )
 from .contracts import SourceInfo, SourceResult
+from .libzim_compat import get_entry_by_id, search_paths
 from .model_meta import (
     MODEL_PROBE_SHAPE_KEY,
     MODEL_PROBE_TEXTS_KEY,
@@ -2483,7 +2484,7 @@ class Search:
         for _ in range(RANDOM_ARTICLE_ATTEMPTS):
             point = secrets.randbelow(upper)
             try:
-                entry = archive._get_entry_by_id(point)
+                entry = get_entry_by_id(archive, point)
             except (KeyError, RuntimeError, ValueError, IndexError):
                 continue
             if self._is_random_article_entry(entry):
@@ -2497,7 +2498,7 @@ class Search:
             ids = []
             for point in range(upper):
                 try:
-                    entry = archive._get_entry_by_id(point)
+                    entry = get_entry_by_id(archive, point)
                 except (KeyError, RuntimeError, ValueError, IndexError):
                     continue
                 if self._is_random_article_entry(entry):
@@ -2506,7 +2507,7 @@ class Search:
         if not ids:
             return None
         try:
-            entry = archive._get_entry_by_id(ids[secrets.randbelow(len(ids))])
+            entry = get_entry_by_id(archive, ids[secrets.randbelow(len(ids))])
         except (KeyError, RuntimeError, ValueError, IndexError):
             return None
         return entry.path
@@ -3774,9 +3775,8 @@ class Search:
             # libzim's Searcher is not documented as thread-safe: serialize it.
             with index.lock:
                 try:
-                    paths = searcher.search(
-                        Query().set_query(fulltext_query or query)
-                    ).getResults(0, count)
+                    search = searcher.search(Query().set_query(fulltext_query or query))
+                    paths = search_paths(search, 0, count)
                     for rank, path in enumerate(paths):
                         try:
                             entry = archive.get_entry_by_path(path)

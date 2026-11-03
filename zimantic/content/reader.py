@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlsplit
 
 from libzim.reader import Archive
 
+from ..libzim_compat import get_entry_by_id
 from ..redirects import RedirectError, resolve_redirect_entry
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class EntrySource(Protocol):
     in-memory archives without reimplementing the whole ``Archive`` API.
     """
 
-    def _get_entry_by_id(self, entry_id: int, /) -> Any: ...
+    def get_entry_by_id(self, entry_id: int, /) -> Any: ...
 
 
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
@@ -1065,7 +1066,7 @@ def read_entry(
     timeout so nothing is silently dropped offline.
 
     """
-    entry = zim._get_entry_by_id(i)
+    entry = get_entry_by_id(zim, i)
     if entry.is_redirect:
         target = _redirect_target(entry)
         if target is None:

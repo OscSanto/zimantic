@@ -1,10 +1,11 @@
 """Pre/post-install check of the third-party APIs zimantic depends on.
 
-``zimantic`` reaches into libzim through a few private and semi-private calls
-(``Archive._get_entry_by_id``, ``Entry._index``, ``Entry.get_item``, the
-``Searcher``/``Query`` pair). A libzim upgrade can change them silently, so this
-module builds a tiny real ZIM and asserts the calls still exist and still
-produce the outputs the indexer and searcher expect.
+``zimantic`` reaches into libzim through a few private, semi-private and
+renamed calls (entry lookup by id, ``Entry._index``, ``Entry.get_item``, the
+``Searcher``/``Query`` pair, and search result access). A libzim upgrade can
+change them silently, so this module builds a tiny real ZIM and asserts the
+compatibility helpers still produce the outputs the indexer and searcher
+expect.
 
 Run it after installing dependencies:
 
@@ -19,6 +20,7 @@ from libzim.search import Query, Searcher
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.content.reader import read_entry
+from zimantic.libzim_compat import get_entry_by_id, search_paths
 
 BODY_ALPHA = (
     "<html><body><p>Alpha is a sufficiently long article about tires and "
@@ -79,14 +81,14 @@ class LibzimRuntimeApiTests(unittest.TestCase):
         del cls.archive
         cls._tmp.cleanup()
 
-    def test_archive_exposes_the_private_entry_lookup(self):
-        entry = self.archive._get_entry_by_id(0)
+    def test_archive_exposes_the_entry_lookup(self):
+        entry = get_entry_by_id(self.archive, 0)
         self.assertIsInstance(entry._index, int)
         self.assertTrue(entry.path)
         self.assertTrue(entry.title)
 
     def test_private_entry_index_matches_path_lookup(self):
-        entry = self.archive._get_entry_by_id(0)
+        entry = get_entry_by_id(self.archive, 0)
         by_path = self.archive.get_entry_by_path(entry.path)
         self.assertEqual(by_path._index, entry._index)
 
@@ -107,17 +109,15 @@ class LibzimRuntimeApiTests(unittest.TestCase):
     def test_fulltext_searcher_returns_paths(self):
         if not self.archive.has_fulltext_index:
             self.skipTest("libzim was built without a full-text index")
-        paths = list(
-            Searcher(self.archive).search(Query().set_query("brakes")).getResults(0, 10)
-        )
-        self.assertIn("Beta", paths)
+        search = Searcher(self.archive).search(Query().set_query("brakes"))
+        self.assertIn("Beta", search_paths(search, 0, 10))
 
     def test_read_entry_produces_an_excerpt(self):
         # End-to-end: the real Archive -> private lookup -> text extraction.
         row = next(
             read_entry(self.archive, index)
             for index in range(self.archive.entry_count)
-            if not self.archive._get_entry_by_id(index).is_redirect
+            if not get_entry_by_id(self.archive, index).is_redirect
         )
         assert row is not None
         self.assertEqual(len(row), 5)

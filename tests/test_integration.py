@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic import build as build_module
+from zimantic.libzim_compat import get_entry_by_id
 from zimantic.search import Search
 from zimantic.web.app import create_app
 
@@ -438,7 +439,7 @@ class LocalIntegrationTests(unittest.TestCase):
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
-                entry = archive._get_entry_by_id(i)
+                entry = get_entry_by_id(archive, i)
                 if entry.path == "Alpha":
                     article_id = i
                 elif not entry.is_redirect:
@@ -485,7 +486,7 @@ class LocalIntegrationTests(unittest.TestCase):
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
-                entry = archive._get_entry_by_id(i)
+                entry = get_entry_by_id(archive, i)
                 if entry.path == "Alpha":
                     article_id = i
                 elif not entry.is_redirect:
