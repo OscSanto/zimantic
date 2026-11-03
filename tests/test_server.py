@@ -234,6 +234,11 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(response.headers["content-type"].startswith("image/x-icon"))
         self.assertTrue(response.content.startswith(b"\x00\x00\x01\x00"))
 
+        response = self.client.get("/favicon.svg")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("image/svg+xml"))
+        self.assertIn(b"<svg", response.content)
+
         for path in (
             "/favicon-16x16.png",
             "/favicon-32x32.png",

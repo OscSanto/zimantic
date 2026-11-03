@@ -167,6 +167,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         ("/app.js", web_app.APP_JS, "application/javascript"),
         ("/indexeddb-shim.js", web_app.INDEXEDDB_SHIM, "application/javascript"),
         ("/favicon.ico", web_app.FAVICON, "image/x-icon"),
+        ("/favicon.svg", web_app.FAVICON_SVG, "image/svg+xml"),
         ("/favicon-16x16.png", web_app.FAVICON_16, "image/png"),
         ("/favicon-32x32.png", web_app.FAVICON_32, "image/png"),
         ("/apple-touch-icon.png", web_app.APPLE_TOUCH_ICON, "image/png"),
