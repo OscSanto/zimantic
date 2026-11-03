@@ -1382,6 +1382,60 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIsNotNone(index.faiss_index)
             self.assertTrue(any("probes match" in line for line in logs.output))
 
+    def test_concurrent_probe_checks_share_cached_embeddings(self):
+        from zimantic.embed import serialize_model_probes
+
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")
+        probes = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
+        for key, value in serialize_model_probes(
+            ["first probe", "second probe"], probes
+        ).items():
+            db.execute("INSERT INTO meta VALUES (?, ?)", (key, value))
+        db.commit()
+
+        search = _bare_search({})
+        search.embedder = object()
+        search._probe_cache = {}
+        search._probe_cache_lock = threading.Lock()
+        started = threading.Event()
+        release = threading.Event()
+        second_call = threading.Event()
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def embed_probe(_embedder, _texts):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+                if calls > 1:
+                    second_call.set()
+            started.set()
+            if not release.wait(2):
+                raise RuntimeError("test probe release timed out")
+            return probes
+
+        executor = ThreadPoolExecutor(max_workers=2)
+        futures = []
+        try:
+            with patch("zimantic.embed.embed_probe_texts", side_effect=embed_probe):
+                futures = [
+                    executor.submit(
+                        search._model_probes_compatible, db, Path("index.sqlite")
+                    )
+                    for _ in range(2)
+                ]
+                self.assertTrue(started.wait(2))
+                self.assertFalse(second_call.wait(1))
+        finally:
+            release.set()
+            executor.shutdown(wait=True)
+            db.close()
+
+        results = [future.result() for future in futures]
+        self.assertEqual(calls, 1)
+        self.assertTrue(all(result[0] for result in results))
+
     def test_mismatched_probes_keep_vectors_disabled(self):
         class _ProbeEmbedder:
             def __init__(self, vectors):

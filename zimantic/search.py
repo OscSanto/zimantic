@@ -1077,14 +1077,17 @@ class Search:
         if cache is not None and lock is not None:
             with lock:
                 current = cache.get(key)
-        if current is None:
+                if current is None:
+                    try:
+                        current = embed_probe_texts(embedder, texts)
+                    except Exception as error:  # a broken probe must not hide the index
+                        return False, f"probe embedding failed: {error}"
+                    cache[key] = current
+        elif current is None:
             try:
                 current = embed_probe_texts(embedder, texts)
             except Exception as error:  # a broken probe must not hide the index
                 return False, f"probe embedding failed: {error}"
-            if cache is not None and lock is not None:
-                with lock:
-                    cache[key] = current
         try:
             compatible, mean_cosine, min_cosine = model_probes_match(
                 texts, stored_vectors, current=current
