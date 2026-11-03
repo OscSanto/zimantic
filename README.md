@@ -28,15 +28,18 @@ Zero 2 W.
 - **Source-aware UI**: discover sources, sort matching sources by count, select multiple source filters, and reset with **All Sources**; the top 10 sources are shown with an **Other** catch-all when needed, while searching sources shows up to 30 matches plus a **Show N more** control for the rest. Selected sources stay visible, so choosing **Other** expands that group into its individual filters. A selection of at most `min(10, 35%)` of available sources is searched on its own when it starts a search and is not cached; a larger selection is promoted to one full search whose ranked pool is cached, and the filters narrow what is displayed. Source filters chosen after a full search are display-only and reuse that pool when the source was part of it. Selecting a source that the full search did not include (for example one beyond `max_remote_sources`) starts a new scoped search instead of filtering an empty page. Dated and flavour variants of one book are collapsed to a single source here as well as in the library view.
 - **Installed library view**: browse local ZIMs at `/library` in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. Dated and flavour variants of the same local book are collapsed to one card, keeping the largest readable/searchable copy (a larger archive is usually the more complete download and may contain larger artwork or media). **Shuffle** reorders the cards. An unreadable archive stays in the grid marked **Unavailable** with the catalog's reason. Click a ZIM's title (or **Details**) for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags and content-type breakdown. Prefix terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
 - **Lightweight and offline**: runs on low-resource devices, such as a Raspberry Pi Zero 2 W (512 MB RAM), using roughly 250–325 MB while serving (see [Measured memory use](#measured-memory-use)).
-- **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional. A fast index and `serve --fast` skip the model and FAISS entirely.
+- **Degrades gracefully**: title-word and full-text search work as soon as an index exists; vectors are optional, and a ZIM with no index at all remains searchable through its native full-text index. A fast index and `serve --fast` skip the model and FAISS entirely; a missing model, FAISS file or mismatched model fingerprint falls back to lexical search instead of failing the server.
 - **Multi-user**: multiple searches can run at once (`max_concurrent_searches`); identical queries in flight share one computation, and repeated queries are answered from a small in-memory cache bounded by `cache_size` and `cache_bytes`. Small one-off source selections are intentionally not cached (see the source-aware UI note above).
 - **Built-in article serving**: local result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
 - **Web page and JSON API**: search from any browser on the network or use your own programs.
   Routes use short paths such as `/search`, `/library`, `/content/<zim>/<path>`, `/article/<zim>/<path>` and `/health`.
 
-Zimantic can search and serve articles from its local ZIM archives. An optional
-[kiwix-serve](https://kiwix.org/en/applications/) remains useful for sources that are only
-available through a Kiwix server, but local indexed results do not require it.
+Zimantic searches the local ZIM archives themselves, not a separate Kiwix index. `zimantic build`
+adds semantic and SQLite title-word search, but it is not a prerequisite for `zimantic serve`: an
+unbuilt ZIM is still searched through the archive's own full-text index, and articles, assets and
+homepages are served directly from the archive. An optional
+[kiwix-serve](https://kiwix.org/en/applications/) remains useful only for sources that are available
+through a Kiwix server, where Zimantic can also search them with kiwix-serve's full-text API.
 
 ## Requirements
 
@@ -710,10 +713,29 @@ and remote XML responses are capped at 64 MiB by default; both limits are config
 search uses at most `max_remote_sources` (default 100) of the discovered remote sources; selecting a
 remote source explicitly always searches it.
 
-A finished index remains usable without FAISS: the server falls back to **title-word and ZIM full-text
-search**. A ZIM without a SQLite index is also searchable through its native full-text index,
-but has no SQLite title-word or semantic search until it is built. `serve --fast` also skips the
-model and all vectors.
+**Graceful degradation.** `serve` works without running `build` first and without `catalog.sqlite`:
+startup scans `zim_dir`, rebuilds missing catalog metadata, and treats every usable archive as a
+search source. A finished index remains usable without FAISS: the server falls back to **title-word
+and ZIM full-text search**. A ZIM with no SQLite index is still searched through its native full-text
+index, but has no SQLite title-word ranking and no semantic search until it is built. Native
+full-text search usually matches titles too, but without the dedicated title-word ranking and title
+bonus. An unindexed ZIM that has no native full-text index has nothing to search, so it is skipped
+as a search source rather than advertised as an available but empty one; it still appears in
+`/library` with its catalog metadata, but `/sources` omits it and it cannot be selected for a search.
+
+| What exists for a local ZIM | Meaning (FAISS) | Title words (SQLite FTS5) | Native full-text (libzim) |
+|---|:---:|:---:|:---:|
+| Full index (`.sqlite` plus matching `.faiss`) | yes | yes | yes |
+| Fast index (`.sqlite` only) | no | yes | yes |
+| No index, archive has a native full-text index | no | no | yes |
+| No index, no native full-text index | no | no | no — library only, not searchable |
+
+`serve --fast` skips the model and all vectors, leaving title-word and full-text search. A normal
+`serve` loads the model in the background; if `model/` is missing or unreadable it logs a warning and
+keeps serving lexical results. Vectors built with a different embedding model are ignored in the same
+way. `kiwix-serve` is not involved in any local row of the table: the ZIM archive is searched directly,
+and its embedded full-text index is not a separate Kiwix index file. With `kiwix_server` set, remote
+Kiwix catalog sources are searched through kiwix-serve's full-text API instead.
 
 FastAPI serves a lightweight HTML page that is accessible from any browser at
 `http://<host>:8090` (the `port` in `config.toml`). To serve it under a path such
