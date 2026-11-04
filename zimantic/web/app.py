@@ -29,6 +29,7 @@ ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"
 APP_CSS = ASSET_DIR / "app.css"
 APP_JS = ASSET_DIR / "app.js"
+I18N = ASSET_DIR / "i18n.js"
 INDEXEDDB_SHIM = ASSET_DIR / "indexeddb-shim.js"
 FAVICON = ASSET_DIR / "favicon.ico"
 FAVICON_SVG = ASSET_DIR / "favicon.svg"
@@ -345,15 +346,19 @@ def _article_toolbar(
             '<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
             f'<a class="zimantic-toolbar-article" data-zimantic-permalink '
             f'data-zimantic-action="copy" href="{permalink_url}" '
-            f'title="Open or copy this article\'s permalink">'
+            f'title="Open or copy this article\'s permalink" '
+            f'data-i18n-title="Open or copy this article\'s permalink">'
             f'<span class="zimantic-toolbar-article-full">{article_title}</span>'
-            '<span class="zimantic-toolbar-article-short">'
+            '<span class="zimantic-toolbar-article-short" '
+            'data-i18n="Permalink">'
             "Permalink</span></a>"
         )
         random_html = (
             f'<a href="{random_url}" data-zimantic-action="random" '
             f'data-zimantic-random-zim-url="{html_escape(base_path + "/random", quote=True)}" '
-            f'title="Open a random article (Alt-click for a random ZIM)">Random</a>'
+            f'title="Open a random article (Alt-click for a random ZIM)" '
+            f'data-i18n-title="Open a random article (Alt-click for a random ZIM)" '
+            f'data-i18n="Random">Random</a>'
         )
 
     home_html = ""
@@ -363,7 +368,7 @@ def _article_toolbar(
             f'<a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" '
             f'title="Open this ZIM\'s homepage ({zim_name})">'
             f'<span class="zimantic-toolbar-home-full">{html_escape(site_name)}</span>'
-            '<span class="zimantic-toolbar-home-short">Home</span>'
+            '<span class="zimantic-toolbar-home-short" data-i18n="Home">Home</span>'
             "</a>"
         )
         if show_zim_search:
@@ -373,7 +378,9 @@ def _article_toolbar(
                 f'data-zimantic-zim="{zim_name}">'
                 '<input type="search" class="zimantic-toolbar-zim-search-input" '
                 'data-zimantic-zim-search-input placeholder="Search this ZIM" '
-                'aria-label="Search this ZIM" autocomplete="off" '
+                'data-i18n-placeholder="Search this ZIM" '
+                'aria-label="Search this ZIM" data-i18n-aria-label="Search this ZIM" '
+                'autocomplete="off" '
                 'role="combobox" aria-autocomplete="list" aria-expanded="false" '
                 'aria-controls="zimanticZimSuggestions">'
                 '<div class="zimantic-toolbar-suggestions" '
@@ -383,31 +390,44 @@ def _article_toolbar(
             )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
-    <button type="button" data-zimantic-action="close" title="Close article">Close</button>
-    <span class="zimantic-toolbar-context-nav" role="group" aria-label="Adjacent search results">
+    <button type="button" data-zimantic-action="close" title="Close article"
+      data-i18n="Close" data-i18n-title="Close article">Close</button>
+    <span class="zimantic-toolbar-context-nav" role="group"
+      aria-label="Adjacent search results" data-i18n-aria-label="Adjacent search results">
       <button type="button" data-zimantic-action="previous"
         data-zimantic-context-previous hidden disabled aria-label="Previous search result"
-        title="Open the previous search result">←</button>
+        data-i18n-aria-label="Previous search result"
+        title="Open the previous search result"
+        data-i18n-title="Open the previous search result">←</button>
       <button type="button" data-zimantic-action="next"
         data-zimantic-context-next hidden disabled aria-label="Next search result"
-        title="Open the next search result">→</button>
+        data-i18n-aria-label="Next search result"
+        title="Open the next search result"
+        data-i18n-title="Open the next search result">→</button>
     </span>
     {random_html}
     {home_html}
     <span class="zimantic-toolbar-breadcrumbs">{breadcrumb_html}</span>
   </div>
   <div class="zimantic-toolbar-actions">
-    <span class="zimantic-toolbar-parent-nav-group" role="group" aria-label="Adjacent links in parent page">
+    <span class="zimantic-toolbar-parent-nav-group" role="group"
+      aria-label="Adjacent links in parent page"
+      data-i18n-aria-label="Adjacent links in parent page">
       <button type="button" class="zimantic-toolbar-parent-nav"
         data-zimantic-action="parent-previous" data-zimantic-parent-previous
         hidden disabled aria-label="Previous link in parent page"
-        title="Open the previous link in the parent page">↑</button>
+        data-i18n-aria-label="Previous link in parent page"
+        title="Open the previous link in the parent page"
+        data-i18n-title="Open the previous link in the parent page">↑</button>
       <button type="button" class="zimantic-toolbar-parent-nav"
         data-zimantic-action="parent-next" data-zimantic-parent-next
         hidden disabled aria-label="Next link in parent page"
-        title="Open the next link in the parent page">↓</button>
+        data-i18n-aria-label="Next link in parent page"
+        title="Open the next link in the parent page"
+        data-i18n-title="Open the next link in the parent page">↓</button>
     </span>
-    <a class="zimantic-toolbar-search" href="{base_path}/" data-zimantic-action="home" title="Search your library">Zimantic</a>
+    <a class="zimantic-toolbar-search" href="{base_path}/" data-zimantic-action="home"
+      title="Search your library" data-i18n-title="Search your library">Zimantic</a>
     {zim_search_html}
   </div>
   <span class="zimantic-toolbar-status" data-zimantic-toolbar-status aria-live="polite"></span>
@@ -847,6 +867,9 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
     start_faiss = getattr(searchClass, "start_faiss", None)
     if callable(start_faiss):
         start_faiss()
+    start_fulltext = getattr(searchClass, "start_fulltext_isolation", None)
+    if callable(start_fulltext):
+        start_fulltext()
     try:
         uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
     finally:

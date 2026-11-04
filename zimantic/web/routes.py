@@ -166,6 +166,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     static_routes = (
         ("/app.css", web_app.APP_CSS, "text/css"),
         ("/app.js", web_app.APP_JS, "application/javascript"),
+        ("/i18n.js", web_app.I18N, "application/javascript"),
         ("/indexeddb-shim.js", web_app.INDEXEDDB_SHIM, "application/javascript"),
         ("/favicon.ico", web_app.FAVICON, "image/x-icon"),
         ("/favicon.svg", web_app.FAVICON_SVG, "image/svg+xml"),

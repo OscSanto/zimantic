@@ -856,7 +856,12 @@ class ZimCatalog:
                     self._upsert(metadata_from_archive(archive, path_str))
                 stats["updated" if row is not None else "added"] += 1
             except Exception as error:
-                logger.warning("zimantic: skipping invalid ZIM %s (%s)", path_str, str(error))
+                logger.warning(
+                    "zimantic: skipping invalid ZIM %s (%s); re-download the "
+                    "archive or run zimcheck to see what is wrong",
+                    path_str,
+                    str(error),
+                )
                 self.mark_error(path_str, error, size=stat.st_size, mtime=stat.st_mtime)
                 stats["invalid"] += 1
 

@@ -184,6 +184,11 @@ class ServerTests(unittest.TestCase):
         self.assertIn('credentials: "same-origin"', javascript.text)
         self.assertIn("zimantic-open-article", javascript.text)
 
+        i18n = self.client.get("/i18n.js")
+        self.assertEqual(i18n.status_code, 200)
+        self.assertTrue(i18n.headers["content-type"].startswith("application/javascript"))
+        self.assertIn("data-i18n", i18n.text)
+
         shim = self.client.get("/indexeddb-shim.js")
         self.assertEqual(shim.status_code, 200)
         self.assertTrue(shim.headers["content-type"].startswith("application/javascript"))
@@ -191,7 +196,14 @@ class ServerTests(unittest.TestCase):
         self.assertIn("zimantic-article-storage-blocked", shim.text)
 
     def test_debug_page_assets_are_not_cached(self):
-        for path in ("/", "/library", "/app.css", "/app.js", "/indexeddb-shim.js"):
+        for path in (
+            "/",
+            "/library",
+            "/app.css",
+            "/app.js",
+            "/i18n.js",
+            "/indexeddb-shim.js",
+        ):
             with self.subTest(path=path):
                 response = self.debug_client.get(path)
                 self.assertEqual(response.status_code, 200)
@@ -886,7 +898,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("This page is not available", response.text)
         self.assertIn('<main data-zimantic-shell-main>', response.text)
         self.assertIn("data-zimantic-search-home", response.text)
-        self.assertIn('role="group" aria-label="Adjacent search results"', response.text)
+        self.assertIn('aria-label="Adjacent search results"', response.text)
 
     def test_health_reports_indexes_and_cache(self):
         body = self.client.get("/health").json()

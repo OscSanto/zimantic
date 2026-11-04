@@ -371,6 +371,28 @@ def model_root(model_dir: Path) -> Path:
     return root
 
 
+def resolve_model_dir(model_dir: str | Path) -> Path:
+    """Return the folder that actually contains ``model.onnx``.
+
+    Downloads normally write ``model/<precision>/model.onnx``, but some manual
+    installs put the files directly in ``model/``. Keep that layout working:
+    when the configured precision folder has no ``model.onnx`` and its parent
+    does, use the parent instead of silently starting without semantic search.
+    """
+    path = Path(model_dir).expanduser()
+    if (path / "model.onnx").is_file():
+        return path
+    parent = path.parent
+    if parent != path and (parent / "model.onnx").is_file():
+        logger.info(
+            "zimantic: %s has no model.onnx; using %s instead",
+            path,
+            parent,
+        )
+        return parent
+    return path
+
+
 def default_output_dir(model: str, model_dir: Path) -> Path:
     """Return the destination root for an export that was not given --dir.
 

@@ -413,6 +413,9 @@ class Search:
     candidate_count: int = DEFAULT_CANDIDATES
     max_results: int = DEFAULT_MAX_RESULTS
     source_timeout: int = DEFAULT_SOURCE_TIMEOUT
+    # None means searches use the in-process libzim searcher. ``serve`` installs
+    # a helper-process pool for crash isolation.
+    fulltext_pool: Any | None = None
 
     @property
     def preview_chars(self) -> int:
@@ -497,6 +500,9 @@ class Search:
         self._probe_cache_lock = threading.Lock()
         self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
+        # None until serve enables crash isolation; tests and library callers
+        # keep using the in-process searcher.
+        self.fulltext_pool: Any | None = None
         self._state_lock = threading.RLock()
         self._reload_lock = threading.Lock()
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
@@ -986,7 +992,7 @@ class Search:
                     else:
                         logger.warning(
                             "%s: vectors were built with a different model; "
-                            "using title and full-text search until it is rebuilt "
+                            "falling back to title and full-text (lexical) search until it is rebuilt "
                             "(%s)",
                             db_path.stem,
                             detail,
@@ -1004,7 +1010,7 @@ class Search:
                             faiss_index.nprobe = _nprobe(faiss_index, self.cfg)
                     except Exception as error:  # corrupt/unreadable vectors: keep going
                         logger.warning(
-                            "%s: vectors unavailable (%s); using title and full-text search",
+                            "%s: vectors unavailable (%s); falling back to title and full-text (lexical) search",
                             db_path.stem,
                             error,
                         )
@@ -1143,8 +1149,9 @@ class Search:
                 embedder = factory()
             except Exception as error:  # missing/corrupt model must not kill serve
                 logger.warning(
-                    "zimantic: embedding model unavailable (%s); "
-                    "using title and full-text search",
+                    "zimantic: semantic search disabled: embedding model "
+                    "unavailable (%s); falling back to title and full-text "
+                    "(lexical) search",
                     error,
                 )
             else:
@@ -1166,7 +1173,8 @@ class Search:
                 import faiss  # noqa: F401 - load the native module on this worker
             except Exception as error:
                 logger.warning(
-                    "zimantic: FAISS unavailable (%s); using title and full-text search",
+                    "zimantic: semantic search disabled: FAISS unavailable (%s); "
+                    "falling back to title and full-text (lexical) search",
                     error,
                 )
                 return
@@ -1192,8 +1200,9 @@ class Search:
                 self.reload(scan_catalog=False, refresh=False)
             except Exception as error:
                 logger.warning(
-                    "zimantic: FAISS indexes unavailable (%s); "
-                    "using title and full-text search",
+                    "zimantic: semantic search disabled: FAISS indexes "
+                    "unavailable (%s); falling back to title and full-text "
+                    "(lexical) search",
                     error,
                 )
                 return
@@ -1207,6 +1216,22 @@ class Search:
             )
 
         threading.Thread(target=_load, name="zimantic-faiss", daemon=True).start()
+
+    def start_fulltext_isolation(self) -> None:
+        """Run native full-text searches in helper processes.
+
+        python-libzim aborts the interpreter when a ZIM full-text index points
+        at a missing entry, so the server must not iterate those results in its
+        own process. The helpers are lazy (they open archives on demand) and only
+        serve native full-text lookups; title, semantic and article paths stay
+        in the main process.
+        """
+        if self.fulltext_pool is not None:
+            return
+        from .fulltext import DEFAULT_WORKERS, FulltextPool
+
+        workers = min(DEFAULT_WORKERS, max(1, self.source_workers))
+        self.fulltext_pool = FulltextPool(workers)
 
     def reload(
         self, *, scan_catalog: bool = True, refresh: bool = True
@@ -1337,6 +1362,10 @@ class Search:
                     preview_cache.clear()
             if refresh:
                 self.refresh_sources()
+            if self.fulltext_pool is not None:
+                # A reload is the natural moment to retry an archive that was
+                # repaired in place after its full-text helper aborted.
+                self.fulltext_pool.clear_broken()
             with self._state_lock:
                 indexes = sorted(self.indexes)
             return {
@@ -1529,9 +1558,9 @@ class Search:
                     while key in local:
                         key = f"{local_name}-{suffix}"
                         suffix += 1
-                    logger.warning(
-                        "zimantic: %s shares a source key with another local "
-                        "source; exposing it as %r",
+                    logger.info(
+                        "zimantic: %s shares a base name with another local "
+                        "source; exposing the variant as %r",
                         local_name,
                         key,
                     )
@@ -1771,6 +1800,10 @@ class Search:
 
     def close(self) -> None:
         """Release the search thread pool and every open index."""
+        pool = self.fulltext_pool
+        self.fulltext_pool = None
+        if pool is not None:
+            pool.close()
         executor = getattr(self, "_executor", None)
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
@@ -2507,7 +2540,7 @@ class Search:
             return embedder.embed([f"query: {query}"])
         except Exception as error:
             logger.warning(
-                "zimantic: query embedding failed (%s); using title and full-text search",
+                "zimantic: query embedding failed (%s); falling back to title and full-text (lexical) search",
                 error,
             )
             return None
@@ -3245,9 +3278,19 @@ class Search:
                 keyword.append((float(bm25), {"rowid": int(rowid)}))
 
         fulltext_rows: list[tuple[int, int]] = []
-        searcher = index.ensure_searcher()
+        searcher = None
         archive = index.ensure_open()
-        if db is None and searcher is None and index.faiss_index is None:
+        if self.fulltext_pool is not None:
+            fulltext_capable = bool(
+                archive is not None
+                and index.zim_path
+                and index.has_fulltext_index is not False
+                and getattr(archive, "has_fulltext_index", False)
+            )
+        else:
+            searcher = index.ensure_searcher()
+            fulltext_capable = searcher is not None and archive is not None
+        if db is None and not fulltext_capable and index.faiss_index is None:
             # Nothing can answer this source: no SQLite index, no libzim
             # full-text searcher and no vectors. Report an error instead of a
             # successful empty result so a missing/corrupt archive is visible.
@@ -3256,23 +3299,40 @@ class Search:
                 error=index.error or "ZIM archive is unavailable",
                 status="error",
             )
-        if searcher and archive:
-            # libzim's Searcher is not documented as thread-safe: serialize it.
-            with index.lock:
-                try:
-                    search = searcher.search(Query().set_query(fulltext_query or query))
-                    paths = search_paths(search, 0, count)
-                    for rank, path in enumerate(paths):
-                        try:
-                            entry = archive.get_entry_by_path(path)
-                            rowid = entry._index
-                            rowids.add(rowid)
-                            archive_entries[rowid] = entry
-                            fulltext_rows.append((rank, rowid))
-                        except (KeyError, RuntimeError, ValueError):
-                            continue
-                except (RuntimeError, ValueError) as error:
-                    errors.append(f"full-text search unavailable: {error}")
+        if fulltext_capable:
+            paths: list[str] = []
+            if self.fulltext_pool is not None:
+                # Native libzim iteration aborts the interpreter on some
+                # corrupt full-text indexes, so it runs in a helper process.
+                paths = (
+                    self.fulltext_pool.search(
+                        index.zim_path or "",
+                        fulltext_query or query,
+                        count,
+                        index.zim_signature,
+                    )
+                    or []
+                )
+            elif searcher is not None:
+                # libzim's Searcher is not documented as thread-safe: serialize it.
+                with index.lock:
+                    try:
+                        search = searcher.search(
+                            Query().set_query(fulltext_query or query)
+                        )
+                        paths = search_paths(search, 0, count)
+                    except (RuntimeError, ValueError) as error:
+                        errors.append(f"full-text search unavailable: {error}")
+            if archive is not None:
+                for rank, path in enumerate(paths):
+                    try:
+                        entry = archive.get_entry_by_path(path)
+                        rowid = entry._index
+                        rowids.add(rowid)
+                        archive_entries[rowid] = entry
+                        fulltext_rows.append((rank, rowid))
+                    except (KeyError, RuntimeError, ValueError):
+                        continue
 
         docs = (
             self._fetch_docs(source, db, rowids)

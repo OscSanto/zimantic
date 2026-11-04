@@ -10,7 +10,8 @@ zim_dir = "./zims"
 # Must contain model.onnx and either sentencepiece.bpe.model (multilingual-e5)
 # or vocab.txt (English e5-v2). `zimantic model` writes ./model/int8 (the CPU
 # default) or ./model/fp16 (recommended with a GPU). Change this if you picked
-# a different precision or model.
+# a different precision or model. If this folder has no model.onnx, its parent
+# is used when that folder contains model.onnx (a manual ./model/ layout).
 model_dir = "./model/int8"
 
 # Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.

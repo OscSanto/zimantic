@@ -509,7 +509,10 @@ def _run_serve(args, cfg: dict) -> None:
         search.start_embedder(_make_embedder)
 
     if args.fast:
-        logger.info("zimantic: fast mode: title and ZIM full-text search only")
+        logger.info(
+            "zimantic: fast mode: semantic search disabled; using title and "
+            "ZIM full-text (lexical) search"
+        )
     serve(search, cfg["port"], debug=args.debug)
 
 

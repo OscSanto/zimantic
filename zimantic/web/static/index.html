@@ -17,14 +17,14 @@
                 <h1>
                     <button id="homeHeading" type="button" aria-label="Zimantic: clear or restore search">Zimantic</button>
                 </h1>
-                <nav class="view-nav" aria-label="Primary">
-                    <a href="./">Search</a>
-                    <a href="library">Library</a>
+                <nav class="view-nav" aria-label="Primary" data-i18n-aria-label="Primary">
+                    <a href="./" data-i18n="Search">Search</a>
+                    <a href="library" data-i18n="Library">Library</a>
                 </nav>
             </header>
 
             <main id="searchView">
-                <div class="subtitle">
+                <div class="subtitle" data-i18n="Search your offline library">
                     Search your offline library
                 </div>
 
@@ -35,20 +35,24 @@
                         maxlength="4096"
                         placeholder="how to change a lightbulb"
                         aria-label="Search query"
+                        data-i18n-placeholder="how to change a lightbulb"
+                        data-i18n-aria-label="Search query"
                     />
-                    <button id="searchButton" type="submit">Search</button>
+                    <button id="searchButton" type="submit" data-i18n="Search">Search</button>
                 </form>
 
                 <div class="search-summary" id="searchSummary">
                     <div class="status" id="status"></div>
                     <div class="source-filter-toolbar" id="sourceFilterToolbar" hidden>
-                        <span class="source-filter-heading">Filter by source</span>
+                        <span class="source-filter-heading" data-i18n="Filter by source">Filter by source</span>
                         <input
                             id="sourceFilterSearch"
                             class="source-filter-search"
                             type="search"
                             placeholder="Search sources"
                             aria-label="Search sources"
+                            data-i18n-placeholder="Search sources"
+                            data-i18n-aria-label="Search sources"
                         />
                     </div>
                 </div>
@@ -59,28 +63,31 @@
                         id="sourceFilterOptions"
                         role="group"
                         aria-label="Filter by source"
+                        data-i18n-aria-label="Filter by source"
                     ></div>
                     <div class="source-filter-status" id="sourceFilterStatus" aria-live="polite"></div>
                 </div>
                 <div class="filter-line" id="filterLine"></div>
                 <div id="notice"></div>
                 <div id="results"><div class="empty"></div></div>
-                <nav class="pager" id="pager" aria-label="Results pagination"></nav>
+                <nav class="pager" id="pager" aria-label="Results pagination" data-i18n-aria-label="Results pagination"></nav>
                 <div id="searchAnnouncement" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
             </main>
 
             <section id="libraryView" hidden role="main" aria-labelledby="libraryHeading">
                 <div class="library-heading">
                     <div>
-                        <h2 id="libraryHeading">Your library</h2>
+                        <h2 id="libraryHeading" data-i18n="Your library">Your library</h2>
                     </div>
                     <div class="library-toolbar">
-                        <button id="libraryShuffle" class="library-button" type="button">Shuffle</button>
+                        <button id="libraryShuffle" class="library-button" type="button" data-i18n="Shuffle">Shuffle</button>
                         <input
                             id="libraryFilter"
                             type="search"
                             placeholder="Filter library"
                             aria-label="Filter library"
+                            data-i18n-placeholder="Filter library"
+                            data-i18n-aria-label="Filter library"
                         />
                         <span id="libraryStatus" class="status" aria-live="polite"></span>
                     </div>
@@ -95,6 +102,7 @@
                 type="button"
                 tabindex="-1"
                 aria-label="Close ZIM details"
+                data-i18n-aria-label="Close ZIM details"
             ></button>
             <section
                 class="library-info-dialog"
@@ -107,19 +115,21 @@
                     class="library-info-close"
                     type="button"
                     aria-label="Close ZIM details"
+                    data-i18n-aria-label="Close ZIM details"
                 >&times;</button>
                 <div id="libraryInfoContent" class="library-info-content"></div>
             </section>
         </div>
 
         <div id="articleModal" class="article-modal" hidden>
-            <button class="article-modal-backdrop" type="button" tabindex="-1" aria-label="Close article"></button>
-            <section class="article-modal-dialog" role="dialog" aria-modal="true" aria-label="Article">
+            <button class="article-modal-backdrop" type="button" tabindex="-1" aria-label="Close article" data-i18n-aria-label="Close article"></button>
+            <section class="article-modal-dialog" role="dialog" aria-modal="true" aria-label="Article" data-i18n-aria-label="Article">
                 <iframe
                     id="articleModalFrame"
                     class="article-modal-frame"
                     title="Article"
                     referrerpolicy="no-referrer"
+                    data-i18n-title="Article"
                 ></iframe>
                 <div
                     id="externalLinkNotice"
@@ -131,18 +141,18 @@
                     aria-labelledby="externalLinkTitle"
                 >
                     <div class="external-link-notice-panel">
-                        <h2 id="externalLinkTitle">Online link</h2>
+                        <h2 id="externalLinkTitle" data-i18n="Online link">Online link</h2>
                         <p id="externalLinkUrl" class="external-link-url"></p>
-                        <p>
+                        <p data-i18n="This link points to an online site. It is not cached in your offline library, so opening it may require an internet connection.">
                             This link points to an online site. It is not cached in your offline library, so opening
                             it may require an internet connection.
                         </p>
                         <div class="external-link-actions">
-                            <button id="externalLinkBack" class="secondary" type="button">
+                            <button id="externalLinkBack" class="secondary" type="button" data-i18n="Return to article ↩️">
                                 Return to article ↩️
                             </button>
                             <a id="externalLinkOpen" class="secondary" target="_blank" rel="noopener noreferrer">
-                                Open online site <span aria-hidden="true"> ↗</span>
+                                <span data-i18n="Open online site">Open online site</span> <span aria-hidden="true"> ↗</span>
                             </a>
                         </div>
                     </div>

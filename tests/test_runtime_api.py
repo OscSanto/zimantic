@@ -112,6 +112,18 @@ class LibzimRuntimeApiTests(unittest.TestCase):
         search = Searcher(self.archive).search(Query().set_query("brakes"))
         self.assertIn("Beta", search_paths(search, 0, 10))
 
+    def test_fulltext_helper_returns_paths(self):
+        if not self.archive.has_fulltext_index:
+            self.skipTest("libzim was built without a full-text index")
+        from zimantic.fulltext import FulltextPool
+
+        pool = FulltextPool(1)
+        try:
+            paths = pool.search(str(self.zim_path), "brakes", 10)
+        finally:
+            pool.close()
+        self.assertIn("Beta", paths)
+
     def test_read_entry_produces_an_excerpt(self):
         # End-to-end: the real Archive -> private lookup -> text extraction.
         row = next(

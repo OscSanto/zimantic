@@ -510,6 +510,7 @@
                         open.href = homepage;
                         open.dataset.libraryArticle = "true";
                         open.textContent = source.homepage ? "Open" : "Random article";
+                        open.dataset.i18n = source.homepage ? "Open" : "Random article";
                         actions.append(open);
                     }
                     if (searchable) {
@@ -517,6 +518,7 @@
                         search.type = "button";
                         search.className = "library-button library-info-action";
                         search.textContent = "Search";
+                        search.dataset.i18n = "Search";
                         search.addEventListener("click", () => searchWithinLibrarySource(source));
                         actions.append(search);
                     }
@@ -809,12 +811,14 @@
                         const status = document.createElement("span");
                         status.className = "secondary library-card-action";
                         status.textContent = "Unavailable";
+                        status.dataset.i18n = "Unavailable";
                         actions.appendChild(status);
                     }
                     const detailsButton = document.createElement("button");
                     detailsButton.type = "button";
                     detailsButton.className = "library-button library-card-action";
                     detailsButton.textContent = "Details";
+                    detailsButton.dataset.i18n = "Details";
                     detailsButton.addEventListener("click", () => showLibraryInfo(source));
                     actions.appendChild(detailsButton);
                     body.appendChild(actions);
@@ -2446,6 +2450,32 @@
                 if (!current?.streaming) loadThumbnails(items);
             }
 
+            function clearPartialResults() {
+                // A stream can paint provisional results before a source or the
+                // connection fails. Leaving them beside "Search failed" makes
+                // them look complete, so drop the partial page and its counts.
+                if (resultList) {
+                    resultList.remove();
+                    resultList = null;
+                }
+                lastRenderedItems = null;
+                $("results").replaceChildren();
+                const empty = document.createElement("div");
+                empty.className = "empty";
+                $("results").appendChild(empty);
+                $("pager").innerHTML = "";
+                $("sourceFilters").hidden = true;
+                $("sourceFilterOptions").replaceChildren();
+                $("sourceFilterStatus").textContent = "";
+                $("filterLine").innerHTML = "";
+                if (current) {
+                    current.pageItems = [];
+                    current.total = 0;
+                    current.matchedBy = null;
+                }
+                renderMatchedBy();
+            }
+
             function pageRangeText(total, page) {
                 if (!total) return "No results";
                 const from = page * PAGE_SIZE + 1;
@@ -3000,6 +3030,7 @@
                         !controller.signal.aborted &&
                         sequence === searchSequence
                     ) {
+                        clearPartialResults();
                         $("status").textContent = `Search failed: ${error.message}`;
                         announceSearchStatus($("status").textContent);
                     }
@@ -3104,6 +3135,7 @@
                         sequence === searchSequence &&
                         controller === pageController
                     ) {
+                        clearPartialResults();
                         $("status").textContent = `Search failed: ${error.message}`;
                         announceSearchStatus($("status").textContent);
                     }
@@ -3316,6 +3348,8 @@
                 if (!current) {
                     if (button.dataset.sourceAction === "all") {
                         selectedSourceKeys.clear();
+                        sourceFilterShowAll = false;
+                        sourceFilterShowOther = false;
                     } else if (key && selectedSourceKeys.has(key)) {
                         selectedSourceKeys.delete(key);
                     } else if (key) {
@@ -3343,6 +3377,8 @@
                 }
                 if (button.dataset.sourceAction === "all") {
                     selectedSourceKeys.clear();
+                    sourceFilterShowAll = false;
+                    sourceFilterShowOther = false;
                 } else if (button.dataset.sourceAction === "more") {
                     // Reveal the remaining matching source chips without
                     // changing the search scope or the current selection.

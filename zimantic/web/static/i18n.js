@@ -45,6 +45,8 @@
             "Link copied": "Enlace copiado",
             "Copy unavailable": "No se pudo copiar el enlace",
             "Details": "Detalles",
+            "Open": "Abrir",
+            "Random article": "Artículo aleatorio",
             "Unavailable": "No disponible",
             "Loading...": "Cargando...",
             "No results": "Sin resultados",
@@ -63,60 +65,75 @@
                 Object.prototype.hasOwnProperty.call(catalogs, language),
         ) || "en";
     const translations = catalogs[locale] || {};
-    const attributeNames = [
-        "aria-label",
-        "aria-placeholder",
-        "aria-valuetext",
-        "alt",
-        "placeholder",
-        "title",
-        "value",
-    ];
+    // Only explicitly marked UI chrome is translated. Translating every text
+    // node also rewrites article titles, search-result titles and metadata
+    // (for example an English article called "Library" became "Biblioteca").
+    const attributeMarkers = {
+        "data-i18n-aria-label": "aria-label",
+        "data-i18n-aria-placeholder": "aria-placeholder",
+        "data-i18n-aria-valuetext": "aria-valuetext",
+        "data-i18n-alt": "alt",
+        "data-i18n-placeholder": "placeholder",
+        "data-i18n-title": "title",
+        "data-i18n-value": "value",
+    };
+    const markerNames = ["data-i18n", ...Object.keys(attributeMarkers)];
+    const markerSelector = markerNames.map((name) => `[${name}]`).join(", ");
 
     function translate(value) {
         return translations[value] || value;
     }
 
-    function translateNode(node) {
-        if (node.nodeType === Node.TEXT_NODE) {
-            const value = node.nodeValue || "";
-            const trimmed = value.trim();
-            if (!trimmed) return;
-            const translated = translate(trimmed);
-            if (translated !== trimmed) node.nodeValue = value.replace(trimmed, translated);
-            return;
+    function translateElement(element) {
+        if (element.nodeType !== Node.ELEMENT_NODE) return;
+        if (element.hasAttribute("data-i18n")) {
+            const key = element.getAttribute("data-i18n") || element.textContent.trim();
+            const translated = translate(key);
+            if (key && translated !== element.textContent) {
+                element.textContent = translated;
+            }
         }
-        if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-        for (const name of attributeNames) {
-            if (!node.hasAttribute(name)) continue;
-            const value = node.getAttribute(name);
-            const translated = translate(value);
-            if (translated !== value) node.setAttribute(name, translated);
+        for (const [marker, target] of Object.entries(attributeMarkers)) {
+            if (!element.hasAttribute(marker)) continue;
+            const key = element.getAttribute(marker) || element.getAttribute(target) || "";
+            const translated = translate(key);
+            if (key && translated !== element.getAttribute(target)) {
+                element.setAttribute(target, translated);
+            }
         }
-        for (const child of node.childNodes) translateNode(child);
     }
 
-    window.zimanticI18n = Object.freeze({ locale, translate });
+    function translateTree(root) {
+        if (root.nodeType === Node.ELEMENT_NODE) translateElement(root);
+        if (!root.querySelectorAll) return;
+        for (const element of root.querySelectorAll(markerSelector)) {
+            translateElement(element);
+        }
+    }
+
+    window.zimanticI18n = Object.freeze({ locale, translate, translateTree });
     document.documentElement.lang = locale;
-    translateNode(document.documentElement);
+    translateTree(document.documentElement);
 
     new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             if (mutation.type === "characterData") {
-                translateNode(mutation.target);
+                const parent = mutation.target.parentElement;
+                if (parent?.hasAttribute("data-i18n")) translateElement(parent);
             } else if (mutation.type === "attributes") {
                 const element = mutation.target;
-                const value = element.getAttribute(mutation.attributeName);
-                const translated = translate(value);
-                if (translated !== value) element.setAttribute(mutation.attributeName, translated);
+                if (
+                    markerNames.includes(mutation.attributeName) ||
+                    element.hasAttribute(`data-i18n-${mutation.attributeName}`)
+                ) {
+                    translateElement(element);
+                }
             } else {
-                for (const node of mutation.addedNodes) translateNode(node);
+                for (const node of mutation.addedNodes) translateTree(node);
             }
         }
     }).observe(document.documentElement, {
         attributes: true,
-        attributeFilter: attributeNames,
         characterData: true,
         childList: true,
         subtree: true,
