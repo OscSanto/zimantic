@@ -2912,23 +2912,42 @@ class SourceScopeTests(unittest.TestCase):
         return search
 
     def test_scan_zim_paths_logs_unreadable_directories(self):
-        import zimantic.search as search_module
+        import zimantic.catalog as catalog_module
 
-        search = _bare_search({"zim_dir": "/zims"})
-        self.addCleanup(search.close)
+        with _temp_dir(self) as tmp:
+            search = _bare_search({"zim_dir": str(tmp)})
+            self.addCleanup(search.close)
 
-        def fake_iter_zim_files(_root, on_error=None):
-            assert on_error is not None
-            on_error(OSError(13, "Permission denied", "/zims/private"))
-            return iter(())
+            def fake_iter_zim_files(_root, on_error=None):
+                assert on_error is not None
+                on_error(OSError(13, "Permission denied", str(tmp / "private")))
+                return iter(())
 
-        with (
-            patch.object(search_module, "iter_zim_files", side_effect=fake_iter_zim_files),
-            self.assertLogs("zimantic.search", level="ERROR") as logs,
-        ):
-            self.assertEqual(search._scan_zim_paths(), {})
+            with (
+                patch.object(
+                    catalog_module,
+                    "iter_zim_files",
+                    side_effect=fake_iter_zim_files,
+                ),
+                self.assertLogs("zimantic.catalog", level="WARNING") as logs,
+            ):
+                self.assertEqual(search._scan_zim_paths(), {})
 
-        self.assertTrue(any("/zims/private" in line for line in logs.output))
+            self.assertTrue(any("private" in line for line in logs.output))
+
+    def test_search_uses_an_in_memory_catalog_without_index_dir(self):
+        with _temp_dir(self) as tmp:
+            zim_path = tmp / "manual.zim"
+            zim_path.write_bytes(b"not inspected")
+            search = Search(
+                {"zim_dir": str(tmp)},
+                semantic=False,
+                archive_factory=object,
+            )
+            self.addCleanup(search.close)
+
+            self.assertEqual(search.catalog.db_path, Path(":memory:"))
+            self.assertEqual(search._scan_zim_paths(), {"manual": zim_path})
 
     def test_selective_limit_is_min_ten_or_thirty_five_percent(self):
         self.assertEqual(Search._selective_source_limit(1), 0)
@@ -3399,6 +3418,30 @@ class ProductionHardeningTests(unittest.TestCase):
 
 
 class CatalogLocationTests(unittest.TestCase):
+    def test_bare_search_uses_an_in_memory_catalog_with_index_dir(self):
+        with _temp_dir(self) as tmp:
+            search = _bare_search(
+                {"index_dir": str(tmp), "zim_dir": str(tmp)}
+            )
+            self.addCleanup(search.close)
+
+            self.assertEqual(
+                search._ensure_catalog().db_path, Path(":memory:")
+            )
+
+    def test_search_passes_its_archive_factory_to_the_catalog(self):
+        with (
+            _temp_dir(self) as tmp,
+            patch("zimantic.search.Archive") as archive_factory,
+        ):
+            search = Search(
+                {"zim_dir": str(Path(tmp) / "missing")},
+                semantic=False,
+            )
+            self.addCleanup(search.close)
+
+            self.assertIs(search.catalog.archive_factory, archive_factory)
+
     def test_page_size_is_clamped_to_the_result_pool(self):
         with _temp_dir(self) as tmp:
             root = Path(tmp)
@@ -3432,7 +3475,7 @@ class CatalogLocationTests(unittest.TestCase):
                 "page_size": 10,
                 "max_results": 100,
             }
-            search = Search(cfg, semantic=False, archive_factory=object)
+            search = Search(cfg, semantic=False)
             self.addCleanup(search.close)
             self.assertTrue((root / "catalog.sqlite").exists())
             self.assertFalse((index_dir / "catalog.sqlite").exists())

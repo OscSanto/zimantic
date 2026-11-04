@@ -26,8 +26,7 @@ from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .catalog import (
     ZimCatalog,
     catalog_path,
-    iter_zim_files,
-    metadata_from_archive,
+    largest_zims_by_stem,
     perma_ref,
     public_tags,
 )
@@ -658,7 +657,7 @@ class Search:
         self.cfg = cfg
         self.embedder = embedder
         # Tests pass ``object`` to keep the catalog from opening real archives.
-        self.archive_factory = archive_factory
+        self.archive_factory = Archive if archive_factory is None else archive_factory
         # Fast mode skips FAISS and the model.
         self.semantic = bool(semantic)
         self._defer_faiss = self.semantic
@@ -728,45 +727,21 @@ class Search:
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
         )
-        # Single metadata catalog. It is a disposable cache: the ZIM directory
-        # remains the source of truth, and a missing/corrupt catalog falls back
-        # to the archive-scanning behavior below.
-        self.catalog: ZimCatalog | None = None
-        index_dir = cfg.get("index_dir")
-        if index_dir:
+        self._library_scan_at = 0.0
+        self._catalog_initialized = True
+        self.catalog = self._ensure_catalog()
+        if self.catalog.zim_dir is not None and self.catalog.zim_dir.is_dir():
             try:
-                catalog = ZimCatalog(
-                    catalog_path(index_dir),
-                    zim_dir=cfg.get("zim_dir"),
-                    archive_factory=self.archive_factory,
-                )
-            except Exception as error:
+                self.catalog.scan()
+            except (OSError, sqlite3.Error) as error:
+                # An unmounted ZIM directory must not discard cached metadata.
                 logger.warning(
-                    "zimantic: catalog unavailable (%s); falling back to archive scans",
+                    "zimantic: catalog scan failed (%s); keeping the previous catalog",
                     error,
                 )
             else:
-                try:
-                    catalog.scan()
-                except OSError as error:
-                    # An unmounted ZIM directory is not a reason to throw away
-                    # the cached metadata; reload() will scan again.
-                    logger.warning(
-                        "zimantic: catalog scan failed (%s); keeping the previous catalog",
-                        error,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "zimantic: catalog unavailable (%s); falling back to archive scans",
-                        error,
-                    )
-                    try:
-                        catalog.close()
-                    except Exception:
-                        pass
-                    catalog = None
-                self.catalog = catalog
-        self._load_indexes()
+                self._library_scan_at = time.monotonic()
+        self._load_indexes(refresh_catalog=False)
         # Local indexes are ready immediately; the optional Kiwix catalog is
         # refreshed in the background so an unreachable Kiwix server cannot
         # delay startup (see start_catalog_refresh).
@@ -782,114 +757,124 @@ class Search:
         """Tolerate Search instances built without ``__init__`` (tests)."""
         return getattr(self, "catalog", None)
 
+    def _ensure_catalog(self) -> ZimCatalog:
+        """Return the shared catalog, creating an in-memory one when needed."""
+        cfg = getattr(self, "cfg", {}) or {}
+        zim_dir = cfg.get("zim_dir")
+        catalog = getattr(self, "catalog", None)
+        if catalog is not None:
+            catalog.zim_dir = Path(zim_dir).resolve() if zim_dir else None
+            return catalog
+
+        index_dir = cfg.get("index_dir")
+        initialized = getattr(self, "_catalog_initialized", False)
+        archive_factory = (
+            getattr(self, "archive_factory", None) if initialized else object
+        )
+        persist = initialized and archive_factory is not object
+        db_path = (
+            catalog_path(index_dir)
+            if persist and index_dir and archive_factory is not object
+            else None
+        )
+        try:
+            catalog = ZimCatalog(
+                db_path,
+                zim_dir=zim_dir,
+                archive_factory=archive_factory,
+            )
+        except Exception as error:
+            if db_path is None:
+                raise
+            logger.warning(
+                "zimantic: catalog unavailable (%s); using an in-memory catalog",
+                error,
+            )
+            catalog = ZimCatalog(
+                None,
+                zim_dir=zim_dir,
+                archive_factory=archive_factory,
+            )
+        self.catalog = catalog
+        return catalog
+
     @staticmethod
     def _index_uri(db_path: Path) -> str:
         return db_path.resolve().as_uri() + "?mode=ro"
 
-    def _match_zim_path(
-        self, stem: str, source_size: int | None
-    ) -> tuple[Path | None, bool]:
-        """Return ``(archive, exact)`` for ``stem`` below ``zim_dir``.
-
-        An archive whose size equals the recorded ``source_size`` is an exact
-        identity match and wins outright. When no candidate has that size the
-        largest same-stem file is returned with ``exact=False``, so callers can
-        decide whether a changed archive should replace a stale index. With no
-        recorded size there is nothing to compare, so the largest candidate is
-        reported as exact.
-        """
-        zim_dir = self.cfg.get("zim_dir")
-        if not zim_dir:
-            return None, False
-        try:
-            candidates = sorted(
-                path for path in iter_zim_files(zim_dir) if path.stem == stem
-            )
-        except OSError:
-            return None, False
-
-        largest: Path | None = None
-        largest_size = -1
-        for path in candidates:
+    def _scan_catalog(self, *, force: bool = True) -> bool:
+        """Refresh catalog records, throttling library requests to the scan TTL."""
+        catalog = self._ensure_catalog()
+        if catalog.zim_dir is None or not catalog.zim_dir.is_dir():
+            return False
+        lock = self._library_cache_lock()
+        with lock:
+            now = time.monotonic()
+            scanned_at = getattr(self, "_library_scan_at", 0.0)
+            if not force and now - scanned_at < LIBRARY_SCAN_TTL_SECONDS:
+                return True
             try:
-                size = path.stat().st_size
-            except OSError:
-                continue
-            if source_size is not None and size == source_size:
-                return path, True
-            if size > largest_size:
-                largest_size = size
-                largest = path
-        return largest, largest is not None and source_size is None
+                catalog.scan()
+            except (OSError, sqlite3.Error) as error:
+                logger.error("zimantic: catalog scan failed (%s)", error)
+                self._library_scan_at = 0.0
+                return False
+            self._library_scan_at = time.monotonic()
+            self._library_version_at = 0.0
+        return True
 
-    def _find_zim_path(self, stem: str, source_size: int | None) -> Path | None:
+    def _find_zim_path(
+        self,
+        stem: str,
+        source_size: int | None,
+        *,
+        refresh: bool = True,
+    ) -> Path | None:
         """Best archive for ``stem``: an exact-size match, else the largest."""
-        return self._match_zim_path(stem, source_size)[0]
+        if refresh:
+            if not self._scan_catalog(force=True):
+                return None
+        return self._ensure_catalog().find_path(stem, source_size)
 
-    def _scan_zim_paths(self) -> dict[str, Path]:
-        """Find local archives without requiring a SQLite index.
+    def _match_zim_path(
+        self,
+        stem: str,
+        source_size: int | None,
+        *,
+        refresh: bool = True,
+    ) -> tuple[Path | None, bool]:
+        """Return the matching archive and whether its size matches the index."""
+        path = self._find_zim_path(stem, source_size, refresh=refresh)
+        if path is None:
+            return None, False
+        if source_size is None:
+            return path, True
+        try:
+            return path, path.stat().st_size == source_size
+        except OSError:
+            return path, False
 
-        The shared recursive enumerator keeps this startup probe consistent with
-        the catalog and ``build``. File sizes are read only when a stem repeats,
-        so a normal library never pays for a ``stat``. When a stem repeats with
-        different sizes (for example a truncated download beside the complete
-        file), the larger file is kept rather than discarding the stem.
-        """
-        zim_dir = self.cfg.get("zim_dir")
-        if not zim_dir:
+    def _scan_zim_paths(self, *, refresh: bool = True) -> dict[str, Path]:
+        """Return one catalogued archive per stem, preferring the largest copy."""
+        catalog = self._ensure_catalog()
+        if catalog.zim_dir is None or not catalog.zim_dir.is_dir():
             return {}
-
-        found: dict[str, Path] = {}
-        # Sizes of stems seen more than once; absent for unique stems so they are
-        # never read with ``stat``.
-        sizes: dict[str, int] = {}
-        contested: set[str] = set()
-
-        def record(path: Path) -> None:
-            stem = path.stem
-            existing = found.get(stem)
-            if existing is None:
-                found[stem] = path
-                return
-            # A repeated stem needs a size comparison; this is lazy so a unique
-            # library never pays for a stat.
-            try:
-                kept_size = sizes.get(stem)
-                if kept_size is None:
-                    kept_size = existing.stat().st_size
-                incoming_size = path.stat().st_size
-            except OSError:
-                return
-            if incoming_size > kept_size:
-                found[stem] = path
-                sizes[stem] = incoming_size
-            else:
-                sizes[stem] = kept_size
-            if incoming_size != kept_size:
-                contested.add(stem)
-
-        def _scan_error(error: OSError) -> None:
-            # os.walk otherwise drops an unreadable directory silently. Log it
-            # as an error so an operator can see why a source disappeared
-            # without aborting the rest of source/library discovery.
-            logger.error(
-                "zimantic: cannot list %s (%s); its sources are omitted",
-                error.filename or zim_dir,
-                error,
-            )
-
-        for path in iter_zim_files(zim_dir, on_error=_scan_error):
-            try:
-                if path.is_file():
-                    record(path)
-            except OSError:
-                continue
-        for stem in sorted(contested):
-            logger.warning(
-                "zimantic: %r has ZIM files of different sizes; using the largest %s",
-                stem,
-                found[stem],
-            )
+        if refresh and not self._scan_catalog(force=True):
+            return {}
+        records = catalog.rows()
+        sizes_by_path = {Path(record.path): record.size for record in records}
+        found = largest_zims_by_stem(sizes_by_path)
+        sizes_by_stem: dict[str, set[int]] = {}
+        for record in records:
+            sizes_by_stem.setdefault(record.stem, set()).add(record.size)
+        for stem, sizes in sizes_by_stem.items():
+            if len(sizes) > 1:
+                logger.warning(
+                    "zimantic: %r has ZIM files of different sizes; "
+                    "using the largest %s",
+                    stem,
+                    found[stem],
+                )
         return found
 
     @staticmethod
@@ -939,13 +924,15 @@ class Search:
             if scanned.stat().st_size == source_size:
                 return None
         except OSError:
-            pass  # unreadable now; fall through and check the alternatives
-        archive, exact = self._match_zim_path(stem, source_size)
-        if archive is None or exact:
-            return None
-        return archive
+            pass
+        archive, exact = self._match_zim_path(
+            stem, source_size, refresh=False
+        )
+        return None if archive is None or exact else archive
 
-    def _discover_local_indexes(self) -> dict[str, tuple[str, Path]]:
+    def _discover_local_indexes(
+        self, *, refresh_catalog: bool = True
+    ) -> dict[str, tuple[str, Path]]:
         """Return finished SQLite indexes plus filesystem-only ZIM fallbacks.
 
         A SQLite stem is authoritative only once its build is finished and its
@@ -954,7 +941,8 @@ class Search:
         changed) is ignored so the archive's native full-text index keeps the
         source searchable instead of a stale or unopenable index.
         """
-        db_paths = sorted(Path(self.cfg["index_dir"]).glob("*.sqlite"))
+        index_dir = self.cfg.get("index_dir")
+        db_paths = sorted(Path(index_dir).glob("*.sqlite")) if index_dir else []
         finished: dict[str, Path] = {}
         recorded_sizes: dict[str, int | None] = {}
         for path in db_paths:
@@ -963,7 +951,7 @@ class Search:
                 finished[path.stem] = path
                 recorded_sizes[path.stem] = source_size
 
-        zim_paths = self._scan_zim_paths()
+        zim_paths = self._scan_zim_paths(refresh=refresh_catalog)
         found: dict[str, tuple[str, Path]] = {}
         for stem, db_path in finished.items():
             scanned = zim_paths.get(stem)
@@ -997,48 +985,48 @@ class Search:
         # UUID, different filename/path) must not appear as two sources. Keep
         # one deterministic copy: readable first, then one that can serve a
         # search, then the larger file, then the shorter path.
-        if self._catalog:
-            chosen: dict[str, tuple[tuple, str]] = {}
-            for stem, (kind, _path) in found.items():
-                record = self._catalog.get_stem(stem)
-                uuid_value = record.uuid if record is not None else ""
-                if not uuid_value:
-                    continue
-                usable = kind == "sqlite" or bool(record.has_fulltext_index)
-                rank = (
-                    bool(record.available),
-                    usable,
-                    record.size,
-                    -len(record.path),
-                )
-                current = chosen.get(uuid_value)
-                if (
-                    current is None
-                    or rank > current[0]
-                    or (rank == current[0] and stem < current[1])
-                ):
-                    if current is not None:
-                        logger.warning(
-                            "zimantic: %s duplicates %s (UUID %s); using %s",
-                            stem,
-                            current[1],
-                            uuid_value,
-                            stem,
-                        )
-                    chosen[uuid_value] = (rank, stem)
-                else:
+        catalog = self._ensure_catalog()
+        chosen: dict[str, tuple[tuple, str]] = {}
+        for stem, (kind, _path) in found.items():
+            record = catalog.get_stem(stem)
+            uuid_value = record.uuid if record is not None else ""
+            if not uuid_value:
+                continue
+            usable = kind == "sqlite" or bool(record.has_fulltext_index)
+            rank = (
+                bool(record.available),
+                usable,
+                record.size,
+                -len(record.path),
+            )
+            current = chosen.get(uuid_value)
+            if (
+                current is None
+                or rank > current[0]
+                or (rank == current[0] and stem < current[1])
+            ):
+                if current is not None:
                     logger.warning(
-                        "zimantic: %s duplicates %s (UUID %s); skipping %s",
+                        "zimantic: %s duplicates %s (UUID %s); using %s",
                         stem,
                         current[1],
                         uuid_value,
                         stem,
                     )
-            keep = {stem for _rank, stem in chosen.values()}
-            for stem in list(found):
-                record = self._catalog.get_stem(stem)
-                if record is not None and record.uuid and stem not in keep:
-                    del found[stem]
+                chosen[uuid_value] = (rank, stem)
+            else:
+                logger.warning(
+                    "zimantic: %s duplicates %s (UUID %s); skipping %s",
+                    stem,
+                    current[1],
+                    uuid_value,
+                    stem,
+                )
+        keep = {stem for _rank, stem in chosen.values()}
+        for stem in list(found):
+            record = catalog.get_stem(stem)
+            if record is not None and record.uuid and stem not in keep:
+                del found[stem]
         return found
 
     def _model_probes_compatible(self, db, db_path: Path) -> tuple[bool, str]:
@@ -1186,11 +1174,8 @@ class Search:
                         )
                         faiss_index = None
 
-            record = (
-                self._catalog.get_stem_size(db_path.stem, source_size)
-                if self._catalog
-                else None
-            )
+            catalog = self._ensure_catalog()
+            record = catalog.get_stem_size(db_path.stem, source_size)
             if record is not None:
                 # Keep a valid SQLite index usable for title search even if the
                 # archive is currently unreadable; opening is lazy and reports
@@ -1199,7 +1184,9 @@ class Search:
                 if source_size is None:
                     source_size = record.size
             else:
-                zim_path = self._find_zim_path(db_path.stem, source_size)
+                zim_path = self._find_zim_path(
+                    db_path.stem, source_size, refresh=False
+                )
             # The archive and its libzim Searcher are opened on first use. A
             # 5000-ZIM library therefore no longer opens 5000 archives (or
             # creates 5000 Searchers) at startup.
@@ -1236,7 +1223,7 @@ class Search:
         source (no SQLite title index either), so it is skipped rather than
         advertised as an available-but-empty source.
         """
-        record = self._catalog.get_stem(zim_path.stem) if self._catalog else None
+        record = self._ensure_catalog().get_stem(zim_path.stem)
         if record is not None:
             if not record.available:
                 return None
@@ -1278,8 +1265,8 @@ class Search:
             has_fulltext_index=True,
         )
 
-    def _load_indexes(self) -> None:
-        found = self._discover_local_indexes()
+    def _load_indexes(self, *, refresh_catalog: bool = True) -> None:
+        found = self._discover_local_indexes(refresh_catalog=refresh_catalog)
         if not found:
             return
         workers = min(8, len(found))
@@ -1399,12 +1386,9 @@ class Search:
         the source set; only the index handles need reopening for their vectors.
         """
         with self._reload_lock:
-            if scan_catalog and self._catalog is not None:
-                try:
-                    self._catalog.scan()
-                except Exception as error:
-                    logger.warning("zimantic: catalog rescan failed (%s)", error)
-            found = self._discover_local_indexes()
+            if scan_catalog:
+                self._scan_catalog(force=True)
+            found = self._discover_local_indexes(refresh_catalog=False)
             with self._state_lock:
                 current_names = set(self.indexes)
             removed = sorted(current_names - set(found))
@@ -1438,7 +1422,9 @@ class Search:
                     self._index_uri(path) if kind == "sqlite" else None
                 )
                 matching_zim = (
-                    self._find_zim_path(name, current.source_size)
+                    self._find_zim_path(
+                        name, current.source_size, refresh=False
+                    )
                     if kind == "sqlite" and current is not None
                     else None
                 )
@@ -1693,7 +1679,6 @@ class Search:
         )
 
     def _rebuild_sources(self, entries: list[dict[str, str]]) -> list[dict[str, Any]]:
-        web_base_path = self.web_base_path
         with self._state_lock:
             local: dict[str, SourceInfo] = {}
             for local_name in self.indexes:
@@ -1714,10 +1699,8 @@ class Search:
                         local_name,
                         key,
                     )
-                record = (
-                    self._catalog.get_stem_size(local_name, index.source_size)
-                    if self._catalog
-                    else None
+                record = self._ensure_catalog().get_stem_size(
+                    local_name, index.source_size
                 )
                 if record is not None:
                     local[key] = self._source_from_catalog(
@@ -1727,59 +1710,16 @@ class Search:
                     )
                     continue
 
-                # Fallback for archives without a catalog row (for example, a
-                # catalog created before this version, or a build that could not
-                # write it). This opens the archive, as prior versions always did.
-                archive = index.ensure_open()
-                if archive is None:
-                    # A title-only index can still serve results when its ZIM
-                    # exists but cannot be opened (the SQLite docs table is
-                    # self-contained). Keep the source available, as prior
-                    # versions did. A ZIM that is actually absent is filtered
-                    # out earlier by _discover_local_indexes.
-                    local[key] = SourceInfo(
-                        key=key,
-                        name=local_name,
-                        book=local_name,
-                        mode="local",
-                        local_name=local_name,
-                        intent_phrases=_intent_phrases(local_name),
-                        size=index.source_size,
-                    )
-                    continue
-                metadata: dict[str, Any] = {}
-                try:
-                    with index.read_lock:
-                        if index.zim_path:
-                            metadata = metadata_from_archive(
-                                archive, Path(index.zim_path)
-                            )
-                except (
-                    ArticleNotFoundError,
-                    ArticleUnavailableError,
-                    OSError,
-                    AttributeError,
-                    KeyError,
-                    RuntimeError,
-                    TypeError,
-                    ValueError,
-                ) as error:
-                    logger.warning(
-                        "zimantic: metadata unavailable for %s (%s)",
-                        local_name,
-                        error,
-                    )
-                if metadata.get("size") is None and index.source_size is not None:
-                    metadata["size"] = index.source_size
-                has_icon = bool(metadata.get("favicon") or metadata.get("icon_path"))
-                icon_url = _source_icon_url(local_name, has_icon, web_base_path)
-                local[key] = _source_info_from_metadata(
-                    metadata,
+                # The catalog is authoritative for archive metadata. Keep a
+                # minimal searchable source if its row is unavailable.
+                local[key] = SourceInfo(
                     key=key,
+                    name=local_name,
+                    book=local_name,
+                    mode="local",
                     local_name=local_name,
-                    available=True,
-                    searchable=True,
-                    icon_url=icon_url,
+                    intent_phrases=_intent_phrases(local_name),
+                    size=index.source_size,
                 )
 
             if local:
@@ -1971,57 +1911,6 @@ class Search:
                 for source in self.sources.values()
             ]
 
-    def _inspect_library_archive(self, zim_name: str, zim_path: Path) -> SourceInfo:
-        """Build library metadata for a local archive not used by search."""
-        record = self._catalog.get_stem(zim_path.stem) if self._catalog else None
-        if record is not None:
-            with self._state_lock:
-                searchable = zim_name in self.indexes
-            return self._source_from_catalog(
-                record,
-                key=_zim_key(zim_name),
-                local_name=zim_name,
-                searchable=searchable,
-            )
-        try:
-            archive = Archive(zim_path)
-        except (OSError, RuntimeError, TypeError, ValueError) as error:
-            logger.warning("zimantic: library metadata unavailable for %s (%s)", zim_path, error)
-            return SourceInfo(
-                key=_zim_key(zim_name),
-                name=zim_name,
-                book=zim_name,
-                mode="local",
-                local_name=zim_name,
-                available=False,
-                searchable=False,
-                error="ZIM archive is unavailable",
-                size=zim_path.stat().st_size if zim_path.exists() else None,
-            )
-
-        metadata: dict[str, Any] = {}
-        try:
-            metadata = metadata_from_archive(archive, zim_path)
-        except (OSError, AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
-            logger.warning(
-                "zimantic: library metadata unavailable for %s (%s)", zim_path, error
-            )
-        if metadata.get("size") is None:
-            try:
-                metadata["size"] = zim_path.stat().st_size
-            except OSError:
-                metadata["size"] = None
-        has_icon = bool(metadata.get("favicon") or metadata.get("icon_path"))
-        icon_url = _source_icon_url(zim_name, has_icon, self.web_base_path)
-        return _source_info_from_metadata(
-            metadata,
-            key=_zim_key(zim_name),
-            local_name=zim_name,
-            available=True,
-            searchable=False,
-            icon_url=icon_url,
-        )
-
     def _library_cache_lock(self) -> threading.Lock:
         """Return the lock guarding the library scan/version caches."""
         with self._state_lock:
@@ -2032,7 +1921,7 @@ class Search:
             return lock
 
     def _invalidate_library_cache(self) -> None:
-        """Drop cached library scans, including one currently being computed."""
+        """Invalidate the catalog and library response refresh intervals."""
         lock = self._library_cache_lock()
         with lock:
             self._library_scan_at = 0.0
@@ -2040,23 +1929,6 @@ class Search:
             # A scan that started before this point must not publish its stale
             # result with a fresh timestamp.
             self._library_scan_token = getattr(self, "_library_scan_token", 0) + 1
-
-    def _library_zim_paths(self) -> dict[str, Path]:
-        """Scan ``zim_dir`` at most once per short interval for the library view."""
-        lock = self._library_cache_lock()
-        now = time.monotonic()
-        with lock:
-            cached = getattr(self, "_library_scan_cache", None)
-            scanned_at = getattr(self, "_library_scan_at", 0.0)
-            token = getattr(self, "_library_scan_token", 0)
-            if cached is not None and now - scanned_at < LIBRARY_SCAN_TTL_SECONDS:
-                return dict(cached)
-        scanned = self._scan_zim_paths()
-        with lock:
-            if getattr(self, "_library_scan_token", 0) == token:
-                self._library_scan_cache = dict(scanned)
-                self._library_scan_at = time.monotonic()
-        return scanned
 
     def library_dicts(self) -> list[dict[str, Any]]:
         """Return metadata for every local ZIM in the library.
@@ -2072,14 +1944,29 @@ class Search:
                 for source in self.sources.values()
                 if source.mode == "local" and source.local_name
             }
+            searchable_names = set(self.indexes)
+        self._scan_catalog(force=False)
+        catalog = self._ensure_catalog()
         # One card per UUID, then one per book identity (dated and
         # flavour variants of the same local book collapse together). Prefer a
         # readable, searchable copy, then the newest, fuller archive.
         all_sources: list[SourceInfo] = []
-        for zim_name, zim_path in sorted(self._library_zim_paths().items()):
-            source = indexed.get(zim_name)
+        for zim_name, _zim_path in sorted(
+            self._scan_zim_paths(refresh=False).items()
+        ):
+            record = catalog.get_stem(zim_name)
+            source = (
+                self._source_from_catalog(
+                    record,
+                    key=_zim_key(zim_name),
+                    local_name=zim_name,
+                    searchable=zim_name in searchable_names,
+                )
+                if record is not None
+                else indexed.get(zim_name)
+            )
             if source is None:
-                source = self._inspect_library_archive(zim_name, zim_path)
+                continue
             all_sources.append(source)
         chosen = _choose_sources(
             all_sources,
@@ -2104,6 +1991,7 @@ class Search:
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int], ...]]:
         """Return a cheap token that changes when the library contents change."""
+        self._scan_catalog(force=False)
         lock = self._library_cache_lock()
         now = time.monotonic()
         with lock:
@@ -2112,18 +2000,22 @@ class Search:
             token = getattr(self, "_library_scan_token", 0)
             if cached is not None and now - cached_at < LIBRARY_SCAN_TTL_SECONDS:
                 return cached
-        signatures = []
-        for zim_name, zim_path in sorted(self._library_zim_paths().items()):
-            try:
-                stat = zim_path.stat()
-            except OSError:
-                continue
-            signatures.append((zim_name, stat.st_size, stat.st_mtime_ns))
-        catalog = self._catalog
-        # The catalog is read live for archives without a library source record,
-        # so metadata-only writes must invalidate this payload too.
-        catalog_version = catalog.version() if catalog is not None else ()
-        version = (self.source_version(), catalog_version, tuple(signatures))
+        catalog = self._ensure_catalog()
+        records_by_path = {
+            Path(record.path): record for record in catalog.rows()
+        }
+        selected = largest_zims_by_stem(
+            {path: record.size for path, record in records_by_path.items()}
+        )
+        signatures = tuple(
+            (
+                name,
+                records_by_path[path].size,
+                int(records_by_path[path].mtime * 1_000_000_000),
+            )
+            for name, path in sorted(selected.items())
+        )
+        version = (self.source_version(), catalog.version(), signatures)
         with lock:
             # A reload during the scan already invalidated the previous token;
             # do not let this older signature set be cached under the new one.
@@ -2244,7 +2136,7 @@ class Search:
         with self._state_lock:
             index = self.indexes.get(zim_name)
         if index is None:
-            record = self._catalog.get_stem(zim_name) if self._catalog else None
+            record = self._ensure_catalog().get_stem(zim_name)
             zim_path = (
                 Path(record.path)
                 if record is not None and record.available
@@ -2297,7 +2189,7 @@ class Search:
             with self._state_lock:
                 index = self.indexes.get(zim_name)
             if index is None:
-                record = self._catalog.get_stem(zim_name) if self._catalog else None
+                record = self._ensure_catalog().get_stem(zim_name)
                 zim_path = (
                     Path(record.path)
                     if record is not None and record.available
@@ -2368,25 +2260,23 @@ class Search:
                 ),
                 None,
             )
-        if self._catalog:
-            # Consult the catalog even when the ZIM has no search source (for
-            # example a library-only archive or a duplicate removed from
-            # search). The favicon BLOB is the same illustration the discovery
-            # code selected.
-            data, mime = self._catalog.favicon(zim_name)
-            if data:
-                return {
-                    "zim": zim_name,
-                    "path": None,
-                    "title": (
-                        source.title if source is not None and source.title else zim_name
-                    ),
-                    "mimetype": (mime or "application/octet-stream")
-                    .split(";", 1)[0]
-                    .strip()
-                    .lower(),
-                    "content": data,
-                }
+        # Consult the catalog even when the ZIM has no search source (for
+        # example a library-only archive or a duplicate removed from search).
+        # The favicon BLOB is the same illustration selected during discovery.
+        data, mime = self._ensure_catalog().favicon(zim_name)
+        if data:
+            return {
+                "zim": zim_name,
+                "path": None,
+                "title": (
+                    source.title if source is not None and source.title else zim_name
+                ),
+                "mimetype": (mime or "application/octet-stream")
+                .split(";", 1)[0]
+                .strip()
+                .lower(),
+                "content": data,
+            }
         if source is not None and source.mode == "local" and source.icon_path:
             return self.read_article(zim_name, source.icon_path)
         if source is None:
@@ -2594,11 +2484,7 @@ class Search:
             if not db_current:
                 reasons.append("index file changed since load")
 
-            record = (
-                self._catalog.get_stem_size(name, index.source_size)
-                if self._catalog
-                else None
-            )
+            record = self._ensure_catalog().get_stem_size(name, index.source_size)
             archive_path = (
                 Path(index.zim_path)
                 if index.zim_path

@@ -314,16 +314,19 @@ def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
 
 def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path]:
     """Choose one archive per index identity, preferring the largest copy."""
+    from .catalog import largest_zims_by_stem
+
     by_stem: dict[str, list[Path]] = {}
     for zim in zims:
         by_stem.setdefault(zim.stem, []).append(zim)
+    selected = largest_zims_by_stem({path: zim_sizes[path] for path in zims})
     accepted: list[Path] = []
     for stem, paths in sorted(by_stem.items()):
         sizes = {zim_sizes[path] for path in paths}
         # Build and serve use the largest copy for an ambiguous stem. The
         # catalog keeps every row but resolves the stem to its largest file, so
         # all three agree on which archive wins.
-        chosen = max(paths, key=zim_sizes.__getitem__)
+        chosen = selected[stem]
         if len(sizes) > 1:
             logger.warning(
                 "zimantic: ZIM files share index identity %r with different sizes; "

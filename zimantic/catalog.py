@@ -26,10 +26,15 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    from libzim.reader import Archive
+except ImportError:
+    Archive = None
 
 from .redirects import resolve_redirect_entry
 
@@ -80,6 +85,16 @@ def iter_zim_files(root: Path | str, on_error=None) -> Iterator[Path]:
         for name in sorted(filenames):
             if is_zim_filename(name):
                 yield Path(directory, name)
+
+
+def largest_zims_by_stem(zim_sizes: Mapping[Path, int]) -> dict[str, Path]:
+    """Choose one largest archive per stem, preserving input order on ties."""
+    selected: dict[str, tuple[int, Path]] = {}
+    for path, size in zim_sizes.items():
+        current = selected.get(path.stem)
+        if current is None or size > current[0]:
+            selected[path.stem] = (size, path)
+    return {stem: path for stem, (_size, path) in selected.items()}
 
 
 # Serializes schema creation between threads in one process. Cross-process
@@ -443,24 +458,68 @@ class ZimCatalog:
 
     def __init__(
         self,
-        db_path: Path | str,
+        db_path: Path | str | None,
         zim_dir: Path | str | None = None,
         archive_factory: Any | None = None,
     ):
-        self.db_path = Path(db_path)
+        self.db_path = Path(db_path) if db_path is not None else Path(":memory:")
         self.zim_dir = Path(zim_dir).resolve() if zim_dir else None
         self.archive_factory = archive_factory
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(
-            self.db_path, timeout=30, check_same_thread=False
-        )
-        self.db.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         # Bumped on every local write; combined with SQLite's data_version in
         # version() so HTTP caches notice metadata-only changes.
         self._revision = 0
-        self.db.execute("PRAGMA busy_timeout=30000")
-        self._ensure_schema()
+        try:
+            self.db = self._open_database(db_path)
+            self._ensure_schema()
+            self.db.execute("PRAGMA busy_timeout=0")
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as error:
+                code = getattr(error, "sqlite_errorcode", None)
+                if code is None or code & 0xFF not in {
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                }:
+                    raise
+            else:
+                self.db.rollback()
+            finally:
+                self.db.execute("PRAGMA busy_timeout=30000")
+        except (OSError, sqlite3.Error) as error:
+            if db_path is None:
+                try:
+                    self.db.close()
+                except (AttributeError, sqlite3.Error):
+                    pass
+                raise
+            logger.warning(
+                "zimantic: catalog database %s unavailable (%s); using memory",
+                db_path,
+                error,
+            )
+            try:
+                self.db.close()
+            except (AttributeError, sqlite3.Error):
+                pass
+            self.db_path = Path(":memory:")
+            self.db = self._open_database(None)
+            self._ensure_schema()
+
+    def _open_database(self, db_path: Path | str | None) -> sqlite3.Connection:
+        if db_path is not None:
+            path = Path(db_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(
+                path, timeout=30, check_same_thread=False
+            )
+        else:
+            connection = sqlite3.connect(
+                ":memory:", timeout=30, check_same_thread=False
+            )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
 
     def _schema_current(self) -> tuple[bool, int]:
         """Read the schema state without taking a write lock."""
@@ -725,17 +784,50 @@ class ZimCatalog:
                 len(kept),
             )
 
-        # Unit tests replace libzim.reader.Archive with ``object`` to prevent
-        # accidental archive access. In that environment the catalog cannot
-        # inspect ZIMs; leave it empty so Search's archive fallback still works.
+        # Unit tests may pass ``object`` to prevent accidental archive access.
         _Archive = self.archive_factory
         if _Archive is None:
-            try:
-                from libzim.reader import Archive as _Archive
-            except Exception:
-                _Archive = None
+            _Archive = Archive
         if _Archive is None or _Archive is object:
-            logger.debug("zimantic: libzim.reader.Archive is patched; skipping catalog scan")
+            # Keep path and size identity available to SQLite indexes even when
+            # archive inspection is intentionally disabled (for example, in
+            # tests that pass ``object`` as the archive factory).
+            for path_str, stat in files.items():
+                if path_str in stale:
+                    continue
+                row = existing.get(path_str)
+                if (
+                    row is not None
+                    and row["available"]
+                    and row["size"] == stat.st_size
+                    and abs(float(row["mtime"]) - stat.st_mtime) < 1e-6
+                ):
+                    stats["skipped"] += 1
+                    continue
+                metadata = {column: "" for column in _SCHEMA_COLUMNS}
+                metadata.update(
+                    path=path_str,
+                    stem=Path(path_str).stem,
+                    size=stat.st_size,
+                    mtime=stat.st_mtime,
+                    article_count=0,
+                    media_count=0,
+                    entry_count=0,
+                    has_fulltext_index=0,
+                    favicon=None,
+                    available=1,
+                    scanned_at=time.time(),
+                )
+                with self._lock:
+                    self._upsert(metadata)
+                stats["updated" if path_str in existing else "added"] += 1
+            with self._lock:
+                for path_str in stale:
+                    self.db.execute("DELETE FROM zims WHERE path = ?", (path_str,))
+                    stats["removed"] += 1
+                    self._revision += 1
+                self.db.commit()
+            logger.debug("zimantic: archive inspection is disabled; catalogued paths only")
             return stats
 
         for path_str, stat in files.items():
@@ -775,14 +867,14 @@ class ZimCatalog:
         ).fetchone()
 
     def rows(self) -> list[CatalogRecord]:
-        query = "SELECT * FROM zims ORDER BY stem"
+        query = "SELECT * FROM zims ORDER BY stem, size DESC, path ASC"
         with self._lock:
             return [CatalogRecord.from_row(row) for row in self.db.execute(query)]
 
     def get_stem(self, stem: str) -> CatalogRecord | None:
         with self._lock:
             row = self.db.execute(
-                "SELECT * FROM zims WHERE stem = ? ORDER BY size DESC LIMIT 1",
+                "SELECT * FROM zims WHERE stem = ? ORDER BY size DESC, path ASC LIMIT 1",
                 (stem,),
             ).fetchone()
         return CatalogRecord.from_row(row) if row else None
@@ -794,12 +886,17 @@ class ZimCatalog:
         with self._lock:
             row = self.db.execute(
                 "SELECT * FROM zims WHERE stem = ? AND size = ? "
-                "ORDER BY size DESC LIMIT 1",
+                "ORDER BY path ASC LIMIT 1",
                 (stem, size),
             ).fetchone()
         if row:
             return CatalogRecord.from_row(row)
         return self.get_stem(stem)
+
+    def find_path(self, stem: str, size: int | None = None) -> Path | None:
+        """Return the matching-size archive path, or the largest same-stem copy."""
+        record = self.get_stem_size(stem, size)
+        return Path(record.path) if record is not None else None
 
     def favicon(self, stem: str) -> tuple[bytes | None, str]:
         with self._lock:

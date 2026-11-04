@@ -72,6 +72,7 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(first["added"], 1)
             record = catalog.get_stem("manual")
             self.assertIsNotNone(record)
+            self.assertEqual(catalog.find_path("manual", record.size), zims / "manual.zim")
             self.assertEqual(record.available, 1)
             self.assertEqual(record.article_count, 1)
             self.assertGreaterEqual(record.entry_count, 1)
@@ -87,6 +88,24 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(second["skipped"], 1)
             self.assertEqual(second["added"], 0)
             catalog.close()
+
+    def test_database_open_failure_falls_back_to_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real_connect = sqlite3.connect
+
+            def connect(database, *args, **kwargs):
+                if str(database) != ":memory:":
+                    raise sqlite3.OperationalError("read-only database")
+                return real_connect(database, *args, **kwargs)
+
+            with mock.patch("zimantic.catalog.sqlite3.connect", side_effect=connect):
+                catalog = ZimCatalog(Path(tmp) / "catalog.sqlite")
+
+            try:
+                self.assertEqual(catalog.db_path, Path(":memory:"))
+                self.assertEqual(catalog.rows(), [])
+            finally:
+                catalog.close()
 
     def test_invalid_zim_is_marked_and_retried(self):
         with tempfile.TemporaryDirectory() as tmp:
