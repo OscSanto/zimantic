@@ -3304,15 +3304,16 @@ class Search:
             if self.fulltext_pool is not None:
                 # Native libzim iteration aborts the interpreter on some
                 # corrupt full-text indexes, so it runs in a helper process.
-                paths = (
-                    self.fulltext_pool.search(
-                        index.zim_path or "",
-                        fulltext_query or query,
-                        count,
-                        index.zim_signature,
-                    )
-                    or []
+                native_paths = self.fulltext_pool.search(
+                    index.zim_path or "",
+                    fulltext_query or query,
+                    count,
+                    index.zim_signature,
                 )
+                if native_paths is None:
+                    errors.append("full-text search unavailable")
+                else:
+                    paths = native_paths
             elif searcher is not None:
                 # libzim's Searcher is not documented as thread-safe: serialize it.
                 with index.lock:

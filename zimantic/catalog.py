@@ -60,6 +60,23 @@ MAX_FAVICON_BYTES = 1 << 20
 # Library thumbnail size. libzim's default is also 48, but passing it keeps
 # the on-disk catalog identical to IIAB's iiab_zim_catalog.py.
 ILLUSTRATION_SIZE = 48
+_CATALOG_CORRUPTION_MESSAGES = (
+    "malformed",
+    "not a database",
+    "file is encrypted",
+)
+
+
+def _is_catalog_corruption(error: BaseException) -> bool:
+    """Return whether an initialization error warrants rebuilding the cache."""
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is not None and code & 0xFF in {
+        sqlite3.SQLITE_CORRUPT,
+        sqlite3.SQLITE_NOTADB,
+    }:
+        return True
+    message = str(error).casefold()
+    return any(marker in message for marker in _CATALOG_CORRUPTION_MESSAGES)
 
 
 def is_zim_filename(name: str) -> bool:
@@ -472,7 +489,7 @@ class ZimCatalog:
         try:
             self._initialize_database(db_path)
         except (OSError, sqlite3.Error) as error:
-            if db_path is None:
+            if db_path is None or not _is_catalog_corruption(error):
                 try:
                     self.db.close()
                 except (AttributeError, sqlite3.Error):

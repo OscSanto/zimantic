@@ -15,6 +15,8 @@ from collections import OrderedDict
 from libzim.reader import Archive
 from libzim.search import Query, Searcher
 
+from .libzim_compat import search_paths
+
 # Bound the worker's archive cache. The parent process already keeps its own
 # handles for previews and article reads; this cache only needs to cover the
 # archives touched by recent searches.
@@ -56,12 +58,7 @@ def main() -> int:
                 # Ask for only the caller's window. libzim can return fewer
                 # results than the estimate; the iterator is the source of truth.
                 search = searcher.search(Query().set_query(query))
-                result_set = (
-                    search.get_results(0, count)
-                    if hasattr(search, "get_results")
-                    else search.getResults(0, count)
-                )
-                results = [str(result.path) for result in result_set]
+                results = search_paths(search, 0, count)
         except Exception as error:  # report ordinary libzim errors without dying
             print(
                 json.dumps({"error": f"{type(error).__name__}: {error}"}),

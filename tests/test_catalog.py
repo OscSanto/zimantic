@@ -127,6 +127,31 @@ class CatalogTests(unittest.TestCase):
             finally:
                 catalog.close()
 
+    def test_database_lock_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "catalog.sqlite"
+            db = sqlite3.connect(db_path)
+            db.execute("CREATE TABLE stale_data (value TEXT)")
+            db.execute("INSERT INTO stale_data VALUES ('keep')")
+            db.commit()
+            db.close()
+
+            with mock.patch(
+                "zimantic.catalog.sqlite3.connect",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    ZimCatalog(db_path)
+
+            db = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(
+                    db.execute("SELECT value FROM stale_data").fetchone()[0],
+                    "keep",
+                )
+            finally:
+                db.close()
+
     def test_invalid_zim_is_marked_and_retried(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

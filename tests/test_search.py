@@ -69,6 +69,42 @@ def _bare_search(cfg):
     return search
 
 
+class FulltextFailureTests(unittest.TestCase):
+    def test_native_fulltext_failure_is_reported_as_partial(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        source = SourceInfo(
+            "manual", "Manual", "manual", "local", local_name="manual"
+        )
+        search.fulltext_pool = types.SimpleNamespace(
+            search=lambda *_args: None,
+            close=lambda: None,
+        )
+        archive = types.SimpleNamespace(has_fulltext_index=True)
+        index = _LocalIndex(
+            None,
+            None,
+            archive,
+            None,
+            threading.Lock(),
+            zim_path="/tmp/manual.zim",
+            has_fulltext_index=True,
+        )
+
+        result = search._search_local_locked(
+            source,
+            "tires",
+            "tires",
+            "tires",
+            None,
+            10,
+            index,
+        )
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.error, "full-text search unavailable")
+        self.assertEqual(result.error, "full-text search unavailable")
+
+
 class _CountingSemaphore(threading.BoundedSemaphore):
     """BoundedSemaphore that records successful releases for assertions."""
 

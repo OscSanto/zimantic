@@ -57,7 +57,7 @@ class _Worker:
         count: int,
         version: object = None,
     ) -> list[str] | None:
-        """Return result paths, or None when the worker process died."""
+        """Return result paths, or None when the worker cannot answer."""
         with self._lock:
             try:
                 process = self._ensure_process()
@@ -92,7 +92,7 @@ class _Worker:
                     zim_path,
                     payload["error"],
                 )
-                return []
+                return None
             return list(payload.get("results") or [])
 
     def close(self) -> None:
@@ -114,6 +114,11 @@ class _Worker:
                 process.wait(timeout=2)
         else:
             process.wait()
+        try:
+            if process.stdout is not None:
+                process.stdout.close()
+        except OSError:
+            pass
 
 
 class FulltextPool:
@@ -144,7 +149,7 @@ class FulltextPool:
         count: int,
         version: object = None,
     ) -> list[str] | None:
-        """Search one archive; mark it broken if the helper aborts."""
+        """Search one archive; return None when the helper cannot answer."""
         if self.is_broken(zim_path):
             return None
         worker = self._idle.get()
@@ -163,9 +168,9 @@ class FulltextPool:
                 self._broken.add(zim_path)
             if first_failure:
                 logger.warning(
-                    "zimantic: native full-text search disabled for %s after a "
-                    "corrupt full-text index aborted the helper process; falling "
-                    "back to title and semantic search for this archive",
+                    "zimantic: native full-text search unavailable for %s after "
+                    "a helper failure; falling back to title and semantic search "
+                    "for this archive",
                     zim_path,
                 )
         return results
