@@ -40,7 +40,9 @@ class ArticleNavigationScriptTests(unittest.TestCase):
     def setUpClass(cls):
         cls.bridge = _inline_script(web_app.ARTICLE_NAV_BRIDGE_SCRIPT)
         toolbar = _inline_script(
-            web_app.ARTICLE_TOOLBAR_SCRIPT % (json.dumps(""), json.dumps(False))
+            web_app.ARTICLE_TOOLBAR_SCRIPT.replace(
+                "__APP_BASE_PATH_JSON__", json.dumps("")
+            ).replace("__SECURE_BROWSING_JSON__", json.dumps(False))
         )
         cls.local_source = _section(
             toolbar, "const localPath = pathname =>", "const permalinkLabel"
@@ -65,7 +67,7 @@ const location = {{
   replace(value) {{ calls.push(String(value)); }},
 }};
 const document = {{readyState: "complete", addEventListener() {{}}}};
-{self.bridge % json.dumps(base_path)}
+{self.bridge.replace("__BASE_PATH_JSON__", json.dumps(base_path))}
 console.log(JSON.stringify(calls));
 """
         return _run_node(script)
@@ -104,7 +106,7 @@ const document = {{
   addEventListener(type, fn) {{ handlers[`doc:${{type}}`] = fn; }},
   querySelector() {{ return null; }},
 }};
-{self.bridge % json.dumps("/zimantic")}
+{self.bridge.replace("__BASE_PATH_JSON__", json.dumps("/zimantic"))}
 const click = options => {{
   const anchor = {{
     target: options.target || "",
