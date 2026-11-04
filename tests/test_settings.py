@@ -29,10 +29,15 @@ class HardwareProfileTests(unittest.TestCase):
         with patch("os.cpu_count", return_value=4):
             self.assertEqual(profile_for_hardware(), "mobile")
 
-    @patch.object(settings, "_system_memory_gb", return_value=2.0)
-    def test_two_gb_hosts_use_mobile_profile(self, _memory):
+    @patch.object(settings, "_system_memory_gb", return_value=1.0)
+    def test_one_gb_hosts_use_mobile_profile(self, _memory):
         with patch("os.cpu_count", return_value=4):
             self.assertEqual(profile_for_hardware(), "mobile")
+
+    @patch.object(settings, "_system_memory_gb", return_value=2.0)
+    def test_two_gb_hosts_use_desktop_profile(self, _memory):
+        with patch("os.cpu_count", return_value=4):
+            self.assertEqual(profile_for_hardware(), "desktop")
 
     @patch.object(settings, "_system_memory_gb", return_value=8.0)
     def test_mid_memory_is_desktop(self, _memory):
@@ -73,6 +78,16 @@ class LoadConfigTests(unittest.TestCase):
         for key in ("index_dir", "zim_dir", "model_dir", "port", "batch_size"):
             self.assertIn(key, cfg)
             self.assertEqual(cfg[key], PROFILES["desktop"][key])
+
+    def test_slot_wait_seconds_is_a_known_float_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("slot_wait_seconds = 3.5\n", encoding="utf-8")
+            warnings = []
+            with patch.object(settings, "profile_for_hardware", return_value="desktop"):
+                cfg = load_config(path, warn=warnings.append)
+            self.assertEqual(cfg["slot_wait_seconds"], 3.5)
+            self.assertFalse(any("unknown config key" in message for message in warnings))
 
     def test_empty_file_warns(self):
         with tempfile.TemporaryDirectory() as tmp:

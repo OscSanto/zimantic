@@ -2719,7 +2719,7 @@
             }
 
             function retryStatusText(status, delay) {
-                const reason = status === 504 ? "Search gateway timed out" : "Server is busy";
+                const reason = status === 504 ? "Search gateway timed out" : "Too many searches are running";
                 return `${reason}; retrying in ${delay / 1000}s…`;
             }
 
@@ -3012,7 +3012,7 @@
                             signal: controller.signal,
                         });
                         if (response.ok) break;
-                        // 503 is Zimantic's "all search slots are busy" reply;
+                        // 503 is Zimantic's "too many searches are running" reply;
                         // 504 is a gateway giving up on a cold search. Both
                         // usually succeed once the in-flight search finishes,
                         // so retry instead of showing a hard failure.

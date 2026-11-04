@@ -369,11 +369,37 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 return icon_url
         return None
 
+    def zim_search_available(zim: str) -> bool:
+        """True when this ZIM resolves to an available local search scope.
+
+        `Search.suggest` falls back to every source when a ZIM identifier does
+        not resolve, so the toolbar must not offer "Search this ZIM" for an
+        unknown, removed, or unavailable archive.
+        """
+        try:
+            sources = search_class.source_dicts()
+        except Exception:
+            return False
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            if source.get("mode") != "local" or not source.get("available"):
+                continue
+            if zim in {
+                source.get("key"),
+                source.get("name"),
+                source.get("book"),
+                source.get("local_name"),
+            }:
+                return True
+        return False
+
     def content_shell_response(
         zim: str, path: str | None = None, highlight: str | None = None
     ):
         requested_path = None if path is None else path
         fallback_icon = zim_icon_url(zim)
+        show_zim_search = zim_search_available(zim)
         read_head = getattr(search_class, "read_article_head", None)
         check_path = getattr(search_class, "article_path_exists", None)
 
@@ -415,6 +441,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 path_exists=path_exists,
                 error=error_info,
                 secure_browsing=secure_browsing,
+                show_zim_search=show_zim_search,
             )
 
         if requested_path != article["path"]:
@@ -435,6 +462,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             highlight=highlight,
             path_exists=path_exists,
             secure_browsing=secure_browsing,
+            show_zim_search=show_zim_search,
         )
 
     @app.get("/content/{zim}")

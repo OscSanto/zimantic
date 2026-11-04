@@ -141,6 +141,10 @@ max_kiwix_response_bytes = 67108864
 # max_stream_ranks = 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
 # source_timeout = 12
+# Seconds a search waits for a free slot before reporting busy. Keep this at
+# least as long as a typical cold search on the host so overlapping requests
+# queue instead of returning 503.
+# slot_wait_seconds = 10
 # Exact-query LRU cache. Set cache_size to 0 to disable.
 # Desktop 256, mobile 64, supercomputer 1024.
 # cache_size = 256

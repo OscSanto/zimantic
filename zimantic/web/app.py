@@ -914,16 +914,23 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     let zimSearchItems = [];
     let zimSearchActive = -1;
     let zimSearchComposing = false;
+    const resetZimSuggestionSelection = () => {
+      zimSearchActive = -1;
+      if (zimSearchInput) zimSearchInput.removeAttribute("aria-activedescendant");
+      if (!zimSuggestions) return;
+      zimSuggestions.querySelectorAll("[role='option']").forEach(option => {
+        option.setAttribute("aria-selected", "false");
+      });
+    };
     const closeZimSuggestions = () => {
       zimSearchItems = [];
-      zimSearchActive = -1;
+      resetZimSuggestionSelection();
       if (zimSuggestions) {
         zimSuggestions.hidden = true;
         zimSuggestions.replaceChildren();
       }
       if (zimSearchInput) {
         zimSearchInput.setAttribute("aria-expanded", "false");
-        zimSearchInput.removeAttribute("aria-activedescendant");
       }
     };
     const setActiveZimSuggestion = index => {
@@ -941,8 +948,8 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const renderZimSuggestions = items => {
       if (!zimSuggestions) return;
       zimSearchItems = items;
-      zimSearchActive = -1;
       zimSuggestions.replaceChildren();
+      resetZimSuggestionSelection();
       if (!items.length) {
         closeZimSuggestions();
         return;
@@ -1063,13 +1070,17 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       if (!zimSearchInput) return;
       clearTimeout(zimSearchTimer);
       zimSearchTimer = null;
+      // A new keystroke invalidates in-flight responses and any keyboard
+      // selection. Keep the list already on screen visible and clickable until
+      // the next response replaces it.
+      zimSearchSequence += 1;
+      if (zimSearchController) {
+        zimSearchController.abort();
+        zimSearchController = null;
+      }
+      resetZimSuggestionSelection();
       const query = zimSearchInput.value.trim();
       if (!query) {
-        if (zimSearchController) {
-          zimSearchController.abort();
-          zimSearchController = null;
-        }
-        zimSearchSequence += 1;
         closeZimSuggestions();
         return;
       }
@@ -1081,10 +1092,6 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const submitZimSearch = () => {
       if (zimSearchActive >= 0) {
         openZimSuggestion(zimSearchActive);
-        return true;
-      }
-      if (zimSearchItems.length) {
-        openZimSuggestion(0);
         return true;
       }
       return openZimSearchPage();
@@ -1111,7 +1118,22 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
           setActiveZimSuggestion(start + offset);
           return;
         }
+        if (
+          event.key === "Tab" &&
+          !event.shiftKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey
+        ) {
+          if (!zimSearchItems.length || zimSearchActive >= 0) return;
+          event.preventDefault();
+          setActiveZimSuggestion(0);
+          return;
+        }
         if (event.key === "Escape") {
+          if (!zimSearchItems.length) return;
+          event.preventDefault();
+          event.stopPropagation();
           closeZimSuggestions();
           return;
         }
@@ -1835,6 +1857,7 @@ def _article_toolbar(
     highlight: str | None = None,
     path_exists=None,
     error: dict | None = None,
+    show_zim_search: bool = True,
 ) -> str:
     zim_url = _content_url(zim, base_path=base_path)
     random_url = f"{base_path}/random?zim={quote_path(zim, safe='')}"
@@ -1931,20 +1954,21 @@ def _article_toolbar(
             '<span class="zimantic-toolbar-home-short">Home</span>'
             "</a>"
         )
-        zim_search_html = (
-            '<form class="zimantic-toolbar-zim-search" role="search" '
-            'data-zimantic-zim-search '
-            f'data-zimantic-zim="{zim_name}">'
-            '<input type="search" class="zimantic-toolbar-zim-search-input" '
-            'data-zimantic-zim-search-input placeholder="Search this ZIM" '
-            'aria-label="Search this ZIM" autocomplete="off" '
-            'role="combobox" aria-autocomplete="list" aria-expanded="false" '
-            'aria-controls="zimanticZimSuggestions">'
-            '<div class="zimantic-toolbar-suggestions" '
-            'id="zimanticZimSuggestions" role="listbox" '
-            'data-zimantic-zim-suggestions hidden></div>'
-            "</form>"
-        )
+        if show_zim_search:
+            zim_search_html = (
+                '<form class="zimantic-toolbar-zim-search" role="search" '
+                'data-zimantic-zim-search '
+                f'data-zimantic-zim="{zim_name}">'
+                '<input type="search" class="zimantic-toolbar-zim-search-input" '
+                'data-zimantic-zim-search-input placeholder="Search this ZIM" '
+                'aria-label="Search this ZIM" autocomplete="off" '
+                'role="combobox" aria-autocomplete="list" aria-expanded="false" '
+                'aria-controls="zimanticZimSuggestions">'
+                '<div class="zimantic-toolbar-suggestions" '
+                'id="zimanticZimSuggestions" role="listbox" '
+                'data-zimantic-zim-suggestions hidden></div>'
+                "</form>"
+            )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
     <button type="button" data-zimantic-action="close" title="Close article">Close</button>

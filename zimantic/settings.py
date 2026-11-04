@@ -50,13 +50,17 @@ _COMMON = {
     "preview_limit": 10,
     "min_cosine_similarity": 0.85,
     "source_timeout": 12,
+    # Seconds a search waits for one of max_concurrent_searches before the
+    # server reports busy. Keep this above a typical cold-search duration on
+    # slow hardware so two overlapping requests queue instead of failing.
+    "slot_wait_seconds": 10.0,
     # Sandbox article documents (and therefore isolate their Web Storage).
     # Off by default: local ZIMs are trusted input and article functionality
     # (especially persistent browser storage) matters more than isolation.
     "secure_browsing": False,
 }
 
-MOBILE = {  # ~512 MB - 2 GB RAM: Raspberry Pi Zero 2 W and similar
+MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     **_COMMON,
     "max_results": 50,
     "batch_size": 8,
@@ -243,7 +247,7 @@ def profile_for_hardware() -> str:
     """Pick mobile/desktop/supercomputer from a simple hardware heuristic."""
     cores = os.cpu_count() or 1
     memory = _system_memory_gb()
-    if 0 < memory <= 2.0:  # Pi Zero 2 W (512 MB) through 2 GB hosts
+    if 0 < memory <= 1.0:  # Pi Zero 2 W (512 MB) through 1 GB hosts
         return "mobile"
     if memory >= 128.0 or cores >= 32:
         return "supercomputer"
