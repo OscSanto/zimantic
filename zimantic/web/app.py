@@ -118,6 +118,8 @@ ARTICLE_TOOLBAR_STYLE = (
 
 ARTICLE_TOOLBAR_SCRIPT = (
     '<script data-zimantic-toolbar>\n'
+    + _read_static_text("i18n.js")
+    + "\n"
     + _read_static_text("article-toolbar.js")
     + "\n</script>"
 )
