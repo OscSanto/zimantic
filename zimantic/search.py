@@ -710,20 +710,6 @@ class Search:
         # this, a burst of slower-than-usual searches could occupy every worker
         # thread in the server's sync thread pool while they wait.
         self._slot_waiters = threading.BoundedSemaphore(self.max_concurrent_searches)
-        # Abandoned streams skip queued source work, but a source that is
-        # already running finishes in the background. Bound those finalizers so
-        # repeated disconnects cannot pile up clean-up threads on a
-        # memory-constrained host.
-        self._drain_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
-        # A permit is taken before submitting a source task and released when
-        # the task starts. This bounds the executor queue: queued work from an
-        # abandoned search still occupies queue space until a worker reaches it,
-        # so repeated disconnects cannot grow the queue without limit. The live
-        # owner submits only as far as this permits and retries as sources
-        # finish, so filling the queue never stalls the event stream.
-        self._source_queue_slots = threading.BoundedSemaphore(
-            max(1, self.source_workers)
-        )
         self._executor = ThreadPoolExecutor(
             max_workers=self.source_workers,
             thread_name_prefix="zimantic-search",
@@ -3396,13 +3382,9 @@ class Search:
         inflight_key = (generation, cache_key)
         acquired = False
         futures: list[Future[SourceResult]] = []
-        completed_futures: set[Future[SourceResult]] = set()
         completed: list[SourceResult] = []
         reported_counts: dict[str, int | None] = {}
         cache_value: Any = None
-        abandoned = False
-        finalized = False
-        pending_index = 0
         stop = threading.Event()
         try:
             # Wait briefly for a slot so a burst of retries can be absorbed;
@@ -3437,7 +3419,6 @@ class Search:
                 if acquired:
                     self._release_search_slot()
                     acquired = False
-                finalized = True
                 empty_state = {
                     "results": [],
                     "total": 0,
@@ -3487,21 +3468,10 @@ class Search:
             source_limit = self._source_limit(total_sources)
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
-            future_sources: dict[Future[SourceResult], SourceInfo] = {}
-            remaining: set[Future[SourceResult]] = set()
-
-            def submit_pending(*, wait_seconds: float = 0.0) -> bool:
-                """Submit sources until the bounded queue is full.
-
-                Sources that do not fit stay in ``sources`` and are retried as
-                workers free queue space. The owner never blocks here, so a
-                large search keeps emitting events while its queue drains.
-                """
-                nonlocal pending_index
-                submitted = False
-                while pending_index < len(sources):
-                    src = sources[pending_index]
-                    future = self._submit_source(
+            for src in sources:
+                futures.append(
+                    self._executor.submit(
+                        self._run_source_task,
                         stop,
                         src,
                         query,
@@ -3509,18 +3479,10 @@ class Search:
                         fulltext_query,
                         query_vector,
                         source_limit,
-                        wait_seconds=wait_seconds if not submitted else 0.0,
                     )
-                    if future is None:
-                        break
-                    pending_index += 1
-                    submitted = True
-                    futures.append(future)
-                    future_sources[future] = src
-                    remaining.add(future)
-                return submitted
+                )
 
-            submit_pending()
+            future_sources = dict(zip(futures, sources))
             started_at = time.monotonic()
             last_rank_at = started_at
             rank_passes = 0
@@ -3528,22 +3490,8 @@ class Search:
             # Ids of the page last sent to the client, so a snapshot that didn't
             # move the page can omit its (large, unchanged) result list.
             last_page_signature: tuple[str, ...] | None = None
-            while pending_index < len(sources) or remaining:
-                if not remaining:
-                    # All submitted work is done but sources are still pending:
-                    # another search holds every queue permit. Wait briefly for
-                    # capacity and keep the status line alive meanwhile.
-                    wait_seconds = max(0.05, min(1.0, update_interval or 1.0))
-                    if not submit_pending(wait_seconds=wait_seconds):
-                        yield {
-                            "type": "progress",
-                            "completed": len(completed),
-                            "total_sources": total_sources,
-                            "elapsed": round(time.monotonic() - started_at, 1),
-                        }
-                        continue
-                else:
-                    submit_pending()
+            remaining = set(futures)
+            while remaining:
                 timed_out = False
                 try:
                     for future in as_completed(
@@ -3552,9 +3500,6 @@ class Search:
                     ):
                         remaining.discard(future)
                         src = future_sources[future]
-                        # A completed source frees queue space; keep the
-                        # pipeline full without waiting for the next pass.
-                        submit_pending()
                         try:
                             result = future.result()
                         except Exception as error:
@@ -3563,7 +3508,6 @@ class Search:
                                 error=f"search failed: {error}",
                                 status="error",
                             )
-                        completed_futures.add(future)
                         completed.append(result)
                         unranked += 1
                         now = time.monotonic()
@@ -3623,7 +3567,7 @@ class Search:
                             )
                 except TimeoutError:
                     timed_out = True
-                if pending_index >= len(sources) and not remaining:
+                if not remaining:
                     break
                 if not timed_out:
                     continue
@@ -3679,7 +3623,6 @@ class Search:
             if acquired:
                 self._release_search_slot()
                 acquired = False
-            finalized = True
             yield self._event(
                 "done",
                 state,
@@ -3689,191 +3632,16 @@ class Search:
                 page_size,
                 self._matched_by(cache_value["pool"]) if debug else None,
             )
-        except GeneratorExit:
-            # A disconnected streaming response closes this generator while
-            # source workers may still be running. Queued work is skipped in the
-            # finally block and the admission slot is returned immediately;
-            # running work finishes in the bounded search pool.
-            abandoned = True
-            raise
         finally:
+            # Skip any queued source work from an interrupted or finished
+            # search, release the admission slot immediately, and wake any
+            # identical-query waiters (who retry when cache_value is None).
+            stop.set()
+            for future in futures:
+                future.cancel()
             if acquired:
                 self._release_search_slot()
-                acquired = False
-            if abandoned and futures and not finalized:
-                # A disconnected stream must never hold user-facing admission
-                # while it drains stale work. Skip every source that definitely
-                # will not run: sources that were never submitted because the
-                # bounded queue was full, and submitted tasks still waiting for
-                # a worker. The running ones finish in the bounded search pool,
-                # so at most `source_workers` abandoned queries can occupy
-                # workers after a disconnect.
-                if pending_index < len(sources) or any(
-                    not future.done() and not future.running()
-                    for future in futures
-                ):
-                    # Some sources never ran, so the result is partial. Answer
-                    # identical waiters with "retry" instead of serving or
-                    # caching an incomplete page. The queued tasks release their
-                    # queue permits when workers reach them.
-                    stop.set()
-                    self._finish_inflight(inflight_key, pending, None)
-                else:
-                    # Every source had already started. Collect them in the
-                    # background (or inline when they are all done) and cache a
-                    # complete result.
-                    drain_slot = self._acquire_drain_slot()
-                    if drain_slot:
-                        try:
-                            threading.Thread(
-                                target=self._finish_abandoned_search,
-                                args=(
-                                    query,
-                                    cache_key,
-                                    generation,
-                                    pending,
-                                    sources,
-                                    source,
-                                    offset,
-                                    page_size,
-                                    debug,
-                                    selective,
-                                    futures,
-                                    completed_futures,
-                                    completed,
-                                    reported_counts,
-                                    drain_slot,
-                                ),
-                                name="zimantic-abandoned-search",
-                                daemon=True,
-                            ).start()
-                        except Exception:
-                            self._release_drain_slot()
-                            drain_slot = False
-                    if not drain_slot:
-                        if all(future.done() for future in futures):
-                            self._finish_abandoned_search(
-                                query,
-                                cache_key,
-                                generation,
-                                pending,
-                                sources,
-                                source,
-                                offset,
-                                page_size,
-                                debug,
-                                selective,
-                                futures,
-                                completed_futures,
-                                completed,
-                                reported_counts,
-                                False,
-                            )
-                        else:
-                            # Waiting for a running source here would pin the
-                            # request thread for up to source_timeout. The next
-                            # query can start fresh; this result is not cached.
-                            self._finish_inflight(inflight_key, pending, None)
-            else:
-                # Normal completion, or an error unrelated to disconnecting.
-                # Any source still queued must not run after the owner is gone.
-                stop.set()
-                self._finish_inflight(inflight_key, pending, cache_value)
-
-    def _finish_abandoned_search(
-        self,
-        query: str,
-        cache_key: Any,
-        generation: int,
-        pending: Future,
-        sources: list[SourceInfo],
-        source: str | list[str] | None,
-        offset: int,
-        page_size: int,
-        debug: bool,
-        selective: bool,
-        futures: list[Future[SourceResult]],
-        completed_futures: set[Future[SourceResult]],
-        completed: list[SourceResult],
-        reported_counts: dict[str, int | None],
-        holds_drain_slot: bool,
-    ) -> None:
-        """Finish a search after its streaming client has disconnected.
-
-        Called only when every source had already started, so the collected
-        result is complete and can be cached for identical-query waiters.
-        """
-        inflight_key = (generation, cache_key)
-        cache_value: Any = None
-        try:
-            future_sources = dict(zip(futures, sources))
-            deadline = time.monotonic() + SEARCH_CLAIM_WAIT_SECONDS
-            for future in futures:
-                if future in completed_futures:
-                    continue
-                src = future_sources[future]
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    completed.append(
-                        SourceResult(
-                            source=src,
-                            error="search timed out",
-                            status="error",
-                        )
-                    )
-                    continue
-                try:
-                    result = future.result(timeout=remaining)
-                except TimeoutError:
-                    result = SourceResult(
-                        source=src,
-                        error="search timed out",
-                        status="error",
-                    )
-                except Exception as error:
-                    result = SourceResult(
-                        source=src,
-                        error=f"search failed: {error}",
-                        status="error",
-                    )
-                completed.append(result)
-
-            pool_target = self._pool_target()
-            _, cache_value = self._finalize_search(
-                query,
-                completed,
-                source,
-                offset,
-                page_size,
-                debug,
-                pool_target,
-                reported_counts,
-                selective,
-                generation,
-                cache_key,
-            )
-        except Exception:
-            logger.exception("zimantic: abandoned search finalization failed")
-        finally:
-            if holds_drain_slot:
-                self._release_drain_slot()
             self._finish_inflight(inflight_key, pending, cache_value)
-
-    def _acquire_drain_slot(self) -> bool:
-        """Take a background-drain slot without blocking.
-
-        Test doubles without the semaphore always drain, matching the old
-        behaviour.
-        """
-        slots = getattr(self, "_drain_slots", None)
-        if slots is None:
-            return True
-        return slots.acquire(blocking=False)
-
-    def _release_drain_slot(self) -> None:
-        slots = getattr(self, "_drain_slots", None)
-        if slots is not None:
-            slots.release()
 
     def _release_search_slot(self) -> None:
         self._search_slots.release()
@@ -3899,44 +3667,12 @@ class Search:
             if waiters is not None:
                 waiters.release()
 
-    def _submit_source(
-        self,
-        stop: threading.Event,
-        source: SourceInfo,
-        *args,
-        wait_seconds: float = 0.0,
-    ):
-        """Submit one source task, bounding the executor queue.
-
-        Returns ``None`` when the queue is full and ``wait_seconds`` is zero, so
-        the streaming owner can keep yielding events and retry later instead of
-        blocking the request thread.
-        """
-        slots = getattr(self, "_source_queue_slots", None)
-        if slots is not None:
-            if wait_seconds > 0:
-                if not slots.acquire(timeout=wait_seconds):
-                    return None
-            elif not slots.acquire(blocking=False):
-                return None
-        try:
-            return self._executor.submit(self._run_source_task, stop, source, *args)
-        except BaseException:
-            if slots is not None:
-                slots.release()
-            raise
-
     def _run_source_task(
         self,
         stop: threading.Event,
         source: SourceInfo,
         *args,
     ) -> SourceResult:
-        # The work item has left the executor queue, so another submission may
-        # take this permit even while the source itself runs.
-        slots = getattr(self, "_source_queue_slots", None)
-        if slots is not None:
-            slots.release()
         if stop.is_set():
             return SourceResult(source=source, status="cancelled")
         return self._search_source(source, *args)
