@@ -73,6 +73,7 @@ const history = {{
   replaceState(state, _title, url) {{ replaced = String(url); }},
 }};
 const MAX_QUERY_LENGTH = 4096;
+{_function_source(source, "function replaceQueryParam(", "let PAGE_SIZE =")}
 {_function_source(source, "function normalizePageParam(", "function readLocationState(")}
 normalizePageParam();
 const zero = replaced;

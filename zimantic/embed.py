@@ -13,7 +13,7 @@ import numpy as np
 import onnxruntime as ort
 import sentencepiece
 
-from .model_files import DEFAULT_MODEL_CHECKSUMS
+from .model_files import DEFAULT_MODEL_CHECKSUMS, sha256_file as _sha256
 from .model_meta import (
     MODEL_PROBE_MEAN_COSINE,
     MODEL_PROBE_MIN_COSINE,
@@ -167,14 +167,6 @@ EXPECTED_CHECKSUMS = DEFAULT_MODEL_CHECKSUMS
 
 # Leave a core for search and the web server.
 DEFAULT_EMBED_THREADS = max(1, (os.cpu_count() or 1) - 1)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _configured_tokenizer_class(model_dir) -> str:

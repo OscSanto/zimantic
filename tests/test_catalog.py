@@ -89,21 +89,41 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(second["added"], 0)
             catalog.close()
 
-    def test_database_open_failure_falls_back_to_memory(self):
+    def test_database_open_failure_deletes_and_recreates_database(self):
         with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "catalog.sqlite"
+            db = sqlite3.connect(db_path)
+            db.execute("CREATE TABLE stale_data (value TEXT)")
+            db.execute("INSERT INTO stale_data VALUES ('old')")
+            db.commit()
+            db.close()
+            Path(f"{db_path}-wal").write_bytes(b"stale WAL")
+            Path(f"{db_path}-shm").write_bytes(b"stale SHM")
+
             real_connect = sqlite3.connect
+            failed = False
 
             def connect(database, *args, **kwargs):
-                if str(database) != ":memory:":
-                    raise sqlite3.OperationalError("read-only database")
+                nonlocal failed
+                if str(database) == str(db_path) and not failed:
+                    failed = True
+                    raise sqlite3.DatabaseError("database is malformed")
                 return real_connect(database, *args, **kwargs)
 
             with mock.patch("zimantic.catalog.sqlite3.connect", side_effect=connect):
-                catalog = ZimCatalog(Path(tmp) / "catalog.sqlite")
+                catalog = ZimCatalog(db_path)
 
             try:
-                self.assertEqual(catalog.db_path, Path(":memory:"))
+                self.assertTrue(failed)
+                self.assertEqual(catalog.db_path, db_path)
                 self.assertEqual(catalog.rows(), [])
+                tables = {
+                    row["name"]
+                    for row in catalog.db.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                self.assertEqual(tables, {"zims"})
             finally:
                 catalog.close()
 

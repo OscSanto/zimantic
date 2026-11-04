@@ -56,7 +56,12 @@ from .model_meta import (
     MODEL_PROBE_TEXTS_KEY,
     MODEL_PROBE_VECTORS_KEY,
 )
-from .searching.config import _file_signature, _float_config, _int_config
+from .searching.config import (
+    DEFAULT_MAX_ARTICLE_BYTES,
+    _file_signature,
+    _float_config,
+    _int_config,
+)
 from .searching.index import _LocalIndex, _nprobe
 from .searching.kiwix import (
     DEFAULT_KIWIX_CATALOG_ATTEMPTS,
@@ -393,6 +398,78 @@ def _choose_sources(sources: list[SourceInfo], identity) -> list[SourceInfo]:
 
 
 class Search:
+    cfg: dict[str, Any] = {}
+    semantic: bool = False
+    embedder: Any = None
+    catalog: ZimCatalog | None = None
+    _defer_faiss: bool = False
+    _model_fingerprint: str = ""
+    _cache_generation: int = 0
+    preview_cache: QueryCache | None = None
+    _probe_cache: dict[tuple[str, ...], Any] | None = None
+    _probe_cache_lock: threading.Lock | None = None
+    page_size: int = DEFAULT_PAGE_SIZE
+    preview_limit: int = DEFAULT_PAGE_SIZE
+    candidate_count: int = DEFAULT_CANDIDATES
+    max_results: int = DEFAULT_MAX_RESULTS
+    source_timeout: int = DEFAULT_SOURCE_TIMEOUT
+
+    @property
+    def preview_chars(self) -> int:
+        if "_preview_chars" in self.__dict__:
+            return self.__dict__["_preview_chars"]
+        return _int_config(self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
+
+    @preview_chars.setter
+    def preview_chars(self, value: int) -> None:
+        self.__dict__["_preview_chars"] = value
+
+    @property
+    def max_stream_ranks(self) -> int:
+        if "_max_stream_ranks" in self.__dict__:
+            return self.__dict__["_max_stream_ranks"]
+        return _int_config(self.cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS)
+
+    @max_stream_ranks.setter
+    def max_stream_ranks(self, value: int) -> None:
+        self.__dict__["_max_stream_ranks"] = value
+
+    @property
+    def stream_update_interval(self) -> float:
+        if "_stream_update_interval" in self.__dict__:
+            return self.__dict__["_stream_update_interval"]
+        return _float_config(
+            self.cfg,
+            "stream_update_interval",
+            DEFAULT_STREAM_UPDATE_INTERVAL,
+            0.0,
+            math.inf,
+        )
+
+    @stream_update_interval.setter
+    def stream_update_interval(self, value: float) -> None:
+        self.__dict__["_stream_update_interval"] = value
+
+    @property
+    def max_html_bytes(self) -> int:
+        if "_max_html_bytes" in self.__dict__:
+            return self.__dict__["_max_html_bytes"]
+        return _int_config(self.cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES)
+
+    @max_html_bytes.setter
+    def max_html_bytes(self, value: int) -> None:
+        self.__dict__["_max_html_bytes"] = value
+
+    @property
+    def max_article_bytes(self) -> int:
+        if "_max_article_bytes" in self.__dict__:
+            return self.__dict__["_max_article_bytes"]
+        return _int_config(self.cfg, "max_article_bytes", DEFAULT_MAX_ARTICLE_BYTES)
+
+    @max_article_bytes.setter
+    def max_article_bytes(self, value: int) -> None:
+        self.__dict__["_max_article_bytes"] = value
+
     def __init__(
         self,
         cfg: dict,
@@ -408,7 +485,7 @@ class Search:
         self.semantic = bool(semantic)
         self._defer_faiss = self.semantic
         # Filled from the configured model before deferred vectors are opened.
-        self._model_fingerprint: str | None = None
+        self._model_fingerprint = ""
         # `start_faiss` may need to embed probes before it can decide whether an
         # index built with another model file is still compatible. `start_embedder`
         # signals this event once the model has loaded (or failed to load).
@@ -429,6 +506,12 @@ class Search:
             cfg, "max_remote_sources", DEFAULT_MAX_REMOTE_SOURCES, minimum=0
         )
         self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
+        self.max_html_bytes = _int_config(
+            cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES
+        )
+        self.max_article_bytes = _int_config(
+            cfg, "max_article_bytes", DEFAULT_MAX_ARTICLE_BYTES
+        )
         self.max_results = _int_config(cfg, "max_results", DEFAULT_MAX_RESULTS)
         # A page can never be larger than the ranked pool it is sliced from.
         # Clamping once here keeps /config, the page headers, and the frontend
@@ -449,6 +532,13 @@ class Search:
         )
         self.max_stream_ranks = _int_config(
             cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS
+        )
+        self.stream_update_interval = _float_config(
+            cfg,
+            "stream_update_interval",
+            DEFAULT_STREAM_UPDATE_INTERVAL,
+            0.0,
+            math.inf,
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
         # Bound the number of requests parked waiting for a search slot. Without
@@ -501,13 +591,13 @@ class Search:
     @property
     def _catalog(self) -> ZimCatalog | None:
         """Tolerate Search instances built without ``__init__`` (tests)."""
-        return getattr(self, "catalog", None)
+        return self.catalog
 
     def _ensure_catalog(self) -> ZimCatalog:
         """Return the shared catalog, creating an in-memory one when needed."""
-        cfg = getattr(self, "cfg", {}) or {}
+        cfg = self.cfg or {}
         zim_dir = cfg.get("zim_dir")
-        catalog = getattr(self, "catalog", None)
+        catalog = self.catalog
         if catalog is not None:
             catalog.zim_dir = Path(zim_dir).resolve() if zim_dir else None
             return catalog
@@ -809,13 +899,13 @@ class Search:
         probes = load_model_probes(rows)
         if probes is None:
             return False, "unreadable compatibility probes"
-        embedder = getattr(self, "embedder", None)
+        embedder = self.embedder
         if embedder is None:
             return False, "embedding model is unavailable"
         texts, stored_vectors = probes
         key = tuple(texts)
-        cache = getattr(self, "_probe_cache", None)
-        lock = getattr(self, "_probe_cache_lock", None)
+        cache = self._probe_cache
+        lock = self._probe_cache_lock
         current = None
         if cache is not None and lock is not None:
             with lock:
@@ -870,14 +960,14 @@ class Search:
 
             faiss_index = None
             faiss_path = db_path.with_suffix(".faiss")
-            defer_faiss = getattr(self, "_defer_faiss", False)
+            defer_faiss = self._defer_faiss
             if (
                 self.semantic
                 and not defer_faiss
                 and done_value == "1"
                 and faiss_path.exists()
             ):
-                current_fingerprint = getattr(self, "_model_fingerprint", "")
+                current_fingerprint = self._model_fingerprint
                 model_changed = bool(
                     stored_fingerprint
                     and current_fingerprint
@@ -1068,7 +1158,7 @@ class Search:
 
     def start_faiss(self) -> None:
         """Load FAISS and vector indexes off the server startup path."""
-        if not self.semantic or not getattr(self, "_defer_faiss", False):
+        if not self.semantic or not self._defer_faiss:
             return
 
         def _load() -> None:
@@ -1153,7 +1243,7 @@ class Search:
                 with self._state_lock:
                     current = self.indexes.get(name)
                 db_signature = _file_signature(path) if kind == "sqlite" else None
-                defer_faiss = getattr(self, "_defer_faiss", False)
+                defer_faiss = self._defer_faiss
                 faiss_signature = (
                     _file_signature(path.with_suffix(".faiss"))
                     if kind == "sqlite" and self.semantic and not defer_faiss
@@ -1240,9 +1330,9 @@ class Search:
                 # cached answers under the same names can no longer be fresh.
                 self._invalidate_library_cache()
                 with self._state_lock:
-                    self._cache_generation = getattr(self, "_cache_generation", 0) + 1
+                    self._cache_generation += 1
                 self.cache.clear()
-                preview_cache = getattr(self, "preview_cache", None)
+                preview_cache = self.preview_cache
                 if preview_cache is not None:
                     preview_cache.clear()
             if refresh:
@@ -1531,7 +1621,7 @@ class Search:
                 # Bump the generation in the same critical section that swaps
                 # the source snapshot, so a concurrent search can never pair
                 # the old source list with the new generation.
-                self._cache_generation = getattr(self, "_cache_generation", 0) + 1
+                self._cache_generation += 1
             sources = self.source_dicts()
         if changed:
             # The set of searchable sources changed, so prior answers can be stale.
@@ -1540,7 +1630,7 @@ class Search:
             self._invalidate_library_cache()
             self._remote_limit_warned = False
             self.cache.clear()
-            preview_cache = getattr(self, "preview_cache", None)
+            preview_cache = self.preview_cache
             if preview_cache is not None:
                 preview_cache.clear()
         return sources
@@ -1677,7 +1767,7 @@ class Search:
     def source_version(self) -> tuple[int, ...]:
         """Token that changes whenever the source set or its metadata changes."""
         with self._state_lock:
-            return (getattr(self, "_cache_generation", 0),)
+            return (self._cache_generation,)
 
     def close(self) -> None:
         """Release the search thread pool and every open index."""
@@ -1689,7 +1779,7 @@ class Search:
             self.indexes.clear()
         for index in indexes:
             self._close_index(index)
-        catalog = getattr(self, "catalog", None)
+        catalog = self.catalog
         if catalog is not None:
             catalog.close()
             self.catalog = None
@@ -1718,12 +1808,7 @@ class Search:
             zim_name,
             path,
             head_only,
-            _int_config(
-                self.cfg,
-                "max_article_bytes",
-                33_554_432,
-                minimum=1,
-            ),
+            self.max_article_bytes,
         )
 
     def read_article(
@@ -1840,12 +1925,7 @@ class Search:
             archive,
             zim_name,
             icon_path,
-            _int_config(
-                self.cfg,
-                "max_article_bytes",
-                33_554_432,
-                minimum=1,
-            ),
+            self.max_article_bytes,
         )
 
     def read_source_icon(self, zim_name: str) -> dict[str, Any]:
@@ -2023,7 +2103,7 @@ class Search:
             vectors_expected = (
                 self.semantic
                 and index.done == "1"
-                and not getattr(self, "_defer_faiss", False)
+                and not self._defer_faiss
             )
             vectors_loaded = index.faiss_index is not None
             if vectors_expected and not vectors_loaded:
@@ -2092,7 +2172,7 @@ class Search:
             "cache": self.cache.stats(),
             "preview_cache": (
                 self.preview_cache.stats()
-                if getattr(self, "preview_cache", None) is not None
+                if self.preview_cache is not None
                 else None
             ),
         }
@@ -2246,8 +2326,8 @@ class Search:
         return (normalized, selection)
 
     def _page_size(self, limit: int | None) -> int:
-        default = getattr(self, "page_size", DEFAULT_PAGE_SIZE)
-        ceiling = getattr(self, "max_results", DEFAULT_MAX_RESULTS)
+        default = self.page_size
+        ceiling = self.max_results
         if limit is None:
             return max(1, min(int(default), ceiling))
         try:
@@ -2259,7 +2339,7 @@ class Search:
         """How many ranked candidates to retain and serve across all pages."""
         return max(
             self.candidate_count,
-            getattr(self, "max_results", DEFAULT_MAX_RESULTS),
+            self.max_results,
         )
 
     def _source_limit(self, total_sources: int) -> int:
@@ -2676,7 +2756,7 @@ class Search:
         # newer generation and cache pre-refresh results as current.
         with self._state_lock:
             sources, selective, scope_key = self._search_scope(zim)
-            generation = getattr(self, "_cache_generation", 0)
+            generation = self._cache_generation
         all_sources = scope_key is None
         cache_key = self._cache_key(query, scope_key)
         inflight_key = (generation, cache_key)
@@ -2760,7 +2840,7 @@ class Search:
             ],
         }
         with self._state_lock:
-            current_generation = getattr(self, "_cache_generation", 0)
+            current_generation = self._cache_generation
         if not selective and current_generation == generation:
             self.cache.put(cache_key, cache_value)
         return state, cache_value
@@ -2813,7 +2893,7 @@ class Search:
             if not sources:
                 cache_value = {"generation": generation, "pool": [], "sources": []}
                 with self._state_lock:
-                    current_generation = getattr(self, "_cache_generation", 0)
+                    current_generation = self._cache_generation
                 if not selective and current_generation == generation:
                     self.cache.put(cache_key, cache_value)
                 # The computation is complete; do not keep an admission slot
@@ -2846,27 +2926,9 @@ class Search:
             title_query = _title_query(query)
             fulltext_query = _fulltext_query(query)
             pool_target = self._pool_target()
-            max_stream_ranks = max(
-                1,
-                getattr(
-                    self,
-                    "max_stream_ranks",
-                    _int_config(
-                        self.cfg,
-                        "max_stream_ranks",
-                        DEFAULT_MAX_STREAM_RANKS,
-                    ),
-                ),
-            )
+            max_stream_ranks = max(1, self.max_stream_ranks)
             rank_interval = max(1, math.ceil(total_sources / max_stream_ranks))
-            update_interval = max(
-                0.0,
-                getattr(
-                    self,
-                    "stream_update_interval",
-                    DEFAULT_STREAM_UPDATE_INTERVAL,
-                ),
-            )
+            update_interval = self.stream_update_interval
             source_limit = self._source_limit(total_sources)
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
@@ -3386,16 +3448,8 @@ class Search:
                         row = read_entry(
                             archive,
                             entry._index,
-                            max_html_bytes=_int_config(
-                                self.cfg,
-                                "max_html_bytes",
-                                DEFAULT_MAX_HTML_BYTES,
-                            ),
-                            max_entry_bytes=_int_config(
-                                self.cfg,
-                                "max_article_bytes",
-                                33_554_432,
-                            ),
+                            max_html_bytes=self.max_html_bytes,
+                            max_entry_bytes=self.max_article_bytes,
                             max_preview_chars=self.preview_chars,
                             timeout=DEFAULT_PARSE_TIMEOUT,
                         )
@@ -3427,7 +3481,7 @@ class Search:
         docs = docs[: self.preview_limit]
         with self._state_lock:
             sources = dict(self.sources)
-        preview_cache = getattr(self, "preview_cache", None)
+        preview_cache = self.preview_cache
         if preview_cache is None:
             preview_cache = QueryCache(0, 0)
             self.preview_cache = preview_cache
@@ -3486,10 +3540,8 @@ class Search:
         query_terms = _query_terms(query)
         phrase_active = len(phrase_words) >= 2 and bool(pool)
         _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
-        max_html_bytes = _int_config(self.cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES)
-        max_phrase_bytes = _int_config(
-            self.cfg, "max_article_bytes", 33_554_432
-        )
+        max_html_bytes = self.max_html_bytes
+        max_phrase_bytes = self.max_article_bytes
         indexes = getattr(self, "indexes", {})
 
         # Check the phrase in article text for the highest-ranked candidates,
@@ -3574,12 +3626,7 @@ class Search:
         return self._rank_results(source_results, query, limit) if found else pool
 
     def _preview(self, text: str) -> str:
-        limit = getattr(
-            self,
-            "preview_chars",
-            _int_config(self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS),
-        )
-        return truncate_at_word_boundary(text, limit)
+        return truncate_at_word_boundary(text, self.preview_chars)
 
     @staticmethod
     def _source_items(

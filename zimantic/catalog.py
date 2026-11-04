@@ -470,22 +470,7 @@ class ZimCatalog:
         # version() so HTTP caches notice metadata-only changes.
         self._revision = 0
         try:
-            self.db = self._open_database(db_path)
-            self._ensure_schema()
-            self.db.execute("PRAGMA busy_timeout=0")
-            try:
-                self.db.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError as error:
-                code = getattr(error, "sqlite_errorcode", None)
-                if code is None or code & 0xFF not in {
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                }:
-                    raise
-            else:
-                self.db.rollback()
-            finally:
-                self.db.execute("PRAGMA busy_timeout=30000")
+            self._initialize_database(db_path)
         except (OSError, sqlite3.Error) as error:
             if db_path is None:
                 try:
@@ -494,7 +479,8 @@ class ZimCatalog:
                     pass
                 raise
             logger.warning(
-                "zimantic: catalog database %s unavailable (%s); using memory",
+                "zimantic: catalog database %s unavailable (%s); "
+                "deleting and recreating it",
                 db_path,
                 error,
             )
@@ -502,9 +488,29 @@ class ZimCatalog:
                 self.db.close()
             except (AttributeError, sqlite3.Error):
                 pass
-            self.db_path = Path(":memory:")
-            self.db = self._open_database(None)
-            self._ensure_schema()
+            database_path = Path(db_path)
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+            self.db_path = database_path
+            self._initialize_database(database_path)
+
+    def _initialize_database(self, db_path: Path | str | None) -> None:
+        self.db = self._open_database(db_path)
+        self._ensure_schema()
+        self.db.execute("PRAGMA busy_timeout=0")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as error:
+            code = getattr(error, "sqlite_errorcode", None)
+            if code is None or code & 0xFF not in {
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            }:
+                raise
+        else:
+            self.db.rollback()
+        finally:
+            self.db.execute("PRAGMA busy_timeout=30000")
 
     def _open_database(self, db_path: Path | str | None) -> sqlite3.Connection:
         if db_path is not None:
@@ -517,8 +523,12 @@ class ZimCatalog:
             connection = sqlite3.connect(
                 ":memory:", timeout=30, check_same_thread=False
             )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=30000")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=30000")
+        except sqlite3.Error:
+            connection.close()
+            raise
         return connection
 
     def _schema_current(self) -> tuple[bool, int]:

@@ -5,6 +5,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from .searching.config import DEFAULT_MAX_ARTICLE_BYTES
+
 DEFAULT_EMBEDDING_TOKENS = 256
 
 # Accepted embed_device values. Kept here (instead of embed.py) so config values
@@ -45,7 +47,7 @@ _COMMON = {
     "page_size": 10,
     "embed_device": "auto",
     "max_html_bytes": 4_194_304,
-    "max_article_bytes": 33_554_432,
+    "max_article_bytes": DEFAULT_MAX_ARTICLE_BYTES,
     "max_preview_chars": 1_000,
     "preview_limit": 10,
     "min_cosine_similarity": 0.85,

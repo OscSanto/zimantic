@@ -3,6 +3,8 @@
 import math
 from pathlib import Path
 
+DEFAULT_MAX_ARTICLE_BYTES = 33_554_432
+
 
 def _int_config(cfg: dict, key: str, default: int, minimum: int = 1) -> int:
     try:
