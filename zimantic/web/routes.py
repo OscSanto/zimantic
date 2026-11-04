@@ -500,6 +500,31 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             },
         )
 
+    @app.get("/suggest")
+    def api_suggest(
+        q: str = Query(..., min_length=1, max_length=4096),
+        zim: list[str] | None = Query(None),
+        limit: int = Query(8, ge=1, le=20),
+    ):
+        suggest = getattr(search_class, "suggest", None)
+        try:
+            if callable(suggest):
+                items = suggest(q, zim, limit)
+            else:
+                # Older search backends and test doubles only expose the full
+                # search API; its first page is still a usable suggestion list.
+                page = search_class.search_page(q, zim, limit, 0, None, False)
+                items = page.get("results", [])
+        except SearchBusyError as error:
+            raise HTTPException(
+                status_code=503,
+                detail=str(error),
+                headers={"Retry-After": "1"},
+            ) from error
+        except SearchQueryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return JSONResponse(content=items)
+
     @app.get("/search")
     def api_search(
         q: str = Query(..., min_length=1, max_length=4096),

@@ -338,6 +338,70 @@ script[data-zimantic-toolbar] { display: none !important; }
   white-space: nowrap !important;
   width: 1px !important;
 }
+[data-zimantic-toolbar] .zimantic-toolbar-zim-search {
+  align-items: center !important;
+  display: flex !important;
+  flex: 0 1 220px !important;
+  margin: 0 !important;
+  min-width: 0 !important;
+  position: relative !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-zim-search-input {
+  background: #0f1115 !important;
+  border: 1px solid #46505f !important;
+  border-radius: 4px !important;
+  color: #e6e8eb !important;
+  font: inherit !important;
+  min-width: 0 !important;
+  padding: 4px 8px !important;
+  width: 100% !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-zim-search-input::placeholder {
+  color: #9aa3af !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-zim-search-input:focus {
+  border-color: #4f9cf9 !important;
+  outline: 2px solid rgba(79, 156, 249, .35) !important;
+  outline-offset: 0 !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-suggestions {
+  background: #171a21 !important;
+  border: 1px solid #46505f !important;
+  border-radius: 4px !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .4) !important;
+  left: 0 !important;
+  max-height: min(50vh, 320px) !important;
+  overflow-y: auto !important;
+  position: absolute !important;
+  right: 0 !important;
+  top: calc(100% + 4px) !important;
+  z-index: 2147483647 !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-suggestion {
+  cursor: pointer !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1px !important;
+  padding: 6px 8px !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-suggestion:hover,
+[data-zimantic-toolbar] .zimantic-toolbar-suggestion[aria-selected="true"] {
+  background: #263449 !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-suggestion-title {
+  color: #e6e8eb !important;
+  font-weight: 600 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-suggestion-path {
+  color: #9aa3af !important;
+  font-size: 12px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
 @media (prefers-color-scheme: light) {
   nav[data-zimantic-toolbar] {
     background: #fff !important;
@@ -353,6 +417,25 @@ script[data-zimantic-toolbar] { display: none !important; }
   [data-zimantic-toolbar] a:hover,
   [data-zimantic-toolbar] button:hover { background: #eef5ff !important; }
   [data-zimantic-toolbar] .zimantic-toolbar-separator { color: #5d6673 !important; }
+  [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input {
+    background: #fff !important;
+    border-color: #b8c0cc !important;
+    color: #1b1f24 !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input::placeholder {
+    color: #5d6673 !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-suggestions {
+    background: #fff !important;
+    border-color: #b8c0cc !important;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .15) !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-suggestion:hover,
+  [data-zimantic-toolbar] .zimantic-toolbar-suggestion[aria-selected="true"] {
+    background: #eef5ff !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-suggestion-title { color: #1b1f24 !important; }
+  [data-zimantic-toolbar] .zimantic-toolbar-suggestion-path { color: #5d6673 !important; }
 }
 /* Phones: a wrapped toolbar eats a big slice of an already short viewport.
    Keep it to one line that scrolls sideways instead, with finger-sized
@@ -381,7 +464,8 @@ script[data-zimantic-toolbar] { display: none !important; }
   [data-zimantic-toolbar] .zimantic-toolbar-actions {
     margin-left: 8px !important;
   }
-  [data-zimantic-toolbar] .zimantic-toolbar-actions > .zimantic-toolbar-search {
+  [data-zimantic-toolbar] .zimantic-toolbar-actions > .zimantic-toolbar-search,
+  [data-zimantic-toolbar] .zimantic-toolbar-actions > .zimantic-toolbar-zim-search {
     display: none !important;
   }
   [data-zimantic-toolbar] .zimantic-toolbar-home-full,
@@ -482,6 +566,9 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
     const parentPrevious = toolbar.querySelector("[data-zimantic-parent-previous]");
     const parentNext = toolbar.querySelector("[data-zimantic-parent-next]");
     const actions = toolbar.querySelector(".zimantic-toolbar-actions");
+    const zimSearchForm = toolbar.querySelector("[data-zimantic-zim-search]");
+    const zimSearchInput = toolbar.querySelector("[data-zimantic-zim-search-input]");
+    const zimSuggestions = toolbar.querySelector("[data-zimantic-zim-suggestions]");
     const articleFrame = document.querySelector("iframe[data-zimantic-article]");
     const shellUrl = new URL(location.href);
     const localPath = pathname => {
@@ -816,6 +903,231 @@ ARTICLE_TOOLBAR_SCRIPT = """<script data-zimantic-toolbar>
       if (event.data?.type !== "zimantic-article-link") return;
       handleArticleLink(event.data);
     });
+    // Search inside the ZIM currently open in this shell. Suggestions are
+    // title-only, so a 500 ms typing pause is enough for the server to answer
+    // without starting a full hybrid search on every keystroke.
+    const zimSearchDelay = 500;
+    const zimSearchLimit = 8;
+    let zimSearchTimer = null;
+    let zimSearchController = null;
+    let zimSearchSequence = 0;
+    let zimSearchItems = [];
+    let zimSearchActive = -1;
+    let zimSearchComposing = false;
+    const closeZimSuggestions = () => {
+      zimSearchItems = [];
+      zimSearchActive = -1;
+      if (zimSuggestions) {
+        zimSuggestions.hidden = true;
+        zimSuggestions.replaceChildren();
+      }
+      if (zimSearchInput) {
+        zimSearchInput.setAttribute("aria-expanded", "false");
+        zimSearchInput.removeAttribute("aria-activedescendant");
+      }
+    };
+    const setActiveZimSuggestion = index => {
+      if (!zimSuggestions || !zimSearchItems.length) return;
+      zimSearchActive = Math.max(0, Math.min(index, zimSearchItems.length - 1));
+      const options = zimSuggestions.querySelectorAll("[role='option']");
+      options.forEach((option, optionIndex) => {
+        const selected = optionIndex === zimSearchActive;
+        option.setAttribute("aria-selected", selected ? "true" : "false");
+        if (!selected) return;
+        zimSearchInput?.setAttribute("aria-activedescendant", option.id);
+        option.scrollIntoView?.({block: "nearest"});
+      });
+    };
+    const renderZimSuggestions = items => {
+      if (!zimSuggestions) return;
+      zimSearchItems = items;
+      zimSearchActive = -1;
+      zimSuggestions.replaceChildren();
+      if (!items.length) {
+        closeZimSuggestions();
+        return;
+      }
+      items.forEach((item, index) => {
+        const option = document.createElement("div");
+        option.className = "zimantic-toolbar-suggestion";
+        option.id = `zimantic-zim-suggestion-${index}`;
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", "false");
+        const title = document.createElement("span");
+        title.className = "zimantic-toolbar-suggestion-title";
+        title.textContent = String(item.title || item.path || "(untitled)");
+        const path = document.createElement("span");
+        path.className = "zimantic-toolbar-suggestion-path";
+        path.textContent = String(item.path || "");
+        option.append(title);
+        if (path.textContent) option.append(path);
+        option.addEventListener("pointerdown", event => {
+          event.preventDefault();
+          openZimSuggestion(index);
+        });
+        zimSuggestions.append(option);
+      });
+      zimSuggestions.hidden = false;
+      zimSearchInput?.setAttribute("aria-expanded", "true");
+    };
+    const openZimSuggestion = index => {
+      const item = zimSearchItems[index];
+      if (!item) return;
+      const route = articleUrl ? articleRoute(articleUrl.href) : null;
+      let target;
+      try {
+        if (item.url) {
+          target = new URL(String(item.url), location.href);
+        } else {
+          const zim = String(zimSearchForm?.dataset.zimanticZim || "");
+          const path = String(item.path || "")
+            .split("/")
+            .filter(Boolean)
+            .map(part => `/${encodeURIComponent(part)}`)
+            .join("");
+          target = new URL(
+            `${appBasePath}/content/${encodeURIComponent(zim)}${path}`,
+            location.href,
+          );
+        }
+      } catch (_) {
+        return;
+      }
+      if (target.origin !== shellUrl.origin) return;
+      if (zimSearchInput) zimSearchInput.value = String(item.title || "");
+      closeZimSuggestions();
+      if (window.parent !== window) {
+        window.parent.postMessage({
+          type: "zimantic-article-follow",
+          url: target.href,
+          parent: route ? currentContentUrl(route) : null,
+        }, "*");
+        return;
+      }
+      offlineRequest += 1;
+      location.href = target.href;
+    };
+    const openZimSearchPage = () => {
+      if (!zimSearchInput || !zimSearchForm) return false;
+      const query = zimSearchInput.value.trim();
+      const zim = String(zimSearchForm.dataset.zimanticZim || "").trim();
+      if (!query || !zim) return false;
+      const target = new URL(`${appBasePath}/`, location.href);
+      target.searchParams.set("q", query);
+      target.searchParams.set("zim", zim);
+      closeZimSuggestions();
+      if (window.parent !== window) {
+        window.parent.postMessage({
+          type: "zimantic-app-navigate",
+          url: target.href,
+        }, "*");
+      } else {
+        location.href = target.href;
+      }
+      return true;
+    };
+    const requestZimSuggestions = query => {
+      if (!zimSearchForm) return;
+      const zim = String(zimSearchForm.dataset.zimanticZim || "").trim();
+      if (!zim) return;
+      if (zimSearchController) zimSearchController.abort();
+      const controller = new AbortController();
+      zimSearchController = controller;
+      const sequence = ++zimSearchSequence;
+      const params = new URLSearchParams({
+        q: query,
+        zim,
+        limit: String(zimSearchLimit),
+      });
+      fetch(`${appBasePath}/suggest?${params}`, {
+        signal: controller.signal,
+        headers: {Accept: "application/json"},
+      })
+        .then(response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
+        .then(items => {
+          if (sequence !== zimSearchSequence) return;
+          renderZimSuggestions(Array.isArray(items) ? items : []);
+        })
+        .catch(error => {
+          if (error.name === "AbortError") return;
+          if (sequence === zimSearchSequence) closeZimSuggestions();
+        })
+        .finally(() => {
+          if (zimSearchController === controller) zimSearchController = null;
+        });
+    };
+    const scheduleZimSuggestions = () => {
+      if (!zimSearchInput) return;
+      clearTimeout(zimSearchTimer);
+      zimSearchTimer = null;
+      const query = zimSearchInput.value.trim();
+      if (!query) {
+        if (zimSearchController) {
+          zimSearchController.abort();
+          zimSearchController = null;
+        }
+        zimSearchSequence += 1;
+        closeZimSuggestions();
+        return;
+      }
+      zimSearchTimer = setTimeout(() => {
+        zimSearchTimer = null;
+        requestZimSuggestions(query);
+      }, zimSearchDelay);
+    };
+    const submitZimSearch = () => {
+      if (zimSearchActive >= 0) {
+        openZimSuggestion(zimSearchActive);
+        return true;
+      }
+      if (zimSearchItems.length) {
+        openZimSuggestion(0);
+        return true;
+      }
+      return openZimSearchPage();
+    };
+    if (zimSearchForm && zimSearchInput) {
+      zimSearchInput.addEventListener("compositionstart", () => {
+        zimSearchComposing = true;
+      });
+      zimSearchInput.addEventListener("compositionend", () => {
+        zimSearchComposing = false;
+        scheduleZimSuggestions();
+      });
+      zimSearchInput.addEventListener("input", () => {
+        if (!zimSearchComposing) scheduleZimSuggestions();
+      });
+      zimSearchInput.addEventListener("keydown", event => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          if (!zimSearchItems.length) return;
+          event.preventDefault();
+          const offset = event.key === "ArrowDown" ? 1 : -1;
+          const start = zimSearchActive < 0
+            ? (offset > 0 ? -1 : 0)
+            : zimSearchActive;
+          setActiveZimSuggestion(start + offset);
+          return;
+        }
+        if (event.key === "Escape") {
+          closeZimSuggestions();
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          submitZimSearch();
+        }
+      });
+      zimSearchForm.addEventListener("submit", event => {
+        event.preventDefault();
+        submitZimSearch();
+      });
+      zimSearchForm.addEventListener("focusout", event => {
+        if (!zimSearchForm.contains(event.relatedTarget)) closeZimSuggestions();
+      });
+    }
     // A capture can finish loading with nothing to show: a JavaScript shell that
     // renders content it never saved, a redirect to a page whose assets 404, or
     // a parked domain. An empty iframe looks broken, so explain it in the shell.
@@ -1610,6 +1922,7 @@ def _article_toolbar(
         )
 
     home_html = ""
+    zim_search_html = ""
     if error is None or error.get("zim_found"):
         home_html = (
             f'<a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" '
@@ -1617,6 +1930,20 @@ def _article_toolbar(
             f'<span class="zimantic-toolbar-home-full">{html_escape(site_name)}</span>'
             '<span class="zimantic-toolbar-home-short">Home</span>'
             "</a>"
+        )
+        zim_search_html = (
+            '<form class="zimantic-toolbar-zim-search" role="search" '
+            'data-zimantic-zim-search '
+            f'data-zimantic-zim="{zim_name}">'
+            '<input type="search" class="zimantic-toolbar-zim-search-input" '
+            'data-zimantic-zim-search-input placeholder="Search this ZIM" '
+            'aria-label="Search this ZIM" autocomplete="off" '
+            'role="combobox" aria-autocomplete="list" aria-expanded="false" '
+            'aria-controls="zimanticZimSuggestions">'
+            '<div class="zimantic-toolbar-suggestions" '
+            'id="zimanticZimSuggestions" role="listbox" '
+            'data-zimantic-zim-suggestions hidden></div>'
+            "</form>"
         )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
@@ -1645,6 +1972,7 @@ def _article_toolbar(
         title="Open the next link in the parent page">↓</button>
     </span>
     <a class="zimantic-toolbar-search" href="{base_path}/" data-zimantic-action="home" title="Search your library">Zimantic</a>
+    {zim_search_html}
   </div>
   <span class="zimantic-toolbar-status" data-zimantic-toolbar-status aria-live="polite"></span>
 </nav>"""

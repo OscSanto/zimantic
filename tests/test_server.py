@@ -301,6 +301,9 @@ class ServerTests(unittest.TestCase):
         self.assertIn("data-zimantic-toolbar", shell.text)
         self.assertIn('src="/article/manual/page"', shell.text)
         self.assertIn("zimantic-external-link", shell.text)
+        self.assertIn("data-zimantic-zim-search", shell.text)
+        self.assertIn('data-zimantic-zim="manual"', shell.text)
+        self.assertIn("data-zimantic-zim-suggestions", shell.text)
         self.assertNotIn("Article body", shell.text)
 
         # /article/ serves the raw article and only reports link clicks; the
@@ -713,6 +716,15 @@ class ServerTests(unittest.TestCase):
             shell.text,
         )
         self.assertNotIn("\n[data-zimantic-toolbar] {", shell.text)
+
+    def test_suggest_falls_back_to_the_search_page_api(self):
+        response = self.client.get("/suggest?q=page&zim=manual&limit=5")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["title"], "Page")
+        self.assertEqual(
+            self.search.search_page_calls[-1],
+            ("page", ["manual"], 5, 0, None, False),
+        )
 
     def test_search_accepts_page_and_filter_parameters(self):
         response = self.client.get("/search?q=page&offset=10&source=manual&limit=5")

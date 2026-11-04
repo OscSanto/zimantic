@@ -153,6 +153,28 @@ def _title_search(rows, query, limit=1):
     return events[-1]["results"]
 
 
+def _title_suggest(rows, query, limit=2):
+    """Run the autocomplete path against an in-memory title index."""
+    db = sqlite3.connect(":memory:", check_same_thread=False)
+    db.execute(
+        "CREATE VIRTUAL TABLE docs USING fts5("
+        "title, path UNINDEXED, target UNINDEXED)"
+    )
+    db.executemany(
+        "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+    search = _bare_search({"candidate_count": 2})
+    search.semantic = False
+    search.sources = {"manual": source}
+    search.indexes = {"manual": _LocalIndex(db, None, None, None, threading.Lock())}
+    try:
+        return search.suggest(query, ["manual"], limit)
+    finally:
+        search.close()
+
+
 class SearchContractTests(unittest.TestCase):
     def test_source_info_metadata_fallback_uses_name_and_bool_capability(self):
         source = _source_info_from_metadata(
@@ -1166,6 +1188,45 @@ class SearchContractTests(unittest.TestCase):
                 results = _title_search([row], query)
                 self.assertTrue(results, f"no results for {query!r}")
                 self.assertEqual(results[0]["title"], expected)
+
+    def test_suggest_returns_title_prefix_matches_with_article_urls(self):
+        rows = [
+            (1, "Tire", "Tire", None),
+            (2, "Tire Changes", "Tire_Changes", None),
+            (3, "Tiredness", "Tiredness", None),
+            (4, "Wheel", "Wheel", None),
+        ]
+
+        suggestions = _title_suggest(rows, "tire", limit=3)
+
+        self.assertEqual(
+            {item["title"] for item in suggestions},
+            {"Tire", "Tire Changes", "Tiredness"},
+        )
+        by_title = {item["title"]: item for item in suggestions}
+        self.assertEqual(by_title["Tire Changes"]["path"], "Tire_Changes")
+        self.assertEqual(by_title["Tire Changes"]["id"], "manual:Tire_Changes")
+        self.assertEqual(
+            by_title["Tire Changes"]["url"], "/content/manual/Tire_Changes"
+        )
+
+    def test_suggest_matches_partial_words_and_respects_limit(self):
+        rows = [
+            (1, "Tire Changes", "Tire_Changes", None),
+            (2, "Tire Repair", "Tire_Repair", None),
+        ]
+
+        suggestions = _title_suggest(rows, "tire cha", limit=2)
+        self.assertEqual([item["title"] for item in suggestions], ["Tire Changes"])
+
+        limited = _title_suggest(rows, "tire", limit=1)
+        self.assertEqual(len(limited), 1)
+        self.assertIn(limited[0]["title"], {"Tire Changes", "Tire Repair"})
+
+    def test_suggest_returns_no_matches_for_unrelated_query(self):
+        rows = [(1, "Tire Changes", "Tire_Changes", None)]
+
+        self.assertEqual(_title_suggest(rows, "wheel", limit=3), [])
 
 
 class DisambiguationRankingTests(unittest.TestCase):

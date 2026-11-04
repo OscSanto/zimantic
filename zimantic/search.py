@@ -3021,6 +3021,76 @@ class Search:
             )
             return None
 
+    def suggest(
+        self,
+        query: str,
+        zim: list[str] | None = None,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Return title-completion candidates scoped to the given sources.
+
+        Autocomplete must answer within a typing pause, so it deliberately
+        stays title-only: no query embedding, no libzim full-text search and no
+        article reads. Sources without a Zimantic title index simply contribute
+        nothing; the caller can still fall back to a full search.
+        """
+        query = self._validate_query(query)
+        try:
+            limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            limit = 8
+        prefix_query = _title_prefix_query(query)
+        exact_query = _title_query(query)
+        if not prefix_query:
+            return []
+        with self._state_lock:
+            sources, _, _ = self._search_scope(zim)
+        suggestions: list[dict[str, Any]] = []
+        for source in sources:
+            remaining = limit - len(suggestions)
+            if remaining <= 0:
+                break
+            if source.mode != "local" or not source.local_name:
+                continue
+            with self._state_lock:
+                index = self.indexes.get(source.local_name)
+            if index is None:
+                continue
+            try:
+                self._acquire_index(index)
+            except RuntimeError:
+                continue
+            try:
+                db = self._db_for(index)
+                if db is None:
+                    continue
+                rows = db.execute(
+                    "SELECT rowid FROM docs WHERE docs MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (prefix_query, remaining),
+                ).fetchall()
+                if not rows:
+                    rows = db.execute(
+                        "SELECT rowid FROM docs WHERE docs MATCH ? "
+                        "ORDER BY rank LIMIT ?",
+                        (exact_query, remaining),
+                    ).fetchall()
+                rowids = [int(row[0]) for row in rows]
+                docs = self._fetch_docs(source, db, set(rowids))
+                for rowid in rowids:
+                    doc = docs.get(rowid)
+                    if doc is not None:
+                        suggestions.append(doc)
+            except sqlite3.Error as error:
+                logger.warning(
+                    "zimantic: title suggestions unavailable for %s: %s",
+                    source.local_name,
+                    error,
+                )
+            finally:
+                self._release_index(index)
+        return suggestions[:limit]
+
     def search_page(
         self,
         query: str,
