@@ -16,6 +16,36 @@ from ..redirects import RedirectError, resolve_redirect_entry
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_archive_path(path: str) -> str | None:
+    candidate = path.lstrip("/")
+    if not candidate:
+        return None
+    normalized = posixpath.normpath(candidate)
+    if (
+        normalized in {"", ".", ".."}
+        or normalized.startswith("../")
+        or normalized.startswith("/")
+    ):
+        return None
+    return normalized
+
+
+def resolve_archive_href(
+    base_path: str, href: str, *, unquote_path: bool = True
+) -> str | None:
+    parsed = urlsplit(href.strip())
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return None
+    path = unquote(parsed.path) if unquote_path else parsed.path
+    candidate = (
+        path
+        if path.startswith("/")
+        else posixpath.join(posixpath.dirname(base_path), path)
+    )
+    return normalize_archive_path(candidate)
+
+
 try:
     from libzim.reader import set_cluster_cache_max_size
 except ImportError:
@@ -917,22 +947,16 @@ def _refresh_target(entry_path: str, refresh_url: str) -> tuple[str, str] | None
     and may carry a query string before the fragment. Only the path identifies
     an archive entry; the query is not part of the ZIM path.
     """
-    parsed = urlsplit(unquote(refresh_url))
-    fragment = parsed.fragment
-    path_part = parsed.path
-    if not path_part:
+    parsed = urlsplit(refresh_url.strip())
+    fragment = unquote(parsed.fragment)
+    if not parsed.path:
         if parsed.scheme or parsed.netloc:
             return None
         # A fragment-only refresh stays on the current entry; its companion may
         # still supply the real body.
         return entry_path, fragment
-    if path_part.startswith("/"):
-        path = posixpath.normpath(path_part).lstrip("/")
-    else:
-        path = posixpath.normpath(
-            posixpath.join(posixpath.dirname(entry_path), path_part)
-        )
-    if not path or path == "." or any(part == ".." for part in path.split("/")):
+    path = resolve_archive_href(entry_path, refresh_url)
+    if path is None:
         return None
     return path, fragment
 

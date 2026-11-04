@@ -1,13 +1,12 @@
 """Archive-level helpers for serving ZIM articles and random entries."""
 
-import posixpath
 import secrets
 import sqlite3
 from typing import Any
 
 from ..libzim_compat import get_entry_by_id
 from ..redirects import RedirectError, resolve_redirect_entry
-from .reader import _READABLE_MIMETYPES
+from .reader import _READABLE_MIMETYPES, normalize_archive_path
 
 RANDOM_ARTICLE_ATTEMPTS = 128
 HEAD_READ_BYTES = 256 << 10
@@ -38,12 +37,12 @@ def normalize_article_path(path: str) -> str:
     path = str(path)
     if not path or path.startswith("/") or "\\" in path:
         raise ArticleNotFoundError("invalid article path")
-    if any(part == ".." for part in path.split("/")):
-        raise ArticleNotFoundError("invalid article path")
     trailing_slash = path.endswith("/")
     candidate = path[:-1] if trailing_slash else path
-    normalized = posixpath.normpath(candidate)
-    if normalized in {"", "."} or normalized != candidate:
+    if any(part == ".." for part in candidate.split("/")):
+        raise ArticleNotFoundError("invalid article path")
+    normalized = normalize_archive_path(candidate)
+    if normalized is None or normalized != candidate:
         raise ArticleNotFoundError("invalid article path")
     return normalized + "/" if trailing_slash else normalized
 

@@ -4,11 +4,12 @@ import logging
 import posixpath
 import re
 import xml.etree.ElementTree as ET
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from libzim.reader import Archive
 
 from ..catalog import perma_ref
+from ..content.reader import resolve_archive_href
 from .query import INTENT_RULES
 
 ICON_METADATA_PATH = "-/icon"
@@ -29,18 +30,7 @@ def _html_attribute(tag: str, name: str) -> str:
 
 
 def _archive_path_from_href(base: str, href: str) -> str | None:
-    parsed = urlsplit(href.strip())
-    if parsed.scheme or parsed.netloc or not parsed.path:
-        return None
-    path = unquote(parsed.path)
-    if path.startswith("/"):
-        candidate = path[1:]
-    else:
-        candidate = posixpath.join(posixpath.dirname(base), path)
-    if not candidate or any(part == ".." for part in candidate.split("/")):
-        return None
-    normalized = posixpath.normpath(candidate)
-    return normalized if normalized not in {"", "."} else None
+    return resolve_archive_href(base, href)
 
 
 def _icon_entry_path(archive: Archive, path: str) -> str | None:

@@ -16,6 +16,51 @@
                     ? pathname.slice(BASE_PATH.length)
                     : pathname;
             };
+            const FOCUSABLE_SELECTOR =
+                'a[href], button:not([disabled]):not([tabindex="-1"]), ' +
+                "input:not([disabled]), select:not([disabled]), " +
+                "textarea:not([disabled]), summary, " +
+                '[tabindex]:not([tabindex="-1"])';
+
+            function trapModalTabFocus(container, event) {
+                if (event.key !== "Tab" || !container || container.hidden) return;
+                const focusable = [...container.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
+                    (node) => node.getClientRects().length > 0,
+                );
+                if (!focusable.length) return;
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+                if (!container.contains(document.activeElement)) {
+                    event.preventDefault();
+                    first.focus();
+                } else if (
+                    event.shiftKey &&
+                    (document.activeElement === first || document.activeElement === container)
+                ) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            }
+
+            function replaceQueryParam(name, value) {
+                const url = new URL(location.href);
+                if (value === null) {
+                    if (!url.searchParams.has(name)) return;
+                    url.searchParams.delete(name);
+                } else {
+                    if (url.searchParams.get(name) === value) return;
+                    url.searchParams.set(name, value);
+                }
+                history.replaceState(
+                    history.state,
+                    "",
+                    url.pathname + url.search + url.hash,
+                );
+            }
+
             let PAGE_SIZE = 10; // replaced with the server's page_size at startup
             let debugMode = false;
             // Filled from /config so highlighting uses the same stopword list as
@@ -602,19 +647,7 @@
             function updateLibraryFilterUrl() {
                 if (location.pathname !== appPath("/library")) return;
                 const filter = $("libraryFilter")?.value.trim() || "";
-                const url = new URL(location.href);
-                if (filter) {
-                    if (url.searchParams.get("filter") === filter) return;
-                    url.searchParams.set("filter", filter);
-                } else {
-                    if (!url.searchParams.has("filter")) return;
-                    url.searchParams.delete("filter");
-                }
-                history.replaceState(
-                    history.state,
-                    "",
-                    url.pathname + url.search + url.hash,
-                );
+                replaceQueryParam("filter", filter || null);
             }
 
             function sortLibrarySources(sources) {
@@ -3198,15 +3231,7 @@
                 const modal = $("articleModal");
                 if (!modal || modal.hidden) return;
                 const value = articleUrl ? articleUrlValue(articleUrl) : null;
-                const url = new URL(location.href);
-                if (value) {
-                    if (url.searchParams.get("modal") === value) return;
-                    url.searchParams.set("modal", value);
-                } else {
-                    if (!url.searchParams.has("modal")) return;
-                    url.searchParams.delete("modal");
-                }
-                history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+                replaceQueryParam("modal", value);
             }
 
             function normalizePageParam() {
@@ -3221,17 +3246,9 @@
                 const canonical =
                     Number.isInteger(page) && page >= 1 ? String(page) : null;
                 if (raw === canonical && canonical !== "1") return;
-                if (canonical && canonical !== "1") {
-                    params.set("page", canonical);
-                } else {
-                    params.delete("page");
-                }
-                const url = new URL(location.href);
-                url.search = params.toString();
-                history.replaceState(
-                    history.state,
-                    "",
-                    url.pathname + url.search + url.hash,
+                replaceQueryParam(
+                    "page",
+                    canonical && canonical !== "1" ? canonical : null,
                 );
             }
 
@@ -3422,26 +3439,7 @@
             });
             $("libraryInfoClose").addEventListener("click", closeLibraryInfo);
             $("libraryInfoModal").addEventListener("keydown", (event) => {
-                if (event.key !== "Tab" || $("libraryInfoModal").hidden) return;
-                const modal = $("libraryInfoModal");
-                const focusable = [
-                    ...modal.querySelectorAll(
-                        'a[href], button:not([disabled]):not([tabindex="-1"]), ' +
-                            "input:not([disabled]), select:not([disabled]), " +
-                            "textarea:not([disabled]), summary, " +
-                            '[tabindex]:not([tabindex="-1"])',
-                    ),
-                ].filter((node) => node.getClientRects().length > 0);
-                if (!focusable.length) return;
-                const first = focusable[0];
-                const last = focusable[focusable.length - 1];
-                if (event.shiftKey && document.activeElement === first) {
-                    event.preventDefault();
-                    last.focus();
-                } else if (!event.shiftKey && document.activeElement === last) {
-                    event.preventDefault();
-                    first.focus();
-                }
+                trapModalTabFocus($("libraryInfoModal"), event);
             });
             $("libraryFilter").addEventListener("input", () => {
                 updateLibraryFilterUrl();
@@ -3469,33 +3467,7 @@
                 if (event.target === event.currentTarget) hideExternalLinkNotice();
             });
             $("externalLinkNotice").addEventListener("keydown", (event) => {
-                if (event.key !== "Tab" || $("externalLinkNotice").hidden) return;
-                const notice = $("externalLinkNotice");
-                const focusable = [
-                    ...notice.querySelectorAll(
-                        'a[href], button:not([disabled]):not([tabindex="-1"]), ' +
-                            "input:not([disabled]), select:not([disabled]), " +
-                            "textarea:not([disabled]), summary, " +
-                            '[tabindex]:not([tabindex="-1"])',
-                    ),
-                ].filter((node) => node.getClientRects().length > 0);
-                if (!focusable.length) return;
-                const first = focusable[0];
-                const last = focusable[focusable.length - 1];
-                if (!notice.contains(document.activeElement)) {
-                    event.preventDefault();
-                    first.focus();
-                } else if (
-                    event.shiftKey &&
-                    (document.activeElement === first ||
-                        document.activeElement === notice)
-                ) {
-                    event.preventDefault();
-                    last.focus();
-                } else if (!event.shiftKey && document.activeElement === last) {
-                    event.preventDefault();
-                    first.focus();
-                }
+                trapModalTabFocus($("externalLinkNotice"), event);
             });
             // The article modal is an iframe, so Tab can move focus out of the
             // frame to the parent document. The page behind the modal is inert,

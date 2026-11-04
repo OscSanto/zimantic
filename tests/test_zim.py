@@ -25,7 +25,9 @@ from zimantic.content.reader import (
     is_disambiguation,
     is_javascript_shell,
     iter_text_blocks,
+    normalize_archive_path,
     read_entry,
+    resolve_archive_href,
     truncate_at_word_boundary,
 )
 
@@ -35,6 +37,24 @@ def _read_entry(*args, **kwargs) -> EntryRecord:
     row = read_entry(*args, **kwargs)
     assert row is not None
     return row
+
+
+class ArchivePathResolutionTests(unittest.TestCase):
+    def test_archive_href_resolution_normalizes_and_bounds_paths(self):
+        self.assertEqual(
+            resolve_archive_href(
+                "docs/page.html", "../images/%23icon.svg?size=small#preview"
+            ),
+            "images/#icon.svg",
+        )
+        self.assertEqual(
+            resolve_archive_href(
+                "docs/page.html", "/assets/%23icon.svg", unquote_path=False
+            ),
+            "assets/%23icon.svg",
+        )
+        self.assertIsNone(resolve_archive_href("docs/page.html", "../../outside.html"))
+        self.assertIsNone(normalize_archive_path("/"))
 
 
 HTML = b"""
