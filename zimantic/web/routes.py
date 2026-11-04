@@ -17,6 +17,7 @@ from ..search import (
     SearchQueryError,
 )
 from ..searching.query import MAX_QUERY_LENGTH, STOPWORDS
+from ..searching.sources import _book_identity, _zim_key
 from . import app as web_app
 
 
@@ -372,14 +373,18 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     def zim_search_available(zim: str) -> bool:
         """True when this ZIM resolves to an available local search scope.
 
-        `Search.suggest` falls back to every source when a ZIM identifier does
-        not resolve, so the toolbar must not offer "Search this ZIM" for an
-        unknown, removed, or unavailable archive.
+        Full search falls back to every source when a ZIM identifier does not
+        resolve, so the toolbar must not offer "Search this ZIM" for an
+        unknown, removed, or unavailable archive. Aliases are matched the same
+        way as `Search._select_sources`, so a date-stripped or flavour-suffixed
+        bookmark still gets the scoped search box.
         """
         try:
             sources = search_class.source_dicts()
         except Exception:
             return False
+        wanted_key = _zim_key(zim)
+        wanted_book = _book_identity(zim) if str(zim or "").strip() else None
         for source in sources:
             if not isinstance(source, dict):
                 continue
@@ -391,6 +396,12 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 source.get("book"),
                 source.get("local_name"),
             }:
+                return True
+            if source.get("key") == wanted_key:
+                return True
+            if wanted_book is not None and _book_identity(
+                source.get("local_name") or source.get("name") or source.get("key")
+            ) == wanted_book:
                 return True
         return False
 

@@ -2188,6 +2188,7 @@ def _content_shell(
     path_exists=None,
     error: dict | None = None,
     secure_browsing: bool = False,
+    show_zim_search: bool = True,
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -2216,6 +2217,7 @@ def _content_shell(
         highlight,
         path_exists,
         error=error,
+        show_zim_search=show_zim_search,
     )
     entry_title = str((error or {}).get("title") or article.get("title") or article_path or zim)
     parsed_title = None

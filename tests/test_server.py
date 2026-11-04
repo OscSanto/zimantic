@@ -351,6 +351,56 @@ class ServerTests(unittest.TestCase):
             shell.text.index("<iframe data-zimantic-article"),
         )
 
+    def test_content_shell_hides_zim_search_when_scope_does_not_resolve(self):
+        body = b"<html><head></head><body>Page</body></html>"
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda zim, path: {
+                "path": path,
+                "title": "Page",
+                "mimetype": "text/html",
+                "content": body,
+            },
+            create=True,
+        ), patch.object(self.search, "source_dicts", lambda: []):
+            shell = self.client.get("/content/manual/page")
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertNotIn('<form class="zimantic-toolbar-zim-search"', shell.text)
+        self.assertNotIn('data-zimantic-zim="manual"', shell.text)
+        self.assertNotIn("id=\"zimanticZimSuggestions\"", shell.text)
+
+    def test_content_shell_shows_zim_search_for_resolvable_alias(self):
+        body = b"<html><head></head><body>Page</body></html>"
+        with patch.object(
+            self.search,
+            "read_article",
+            lambda zim, path: {
+                "path": path,
+                "title": "Page",
+                "mimetype": "text/html",
+                "content": body,
+            },
+            create=True,
+        ), patch.object(
+            self.search,
+            "source_dicts",
+            lambda: [{
+                "key": "manual",
+                "name": "manual_2025-10",
+                "book": "manual_2025-10",
+                "local_name": "manual_2025-10",
+                "mode": "local",
+                "available": True,
+            }],
+        ):
+            shell = self.client.get("/content/manual/page")
+
+        self.assertEqual(shell.status_code, 200)
+        self.assertIn('<form class="zimantic-toolbar-zim-search"', shell.text)
+        self.assertIn('data-zimantic-zim="manual"', shell.text)
+
     def test_content_shell_preserves_trailing_article_paths(self):
         self.search.read_article = lambda zim, path: {
             "path": "docs/home/",

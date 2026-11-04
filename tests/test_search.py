@@ -1229,6 +1229,70 @@ class SearchContractTests(unittest.TestCase):
 
         self.assertEqual(_title_suggest(rows, "wheel", limit=3), [])
 
+    def test_suggest_deduplicates_redirects_that_resolve_to_one_article(self):
+        rows = [
+            (1, "Tires", "Tires", 2),
+            (2, "Tire", "Tire", None),
+        ]
+
+        suggestions = _title_suggest(rows, "tir", limit=8)
+
+        self.assertEqual([item["id"] for item in suggestions], ["manual:Tire"])
+
+    def test_suggest_fills_limit_when_redirects_collapse(self):
+        rows = [
+            (1, "Tires", "Tires", 5),
+            (2, "Tire", "Tire", 5),
+            (3, "Tired", "Tired", 5),
+            (4, "Tireless", "Tireless", 5),
+            (5, "Tire", "Tire", None),
+            (6, "Tire Changes", "Tire_Changes", None),
+            (7, "Tire Repair", "Tire_Repair", None),
+        ]
+
+        suggestions = _title_suggest(rows, "tir", limit=3)
+
+        self.assertEqual(
+            {item["id"] for item in suggestions},
+            {"manual:Tire", "manual:Tire_Changes", "manual:Tire_Repair"},
+        )
+
+    def test_suggest_stays_scoped_on_two_source_library_and_unknown_zim(self):
+        manual_db = sqlite3.connect(":memory:", check_same_thread=False)
+        other_db = sqlite3.connect(":memory:", check_same_thread=False)
+        for db, row in (
+            (manual_db, (1, "Tire Changes", "Tire_Changes", None)),
+            (other_db, (1, "Tire Pressure", "Tire_Pressure", None)),
+        ):
+            db.execute(
+                "CREATE VIRTUAL TABLE docs USING fts5("
+                "title, path UNINDEXED, target UNINDEXED)"
+            )
+            db.execute(
+                "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+                row,
+            )
+        search = _bare_search({"candidate_count": 2})
+        search.semantic = False
+        search.sources = {
+            "manual": SourceInfo(
+                "manual", "Manual", "manual", "local", local_name="manual"
+            ),
+            "other": SourceInfo(
+                "other", "Other", "other", "local", local_name="other"
+            ),
+        }
+        search.indexes = {
+            "manual": _LocalIndex(manual_db, None, None, None, threading.Lock()),
+            "other": _LocalIndex(other_db, None, None, None, threading.Lock()),
+        }
+        try:
+            scoped = search.suggest("tire", ["manual"], limit=8)
+            self.assertEqual([item["id"] for item in scoped], ["manual:Tire_Changes"])
+            self.assertEqual(search.suggest("tire", ["missing"], limit=8), [])
+        finally:
+            search.close()
+
 
 class DisambiguationRankingTests(unittest.TestCase):
     def _search(self):
@@ -3350,6 +3414,88 @@ class ProductionHardeningTests(unittest.TestCase):
             search._source_queue_slots.release()
         finally:
             gate.set()
+            search._executor.shutdown(wait=True)
+
+    def test_source_submission_does_not_block_when_queue_is_full(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search._executor.shutdown(wait=True)
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        search._source_queue_slots = threading.BoundedSemaphore(1)
+        search._search_source = lambda source, *_args: SourceResult(source=source)
+        source = SourceInfo("queued", "Queued", "queued", "local")
+        stop = threading.Event()
+        self.assertTrue(search._source_queue_slots.acquire(blocking=False))
+        try:
+            started = time.monotonic()
+            self.assertIsNone(
+                search._submit_source(stop, source, "query", "", "", None, 1)
+            )
+            self.assertLess(time.monotonic() - started, 1.0)
+        finally:
+            search._source_queue_slots.release()
+            search._executor.shutdown(wait=True)
+
+    def test_stream_submits_all_sources_with_a_small_queue(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search._executor.shutdown(wait=True)
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        search._source_queue_slots = threading.BoundedSemaphore(1)
+        sources = [
+            SourceInfo(f"s{i}", f"S{i}", f"s{i}", "local", local_name=f"s{i}")
+            for i in range(4)
+        ]
+        search.sources = {source.key: source for source in sources}
+        search._search_source = lambda source, *_args: SourceResult(source=source)
+        try:
+            events = list(search.stream_search("anything", limit=1))
+        finally:
+            search._executor.shutdown(wait=True)
+
+        self.assertEqual(
+            {
+                event["source"]["key"]
+                for event in events
+                if event["type"] == "source"
+            },
+            {source.key for source in sources},
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_stream_yields_progress_before_all_sources_are_submitted(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search._executor.shutdown(wait=True)
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        search._source_queue_slots = threading.BoundedSemaphore(1)
+        search.stream_update_interval = 0.01
+        sources = [
+            SourceInfo(f"s{i}", f"S{i}", f"s{i}", "local", local_name=f"s{i}")
+            for i in range(3)
+        ]
+        search.sources = {source.key: source for source in sources}
+        release = threading.Event()
+
+        def search_source(source, *_args):
+            if source.key == "s0":
+                release.wait(timeout=5)
+            return SourceResult(source=source)
+
+        search._search_source = search_source
+        stream = search.stream_search("anything", limit=1)
+        try:
+            self.assertEqual(next(stream)["type"], "started")
+            # The third source has nowhere to go while s0 occupies the only
+            # worker, but the owner must still reach the event loop and emit a
+            # heartbeat instead of blocking inside source submission.
+            started = time.monotonic()
+            event = next(stream)
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertIn(event["type"], {"progress", "source"})
+        finally:
+            release.set()
+            stream.close()
             search._executor.shutdown(wait=True)
 
     def test_claim_search_reports_busy_when_the_owner_never_finishes(self):

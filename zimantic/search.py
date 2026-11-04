@@ -718,7 +718,9 @@ class Search:
         # A permit is taken before submitting a source task and released when
         # the task starts. This bounds the executor queue: queued work from an
         # abandoned search still occupies queue space until a worker reaches it,
-        # so repeated disconnects cannot grow the queue without limit.
+        # so repeated disconnects cannot grow the queue without limit. The live
+        # owner submits only as far as this permits and retries as sources
+        # finish, so filling the queue never stalls the event stream.
         self._source_queue_slots = threading.BoundedSemaphore(
             max(1, self.source_workers)
         )
@@ -2747,6 +2749,29 @@ class Search:
             if source.mode != "kiwix" or source.key in kept
         ]
 
+    @staticmethod
+    def _select_sources(
+        available: list[SourceInfo], zim: list[str]
+    ) -> list[SourceInfo]:
+        wanted = set(zim)
+        # Match the same aliases that a Kiwix catalog link may use: a remote
+        # book slug carries a date suffix, while a local index is identified by
+        # its date-stripped key. Comparing base keys preserves those links
+        # without overwriting the local source's own name/book metadata.
+        wanted_keys = {_zim_key(value) for value in wanted}
+        wanted_books = {
+            _book_identity(value) for value in wanted if str(value or "").strip()
+        }
+        return [
+            source
+            for source in available
+            if wanted.intersection({source.key, source.name, source.book, source.local_name})
+            or source.key in wanted_keys
+            or _book_identity(
+                source.local_name or source.name or source.key
+            ) in wanted_books
+        ]
+
     def _search_scope(
         self, zim: list[str] | None
     ) -> tuple[list[SourceInfo], bool, tuple[str, ...] | None]:
@@ -2770,31 +2795,14 @@ class Search:
             # key distinguishes it from None); it must not mean "all sources".
             return [], True, ()
 
-        wanted = set(zim)
-        # Match the same aliases that a Kiwix catalog link may use: a remote
-        # book slug carries a date suffix, while a local index is identified by
-        # its date-stripped key. Comparing base keys preserves those links
-        # without overwriting the local source's own name/book metadata.
-        wanted_keys = {_zim_key(value) for value in wanted}
-        wanted_books = {
-            _book_identity(value) for value in wanted if str(value or "").strip()
-        }
-        selected = [
-            source
-            for source in available
-            if wanted.intersection({source.key, source.name, source.book, source.local_name})
-            or source.key in wanted_keys
-            or _book_identity(
-                source.local_name or source.name or source.key
-            ) in wanted_books
-        ]
+        selected = self._select_sources(available, zim)
         if not selected:
             # A stale bookmark or a source removed since the URL was saved must
             # not silently turn into a zero-source search. Fall back to the full
             # library and let the normal availability rules decide.
             logger.warning(
                 "zimantic: ignoring unknown source selection (%s); searching all sources",
-                ", ".join(sorted(wanted)),
+                ", ".join(sorted(set(zim))),
             )
             return bounded, False, None
         limit = self._selective_source_limit(len(available))
@@ -3059,8 +3067,16 @@ class Search:
         if not prefix_query:
             return []
         with self._state_lock:
-            sources, _, _ = self._search_scope(zim)
+            available = [
+                source for source in self.sources.values() if source.available
+            ]
+        # Honor the requested ZIM scope directly instead of going through
+        # `_search_scope`, which promotes small-library selections to every
+        # source for cache sharing and falls back to all sources when a name is
+        # unknown.
+        sources = available if zim is None else self._select_sources(available, zim)
         suggestions: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
         for source in sources:
             remaining = limit - len(suggestions)
             if remaining <= 0:
@@ -3079,23 +3095,42 @@ class Search:
                 db = self._db_for(index)
                 if db is None:
                     continue
-                rows = db.execute(
-                    "SELECT rowid FROM docs WHERE docs MATCH ? "
-                    "ORDER BY rank LIMIT ?",
-                    (prefix_query, remaining),
-                ).fetchall()
-                if not rows:
+                # Redirect rows and their targets both match the title query
+                # but resolve to the same article. Fetch extra candidates and
+                # widen the window until the limit is filled or the index runs
+                # out, so collapsing duplicates cannot leave the list short.
+                query_text = prefix_query
+                window = remaining
+                max_window = max(remaining * 8, 64)
+                while True:
                     rows = db.execute(
                         "SELECT rowid FROM docs WHERE docs MATCH ? "
                         "ORDER BY rank LIMIT ?",
-                        (exact_query, remaining),
+                        (query_text, window),
                     ).fetchall()
-                rowids = [int(row[0]) for row in rows]
-                docs = self._fetch_docs(source, db, set(rowids))
-                for rowid in rowids:
-                    doc = docs.get(rowid)
-                    if doc is not None:
+                    if not rows and query_text == prefix_query:
+                        # Exact token matching catches truncated or base forms
+                        # only when the prefix form finds nothing.
+                        query_text = exact_query
+                        continue
+                    rowids = [int(row[0]) for row in rows]
+                    docs = self._fetch_docs(source, db, set(rowids))
+                    for rowid in rowids:
+                        doc = docs.get(rowid)
+                        if doc is None:
+                            continue
+                        doc_id = str(doc.get("id") or "")
+                        if doc_id in seen_ids:
+                            continue
+                        seen_ids.add(doc_id)
                         suggestions.append(doc)
+                    if (
+                        len(rows) < window
+                        or len(suggestions) >= limit
+                        or window >= max_window
+                    ):
+                        break
+                    window = min(max_window, window * 2)
             except sqlite3.Error as error:
                 logger.warning(
                     "zimantic: title suggestions unavailable for %s: %s",
@@ -3367,6 +3402,7 @@ class Search:
         cache_value: Any = None
         abandoned = False
         finalized = False
+        pending_index = 0
         stop = threading.Event()
         try:
             # Wait briefly for a slot so a burst of retries can be absorbed;
@@ -3451,9 +3487,21 @@ class Search:
             source_limit = self._source_limit(total_sources)
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
-            for src in sources:
-                futures.append(
-                    self._submit_source(
+            future_sources: dict[Future[SourceResult], SourceInfo] = {}
+            remaining: set[Future[SourceResult]] = set()
+
+            def submit_pending(*, wait_seconds: float = 0.0) -> bool:
+                """Submit sources until the bounded queue is full.
+
+                Sources that do not fit stay in ``sources`` and are retried as
+                workers free queue space. The owner never blocks here, so a
+                large search keeps emitting events while its queue drains.
+                """
+                nonlocal pending_index
+                submitted = False
+                while pending_index < len(sources):
+                    src = sources[pending_index]
+                    future = self._submit_source(
                         stop,
                         src,
                         query,
@@ -3461,10 +3509,18 @@ class Search:
                         fulltext_query,
                         query_vector,
                         source_limit,
+                        wait_seconds=wait_seconds if not submitted else 0.0,
                     )
-                )
+                    if future is None:
+                        break
+                    pending_index += 1
+                    submitted = True
+                    futures.append(future)
+                    future_sources[future] = src
+                    remaining.add(future)
+                return submitted
 
-            future_sources = dict(zip(futures, sources))
+            submit_pending()
             started_at = time.monotonic()
             last_rank_at = started_at
             rank_passes = 0
@@ -3472,8 +3528,22 @@ class Search:
             # Ids of the page last sent to the client, so a snapshot that didn't
             # move the page can omit its (large, unchanged) result list.
             last_page_signature: tuple[str, ...] | None = None
-            remaining = set(futures)
-            while remaining:
+            while pending_index < len(sources) or remaining:
+                if not remaining:
+                    # All submitted work is done but sources are still pending:
+                    # another search holds every queue permit. Wait briefly for
+                    # capacity and keep the status line alive meanwhile.
+                    wait_seconds = max(0.05, min(1.0, update_interval or 1.0))
+                    if not submit_pending(wait_seconds=wait_seconds):
+                        yield {
+                            "type": "progress",
+                            "completed": len(completed),
+                            "total_sources": total_sources,
+                            "elapsed": round(time.monotonic() - started_at, 1),
+                        }
+                        continue
+                else:
+                    submit_pending()
                 timed_out = False
                 try:
                     for future in as_completed(
@@ -3482,6 +3552,9 @@ class Search:
                     ):
                         remaining.discard(future)
                         src = future_sources[future]
+                        # A completed source frees queue space; keep the
+                        # pipeline full without waiting for the next pass.
+                        submit_pending()
                         try:
                             result = future.result()
                         except Exception as error:
@@ -3550,7 +3623,7 @@ class Search:
                             )
                 except TimeoutError:
                     timed_out = True
-                if not remaining:
+                if pending_index >= len(sources) and not remaining:
                     break
                 if not timed_out:
                     continue
@@ -3629,11 +3702,13 @@ class Search:
                 acquired = False
             if abandoned and futures and not finalized:
                 # A disconnected stream must never hold user-facing admission
-                # while it drains stale work. Skip every source that has not
-                # started; the running ones finish in the bounded search pool,
+                # while it drains stale work. Skip every source that definitely
+                # will not run: sources that were never submitted because the
+                # bounded queue was full, and submitted tasks still waiting for
+                # a worker. The running ones finish in the bounded search pool,
                 # so at most `source_workers` abandoned queries can occupy
                 # workers after a disconnect.
-                if any(
+                if pending_index < len(sources) or any(
                     not future.done() and not future.running()
                     for future in futures
                 ):
@@ -3824,11 +3899,26 @@ class Search:
             if waiters is not None:
                 waiters.release()
 
-    def _submit_source(self, stop: threading.Event, source: SourceInfo, *args):
-        """Submit one source task, bounding the executor queue."""
+    def _submit_source(
+        self,
+        stop: threading.Event,
+        source: SourceInfo,
+        *args,
+        wait_seconds: float = 0.0,
+    ):
+        """Submit one source task, bounding the executor queue.
+
+        Returns ``None`` when the queue is full and ``wait_seconds`` is zero, so
+        the streaming owner can keep yielding events and retry later instead of
+        blocking the request thread.
+        """
         slots = getattr(self, "_source_queue_slots", None)
         if slots is not None:
-            slots.acquire()
+            if wait_seconds > 0:
+                if not slots.acquire(timeout=wait_seconds):
+                    return None
+            elif not slots.acquire(blocking=False):
+                return None
         try:
             return self._executor.submit(self._run_source_task, stop, source, *args)
         except BaseException:
