@@ -246,6 +246,11 @@ def verify_model_files(model_dir, warn=None) -> dict[str, str]:
                 f"(got {actual}, expected {documented}); search results may differ "
                 "from the documented model"
             )
+    for path in sorted(Path(model_dir).glob("*.onnx_data")):
+        try:
+            actual_hashes[path.name] = _sha256(path)
+        except OSError:
+            continue
     return actual_hashes
 
 
@@ -268,7 +273,15 @@ def model_fingerprint(model_dir, hashes: dict[str, str] | None = None) -> str:
 
     cached = hashes or {}
     digest = hashlib.sha256()
-    for label, path in (("model", model_path), (tokenizer_kind, tokenizer_path)):
+    fingerprint_files = [
+        ("model", model_path),
+        *(
+            (f"model-data:{path.name}", path)
+            for path in sorted(Path(model_dir).glob("*.onnx_data"))
+        ),
+        (tokenizer_kind, tokenizer_path),
+    ]
+    for label, path in fingerprint_files:
         value = cached.get(path.name)
         if value is None:
             try:

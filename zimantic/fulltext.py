@@ -28,6 +28,7 @@ _WORKER_MODULE = "zimantic.fulltext_worker"
 # still extra interpreters. Four is enough to hide most of the IPC latency
 # without duplicating every archive on a small host.
 DEFAULT_WORKERS = 4
+FULLTEXT_TIMEOUT_SECONDS = 30.0
 
 
 class _Worker:
@@ -75,7 +76,27 @@ class _Worker:
                     + "\n"
                 )
                 process.stdin.flush()
-                line = process.stdout.readline()
+                response: queue.Queue[str] = queue.Queue(maxsize=1)
+
+                def read_response() -> None:
+                    try:
+                        line = process.stdout.readline()
+                    except (OSError, ValueError):
+                        line = ""
+                    response.put(line)
+
+                reader = threading.Thread(target=read_response, daemon=True)
+                reader.start()
+                try:
+                    line = response.get(timeout=FULLTEXT_TIMEOUT_SECONDS)
+                except queue.Empty:
+                    logger.warning(
+                        "zimantic: native full-text search timed out for %s",
+                        zim_path,
+                    )
+                    self.close()
+                    reader.join(timeout=1)
+                    line = ""
             except (BrokenPipeError, OSError, ValueError):
                 line = ""
             if not line:
@@ -152,7 +173,14 @@ class FulltextPool:
         """Search one archive; return None when the helper cannot answer."""
         if self.is_broken(zim_path):
             return None
-        worker = self._idle.get()
+        try:
+            worker = self._idle.get(timeout=FULLTEXT_TIMEOUT_SECONDS)
+        except queue.Empty:
+            logger.warning(
+                "zimantic: no native full-text worker became available for %s",
+                zim_path,
+            )
+            return None
         try:
             results = worker.search(zim_path, query, count, version)
         except Exception as error:  # never let helper plumbing fail a search

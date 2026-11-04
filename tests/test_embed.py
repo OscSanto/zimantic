@@ -54,6 +54,21 @@ class ModelFingerprintTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertNotEqual(second, third)
 
+    def test_fingerprint_changes_with_external_onnx_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "model.onnx"
+            data = Path(tmp) / "model.onnx_data"
+            tokenizer = Path(tmp) / "sentencepiece.bpe.model"
+            model.write_bytes(b"model")
+            data.write_bytes(b"weights-v1")
+            tokenizer.write_bytes(b"vocab")
+            first = embed.model_fingerprint(tmp)
+
+            data.write_bytes(b"weights-v2")
+            second = embed.model_fingerprint(tmp)
+
+        self.assertNotEqual(first, second)
+
     def test_missing_model_has_no_fingerprint(self):
         with tempfile.TemporaryDirectory() as tmp:
             _sentencepiece_dir(tmp)
