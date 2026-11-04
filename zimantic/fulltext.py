@@ -59,6 +59,17 @@ class _Worker:
         version: object = None,
     ) -> list[str] | None:
         """Return result paths, or None when the worker cannot answer."""
+        results = self.search_results(zim_path, query, count, version)
+        return None if results is None else [result["path"] for result in results]
+
+    def search_results(
+        self,
+        zim_path: str,
+        query: str,
+        count: int,
+        version: object = None,
+    ) -> list[dict[str, str]] | None:
+        """Return result paths and titles, or None when the worker cannot answer."""
         with self._lock:
             try:
                 process = self._ensure_process()
@@ -114,7 +125,12 @@ class _Worker:
                     payload["error"],
                 )
                 return None
-            return list(payload.get("results") or [])
+            results = payload.get("results") or []
+            return [
+                result if isinstance(result, dict)
+                else {"path": str(result), "title": ""}
+                for result in results
+            ]
 
     def close(self) -> None:
         process = self._process
@@ -171,6 +187,17 @@ class FulltextPool:
         version: object = None,
     ) -> list[str] | None:
         """Search one archive; return None when the helper cannot answer."""
+        results = self.search_results(zim_path, query, count, version)
+        return None if results is None else [result["path"] for result in results]
+
+    def search_results(
+        self,
+        zim_path: str,
+        query: str,
+        count: int,
+        version: object = None,
+    ) -> list[dict[str, str]] | None:
+        """Return result paths and titles from one helper process."""
         if self.is_broken(zim_path):
             return None
         try:
@@ -182,7 +209,7 @@ class FulltextPool:
             )
             return None
         try:
-            results = worker.search(zim_path, query, count, version)
+            results = worker.search_results(zim_path, query, count, version)
         except Exception as error:  # never let helper plumbing fail a search
             logger.warning(
                 "zimantic: full-text helper failed for %s: %s", zim_path, error

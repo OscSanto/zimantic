@@ -104,6 +104,42 @@ class FulltextFailureTests(unittest.TestCase):
         self.assertEqual(result.error, "full-text search unavailable")
         self.assertEqual(result.error, "full-text search unavailable")
 
+    def test_isolated_fulltext_results_do_not_open_archive_in_parent(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        source = SourceInfo(
+            "manual", "Manual", "manual", "local", local_name="manual"
+        )
+        search.fulltext_pool = types.SimpleNamespace(
+            search_results=lambda *_args: [
+                {"path": "article", "title": "Article"}
+            ],
+            close=lambda: None,
+        )
+        index = _LocalIndex(
+            None,
+            None,
+            None,
+            None,
+            threading.Lock(),
+            zim_path="/tmp/manual.zim",
+            has_fulltext_index=True,
+        )
+
+        result = search._search_local_locked(
+            source,
+            "article",
+            "",
+            "article",
+            None,
+            10,
+            index,
+        )
+
+        self.assertEqual(result.fulltext[0][1]["path"], "article")
+        self.assertEqual(result.fulltext[0][1]["title"], "Article")
+        self.assertIsNone(index.archive)
+
 
 class _CountingSemaphore(threading.BoundedSemaphore):
     """BoundedSemaphore that records successful releases for assertions."""

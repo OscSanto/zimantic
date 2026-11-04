@@ -266,10 +266,18 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         )
 
     @app.get("/health")
-    def health():
+    def health(request: Request):
         health_report = getattr(search_class, "health", None)
         if callable(health_report):
-            return health_report()
+            version_of = getattr(search_class, "health_version", None)
+            version = version_of() if callable(version_of) else 0
+            return web_app._json_response(
+                request,
+                "health",
+                version,
+                health_report,
+                memos,
+            )
         return {
             "status": "ok",
             "indexes": search_class.local_names(),

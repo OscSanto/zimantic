@@ -2,8 +2,8 @@
 
 Protocol: one JSON request per line on stdin, one JSON response per line on
 stdout. A request is ``{"path": ..., "query": ..., "count": ...}``; a response
-is ``{"results": [path, ...]}`` or ``{"error": "..."}``. The parent treats a
-missing response (the process aborted) as an unsafe archive.
+is ``{"results": [{"path": ..., "title": ...}, ...]}`` or ``{"error": "..."}``.
+The parent treats a missing response (the process aborted) as an unsafe archive.
 """
 
 from __future__ import annotations
@@ -15,12 +15,12 @@ from collections import OrderedDict
 from libzim.reader import Archive
 from libzim.search import Query, Searcher
 
-from .libzim_compat import search_paths
+from .libzim_compat import search_results
 
 # Bound the worker's archive cache. The parent process already keeps its own
 # handles for previews and article reads; this cache only needs to cover the
 # archives touched by recent searches.
-MAX_CACHED_ARCHIVES = 16
+MAX_CACHED_ARCHIVES = 4
 
 
 def main() -> int:
@@ -53,12 +53,12 @@ def main() -> int:
                     archives.popitem(last=False)
             archive, searcher = cached
             if not getattr(archive, "has_fulltext_index", False) or not query:
-                results: list[str] = []
+                results: list[dict[str, str]] = []
             else:
                 # Ask for only the caller's window. libzim can return fewer
                 # results than the estimate; the iterator is the source of truth.
                 search = searcher.search(Query().set_query(query))
-                results = search_paths(search, 0, count)
+                results = search_results(search, 0, count)
         except Exception as error:  # report ordinary libzim errors without dying
             print(
                 json.dumps({"error": f"{type(error).__name__}: {error}"}),

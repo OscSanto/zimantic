@@ -19,7 +19,22 @@ def get_entry_by_id(archive: Any, entry_id: int) -> Any:
 
 def search_paths(search: Any, start: int, count: int) -> list[str]:
     """Return result paths from a libzim ``Search`` object."""
+    return [result["path"] for result in search_results(search, start, count)]
+
+
+def search_results(
+    search: Any, start: int, count: int
+) -> list[dict[str, str]]:
+    """Return result paths and titles from a libzim ``Search`` object."""
     getter = getattr(search, "get_results", None)
     if getter is None:
         getter = search.getResults
-    return [getattr(result, "path", result) for result in getter(start, count)]
+    results = []
+    for result in getter(start, count):
+        path = getattr(result, "path", result)
+        title = getattr(result, "title", "")
+        results.append({
+            "path": str(path),
+            "title": str(title or ""),
+        })
+    return results

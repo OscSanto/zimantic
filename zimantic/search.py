@@ -195,6 +195,7 @@ SEARCH_CLAIM_WAIT_SECONDS = 60.0
 # request. A short cache keeps that from walking the whole ZIM tree each time
 # while still noticing files added or removed without a reload.
 LIBRARY_SCAN_TTL_SECONDS = 120.0
+HEALTH_CACHE_TTL_SECONDS = 2.0
 
 
 _HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
@@ -2101,10 +2102,26 @@ class Search:
 
     def health(self) -> dict[str, Any]:
         """Return read-only index, archive, and capability diagnostics."""
+        now = time.monotonic()
         with self._state_lock:
             indexes = sorted(self.indexes.items())
             source_count = len(self.sources)
             embedder_loaded = self.embedder is not None
+            generation = self._cache_generation
+            deferred_faiss = self._defer_faiss
+            cached = getattr(self, "_health_cache", None)
+        if (
+            cached is not None
+            and now - cached[0] < HEALTH_CACHE_TTL_SECONDS
+            and cached[1:4] == (generation, embedder_loaded, deferred_faiss)
+        ):
+            report = dict(cached[4])
+            report["cache"] = self.cache.stats()
+            preview_cache = self.preview_cache
+            report["preview_cache"] = (
+                preview_cache.stats() if preview_cache is not None else None
+            )
+            return report
 
         reports: list[dict[str, Any]] = []
         for name, index in indexes:
@@ -2194,7 +2211,7 @@ class Search:
         status = "ok"
         if not reports or any(report["status"] != "ok" for report in reports):
             status = "degraded"
-        return {
+        report = {
             "status": status,
             "indexes": reports,
             "sources": source_count,
@@ -2209,6 +2226,24 @@ class Search:
                 else None
             ),
         }
+        with self._state_lock:
+            self._health_cache = (
+                time.monotonic(),
+                generation,
+                embedder_loaded,
+                deferred_faiss,
+                report,
+            )
+        return report
+
+    def health_version(self) -> tuple[int, bool, bool, int]:
+        """Return a short-lived version token for the health response cache."""
+        with self._state_lock:
+            generation = self._cache_generation
+            embedder_loaded = self.embedder is not None
+            deferred_faiss = self._defer_faiss
+        bucket = int(time.monotonic() / HEALTH_CACHE_TTL_SECONDS)
+        return generation, embedder_loaded, deferred_faiss, bucket
 
     @staticmethod
     def _selective_source_limit(total_sources: int) -> int:
@@ -3241,6 +3276,7 @@ class Search:
         fulltext: list[tuple[int, dict[str, Any]]] = []
         rowids: set[int] = set()
         archive_entries: dict[int, Any] = {}
+        fulltext_hits: list[tuple[int, dict[str, Any]]] = []
         errors: list[str] = []
 
         # FAISS search is read-only and thread-safe; skip it when this index has
@@ -3279,8 +3315,18 @@ class Search:
 
         fulltext_rows: list[tuple[int, int]] = []
         searcher = None
-        archive = index.ensure_open()
-        if self.fulltext_pool is not None:
+        helper_results = (
+            self.fulltext_pool is not None
+            and callable(getattr(self.fulltext_pool, "search_results", None))
+        )
+        archive = None if helper_results else index.ensure_open()
+        if helper_results:
+            # The helper already validates the native archive and returns the
+            # result title. Avoid opening a second copy in the server process.
+            fulltext_capable = bool(
+                index.zim_path and index.has_fulltext_index is not False
+            )
+        elif self.fulltext_pool is not None:
             fulltext_capable = bool(
                 archive is not None
                 and index.zim_path
@@ -3301,9 +3347,37 @@ class Search:
             )
         if fulltext_capable:
             paths: list[str] = []
-            if self.fulltext_pool is not None:
+            if helper_results:
                 # Native libzim iteration aborts the interpreter on some
                 # corrupt full-text indexes, so it runs in a helper process.
+                native_results = self.fulltext_pool.search_results(
+                    index.zim_path or "",
+                    fulltext_query or query,
+                    count,
+                    index.zim_signature,
+                )
+                if native_results is None:
+                    errors.append("full-text search unavailable")
+                else:
+                    for rank, result in enumerate(native_results):
+                        if not isinstance(result, dict):
+                            continue
+                        path = str(result.get("path") or "")
+                        if not path:
+                            continue
+                        fulltext_hits.append(
+                            (
+                                rank,
+                                self._result_doc(
+                                    source,
+                                    path,
+                                    str(result.get("title") or path),
+                                ),
+                            )
+                        )
+            elif self.fulltext_pool is not None:
+                # Compatibility with lightweight test doubles and older pool
+                # implementations that only return paths.
                 native_paths = self.fulltext_pool.search(
                     index.zim_path or "",
                     fulltext_query or query,
@@ -3345,6 +3419,7 @@ class Search:
             doc = docs.get(rowid)
             if doc:
                 fulltext.append((rank, doc))
+        fulltext.extend(fulltext_hits)
         # Keep weak meaning matches only when this source has no lexical
         # candidates. With title or full-text hits the cosine floor removes
         # noise; without them it used to turn a meaning-only query into an
