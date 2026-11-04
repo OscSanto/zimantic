@@ -3,21 +3,18 @@ from __future__ import annotations
 
 import logging
 import math
-import posixpath
 import re
 import secrets
 import sqlite3
 import threading
 import time
-import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlencode, urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import quote
+from urllib.request import urlopen
 
 from libzim.reader import Archive
 from libzim.search import Query
@@ -31,12 +28,26 @@ from .catalog import (
     public_tags,
 )
 from .content.reader import (
-    _READABLE_MIMETYPES,
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PARSE_TIMEOUT,
     DEFAULT_PREVIEW_CHARS,
     read_entry,
     truncate_at_word_boundary,
+)
+from .content.serving import (
+    HEAD_READ_BYTES,
+    RANDOM_ARTICLE_ATTEMPTS,
+    ArticleNotFoundError,
+    ArticleSourceNotFoundError,
+    ArticleTooLargeError,
+    ArticleUnavailableError,
+    is_random_article_entry,
+    normalize_article_path,
+    random_fallback_article,
+    random_indexed_article,
+    read_archive_article,
+    read_archive_icon,
+    resolve_article_entry,
 )
 from .contracts import SourceInfo, SourceResult
 from .libzim_compat import get_entry_by_id, search_paths
@@ -45,27 +56,45 @@ from .model_meta import (
     MODEL_PROBE_TEXTS_KEY,
     MODEL_PROBE_VECTORS_KEY,
 )
-from .redirects import RedirectError, resolve_redirect_entry
 from .searching.config import _file_signature, _float_config, _int_config
 from .searching.index import _LocalIndex, _nprobe
+from .searching.kiwix import (
+    DEFAULT_KIWIX_CATALOG_ATTEMPTS,
+    DEFAULT_KIWIX_CATALOG_LIMIT,
+    DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF,
+    DEFAULT_KIWIX_RESULT_LIMIT,
+    DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
+    MAX_KIWIX_CATALOG_RETRY_BACKOFF,
+    _catalog_book,
+    catalog_entries,
+    search_kiwix,
+)
 from .searching.query import (
-    DEFAULT_DISAMBIGUATION_BOOST,
-    DEFAULT_DISAMBIGUATION_PENALTY,
-    DEFAULT_USER_PAGE_PENALTY,
-    DISAMBIGUATION_TITLE,
     MAX_QUERY_LENGTH,
-    USER_PAGE_PATH,
     _content_terms,
-    _density,
-    _disambiguation_intent,
     _fulltext_query,
-    _intent_match,
     _phrase,
     _phrase_words,
     _query_terms,
     _title_prefix_query,
     _title_query,
-    _user_page_intent,
+)
+from .searching.ranking import (
+    DEFAULT_LONG_QUERY,
+    FULLTEXT_WEIGHT,
+    KEYWORD_WEIGHT,
+    LONG_FULLTEXT_WEIGHT,
+    RRF_K,
+    SEMANTIC_WEIGHT,
+    _RankedAssessment,
+    _assess_ranked_document,
+    _collect_ranked_candidates,
+    _deduplicate_ranked,
+    _render_ranked_document,
+    _rrf_scores,
+    matched_by,
+    rank_results,
+    source_items,
 )
 from .searching.sources import (
     _book_identity,
@@ -82,6 +111,52 @@ from .searching.sources import (
 from .settings import normalize_web_base_path
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "ArticleNotFoundError",
+    "ArticleSourceNotFoundError",
+    "ArticleTooLargeError",
+    "ArticleUnavailableError",
+    "DEFAULT_KIWIX_CATALOG_ATTEMPTS",
+    "DEFAULT_KIWIX_CATALOG_LIMIT",
+    "DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF",
+    "DEFAULT_KIWIX_RESULT_LIMIT",
+    "DEFAULT_LONG_QUERY",
+    "DEFAULT_MAX_KIWIX_RESPONSE_BYTES",
+    "FULLTEXT_WEIGHT",
+    "HEAD_READ_BYTES",
+    "KEYWORD_WEIGHT",
+    "LONG_FULLTEXT_WEIGHT",
+    "MAX_KIWIX_CATALOG_RETRY_BACKOFF",
+    "RANDOM_ARTICLE_ATTEMPTS",
+    "RRF_K",
+    "SEMANTIC_WEIGHT",
+    "Search",
+    "_RankedAssessment",
+    "_assess_ranked_document",
+    "_bounded_catalog_url",
+    "_catalog_book",
+    "_child_text",
+    "_collect_ranked_candidates",
+    "_deduplicate_ranked",
+    "_local_name",
+    "_parse_remote_xml",
+    "_read_limited_response",
+    "_render_ranked_document",
+    "_rrf_scores",
+    "catalog_entries",
+    "is_random_article_entry",
+    "matched_by",
+    "normalize_article_path",
+    "random_fallback_article",
+    "random_indexed_article",
+    "rank_results",
+    "read_archive_article",
+    "read_archive_icon",
+    "resolve_article_entry",
+    "search_kiwix",
+    "source_items",
+]
 
 
 DEFAULT_CANDIDATES = 16
@@ -100,20 +175,8 @@ DEFAULT_MAX_RESULTS = 100
 # selections are promoted to one full search so their pool can be shared.
 SELECTIVE_SOURCE_LIMIT = 10
 SELECTIVE_SOURCE_RATIO = 0.35
-DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
-DEFAULT_KIWIX_CATALOG_LIMIT = 50_000
 DEFAULT_MAX_REMOTE_SOURCES = 100
-DEFAULT_KIWIX_CATALOG_ATTEMPTS = 3
-DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF = 1.0
-MAX_KIWIX_CATALOG_RETRY_BACKOFF = 8.0
-DEFAULT_KIWIX_RESULT_LIMIT = 1_000
-DEFAULT_LONG_QUERY = 10
 MAX_PHRASE_CANDIDATES = 32
-# How many uniform rowid/entry-id probes /random tries before falling back to a
-# guaranteed pick. Probes give every eligible article equal weight and usually
-# succeed on the first try; the budget only matters for a moderately sparse
-# index, where a larger value keeps the slower fallback off the common path.
-RANDOM_ARTICLE_ATTEMPTS = 128
 # How long an owner waits for a search slot before reporting busy. A cold
 # search on a Pi can run for several seconds, and a superseded stream can take
 # a moment to release its slot, so a short wait would turn normal queueing into
@@ -123,8 +186,6 @@ SLOT_WAIT_SECONDS = 10.0
 # Bound how long an identical-query waiter (or an abandoned finalizer) waits
 # for a source future. A hung source must not hang every following request.
 SEARCH_CLAIM_WAIT_SECONDS = 60.0
-# Leading bytes returned by a head-only article read (shell title/favicon).
-HEAD_READ_BYTES = 256 << 10
 # The installed-library view recomputes its version on every conditional
 # request. A short cache keeps that from walking the whole ZIM tree each time
 # while still noticing files added or removed without a reload.
@@ -141,20 +202,6 @@ _SCRIPT_STYLE_OPEN = re.compile(r"<\s*(?:script|style)\b", re.IGNORECASE)
 
 # Entries whose readable text can be searched for an exact query phrase.
 _PHRASE_MIMETYPES = frozenset({"text/plain", "text/html", "application/xhtml+xml"})
-
-
-def _catalog_book(href: str) -> str:
-    """Extract a ZIM book name from a catalog entry's HTML link.
-
-    Kiwix normally links to ``/content/<book>``, but some servers link to an
-    article below it (``/content/<book>/A/Main_Page``). Take the segment after
-    ``content`` when present instead of assuming it is the last one.
-    """
-    parts = [part for part in urlparse(href).path.split("/") if part]
-    for index in range(len(parts) - 1, -1, -1):
-        if parts[index] == "content" and index + 1 < len(parts):
-            return unquote(parts[index + 1])
-    return unquote(parts[-1]) if parts else ""
 
 
 def _source_tags(metadata: dict[str, Any]) -> tuple[str, ...]:
@@ -302,307 +349,6 @@ class SearchQueryError(ValueError):
 
 class SearchBusyError(Exception):
     """Too many searches are already running; the client should retry."""
-
-
-class ArticleNotFoundError(Exception):
-    """The requested local ZIM or article path does not exist."""
-
-
-class ArticleSourceNotFoundError(ArticleNotFoundError):
-    """The named local source is not installed."""
-
-
-class ArticleUnavailableError(Exception):
-    """A local ZIM exists but cannot currently serve the requested article."""
-
-
-class ArticleTooLargeError(ArticleUnavailableError):
-    """The requested entry exceeds the configured serving limit."""
-
-
-def _deduplicate_ranked(ranked):
-    seen: set[str] = set()
-    unique = []
-    for item in ranked:
-        identity = item[2]["id"]
-        if identity in seen:
-            continue
-        seen.add(identity)
-        unique.append(item)
-    return unique
-
-
-def _collect_ranked_candidates(source_results: list[SourceResult]):
-    semantic: list[tuple[float, str, dict[str, Any]]] = []
-    keyword: list[tuple[float, str, dict[str, Any]]] = []
-    fulltext: list[tuple[int, str, dict[str, Any]]] = []
-    docs: dict[str, dict[str, Any]] = {}
-    source_by_key = {
-        result.source.key: result.source for result in source_results
-    }
-
-    for result in source_results:
-        for doc in result.items:
-            docs[doc["id"]] = doc
-        for score, doc in result.semantic:
-            semantic.append((score, result.source.key, doc))
-        for score, doc in result.keyword:
-            keyword.append((score, result.source.key, doc))
-        for rank, doc in result.fulltext:
-            fulltext.append((rank, result.source.key, doc))
-
-    semantic.sort(
-        key=lambda item: (
-            -item[0],
-            source_by_key[item[1]].name.casefold(),
-            item[2]["path"],
-        )
-    )
-    keyword.sort(
-        key=lambda item: (
-            item[0],
-            source_by_key[item[1]].name.casefold(),
-            item[2]["path"],
-        )
-    )
-    fulltext.sort(
-        key=lambda item: (
-            item[0],
-            source_by_key[item[1]].name.casefold(),
-            item[2]["path"],
-        )
-    )
-    return (
-        _deduplicate_ranked(semantic),
-        _deduplicate_ranked(keyword),
-        _deduplicate_ranked(fulltext),
-        docs,
-        source_by_key,
-    )
-
-
-def _rrf_scores(
-    ranked_lists,
-    query: str,
-    candidate_limit: int,
-) -> tuple[dict[str, float], dict[str, dict[str, dict[str, Any]]], float]:
-    scores: dict[str, float] = {}
-    fulltext_weight = (
-        2.0
-        if len(re.findall(r"\w+", query, re.UNICODE)) >= DEFAULT_LONG_QUERY
-        else 1.0
-    )
-    details: dict[str, dict[str, dict[str, Any]]] = {}
-    for ranked, method, weight in (
-        (ranked_lists[0], "semantic", 1.0),
-        (ranked_lists[1], "title", 1.0),
-        (ranked_lists[2], "fulltext", fulltext_weight),
-    ):
-        for rank, (raw_score, _, doc) in enumerate(ranked[:candidate_limit]):
-            # Reciprocal Rank Fusion uses one-based positions.
-            contribution = weight / (60 + rank + 1)
-            scores[doc["id"]] = scores.get(doc["id"], 0.0) + contribution
-            details.setdefault(doc["id"], {})[method] = {
-                "rank": rank + 1,
-                "score": round(raw_score, 6),
-                "weight": weight,
-                "contribution": round(contribution, 6),
-            }
-    return scores, details, fulltext_weight
-
-
-@dataclass(slots=True)
-class _RankedAssessment:
-    """Scored candidate plus everything needed to render its response dict.
-
-    Ranking computes one of these per candidate and sorts on the numeric
-    fields; the heavy ``output`` dict (ranking metadata and explanation) is
-    only rendered for the docs that survive the top-k cut.
-    """
-
-    identity: str
-    doc: dict[str, Any]
-    query_words: list[str]
-    title_tokens: list[str]
-    title_matches: int
-    title_coverage: float
-    title_density: float
-    title_quality: float
-    title_phrase_hit: bool
-    content_phrase_hit: bool
-    intent: float
-    total: float
-    lexical: float
-    source_rank: int
-    source_casefold: str
-    path: str
-    rrf_score: float
-    rrf_details: dict[str, dict[str, dict[str, Any]]]
-    semantic_hit: bool
-    fulltext_weight: float
-    disambig: dict[str, Any]
-    user_page: dict[str, Any]
-
-
-def _assess_ranked_document(
-    identity: str,
-    doc: dict[str, Any],
-    query_words: list[str],
-    query: str,
-    source_by_key: dict[str, SourceInfo],
-    scores: dict[str, float],
-    rrf_details: dict[str, dict[str, dict[str, Any]]],
-    fulltext_weight: float,
-) -> _RankedAssessment:
-    # A document is re-assessed on every intermediate ranking pass, but its
-    # title never changes; tokenizing once per document instead of once per
-    # pass removes most of the ranking cost on large pools.
-    title_tokens = doc.get("_title_tokens")
-    if title_tokens is None:
-        title_tokens = _content_terms(doc["title"])
-        doc["_title_tokens"] = title_tokens
-    title_token_set = set(title_tokens)
-    title_matches = sum(term in title_token_set for term in query_words)
-    title_coverage = title_matches / len(query_words) if query_words else 0.0
-    title_density = _density(query_words, title_tokens)
-    # Coverage is primary; density rewards concise titles among equally
-    # complete matches without letting a short partial match win.
-    title_quality = title_coverage * (1.0 + title_density) / 2.0
-    title_phrase_hit = _phrase(query_words, title_tokens)
-    content_phrase_hit = bool(doc.get("_content_phrase"))
-    phrase_hit = max(title_phrase_hit, content_phrase_hit)
-    source = source_by_key.get(doc["source_key"])
-    intent = _intent_match(source, query) if source is not None else 0.0
-    lexical = (5.0 * title_quality + 2.0 * phrase_hit + intent) / 8.0
-    source_rank = int(doc.get("source_rank", 100000))
-    rrf_score = scores.get(identity, 0.0)
-    semantic_hit = "semantic" in rrf_details.get(identity, {})
-    base_score = rrf_score + 0.02 * lexical
-    total = base_score
-    disambig = {
-        "action": "none",
-        "factor": 1.0,
-        "adjustment": 0.0,
-    }
-    if DISAMBIGUATION_TITLE.search(doc["title"]):
-        if _disambiguation_intent(query, query_words, doc["title"]):
-            total += DEFAULT_DISAMBIGUATION_BOOST
-            disambig = {
-                "action": "boost",
-                "factor": 1.0,
-                "adjustment": round(DEFAULT_DISAMBIGUATION_BOOST, 6),
-            }
-        else:
-            total *= DEFAULT_DISAMBIGUATION_PENALTY
-            disambig = {
-                "action": "demote",
-                "factor": DEFAULT_DISAMBIGUATION_PENALTY,
-                "adjustment": round(total - base_score, 6),
-            }
-    user_page = bool(USER_PAGE_PATH.search(str(doc.get("path", ""))))
-    user_page_action = "none"
-    user_page_factor = 1.0
-    user_page_adjustment = 0.0
-    if user_page and not _user_page_intent(query_words):
-        before_user_page = total
-        total *= DEFAULT_USER_PAGE_PENALTY
-        user_page_action = "demote"
-        user_page_factor = DEFAULT_USER_PAGE_PENALTY
-        user_page_adjustment = total - before_user_page
-    return _RankedAssessment(
-        identity=identity,
-        doc=doc,
-        query_words=query_words,
-        title_tokens=title_tokens,
-        title_matches=title_matches,
-        title_coverage=title_coverage,
-        title_density=title_density,
-        title_quality=title_quality,
-        title_phrase_hit=title_phrase_hit,
-        content_phrase_hit=content_phrase_hit,
-        intent=intent,
-        total=total,
-        lexical=lexical,
-        source_rank=source_rank,
-        source_casefold=doc["source"].casefold(),
-        path=doc["path"],
-        rrf_score=rrf_score,
-        rrf_details=rrf_details,
-        semantic_hit=semantic_hit,
-        fulltext_weight=fulltext_weight,
-        disambig=disambig,
-        user_page={
-            "action": user_page_action,
-            "factor": user_page_factor,
-            "adjustment": round(user_page_adjustment, 6),
-        },
-    )
-
-
-def _render_ranked_document(assessment: _RankedAssessment) -> dict[str, Any]:
-    """Build the public/ranking-friendly dict for a surviving candidate.
-
-    Kept separate from ``_assess_ranked_document`` so ranking only pays for the
-    nested ``ranking``/``explain`` structure on the docs that are actually kept.
-    """
-    a = assessment
-    title_phrase_hit = a.title_phrase_hit
-    phrase_hit = max(title_phrase_hit, a.content_phrase_hit)
-    user_page_action = a.user_page["action"]
-    explanation = (
-        f"title {round(a.title_coverage * 100)}% "
-        f"({a.title_matches}/{len(a.query_words) if a.query_words else 0}, "
-        f"density {round(a.title_density * 100)}%), "
-        f"phrase {'yes' if phrase_hit else 'no'}, "
-        f"intent {'yes' if a.intent else 'no'}"
-        f"{', disambiguation ' + a.disambig['action'] if a.disambig['action'] != 'none' else ''}"
-        f"{', user page demote' if user_page_action == 'demote' else ''}"
-    )
-    output = dict(a.doc)
-    output.pop("_content_phrase", None)
-    output.pop("_title_tokens", None)
-    output.update({
-        "score": a.total,
-        "explain": explanation,
-        "rank": a.source_rank,
-        "ranking": {
-            "final_score": round(a.total, 6),
-            "rrf_score": round(a.rrf_score, 6),
-            "rrf": {
-                method: a.rrf_details.get(a.identity, {}).get(
-                    method,
-                    {
-                        "rank": None,
-                        "score": None,
-                        "weight": weight,
-                        "contribution": 0.0,
-                    },
-                )
-                for method, weight in (
-                    ("semantic", 1.0),
-                    ("title", 1.0),
-                    ("fulltext", a.fulltext_weight),
-                )
-            },
-            "title": {
-                "query_terms": a.query_words,
-                "matches": a.title_matches,
-                "term_count": len(a.query_words),
-                "coverage": round(a.title_coverage, 6),
-                "density": round(a.title_density, 6),
-                "quality": round(a.title_quality, 6),
-            },
-            "phrase": bool(phrase_hit),
-            "content_phrase": a.content_phrase_hit,
-            "semantic_hit": a.semantic_hit,
-            "intent": bool(a.intent),
-            "lexical_score": round(a.lexical, 6),
-            "disambiguation": a.disambig,
-            "user_page": a.user_page,
-            "source_rank": a.source_rank,
-        },
-    })
-    return output
 
 
 def _local_source_rank(source: SourceInfo) -> tuple:
@@ -1800,109 +1546,13 @@ class Search:
         return sources
 
     def _catalog_entries(self, server: str) -> list[dict[str, str]] | None:
-        path = str(
-            self.cfg.get(
-                "kiwix_catalog_path",
-                "/kiwix/catalog/v2/entries?count=50000",
-            )
-        )
-        url = server + (path if path.startswith("/") else "/" + path)
-        catalog_limit = _int_config(
+        return catalog_entries(
             self.cfg,
-            "kiwix_catalog_limit",
-            DEFAULT_KIWIX_CATALOG_LIMIT,
+            server,
+            self.source_timeout,
+            urlopen_fn=urlopen,
+            sleep_fn=time.sleep,
         )
-        url = _bounded_catalog_url(url, catalog_limit)
-        response_limit = _int_config(
-            self.cfg,
-            "max_kiwix_response_bytes",
-            DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
-        )
-        attempts = DEFAULT_KIWIX_CATALOG_ATTEMPTS
-        for attempt in range(attempts):
-            try:
-                request = Request(
-                    url,
-                    headers={"Accept": "application/atom+xml, application/xml"},
-                )
-                with urlopen(request, timeout=self.source_timeout) as response:
-                    root = _parse_remote_xml(
-                        _read_limited_response(response, response_limit)
-                    )
-                break
-            except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError) as error:
-                retryable = True
-                if isinstance(error, HTTPError) and (
-                    400 <= error.code < 500 and error.code != 429
-                ):
-                    retryable = False
-                elif isinstance(error, (ValueError, ET.ParseError)):
-                    # Malformed XML, a DTD, or an over-limit response will not
-                    # become valid on the next attempt.
-                    retryable = False
-                if not retryable:
-                    logger.warning(
-                        "zimantic: catalog request failed: %s",
-                        error,
-                    )
-                    return None
-                if attempt + 1 == attempts:
-                    logger.warning(
-                        "zimantic: catalog request failed after %d attempt(s): %s",
-                        attempts,
-                        error,
-                    )
-                    return None
-                delay = min(
-                    DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF * (2**attempt),
-                    MAX_KIWIX_CATALOG_RETRY_BACKOFF,
-                )
-                logger.info(
-                    "zimantic: catalog request failed (%s); retrying in %.1f seconds",
-                    error,
-                    delay,
-                )
-                time.sleep(delay)
-
-        newest: dict[str, dict[str, str]] = {}
-        for entry in root.iter():
-            if _local_name(entry) != "entry":
-                continue
-            title = _child_text(entry, "title")
-            updated = _child_text(entry, "updated")
-            href = ""
-            for child in entry:
-                if _local_name(child) == "link" and (
-                    (child.attrib.get("type") or "").startswith("text/html")
-                    or not href
-                ):
-                    href = child.attrib.get("href") or ""
-            book = _catalog_book(href) or unquote(_child_text(entry, "name"))
-            if not book:
-                continue
-            item = {"name": title or book, "book": book, "updated": updated}
-            key = _book_identity(book)
-            previous = newest.get(key)
-            if not previous or (updated, book) > (
-                previous["updated"],
-                previous["book"],
-            ):
-                newest[key] = item
-
-        items = list(newest.values())
-        # The server may ignore the requested count or return more entries than
-        # asked for. Enforce the configured ceiling locally as well, after
-        # de-duplicating by book key, so a remote catalog cannot make the source
-        # set unbounded.
-        items.sort(key=lambda item: (item["name"].casefold(), item["book"]))
-        items = items[:catalog_limit]
-        title_counts: dict[str, int] = {}
-        for item in items:
-            title_counts[item["name"]] = title_counts.get(item["name"], 0) + 1
-        for item in items:
-            if title_counts[item["name"]] > 1:
-                item["name"] = f"{item['name']} ({_zim_key(item['book'])})"
-        return items
 
     def source_dicts(self) -> list[dict[str, Any]]:
         with self._state_lock:
@@ -2050,32 +1700,11 @@ class Search:
 
     @staticmethod
     def _article_path(path: str) -> str:
-        # The ASGI server already percent-decodes the request path before it
-        # gets here. Unquoting again corrupts entries whose names contain
-        # literal escapes, such as the LibreTexts cover thumbnails stored as
-        # ``.../mindtouch.page%23thumbnail?revision=2``.
-        path = str(path)
-        if not path or path.startswith("/") or "\\" in path:
-            raise ArticleNotFoundError("invalid article path")
-        if any(part == ".." for part in path.split("/")):
-            raise ArticleNotFoundError("invalid article path")
-        trailing_slash = path.endswith("/")
-        candidate = path[:-1] if trailing_slash else path
-        normalized = posixpath.normpath(candidate)
-        if normalized in {"", "."} or normalized != candidate:
-            raise ArticleNotFoundError("invalid article path")
-        return normalized + "/" if trailing_slash else normalized
+        return normalize_article_path(path)
 
     @staticmethod
     def _resolve_article_entry(archive: Archive, path: str | None = None):
-        try:
-            entry = archive.main_entry if path is None else archive.get_entry_by_path(path)
-        except (KeyError, RuntimeError, ValueError) as error:
-            raise ArticleNotFoundError("article not found") from error
-        try:
-            return resolve_redirect_entry(entry)
-        except RedirectError as error:
-            raise ArticleUnavailableError(str(error)) from error
+        return resolve_article_entry(archive, path)
 
     def _read_archive_article(
         self,
@@ -2084,40 +1713,18 @@ class Search:
         path: str | None,
         head_only: bool,
     ) -> dict[str, Any]:
-        requested_path = None if path is None else self._article_path(path)
-        try:
-            entry = self._resolve_article_entry(archive, requested_path)
-            item = entry.get_item()
-            mimetype = (
-                item.mimetype or "application/octet-stream"
-            ).split(";", 1)[0].strip().lower()
-            max_bytes = _int_config(
+        return read_archive_article(
+            archive,
+            zim_name,
+            path,
+            head_only,
+            _int_config(
                 self.cfg,
                 "max_article_bytes",
                 33_554_432,
                 minimum=1,
-            )
-            size = int(getattr(item, "size", 0) or 0)
-            if size > max_bytes:
-                raise ArticleTooLargeError(
-                    f"article exceeds the {max_bytes} byte serving limit"
-                )
-            content = item.content[:HEAD_READ_BYTES] if head_only else item.content
-        except (ArticleNotFoundError, ArticleUnavailableError):
-            raise
-        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
-            raise ArticleUnavailableError("article content is unavailable") from error
-        if not head_only and len(content) > max_bytes:
-            raise ArticleTooLargeError(
-                f"article exceeds the {max_bytes} byte serving limit"
-            )
-        return {
-            "zim": zim_name,
-            "path": entry.path,
-            "title": entry.title,
-            "mimetype": mimetype,
-            "content": content,
-        }
+            ),
+        )
 
     def read_article(
         self,
@@ -2229,25 +1836,17 @@ class Search:
         zim_name: str,
         icon_path: str | None,
     ) -> dict[str, Any]:
-        if icon_path:
-            return self._read_archive_article(archive, zim_name, icon_path, False)
-        try:
-            item = archive.get_illustration_item(48)
-            content = item.content
-            mimetype = (
-                item.mimetype or "application/octet-stream"
-            ).split(";", 1)[0].strip().lower()
-        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
-            raise ArticleNotFoundError("source icon not found") from error
-        if len(content) > 1 << 20:
-            raise ArticleTooLargeError("source icon exceeds the 1048576 byte serving limit")
-        return {
-            "zim": zim_name,
-            "path": None,
-            "title": zim_name,
-            "mimetype": mimetype,
-            "content": content,
-        }
+        return read_archive_icon(
+            archive,
+            zim_name,
+            icon_path,
+            _int_config(
+                self.cfg,
+                "max_article_bytes",
+                33_554_432,
+                minimum=1,
+            ),
+        )
 
     def read_source_icon(self, zim_name: str) -> dict[str, Any]:
         """Read the illustration selected for a local ZIM."""
@@ -2317,98 +1916,21 @@ class Search:
 
     @staticmethod
     def _is_random_article_entry(entry: Any) -> bool:
-        """True when an archive entry is a readable, non-redirect article.
-
-        The SQLite path only samples rows in ``docs`` (entries ``read_entry``
-        accepted), so the filesystem fallback must reject redirects and
-        non-article assets (images, stylesheets, scripts) to avoid redirecting
-        /random to a binary file. Content-level checks (JS shells, block length)
-        that ``read_entry`` also applies are not replicated here because they
-        would require reading the article.
-        """
-        if entry.is_redirect or not entry.path:
-            return False
-        try:
-            item = entry.get_item()
-        except (KeyError, RuntimeError, ValueError):
-            return False
-        mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
-        return mimetype in _READABLE_MIMETYPES
+        return is_random_article_entry(entry)
 
     def _random_indexed_article(self, index: _LocalIndex, db: sqlite3.Connection) -> str | None:
-        """Pick a uniformly random indexed article, or None when there are none."""
-        if not db.execute(
-            "SELECT 1 FROM docs WHERE target IS NULL LIMIT 1"
-        ).fetchone():
-            return None
-        archive = index.ensure_open()
-        upper = max(1, int(getattr(archive, "entry_count", 0) or 0)) if archive else 1
-        # Entry rowids are dense entry ids, so sampling one and rejecting gaps,
-        # unindexed entries and redirects gives every eligible row equal weight
-        # in O(1) per probe. This is fine for normal indexes, but an archive can
-        # be extremely sparse: an OSM ZIM has a few hundred articles among
-        # ~800k tile entries, so a bounded probe budget would almost always miss.
-        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
-            point = secrets.randbelow(upper)
-            row = db.execute(
-                "SELECT path FROM docs WHERE rowid = ? AND target IS NULL",
-                (point,),
-            ).fetchone()
-            if row and row[0]:
-                return str(row[0])
-        # Sparse index: fall back to a uniform COUNT/OFFSET pick. The O(n) count
-        # is only paid here, where the probe budget already showed the eligible
-        # set is small relative to the index.
-        count = int(
-            db.execute(
-                "SELECT COUNT(*) FROM docs WHERE target IS NULL"
-            ).fetchone()[0]
+        return random_indexed_article(
+            index,
+            db,
+            attempts=RANDOM_ARTICLE_ATTEMPTS,
         )
-        if count <= 0:
-            return None
-        row = db.execute(
-            "SELECT path FROM docs WHERE target IS NULL "
-            "ORDER BY rowid LIMIT 1 OFFSET ?",
-            (secrets.randbelow(count),),
-        ).fetchone()
-        return str(row[0]) if row and row[0] else None
 
     def _random_fallback_article(self, index: _LocalIndex) -> str | None:
-        """Pick a uniformly random readable entry from an unindexed archive."""
-        archive = index.ensure_open()
-        if archive is None:
-            return None
-        upper = max(1, int(getattr(archive, "entry_count", 0) or 0))
-        for _ in range(RANDOM_ARTICLE_ATTEMPTS):
-            point = secrets.randbelow(upper)
-            try:
-                entry = get_entry_by_id(archive, point)
-            except (KeyError, RuntimeError, ValueError, IndexError):
-                continue
-            if self._is_random_article_entry(entry):
-                return entry.path
-        # Sparse archive (for example, an OSM ZIM): probes miss, and there is no docs
-        # table to COUNT/OFFSET against, so scan the readable entry ids once and
-        # reuse the list. The scan is O(entry_count) and happens at most once per
-        # open index; storing ids keeps it far smaller than storing paths.
-        ids = index.random_article_ids
-        if ids is None:
-            ids = []
-            for point in range(upper):
-                try:
-                    entry = get_entry_by_id(archive, point)
-                except (KeyError, RuntimeError, ValueError, IndexError):
-                    continue
-                if self._is_random_article_entry(entry):
-                    ids.append(point)
-            index.random_article_ids = ids
-        if not ids:
-            return None
-        try:
-            entry = get_entry_by_id(archive, ids[secrets.randbelow(len(ids))])
-        except (KeyError, RuntimeError, ValueError, IndexError):
-            return None
-        return entry.path
+        return random_fallback_article(
+            index,
+            attempts=RANDOM_ARTICLE_ATTEMPTS,
+            get_entry_fn=get_entry_by_id,
+        )
 
     def random_local_source(self) -> SourceInfo:
         """Return a random readable local source that has a homepage.
@@ -2785,13 +2307,7 @@ class Search:
 
     @staticmethod
     def _matched_by(pool: list[dict[str, Any]]) -> dict[str, int]:
-        method_counts = {"semantic": 0, "title": 0, "fulltext": 0}
-        for doc in pool:
-            matches = doc.get("ranking", {}).get("rrf", {})
-            for method in method_counts:
-                if matches.get(method, {}).get("rank") is not None:
-                    method_counts[method] += 1
-        return method_counts
+        return matched_by(pool)
 
     def _page_state(
         self,
@@ -4071,83 +3587,18 @@ class Search:
         keyword: list[tuple[float, dict[str, Any]]],
         fulltext: list[tuple[int, dict[str, Any]]],
     ) -> list[dict[str, Any]]:
-        order: dict[str, tuple[int, int, str]] = {}
-        for rank, (_, doc) in enumerate(semantic):
-            order.setdefault(doc["id"], (rank, 0, doc["path"]))
-        for rank, (_, doc) in enumerate(keyword):
-            order.setdefault(doc["id"], (rank, 1, doc["path"]))
-        for rank, (_, doc) in enumerate(fulltext):
-            order.setdefault(doc["id"], (rank, 2, doc["path"]))
-        docs = {doc["id"]: doc for _, doc in semantic}
-        docs.update({doc["id"]: doc for _, doc in keyword})
-        docs.update({doc["id"]: doc for _, doc in fulltext})
-        result = []
-        for rank, (matching, _) in enumerate(sorted(order.items(), key=lambda item: item[1])):
-            item = dict(docs[matching])
-            item["source_rank"] = rank + 1
-            result.append(item)
-        return result
+        return source_items(semantic, keyword, fulltext)
 
     def _search_kiwix(self, source: SourceInfo, query: str, limit: int) -> SourceResult:
-        server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
-        # The search endpoint is fixed by kiwix-serve itself, not per-install.
-        endpoint = server + "/kiwix/search"
-        result_limit = min(
-            max(self.candidate_count, limit),
-            DEFAULT_KIWIX_RESULT_LIMIT,
-        )
-        params = urlencode({
-            "pattern": query,
-            "books.name": source.book,
-            "pageLength": result_limit,
-            "format": "xml",
-        })
-        response_limit = _int_config(
+        return search_kiwix(
+            source,
+            query,
+            limit,
             self.cfg,
-            "max_kiwix_response_bytes",
-            DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
-        )
-        try:
-            request = Request(endpoint + "?" + params, headers={"Accept": "application/xml"})
-            with urlopen(request, timeout=self.source_timeout) as response:
-                root = _parse_remote_xml(_read_limited_response(response, response_limit))
-        except (HTTPError, URLError, TimeoutError, ValueError, ET.ParseError, OSError) as error:
-            return SourceResult(
-                source=source,
-                error=f"Kiwix search failed: {error}",
-                status="error",
-            )
-
-        docs: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        for item in root.iter():
-            if _local_name(item) not in {"item", "entry"}:
-                continue
-            title = _child_text(item, "title")
-            link = _child_text(item, "link")
-            snippet = self._preview(re.sub(r"\s+", " ", _child_text(item, "description")).strip())
-            identity = (title.casefold(), link)
-            if not title and not link or identity in seen:
-                continue
-            seen.add(identity)
-            parsed_link = urlparse(link)
-            if link and not parsed_link.scheme and not parsed_link.netloc:
-                link = urljoin(server.rstrip("/") + "/", link)
-            docs.append({
-                "id": f"{source.key}:{link or title}",
-                "source_key": source.key,
-                "source": source.name,
-                "source_icon": source.icon_url,
-                "title": title or "(untitled)",
-                "lead": snippet,
-                "path": link,
-                "url": link,
-                "source_rank": len(docs) + 1,
-            })
-        return SourceResult(
-            source=source,
-            items=docs,
-            fulltext=[(rank, doc) for rank, doc in enumerate(docs)],
+            self.candidate_count,
+            self.source_timeout,
+            self._preview,
+            urlopen_fn=urlopen,
         )
 
     def _rank_results(
@@ -4156,42 +3607,9 @@ class Search:
         query: str,
         limit: int,
     ) -> list[dict[str, Any]]:
-        query_words = _query_terms(query)
-        ranked_lists = _collect_ranked_candidates(source_results)
-        semantic, keyword, fulltext, docs, source_by_key = ranked_lists
-        scores, rrf_details, fulltext_weight = _rrf_scores(
-            (semantic, keyword, fulltext),
+        return rank_results(
+            source_results,
             query,
-            max(self.candidate_count, limit),
+            limit,
+            self.candidate_count,
         )
-        assessed = [
-            _assess_ranked_document(
-                identity,
-                doc,
-                query_words,
-                query,
-                source_by_key,
-                scores,
-                rrf_details,
-                fulltext_weight,
-            )
-            for identity, doc in docs.items()
-        ]
-        assessed.sort(key=lambda item: (
-            -item.total,
-            # Title/full-text-only entries still appear, but a semantic hit wins
-            # an otherwise exact tie. This keeps title-only pages (for example
-            # JavaScript loader shells) below comparable meaning matches.
-            not item.semantic_hit,
-            -item.lexical,
-            -item.title_quality,
-            item.source_rank,
-            item.source_casefold,
-            item.path,
-        ))
-        ranked = []
-        for final_rank, assessment in enumerate(assessed[:limit], 1):
-            output = _render_ranked_document(assessment)
-            output["ranking"]["final_rank"] = final_rank
-            ranked.append(output)
-        return ranked

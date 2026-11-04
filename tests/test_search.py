@@ -2514,6 +2514,31 @@ class KiwixSearchTests(unittest.TestCase):
         self.assertEqual(result.items[0]["url"], "http://kiwix/manual/page")
 
 
+class RandomArticleServingTests(unittest.TestCase):
+    def test_fallback_uses_get_entry_by_id_from_search_module(self):
+        class _Archive:
+            entry_count = 1
+
+        class _Index:
+            random_article_ids = None
+
+            @staticmethod
+            def ensure_open():
+                return _Archive()
+
+        class _Entry:
+            is_redirect = False
+            path = "Article"
+
+            @staticmethod
+            def get_item():
+                return types.SimpleNamespace(mimetype="text/html")
+
+        search = _bare_search({})
+        with patch("zimantic.search.get_entry_by_id", return_value=_Entry()):
+            self.assertEqual(search._random_fallback_article(_Index()), "Article")
+
+
 class PaginationTests(unittest.TestCase):
     def _cfg(self, tmp):
         return {
