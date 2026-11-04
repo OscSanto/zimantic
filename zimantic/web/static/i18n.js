@@ -11,6 +11,7 @@
             "Search query": "Consulta de búsqueda",
             "Filter by source": "Filtrar por fuente",
             "Search sources": "Buscar fuentes",
+            "Search all sources": "Buscar en todas las fuentes",
             "Results pagination": "Paginación de resultados",
             "Your library": "Tu biblioteca",
             "Shuffle": "Mezclar",

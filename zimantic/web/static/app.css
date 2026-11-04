@@ -251,6 +251,22 @@ button.source-filter-option[aria-pressed="true"] {
     margin-top: 6px;
     font-size: 0.78rem;
 }
+.scope-line {
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+    gap: 6px 10px;
+    margin: 0 0 8px;
+    padding: 6px 10px;
+}
+.scope-line-reset {
+    font-size: 0.78rem;
+    padding: 3px 9px;
+}
 .filter-line {
     min-height: 1.2em;
     font-size: 0.85rem;

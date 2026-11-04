@@ -266,6 +266,7 @@ How a selection is searched depends on its size:
 - A larger selection is promoted to one full search whose ranked pool is cached. Source filters then narrow what is displayed.
 - Source filters chosen after a full search are display-only and reuse that pool when the source was part of it.
 - Selecting a source that the full search did not include (for example one beyond `max_remote_sources`) starts a new scoped search instead of filtering an empty page.
+- A scoped search shows **Searching only in: …** above the results with a **Search all sources** control, so submitting a new query while a source is selected never silently hides the narrower scope.
 
 ### Library view
 

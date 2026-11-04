@@ -1195,6 +1195,32 @@
                     `Type a query to search ${count === 1 ? "it" : "them"}.`;
             }
 
+            function renderScopeLine() {
+                const line = $("scopeLine");
+                const text = $("scopeLineText");
+                if (!line || !text) return;
+                const scoped = Boolean(
+                    current &&
+                        !current.searchAll &&
+                        current.searchKeys &&
+                        current.searchKeys.length,
+                );
+                line.hidden = !scoped;
+                if (!scoped) {
+                    text.textContent = "";
+                    return;
+                }
+                const names = current.searchKeys.map((key) => sourceDisplayName(key));
+                const shown = names.slice(0, 3);
+                const extra = names.length - shown.length;
+                text.textContent =
+                    names.length === 1
+                        ? `Searching only in: ${shown[0]}`
+                        : `Searching only in ${names.length} sources: ${shown.join(", ")}${
+                              extra > 0 ? ` and ${extra} more` : ""
+                          }`;
+            }
+
             function renderFilterLine(total) {
                 $("filterLine").innerHTML = total > 0
                     ? '<hr class="source-results-break" aria-hidden="true">'
@@ -2613,6 +2639,7 @@
                 // out-of-range offset; there is nothing to re-slice here.
                 const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
                 renderSourceFilters();
+                renderScopeLine();
                 renderFilterLine(current.total);
                 renderPager(current.total, pageCount);
                 renderResults(current.pageItems);
@@ -2829,6 +2856,7 @@
                         if (typeof event.all_sources === "boolean") {
                             current.searchAll = event.all_sources;
                         }
+                        renderScopeLine();
                         $("status").textContent =
                             `Searching ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
                     } else if (event.type === "source") {
@@ -2947,6 +2975,7 @@
                     `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
                 $("notice").textContent = "";
                 $("pager").innerHTML = "";
+                renderScopeLine();
                 renderResults([]);
                 try {
                     const selected = activeSources();
@@ -3493,6 +3522,18 @@
                 loadPage(page);
             });
 
+            $("scopeLineReset").addEventListener("click", () => {
+                if (!current || current.searchAll) return;
+                commitAutoSearchHistory();
+                setSelectedSources([]);
+                history.pushState(
+                    null,
+                    "",
+                    makeStateUrl(current.question, [], 0, null, []),
+                );
+                applySourceSelection(current.question, [], 0, []);
+            });
+
             $("articleModal").addEventListener("click", (event) => {
                 if (event.target.classList.contains("article-modal-backdrop")) {
                     closeArticleModal();
@@ -3563,6 +3604,8 @@
                 $("sourceFilterOptions").replaceChildren();
                 $("sourceFilterStatus").textContent = "";
                 $("sourceFilterSearch").value = "";
+                $("scopeLine").hidden = true;
+                $("scopeLineText").textContent = "";
                 $("filterLine").innerHTML = "";
                 $("notice").textContent = "";
                 $("pager").innerHTML = "";
