@@ -24,11 +24,15 @@ PID files, or locks behind.
 
 1. **Ephemeral means process-scoped and read-only.** `open` uses an in-memory
    catalog, never builds or rewrites indexes, and never writes the normal
-   `catalog.sqlite`, `zimantic.pid`, or build lock.
+   `catalog.sqlite`, `zimantic.pid`, or build lock. It may open the persistent
+   catalog read-only once, solely to resolve a selected archive's canonical
+   source key and collection for identity and index reuse; that catalog is
+   never used as runtime state and is never modified.
 2. **Explicit scope.** Only the ZIMs named on the command line (after folder
    expansion) are discoverable, searchable, and visible through `/sources`,
    `/library.json`, random-article links, and search. The configured
-   collections and Kiwix catalogs are ignored.
+   collections are never scanned for additional sources, and Kiwix catalogs
+   are ignored.
 3. **Loopback only.** The server binds `127.0.0.1`. The default port is chosen
    by the OS (`0`); `--port` may pin one. There is no authentication, so `open`
    must not expose the server to a network.
@@ -37,11 +41,15 @@ PID files, or locks behind.
 5. **Dedicated switch controls.** The existing left/right arrows remain the
    search-result and parent-page navigation controls. ZIM switching gets its
    own arrow group so search navigation remains independent.
-6. **No build step.** A finished source index at the phase-04 locator under
-   `index_dir` is reused when it matches the selected archive. Otherwise the
-   archive's native full-text index is used, exactly as `serve` does. A ZIM
-   with neither remains readable and navigable but is not searchable; log that
-   once.
+6. **No build step, one identity.** A selected archive uses its canonical
+   `zim:<collection>:<stem>` source key when the read-only catalog has a row
+   whose path, size, and UUID match the file. The same key locates a finished
+   phase-04 index under `index_dir`, subject to the provider, size, and
+   fingerprint checks; it never becomes a second locator. An archive with no
+   matching catalog row uses the ephemeral fallback key `zim:open:<stem>`.
+   If the index is missing/stale/mismatched, the archive's native full-text
+   index is used, exactly as `serve` does. A ZIM with neither remains readable
+   and navigable but is not searchable; log that once.
 7. **Normal `serve` does not grow a ZIM switcher.** The navigation order exists
    only in an `open` process.
 
@@ -133,21 +141,32 @@ collection with symlinks:
 @dataclass(frozen=True)
 class ZimOpenScope:
     paths: tuple[Path, ...]       # resolved, ordered
-    order: tuple[str, ...]        # source keys, same order
+    keys: tuple[str, ...]         # canonical where known, else fallback, same order
 ```
 
-The scope uses collection key `zim:open` and source keys `zim:open:<stem>`.
-`Search` accepts an optional scope. When present:
+The scope reuses the canonical source key `zim:<collection>:<stem>` for every
+archive the read-only `SourceCatalog` resolves by path, size, and UUID. An
+archive with no matching row, or whose matched row disagrees with the file,
+gets the ephemeral fallback key `zim:open:<stem>` in the `zim:open` collection.
+The scope never invents a second locator or a parallel identity for a
+catalogued archive.
 
-- `ZimCatalog` is created in memory (`db_path=None`) and populated with only
-  the scoped archives. Add `ZimCatalog.scan_paths(paths)` that upserts those
-  files without walking configured collections and without deleting unrelated
-  rows.
-- `_discover_local_indexes` considers only the indexes for scoped source keys
-  via the phase-04 locator. It applies the finished/size/staleness checks and
-  never opens or validates indexes for other sources.
-- `_scan_zim_paths`, library rows, `source_dicts`, and random-source selection
-  resolve only scoped archives.
+`keys` is populated by the read-only lookup. `Search` accepts an optional scope.
+When present:
+
+- `SourceCatalog` is created in memory (`db_path=None`) and populated with only
+  the scoped archives under `keys`. `SourceCatalog.scan_paths(paths)` performs
+  the in-memory upsert, while ZIM-specific path normalization and metadata
+  extraction live in `providers/zim/discovery.py`; it never walks configured
+  collections or deletes persistent rows.
+- `providers/zim/discovery.py` considers only `keys` when locating local
+  indexes through the phase-04 locator. It applies the finished/size/staleness
+  checks, opens the reused `IndexHandle` under that same key, and never opens
+  or validates indexes for other sources.
+- `ZimRuntime.refresh`, its scoped discovery helpers, library rows,
+  `source_dicts`, and random-source selection resolve only scoped archives.
+  Collection metadata is emitted only for collections represented in the
+  scope; `zim:open` is an ephemeral fallback collection.
 - Kiwix catalog refresh is disabled.
 - The scope is a constructor/runtime concern, not a new user-facing
   `config.toml` key.
@@ -156,8 +175,9 @@ The scope uses collection key `zim:open` and source keys `zim:open:<stem>`.
 
 ### Indexes and search
 
-- A selected ZIM with a finished index in `index_dir` uses that SQLite/FAISS
-  pair read-only.
+- A selected ZIM with a finished index at its key's locator in `index_dir`
+  uses that SQLite/FAISS pair read-only; the runtime key is the indexed source
+  key, not an alias.
 - A missing, in-progress, stale, or size-mismatched index falls back to the
   archive's native full-text search, with the same warnings as `serve`.
 - Model and FAISS loading stay off the startup path. The browser opens while
@@ -249,6 +269,8 @@ order.
   scope, random port, loopback binding, `--no-browser`, and ZIM switching.
 - `plans/README.md`: add phase 10 to the phase map and link this document.
 - Mention that `open` is not a service replacement and does not update indexes.
+- Explain that catalogued archives keep their canonical source key and URL;
+  only archives unknown to the catalog get the ephemeral `zim:open:` key.
 - Add a troubleshooting note for headless machines (`--no-browser`).
 
 ## Work items
@@ -257,10 +279,13 @@ order.
       one positional path.
 - [ ] Extract ordered path expansion and the stem-dedup rule into an `open`
       helper.
-- [ ] Add `ZimOpenScope` and the in-memory/scoped catalog path.
-- [ ] Implement `ZimCatalog.scan_paths(paths)` and ensure it never deletes
-      persistent rows.
-- [ ] Scope `_discover_local_indexes`, `_scan_zim_paths`, source rebuild,
+- [ ] Add `ZimOpenScope`, its read-only catalog key lookup (validating path,
+      size, and UUID), the canonical/fallback key rule, and the
+      in-memory/scoped `SourceCatalog` path.
+- [ ] Implement `SourceCatalog.scan_paths(paths)` for the in-memory catalog,
+      with ZIM-specific scanning in `providers/zim/discovery.py`, and ensure it
+      never deletes persistent rows.
+- [ ] Scope `providers/zim/discovery.py` index discovery, `ZimRuntime.refresh`,
       library payloads, and random-source selection to the open scope.
 - [ ] Add `Search.source_neighbors()` and expose the ordered source set to the
       content-shell route.
@@ -293,12 +318,19 @@ order.
 ### Scope and read-only behavior
 
 - [ ] `/sources`, `/library.json`, `/search`, `/search/stream`, and
-      `/random?zim=` see only the selected ZIMs even when `index_dir` contains
+      `/random?source=` see only the selected ZIMs even when `index_dir` contains
       indexes for other archives.
 - [ ] The configured collections are never scanned; no Kiwix collection is
       contacted.
-- [ ] A matching finished index is reused; a stale or missing index falls back
-      to native full-text; a ZIM with no index at all still serves articles.
+- [ ] A selected archive matched by the read-only catalog uses its canonical
+      `zim:<collection>:<stem>` key in `/sources`, `/library.json`, search
+      results, and `/content/<key>/`, and reuses its matching finished index
+      through the same locator; the key and URL match a normal `serve` process.
+- [ ] An archive with no catalog row, or a row whose size or UUID disagrees
+      with the file, uses the `zim:open:<stem>` fallback key and never reuses
+      the mismatched index.
+- [ ] A missing, stale, or mismatched index falls back to native full-text; a
+      ZIM with no index at all still serves articles.
 - [ ] No `catalog.sqlite`, index file, `zimantic.pid`, or build lock is created
       or modified.
 - [ ] A normal `serve` startup with the same config is byte-for-byte unaffected
@@ -332,7 +364,9 @@ order.
 ## Acceptance criteria
 
 - `zimantic open zims/phet_en_all_2026-08.zim` starts a loopback server, prints
-  its URL, and opens that ZIM's homepage in the browser.
+  its URL, and opens that ZIM's homepage in the browser. If the archive is also
+  in the configured catalog, its source key and content URL match `serve`; if
+  not, it uses the `zim:open:<stem>` fallback key.
 - `zimantic open a.zim b.zim` exposes only those two sources, and the toolbar's
   left/right ZIM arrows switch between their homepages in both directions.
 - Every terminal stop leaves the user's catalog, indexes, PID file, and locks
@@ -360,6 +394,9 @@ order.
   family and explicit "Previous ZIM"/"Next ZIM" labels.
 - **Large folder expansion.** Cap the scope and direct whole-library use to
   `zimantic serve`.
+- **Stale catalog identity.** Reuse a canonical key only when the row's path,
+  size, and UUID match the file; otherwise use the fallback key instead of
+  serving a replaced archive under another source's identity.
 - **Index mismatch.** Reuse the stale-index fallback and warnings; do not
   silently serve a wrong index.
 - **Slow model startup.** Keep model and FAISS loading in the background so the

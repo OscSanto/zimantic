@@ -72,10 +72,11 @@ name.
   collection/source keys and index paths.
 - Provider-specific keys are validated by the provider. Generic validation only
   checks `type`, `name`, and duplicate names.
-- Phase 00 defines a normalized provider-entry interface so provider phases can
-  validate entries without parsing TOML themselves. Phase 05 introduces the
-  `[[sources]]` TOML parser for the first non-ZIM provider; this phase
-  generalizes it to every provider and owns the full config loader.
+- Phase 00 defines the normalized provider-entry interface and minimal
+  `[[sources]]` TOML parser so provider phases can validate entries without
+  parsing TOML themselves. Phase 05 adds files-provider validation; this phase
+  completes the loader for every provider and owns the remaining config
+  operations.
 - Every collection, including ZIM and Kiwix, requires an explicit `[[sources]]`
   entry. There is no `zim_dir` or `kiwix_server` shorthand and no implicit
   default collection.
@@ -91,6 +92,10 @@ name.
 - Do not log absolute `path`/`database`/`storage` values above debug level.
 
 ### Derived text
+
+Phase 04 owns the canonical `[derived_text]` schema and validation. This phase
+loads and exposes that schema through `settings.py`, preserving its global
+scope and precedence; it does not introduce a second definition.
 
 - `captions`, `ocr`, and `asr` are per-source switches, all `off` by default.
   There is no global "enable enrichment" switch, and enabling one operation
@@ -276,16 +281,16 @@ Scope:
 
 ## Work items
 
-- [ ] Generalize `settings.py` from the phase-05 `[[sources]]` parser to a list
-      of tables for every provider; validate `type`/`name`/duplicates and
-      delegate provider keys.
+- [ ] Complete `settings.py` from the phase-00 raw `[[sources]]` parser and
+      phase-05 files validation to a list of tables for every provider;
+      validate `type`/`name`/duplicates and delegate provider keys.
 - [ ] Remove flat `zim_dir`/`kiwix_server` handling; all collections require an
       explicit `[[sources]]` entry.
 - [ ] Build a provider configuration registry with per-provider defaults and
       validation functions.
-- [ ] Parse and validate `[derived_text]` plus per-source `captions`, `ocr`,
-      and `asr`; all default off, unknown engines are explicit errors, and
-      missing engines degrade only that operation.
+- [ ] Expose the phase-04 `[derived_text]` schema and validate per-source
+      `captions`, `ocr`, and `asr`; all default off, unknown engines are
+      explicit errors, and missing engines degrade only that operation.
 - [ ] Implement resource-derived `workers = "auto"` resolution (CPU and memory
       limits, floor 1, no arbitrary low cap) and an explicit integer override.
 - [ ] Refactor `__main__.py`:

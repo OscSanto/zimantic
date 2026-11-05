@@ -74,9 +74,11 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, contract tests, performance, staged release |
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
 
-Provider configuration follows its first consumer: phase 05 introduces the
-minimal `[[sources]]` parser needed to enable a non-ZIM provider, and phase 08
-generalizes it to every provider and adds the remaining operations.
+Phase 00 introduces the minimal raw `[[sources]]` parser so phases 01 and 02
+can be configured as they land. Phase 05 adds files-provider validation and
+configuration semantics; phase 08 completes the full settings loader for all
+providers and operations. There is one parser and one normalized entry shape,
+not a temporary parser per provider.
 
 ## Design invariants
 

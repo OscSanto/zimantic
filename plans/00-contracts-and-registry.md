@@ -15,6 +15,8 @@ carried forward.
 - Do not move ZIM discovery or search yet. Phase 01 does that.
 - Do not change `SourceResult`, ranking, fan-out, caching, or streaming.
 - Do not publish a third-party plugin API.
+- Do not rename the public `{zim}` route parameters yet. Phase 03 owns the
+  route migration after the source-key contract is in place.
 
 ## Current state
 
@@ -233,6 +235,20 @@ paths.
 Register `zim` and `kiwix` as placeholders in this phase. They may return empty
 discovery results until phases 01 and 02.
 
+### Minimal source configuration
+
+This phase owns the minimal `[[sources]]` TOML parser. It parses the
+array-of-tables shape into normalized provider entries, requires `type` and
+`name`, rejects duplicate names, and preserves provider-specific keys for the
+provider validators that follow. It must not depend on provider modules that
+are introduced later. Flat `zim_dir` and `kiwix_server` shorthands are not
+accepted.
+
+The parser reports invalid TOML as fatal and defers provider-specific
+validation and unavailable-entry handling to the registry/config layer. Phase
+05 adds files-provider validation, and phase 08 completes the full settings
+loader without introducing a second parser.
+
 ### `Search` integration skeleton
 
 In `Search.__init__`:
@@ -262,9 +278,10 @@ keep a `mode` fallback.
       03 implements it rather than extending the contract.
 - [ ] Create `zimantic/providers/registry.py`; register `zim` and `kiwix`
       placeholders.
-- [ ] Add a normalized provider-configuration seam. Phase 05 introduces the
-      `[[sources]]` TOML parser and phase 08 generalizes it; providers consume
-      normalized entries. Do not keep flat shorthands.
+- [ ] Add the normalized provider-configuration seam and minimal
+      `[[sources]]` TOML parser described above; providers consume normalized
+      entries and later phases add provider-specific validation. Do not keep
+      flat shorthands.
 - [ ] Extend `SourceInfo` and `to_dict()` in `zimantic/contracts.py`.
 - [ ] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
       public import path).
@@ -272,8 +289,9 @@ keep a `mode` fallback.
 - [ ] Add `CollectionInfo.to_dict()`, `collection_dicts()`, and make
       `source_dicts()` include the new fields using the frozen nullability/schema
       rules above.
-- [ ] Update `zimantic/web/routes.py` to use `key` as the source parameter;
-      there is no alias lookup.
+- [ ] Update route resolution internals to use the canonical `key` and exact
+      source lookup; leave the public `{zim}` to `{source}` parameter rename
+      to phase 03.
 - [ ] Add `tests/providers/test_contracts.py` and
       `tests/providers/test_registry.py`.
 - [ ] Add a short "Provider contracts" section to `CONTRIBUTING.md`.

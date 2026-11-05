@@ -126,6 +126,15 @@ class DerivedTextProducer(Protocol):
   pages/pixels/output bytes, ASR media seconds/bytes, and `workers`. A skipped
   or truncated input is logged once and reported, never invented.
 
+#### Derived-text configuration ownership
+
+Phase 04 defines and validates the normalized global `[derived_text]` schema
+consumed by this stage, including `max_caption_bytes`, OCR/ASR caps, engine
+settings, cache behavior, and `workers`. Source entries only select
+`captions`, `ocr`, or `asr`; they do not carry operation budgets. Phase 08
+exposes this schema through the complete settings loader without redefining
+its keys or precedence.
+
 #### Execution model
 
 - Caption parsing is pure Python and cheap. It runs in-process; it does not need
@@ -193,10 +202,14 @@ The locator must:
   path and are handled by the fingerprint/resume rules;
 - expose one `paths(source)` function;
 - be shared by `serve`, `build`, `reload`, cleanup, and health.
+- A read-only consumer may reuse a finished index through the logical
+  `source_key` stored in its metadata even when the consumer exposes a
+  temporary source alias. The alias must not produce a second locator or
+  change the indexed source identity.
 
 ### Generic build
 
-`pipelines.py` keeps the current semantics:
+`pipeline.py` keeps the current semantics:
 
 - staging DB/FAISS, upgrade and atomic publish;
 - progress, batching, embedding pipeline, fast mode;
@@ -248,8 +261,12 @@ class IndexHandle:
     faiss_path: Path | None
     store: ContentStore | None
     native: NativeSearcher | None
-    signatures: tuple[tuple[int, int, int, int], ...]
-    locks: ...
+    signatures: tuple[int, int, int, int] | None
+    locks: IndexLocks
+
+# signatures = (db_size, db_mtime_ns, faiss_size, faiss_mtime_ns); a missing
+# artifact uses the corresponding zero pair. IndexLocks contains the
+# lifecycle/ref-count lock, the SQLite read lock, and the close lock.
 ```
 
 ZIM-specific lazy archive opening moves into `ArchiveContentStore`; the handle

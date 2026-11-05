@@ -34,9 +34,10 @@ configure a root per desired source.
 
 ## Configuration
 
-Phase 05 owns the minimal `[[sources]]` TOML parser needed to enable a non-ZIM
-provider; phase 08 generalizes it to every provider and adds the remaining
-operations. Do not duplicate the parser in the provider.
+Phase 00 owns the minimal raw `[[sources]]` TOML parser. Phase 05 owns
+files-provider validation and configuration semantics; phase 08 completes the
+full loader and adds the remaining operations. Do not duplicate the parser in
+the provider.
 
 ```toml
 [[sources]]
@@ -94,7 +95,13 @@ For `granularity = "directory"`:
 
 For `granularity = "collection"`:
 
-- one source whose content root is the configured root.
+- one source whose content root is the configured root and whose source key is
+  `files:<name>:root`.
+
+For `granularity = "directory"`, the loose-files source uses the reserved
+root-relative identifier `__loose__`, so its key is
+`files:<name>:__loose__`. A child directory named `__loose__` is excluded
+from discovery to keep this identity collision-free.
 
 ### Caps
 
@@ -216,7 +223,8 @@ setting still applies; document that untrusted file trees should enable it.
 - [ ] Add `zimantic/providers/files/` with provider, discovery, entries, and
       store modules.
 - [ ] Add provider-level validation for normalized files configuration, and
-      implement the minimal `[[sources]]` TOML parser (phase 08 generalizes it).
+      consume the phase-00 `[[sources]]` parser without adding a provider-local
+      parser.
 - [ ] Implement collection/source discovery with `directory` and `collection`
       granularity, excludes, and the source cap collapse.
 - [ ] Implement `FilesEntryProducer` with stable ids and a manifest
@@ -252,7 +260,8 @@ modules/
 ```
 
 - [ ] `granularity = "directory"` yields sources for `algebra`, `biology`, and
-      one loose-files source; hidden/excluded directories are absent.
+      one loose-files source with the reserved `__loose__` key;
+      hidden/excluded directories are absent.
 - [ ] The default (`granularity = "collection"`) yields exactly one source.
 - [ ] Exceeding `max_sources` collapses to one source and logs once.
 - [ ] Stable ids and resume: interrupt/restart with unchanged tree resumes;
