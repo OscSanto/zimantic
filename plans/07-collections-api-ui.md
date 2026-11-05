@@ -23,8 +23,11 @@ or a Kolibri channel has many topics.
 - `/config` exposes `source_filter_limit`.
 - SSE source snapshots serialize `SourceInfo` through `to_dict()`.
 
-The stash's `source_kind`, `media_type`, and folder-card UI are useful ideas,
-but its flat source-per-file identity model is not adopted.
+The referenced stash adds useful library facets: provider/source kind, coarse
+media classification, and grouping of related files. Keep this plan's
+collection-based identity instead of reviving its source-per-file model:
+`provider`/`content_kind` already identify the source kind, and collection
+cards group sources without exposing a filesystem folder key or path.
 
 ## API design
 
@@ -38,6 +41,7 @@ Each source gains:
 {
   "provider": "files",
   "content_id": "files:modules:algebra",
+  "media_types": ["text", "video"],
   "collection": {
     "key": "files:modules",
     "label": "Modules",
@@ -52,6 +56,11 @@ Each source gains:
 - `content_id` is the value used in `/content/{content_id}/...`; for ZIM it is
   the archive stem, preserving links.
 - Do not expose filesystem paths, database paths, or storage roots.
+- `media_types` is an additive, possibly empty array drawn from `text`,
+  `video`, `audio`, `image`, and `other`. It describes the indexed content
+  families in a source; it may contain multiple values for mixed Files or
+  Kolibri sources. ZIM classification uses its MIME counter, while local
+  providers use their indexed manifest. It is not a source identity.
 
 ### `/collections.json`
 
@@ -132,6 +141,9 @@ Keep `indexes`, `sources`, and `cache`.
   and a bounded number of preview cards; opening it shows its sources.
 - Add a provider filter (All / ZIM / Files / Kolibri / Kiwix) alongside the
   existing text filter. Do not remove the text filter.
+- Add an independent content-type filter (All / Text / Video / Audio / Images /
+  Other). A source matches when its `media_types` contains the selected type;
+  collection cards summarize the union of their sources' types.
 - The existing "search within this source" action remains; add "search within
   this collection" using the new `collection` parameter.
 - Details/infobox continues to show source metadata; add provider and
@@ -179,6 +191,7 @@ Keep `indexes`, `sources`, and `cache`.
 - [ ] Update `app.js`:
       - fetch/cache `/collections.json` alongside `/sources`;
       - group `librarySources` by collection;
+      - expose the content-type filter using `media_types`;
       - group `renderSourceFilters` options;
       - add provider filter and collection selection;
       - add "search within collection";
@@ -199,6 +212,8 @@ Keep `indexes`, `sources`, and `cache`.
       collection membership changes.
 - [ ] Library grouping: one-source collections, multi-source collections,
       empty collections, unavailable collections.
+- [ ] Content-type classification and filtering for ZIM MIME counters and
+      mixed Files/Kolibri sources; folder paths and absolute paths stay hidden.
 - [ ] Filter grouping: top-N + Other per collection; selected sources stay
       visible; collection select/deselect sends the expected request.
 - [ ] Provider filter and text filter compose.

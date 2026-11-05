@@ -110,6 +110,10 @@ zimantic build --list              # show what would be built; no work
 ```
 
 - `--provider`, `--collection`, and `--source` are repeatable and intersect.
+- `--collection` accepts an exact collection key or a configured entry name.
+  When one entry expands to multiple collections (Kolibri channels), the entry
+  name selects all of its collections; do not resolve this by an ambiguous
+  string-prefix match.
 - Provider builds run under the existing global `BuildLock`; do not run one
   lock per provider.
 - ZIM builds keep `--workers`, `-j`, `--wait-stable`, `--no-wait-lock`,

@@ -117,12 +117,22 @@ Move `_search_local_locked` and its helpers out of `Search` into
 
 - Inputs: `IndexHandle`, `SourceInfo`, `SourceQuery`, config limits, and a
   preview hook.
-- Channels: semantic (FAISS), keyword/title (FTS5 `docs`), native full-text
+- Channels: semantic (FAISS), keyword/title (FTS5 `docs`), body/excerpt
+  lexical (FTS5 where a provider supplies body text), native full-text
   (optional), and the same fusion/limits as today.
+- Keep the existing `docs` FTS5 schema and rowids for legacy ZIM indexes. New
+  Files and Kolibri indexes also use a separate FTS5 `body` table keyed by the
+  same rowids, populated from `EntryRecord.excerpt`. This supplies lexical
+  body/transcript search without a native index and avoids rewriting existing
+  ZIM `docs` tables. Indexes without `body` remain readable and use their
+  existing title/native channels.
+- A normal Files/Kolibri build makes indexed body text searchable through
+  `body`; `--fast` intentionally remains title/path-only, with neither body
+  FTS nor embeddings, as specified in phase 08.
 - Preview hydration calls `ContentStore.read`, not libzim directly.
 - Redirect resolution still follows `docs.target` chains for all providers.
-- Providers without a native index simply return no native hits; they still
-  get semantic and keyword results.
+- Providers without a native index return no native hits; they still get
+  semantic and title/body keyword results when those channels are indexed.
 - Providers that are not indexed still use their native searcher if one
   exists (only ZIM today).
 
@@ -160,7 +170,8 @@ borrows it and must never close it independently.
 - [ ] Add `zimantic/indexing/types.py`; re-export `EntryRecord` and define
       `EntryProducer`/`NativeSearcher`.
 - [ ] Move the schema and meta-key constants from `build.py` into
-      `indexing/schema.py`; add `provider`, `source_key`, and
+      `indexing/schema.py`; add the separate optional `body` FTS5 table for
+      provider excerpts, plus `provider`, `source_key`, and
       `source_fingerprint` meta keys.
 - [ ] Split `build.py`: keep the public `build()` as a ZIM compatibility
       wrapper, and implement `build_index(producer, ...)`.
@@ -174,7 +185,14 @@ borrows it and must never close it independently.
       it reduces coupling; keep `read_entry` behavior and tests.
 - [ ] Move `_search_local_locked` into `indexing/search.py`; make it take an
       `IndexHandle` + `ContentStore`.
-- [ ] Move `_fetch_docs` and non-ZIM preview logic into `indexing/search.py`.
+- [ ] Move `_fetch_docs`, `suggest`, and non-ZIM preview logic into
+      `indexing/search.py`; `suggest` must use `IndexHandle`, not
+      `Search.indexes`.
+- [ ] Persist provider excerpts in the `body` FTS5 table and query it as a
+      lexical channel; preserve title/path-only `--fast` behavior.
+- [ ] Move `_enrich_pool` exact-phrase verification and MIME population behind
+      `ContentStore` reads, retaining current byte limits and error handling;
+      it must not open a ZIM archive directly.
 - [ ] Replace `_LocalIndex` with `IndexHandle`; move lazy archive opening to
       `ArchiveContentStore`.
 - [ ] Add `NativeSearcher`; wrap libzim and keep isolation unchanged.
@@ -197,7 +215,9 @@ borrows it and must never close it independently.
 - [ ] Index locator: legacy ZIM paths unchanged; new paths safe, unique, and
       bounded; no absolute paths.
 - [ ] Generic local search over a synthetic producer returns semantic,
-      keyword, and preview results without importing libzim.
+      title/body keyword, and preview results without importing libzim.
+- [ ] A non-ZIM body-term query returns a lexical result without embeddings or
+      a `NativeSearcher`; a fast build is explicitly title/path-only.
 - [ ] Native fulltext absence yields the same partial status as now.
 - [ ] Concurrent builds and `build_workers` still work under the global lock.
 
@@ -213,8 +233,9 @@ borrows it and must never close it independently.
 
 ## Risks and mitigations
 
-- **Index compatibility.** Add only optional meta keys; keep the existing
-  `docs` schema and rowid semantics. Test with a pre-change index fixture.
+- **Index compatibility.** Keep the existing `docs` schema and rowid
+  semantics; the optional body FTS table is absent on legacy indexes. Test
+  both a pre-change ZIM index and a new non-ZIM index.
 - **Resume correctness.** Fingerprint checking is mandatory; a mismatch must
   rebuild rather than produce shifted row ids.
 - **Large mechanical move.** Move code before changing behavior; use parity

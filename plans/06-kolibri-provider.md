@@ -90,7 +90,9 @@ docstring.
 
 ### Collection and source mapping
 
-- Collection key: `kolibri:<name>`.
+- Collection key: `kolibri:<name>:<channel_id>`. The channel ID is required
+  because one configured installation expands into one collection per
+  channel; keys must not collide in runtime maps or index paths.
 - One collection per channel in the database.
 - Sources:
   - `source_depth = 1` (default): each top-level topic node under the channel
@@ -224,6 +226,9 @@ Handling:
       `truncated`.
 - [ ] Document supported Kolibri versions and the read-only guarantee.
 - [ ] Add a annotated example config for IIAB's `/library/kolibri` layout.
+- [ ] Define `--collection` selection for a multi-channel installation:
+      an exact collection key selects one channel; the configured `name`
+      (or `kolibri:<name>` alias) selects every channel from that entry.
 
 ## Tests
 

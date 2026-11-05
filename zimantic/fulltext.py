@@ -37,6 +37,20 @@ class _Worker:
     def __init__(self) -> None:
         self._process: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
+        self._archive_failure = False
+
+    @property
+    def archive_failure(self) -> bool:
+        return self._archive_failure
+
+    @staticmethod
+    def _process_was_aborted(process: subprocess.Popen[str] | None) -> bool:
+        return (
+            process is not None
+            and process.poll() is not None
+            and process.returncode is not None
+            and process.returncode < 0
+        )
 
     def _ensure_process(self) -> subprocess.Popen[str]:
         if self._process is None or self._process.poll() is not None:
@@ -71,6 +85,8 @@ class _Worker:
     ) -> list[dict[str, str]] | None:
         """Return result paths and titles, or None when the worker cannot answer."""
         with self._lock:
+            self._archive_failure = False
+            process: subprocess.Popen[str] | None = None
             try:
                 process = self._ensure_process()
                 assert process.stdin is not None
@@ -110,18 +126,31 @@ class _Worker:
                     )
                     self.close()
                     reader.join(timeout=1)
-                    line = ""
+                    return None
             except (BrokenPipeError, OSError, ValueError):
+                self._archive_failure = self._process_was_aborted(process)
                 line = ""
             if not line:
+                self._archive_failure |= self._process_was_aborted(process)
+                logger.warning(
+                    "zimantic: native full-text worker exited without a response "
+                    "for %s",
+                    zim_path,
+                )
                 self.close()
                 return None
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
+                logger.warning(
+                    "zimantic: native full-text worker returned an invalid "
+                    "response for %s",
+                    zim_path,
+                )
                 self.close()
                 return None
             if payload.get("error"):
+                self._archive_failure = True
                 logger.warning(
                     "zimantic: native full-text search failed for %s: %s",
                     zim_path,
@@ -220,7 +249,7 @@ class FulltextPool:
             results = None
         finally:
             self._idle.put(worker)
-        if results is None:
+        if results is None and worker.archive_failure:
             with self._broken_lock:
                 first_failure = zim_path not in self._broken
                 self._broken.add(zim_path)

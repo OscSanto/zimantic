@@ -25,6 +25,7 @@ class FulltextTimeoutTests(unittest.TestCase):
             worker._process = process
             with patch("zimantic.fulltext.FULLTEXT_TIMEOUT_SECONDS", 0.01):
                 self.assertIsNone(pool.search("/tmp/example.zim", "query", 1))
+            self.assertFalse(pool.is_broken("/tmp/example.zim"))
             self.assertIsNone(worker._process)
         finally:
             pool.close()
@@ -52,5 +53,28 @@ class FulltextTimeoutTests(unittest.TestCase):
                 self.assertIsNone(pool.search("/tmp/example.zim", "query", 1))
             self.assertLess(time.monotonic() - started, 1.0)
             self.assertIsNone(worker._process)
+        finally:
+            pool.close()
+
+    def test_archive_error_payload_marks_archive_broken(self):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json, sys; sys.stdin.readline(); "
+                    "print(json.dumps({'error': 'bad archive'}), flush=True); "
+                    "sys.stdin.read()"
+                ),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        pool = FulltextPool(1)
+        try:
+            pool._all[0]._process = process
+            self.assertIsNone(pool.search("/tmp/example.zim", "query", 1))
+            self.assertTrue(pool.is_broken("/tmp/example.zim"))
         finally:
             pool.close()

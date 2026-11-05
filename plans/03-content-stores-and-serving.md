@@ -52,16 +52,22 @@ content_id: str = ""   # ZIM archive stem; source key for files/Kolibri
 Rules:
 
 - ZIM: `content_id = local_name` (archive stem). Existing links keep working.
-- Files/Kolibri: `content_id = source key` (opaque, URL-safe, no absolute path).
+- Files/Kolibri: `content_id = source key` (opaque, namespaced, no absolute
+  path). URL helpers percent-encode it as one path segment with
+  `quote_path(content_id, safe='')`; for example, `files:modules:algebra` is
+  `/content/files%3Amodules%3Aalgebra/...`. Keep this encoding consistent in
+  generated links, referer parsing, the navigation bridge, and tests.
 - `Search.resolve_content_source(identifier)` matches `content_id`, then
   `key`, `name`, `book`, `local_name`. Exact matches must be globally unique;
   ambiguous aliases return a dedicated ambiguity error with a documented
   4xx mapping rather than selecting an arbitrary provider.
-- New content IDs are URL-safe and namespaced. Legacy ZIM IDs remain the
-  archive stem for URL compatibility, so the resolver preserves their existing
-  collision and alias precedence.
+- New content IDs are stable and namespaced; URL helpers quote them as one
+  path segment. Legacy ZIM IDs remain the archive stem for URL compatibility,
+  so the resolver preserves their existing collision and alias precedence.
 - Route parameter names change from `zim` to `source` internally, but the URL
   shape stays `/content/{source}/{path}`.
+- Path parameters and referers are decoded exactly once at the HTTP boundary;
+  never introduce a second decode of `%3A` or content paths.
 - `SourceInfo.to_dict()` may expose `content_id` as additive metadata; the web
   UI continues to use `icon_url` and generated links only.
 
@@ -125,8 +131,15 @@ HTTP status.
 - Generate `/content/{content_id}/...` URLs from `source.content_id`.
 - Keep `/source-icon/{source}` and `/article/{source}/...`.
 - Preserve the referer-based ZIM extraction in
-  `_referer_article_zim` by treating any source content ID as valid; rename
-  the helper in a follow-up.
+  `_referer_article_zim` by treating any source content ID as valid; rename it
+  to `_referer_content_id` as part of this migration.
+- Update `zim_icon_url` and `zim_search_available` to resolve by `content_id`
+  (with the existing ZIM aliases as fallbacks), not only `local_name`.
+- Update `random_local_source` to select any available local source with a
+  `content_id` and homepage. `/random` must redirect using that `content_id`,
+  including for Files and Kolibri sources whose `local_name` is `None`.
+- Keep the legacy `/random?zim=...` query name for compatibility, but pass the
+  percent-encoded `content_id` as its value.
 - `_decorate_article_bridge` and `_content_shell` remain source-agnostic; only
   the content ID and base path change.
 
@@ -174,6 +187,10 @@ This can ship unused in this phase; files and Kolibri media need it.
       compatibility adapter for tests that construct `Search` partially.
 - [ ] Update `_result_doc` and the web URL helpers to use `content_id`.
 - [ ] Update routes to resolve any provider source; keep URL shapes.
+- [ ] Update `zim_icon_url`, `zim_search_available`, `random_local_source`,
+      and `/random` to use `content_id` while retaining ZIM alias behavior.
+- [ ] Keep colon-containing IDs percent-encoded in the source path segment and
+      test generated URLs, route resolution, referers, and the navigation bridge.
 - [ ] Add `Range` support to `_article_content_response`.
 - [ ] Define `Range` behavior precisely: `206` for one valid range, `416` for
       an unsatisfiable range, `HEAD` returns headers without a body, and

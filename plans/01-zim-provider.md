@@ -165,6 +165,9 @@ Add tests that compare pre/post payloads for a fixture library:
       `searchable`/`error` state.
 - [ ] `reload()` still finds a newly added ZIM and drops a removed one.
 - [ ] Source-key collisions still get the same suffixes.
+- [ ] A source-key collision logs one warning identifying both archives with
+      paths relative to `zim_dir`; paths outside that root use a basename or
+      `<unknown>`, never an absolute path.
 
 ## Acceptance criteria
 
