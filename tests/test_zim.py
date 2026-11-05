@@ -19,6 +19,7 @@ from zimantic.content.reader import (
     DEFAULT_PREVIEW_CHARS,
     EntryRecord,
     _markdown_source,
+    _phet_strings,
     disambiguation_title,
     extract_excerpt,
     extract_pdf_excerpt,
@@ -717,6 +718,106 @@ class TextExtractionTests(unittest.TestCase):
                 return _ShellEntry()
 
         self.assertIsNone(read_entry(_ShellArchive(), 0))
+
+    def test_phet_compact_localization_decoder(self):
+        encoded = (
+            chr(15)
+            + "en"
+            + chr(2)
+            + "ACID_BASE_SOLUTIONS"
+            + chr(3)
+            + "acid-base-solutions"
+            + chr(1)
+            + "title"
+            + chr(9)
+            + chr(8)
+            + "en"
+            + chr(12)
+            + "Acid-Base Solutions"
+        )
+        script = (
+            b"window.phet.chipper.strings = (y=>{"
+            b"let A=f(1);let B=f(2);let C=f(3);let D=f(4);"
+            b"let E=f(5);let F=f(6);let G=f(7);let H=f(8);"
+            b"let I=f(9);let J=f(10);let K=f(11);let L=f(12);"
+            b"let M=f(13);let N=f(14);let O=f(15);"
+            b"// Caf\xc3\xa9\n"
+            b"return m;})('"
+            + encoded.encode("utf-8")
+            + b"');"
+        )
+        strings = _phet_strings(script)
+        self.assertIsNotNone(strings)
+        self.assertEqual(
+            strings["en"]["ACID_BASE_SOLUTIONS/acid-base-solutions.title"],
+            "\u202aAcid-Base Solutions\u202c",
+        )
+
+    def test_phet_shell_indexes_localized_simulation_strings(self):
+        html = (
+            b'<html><head><meta name="phet-sim-level" content="production">'
+            b"</head><body><script src=\"sim.js\"></script></body></html>"
+        )
+        strings = {
+            "de": {
+                "ACID_BASE_SOLUTIONS/screen.introduction": "Einführung",
+                "ACID_BASE_SOLUTIONS/concentrationGraph.yAxis": (
+                    "Gleichgewichtskonzentration (mol/L)"
+                ),
+            },
+            "en": {
+                "ACID_BASE_SOLUTIONS/screen.introduction": "Intro",
+                "ACID_BASE_SOLUTIONS/concentrationGraph.yAxis": (
+                    "Equilibrium Concentration (mol/L)"
+                ),
+            },
+        }
+        script = (
+            b"window.phet.chipper.project = 'acid-base-solutions';"
+            b"window.phet.chipper.locale = 'de';"
+            b"window.phet.chipper.strings = "
+            + json.dumps(strings).encode("utf-8")
+            + b";"
+        )
+
+        class _PhetItem:
+            mimetype = "text/html"
+            content = html
+
+        class _ScriptItem:
+            mimetype = "application/javascript"
+            content = script
+            size = len(script)
+
+        class _PhetEntry:
+            is_redirect = False
+            title = "Säure-Base-Lösungen"
+            path = "acid-base-solutions_de.html"
+
+            def get_item(self):
+                return _PhetItem()
+
+        class _ScriptEntry:
+            path = "sim.js"
+
+            def get_item(self):
+                return _ScriptItem()
+
+        class _PhetArchive:
+            def _get_entry_by_id(self, _index):
+                return _PhetEntry()
+
+            def has_entry_by_path(self, path):
+                return path == "sim.js"
+
+            def get_entry_by_path(self, path):
+                assert path == "sim.js"
+                return _ScriptEntry()
+
+        row = _read_entry(_PhetArchive(), 0, max_preview_chars=500)
+        self.assertIn("Gleichgewichtskonzentration", row.excerpt)
+        self.assertNotIn("Equilibrium Concentration", row.excerpt)
+        self.assertNotIn("\u202a", row.excerpt)
 
     def test_meta_description_is_a_fallback_excerpt(self):
         html = (

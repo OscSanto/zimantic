@@ -4,6 +4,7 @@ import logging
 import posixpath
 import re
 import time
+import unicodedata
 from collections.abc import Iterator
 from html.parser import HTMLParser
 from typing import Any, NamedTuple, Protocol, cast
@@ -183,6 +184,18 @@ _MARKDOWN_HEADING = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]*")
 _MARKDOWN_MARKER = re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|\d+[.)])[ \t]+")
 JS_SHELL_MARKERS = (b"<noscript", b'id="app"', b"id='app'")
 JS_NOTICE_MAX_CHARS = 300
+_PHET_SCRIPT_SRC = re.compile(
+    rb"<script\b[^>]*\bsrc\s*=\s*[\"']([^\"']+)",
+    re.IGNORECASE,
+)
+_PHET_PROJECT = re.compile(
+    rb"window\.phet\.chipper\.project\s*=\s*[\"']([^\"']+)",
+)
+_PHET_LOCALE = re.compile(
+    rb"window\.phet\.chipper\.locale\s*=\s*[\"']([^\"']+)",
+)
+_PHET_STRINGS_MARKER = b"window.phet.chipper.strings"
+_PHET_MAX_BUNDLES = 4
 
 # Page chrome that is navigation, maintenance or boilerplate rather than article
 # text. Matching these by id, class token or ARIA role keeps category footers,
@@ -768,6 +781,274 @@ def is_javascript_shell(html: bytes, text: str) -> bool:
     return any(marker in html for marker in JS_SHELL_MARKERS)
 
 
+def _clean_phet_string(value: str) -> str:
+    """Normalize PhET's directional formatting marks and whitespace."""
+    value = "".join(
+        character
+        for character in value
+        if unicodedata.category(character) != "Cf"
+    )
+    return " ".join(value.split())
+
+
+def _read_js_string_literal(text: str, start: int) -> tuple[str, int] | None:
+    """Read one quoted JavaScript string without executing the bundle."""
+    if start >= len(text) or text[start] not in {"'", '"'}:
+        return None
+    quote = text[start]
+    pieces = []
+    escapes = {
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+    }
+    index = start + 1
+    while index < len(text):
+        character = text[index]
+        index += 1
+        if character == quote:
+            return "".join(pieces), index
+        if character != "\\":
+            pieces.append(character)
+            continue
+        if index >= len(text):
+            return None
+        escaped = text[index]
+        index += 1
+        if escaped in escapes:
+            pieces.append(escapes[escaped])
+        elif escaped in {"x", "u"}:
+            digits = 2 if escaped == "x" else 4
+            value = text[index:index + digits]
+            if len(value) != digits:
+                return None
+            try:
+                pieces.append(chr(int(value, 16)))
+            except ValueError:
+                return None
+            index += digits
+        else:
+            pieces.append(escaped)
+    return None
+
+
+def _decode_phet_strings(
+    encoded: str,
+    controls: dict[str, int],
+) -> dict[str, dict[str, str]]:
+    """Decode PhET's compact localization string format."""
+    strings: dict[str, dict[str, str]] = {}
+    languages: list[str] = []
+    path: list[str] = []
+    current_language = ""
+    current_key = ""
+    last_value = ""
+    english_value: str | None = None
+    translated_languages: set[str] = set()
+    index = 0
+    escape = max(controls.values()) + 1
+
+    def read_literal() -> str:
+        nonlocal index
+        pieces = []
+        while index < len(encoded):
+            character = encoded[index]
+            codepoint = ord(character)
+            if codepoint < controls["A"] or codepoint > escape:
+                pieces.append(character)
+                index += 1
+            elif codepoint == escape and index + 1 < len(encoded):
+                pieces.append(encoded[index + 1])
+                index += 2
+            else:
+                break
+        return "".join(pieces)
+
+    def assign(value: str) -> None:
+        nonlocal last_value, english_value
+        if current_language not in strings:
+            return
+        last_value = value
+        strings[current_language][current_key] = value
+        if current_language == "en":
+            english_value = value
+        translated_languages.add(current_language)
+
+    while index < len(encoded):
+        control = ord(encoded[index])
+        index += 1
+        if control == controls["A"]:
+            path.append(read_literal())
+        elif control == controls["B"]:
+            path.append(read_literal() + "/")
+        elif control == controls["C"]:
+            path.append(read_literal() + ".")
+        elif control == controls["D"]:
+            if path:
+                path.pop()
+        elif control == controls["E"]:
+            if path:
+                path.pop()
+            path.append(read_literal())
+        elif control == controls["F"]:
+            if path:
+                path.pop()
+            path.append(read_literal() + "/")
+        elif control == controls["G"]:
+            if path:
+                path.pop()
+            path.append(read_literal() + ".")
+        elif control == controls["H"]:
+            current_language = read_literal()
+        elif control == controls["I"]:
+            translated_languages.clear()
+            english_value = None
+            current_key = "".join(path)
+        elif control == controls["J"]:
+            for language in languages:
+                if language not in translated_languages:
+                    strings[language][current_key] = english_value or ""
+        elif control == controls["K"]:
+            assign(read_literal())
+        elif control == controls["L"]:
+            assign(f"\u202a{read_literal()}\u202c")
+        elif control == controls["M"]:
+            assign(f"\u202b{read_literal()}\u202c")
+        elif control == controls["N"]:
+            assign(last_value)
+        elif control == controls["O"]:
+            language = read_literal()
+            strings[language] = {}
+            languages.append(language)
+    return strings
+
+
+def _phet_strings(script: bytes) -> dict[str, dict[str, str]] | None:
+    """Read literal or compact PhET localization data from one bundle."""
+    marker = _PHET_STRINGS_MARKER
+    marker_index = script.find(marker)
+    if marker_index < 0:
+        return None
+    script_text = script.decode("utf-8", "ignore")
+    marker_text = marker.decode("ascii")
+    marker_index = script_text.find(marker_text)
+    if marker_index < 0:
+        return None
+    assignment = script_text.find("=", marker_index + len(marker_text))
+    if assignment < 0:
+        return None
+    source = script_text[assignment + 1:].lstrip()
+    try:
+        strings, _end = json.JSONDecoder().raw_decode(source)
+    except (TypeError, ValueError):
+        decoder_call = script_text.find("return m;})(", marker_index)
+        if decoder_call < 0:
+            return None
+        literal = _read_js_string_literal(
+            script_text,
+            decoder_call + len("return m;})("),
+        )
+        if literal is None:
+            return None
+        control_matches = re.findall(
+            r"let ([A-O])=f\((0x[0-9a-fA-F]+|\d+)\)",
+            script_text[:decoder_call],
+        )
+        if len(control_matches) != 15:
+            return None
+        controls = {
+            name: int(value, 0)
+            for name, value in control_matches
+        }
+        strings = _decode_phet_strings(literal[0], controls)
+    return strings if isinstance(strings, dict) else None
+
+
+def _phet_excerpt(
+    zim: Archive,
+    entry,
+    html: bytes,
+    max_preview_chars: int,
+    max_entry_bytes: int,
+) -> str:
+    """Extract localized UI strings from a PhET simulation shell."""
+    if b"phet-sim-level" not in html:
+        return ""
+    script_sources = _PHET_SCRIPT_SRC.findall(html)
+    if not script_sources:
+        return ""
+
+    for source in script_sources[:_PHET_MAX_BUNDLES]:
+        try:
+            script_path = resolve_archive_href(
+                entry.path, source.decode("utf-8", "ignore")
+            )
+            if script_path is None or not zim.has_entry_by_path(script_path):
+                continue
+            item = zim.get_entry_by_path(script_path).get_item()
+            mimetype = str(getattr(item, "mimetype", "") or "").split(";", 1)[0]
+            if mimetype not in {"application/javascript", "text/javascript"}:
+                continue
+            size = int(getattr(item, "size", 0) or 0)
+            if size > max_entry_bytes:
+                continue
+            script = bytes(item.content)
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            continue
+
+        strings = _phet_strings(script)
+        if strings is None:
+            continue
+
+        locale_match = _PHET_LOCALE.search(script)
+        locale = (
+            locale_match.group(1).decode("utf-8", "ignore")
+            if locale_match
+            else ""
+        )
+        localized = strings.get(locale) or strings.get(locale.split("_", 1)[0])
+        if not isinstance(localized, dict):
+            localized = strings.get("en")
+        if not isinstance(localized, dict):
+            continue
+
+        project_match = _PHET_PROJECT.search(script)
+        project = (
+            project_match.group(1).decode("utf-8", "ignore")
+            if project_match
+            else ""
+        )
+        project_key = re.sub(r"[^a-zA-Z0-9]+", "_", project).strip("_").upper()
+        prefix = project_key + "/" if project_key else ""
+        project_values = []
+        other_values = []
+        for key, value in localized.items():
+            if prefix and isinstance(key, str) and key.startswith(prefix):
+                project_values.append(value)
+            else:
+                other_values.append(value)
+        values = project_values + other_values
+
+        pieces = [_clean_phet_string(str(entry.title))]
+        seen = set(pieces)
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            cleaned = _clean_phet_string(value)
+            if (
+                cleaned
+                and cleaned not in seen
+                and any(character.isalpha() for character in cleaned)
+            ):
+                pieces.append(cleaned)
+                seen.add(cleaned)
+        return truncate_at_word_boundary(" ".join(pieces), max_preview_chars)
+    return ""
+
+
 def _is_loader_shell(html: bytes) -> bool:
     """True when a page ships no visible text, only script/style/link references.
 
@@ -979,6 +1260,7 @@ def _read_html_entry(
     deadline: float | None = None,
     max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     truncated: bool = False,
+    allow_phet: bool = True,
 ) -> EntryRecord | None:
     if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(html):
         # A script/data file served as HTML (zimit crawls do this for <site>.js)
@@ -1048,6 +1330,17 @@ def _read_html_entry(
             redirect.path,
             redirect._index,
         )
+
+    if allow_phet:
+        excerpt = _phet_excerpt(
+            zim,
+            entry,
+            html,
+            max_preview_chars,
+            max_entry_bytes,
+        )
+        if excerpt:
+            return EntryRecord(entry_id, entry.title, excerpt, entry.path, None)
 
     excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars, deadline=deadline)
     if is_javascript_shell(html, excerpt):
@@ -1146,6 +1439,7 @@ def read_entry(
                 max_preview_chars,
                 max_entry_bytes=entry_limit,
                 truncated=entry_size > len(head),
+                allow_phet=False,
             )
             if record is not None:
                 return EntryRecord(i, record.title, "", record.path, record.target_id)
