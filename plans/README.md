@@ -60,6 +60,7 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 07 | [Collections, API, and UI](07-collections-api-ui.md) | 01–06 | Grouped library and source filters that do not explode |
 | 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers; migration and docs |
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, parity tests, performance, staged release |
+| 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
 
 ## Global invariants
 

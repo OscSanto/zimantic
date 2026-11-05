@@ -23,7 +23,7 @@ or a Kolibri channel has many topics.
 - `/config` exposes `source_filter_limit`.
 - SSE source snapshots serialize `SourceInfo` through `to_dict()`.
 
-The referenced stash adds useful library facets: provider/source kind, coarse
+The referenced stash (git diff 20997b04ee00537ab51b91d65c17df33ed6a7723^ 20997b04ee00537ab51b91d65c17df33ed6a7723) adds useful library facets: provider/source kind, coarse
 media classification, and grouping of related files. Keep this plan's
 collection-based identity instead of reviving its source-per-file model:
 `provider`/`content_kind` already identify the source kind, and collection
