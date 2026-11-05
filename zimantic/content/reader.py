@@ -194,6 +194,17 @@ _PHET_PROJECT = re.compile(
 _PHET_LOCALE = re.compile(
     rb"window\.phet\.chipper\.locale\s*=\s*[\"']([^\"']+)",
 )
+_PHET_HTML_LANG = re.compile(
+    rb"<html\b[^>]*\blang\s*=\s*[\"']([^\"']+)",
+    re.IGNORECASE,
+)
+# Multi-language PhET ZIMs publish one page per locale. The suffix is the most
+# reliable language marker when a page shares a bundle or the bundle omits its
+# own locale (for example ``acid-base-solutions_pt_BR.html``).
+_PHET_PATH_LOCALE = re.compile(
+    r"_([A-Za-z]{2,3}(?:_[A-Za-z]{2,4})?)\.(?:x?html?)$",
+    re.IGNORECASE,
+)
 _PHET_STRINGS_MARKER = b"window.phet.chipper.strings"
 _PHET_MAX_BUNDLES = 4
 
@@ -967,6 +978,51 @@ def _phet_strings(script: bytes) -> dict[str, dict[str, str]] | None:
     return strings if isinstance(strings, dict) else None
 
 
+def _phet_locale_key(locale: str) -> str:
+    """Normalize a locale for lookup while ignoring case and separators."""
+    return locale.strip().replace("-", "_").casefold()
+
+
+def _phet_locale_candidates(locale: str) -> Iterator[str]:
+    """Yield a locale and its base language, most specific first."""
+    normalized = locale.strip().replace("-", "_")
+    if not normalized:
+        return
+    yield normalized
+    base = normalized.split("_", 1)[0]
+    if base != normalized:
+        yield base
+
+
+def _phet_localized_strings(
+    strings: dict[str, dict[str, str]],
+    locales: tuple[str, ...],
+) -> dict[str, str] | None:
+    """Pick the first available translation for the page's language.
+
+    PhET locale slugs use underscores in ZIM paths and bundles but sometimes
+    differ in case or separator. A locale such as ``de_DE`` also falls back to
+    its base language (``de``) when only that translation exists.
+    """
+    available = {
+        _phet_locale_key(locale): values
+        for locale, values in strings.items()
+        if isinstance(locale, str) and isinstance(values, dict)
+    }
+    for locale in locales:
+        for candidate in _phet_locale_candidates(locale):
+            localized = available.get(_phet_locale_key(candidate))
+            if localized is not None:
+                return localized
+    return None
+
+
+def _phet_path_locale(path: str) -> str:
+    """Read the locale suffix PhET ZIMs put on localized simulation pages."""
+    match = _PHET_PATH_LOCALE.search(path)
+    return match.group(1) if match else ""
+
+
 def _phet_excerpt(
     zim: Archive,
     entry,
@@ -1004,15 +1060,26 @@ def _phet_excerpt(
             continue
 
         locale_match = _PHET_LOCALE.search(script)
-        locale = (
+        bundle_locale = (
             locale_match.group(1).decode("utf-8", "ignore")
             if locale_match
             else ""
         )
-        localized = strings.get(locale) or strings.get(locale.split("_", 1)[0])
-        if not isinstance(localized, dict):
-            localized = strings.get("en")
-        if not isinstance(localized, dict):
+        html_lang_match = _PHET_HTML_LANG.search(html)
+        html_locale = (
+            html_lang_match.group(1).decode("utf-8", "ignore")
+            if html_lang_match
+            else ""
+        )
+        # The page's own language wins over a shared bundle's default locale;
+        # a mul ZIM can publish one page per language from the same scripts.
+        localized = _phet_localized_strings(
+            strings,
+            (_phet_path_locale(entry.path), html_locale, bundle_locale),
+        )
+        if localized is None:
+            localized = _phet_localized_strings(strings, ("en",))
+        if localized is None:
             continue
 
         project_match = _PHET_PROJECT.search(script)

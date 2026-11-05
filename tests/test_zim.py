@@ -166,6 +166,50 @@ def _pdf_archive(content: bytes, *, title: str = "Annual Report", path: str = "f
     return _PdfArchive()
 
 
+def _phet_archive(html: bytes, script: bytes, *, path: str, title: str):
+    """Minimal Archive exposing one PhET shell and its shared JS bundle."""
+
+    class _HtmlItem:
+        mimetype = "text/html"
+        content = html
+
+    class _ScriptItem:
+        mimetype = "application/javascript"
+
+        def __init__(self):
+            self.content = script
+            self.size = len(script)
+
+    class _HtmlEntry:
+        is_redirect = False
+
+        def __init__(self):
+            self.title = title
+            self.path = path
+
+        def get_item(self):
+            return _HtmlItem()
+
+    class _ScriptEntry:
+        path = "sim.js"
+
+        def get_item(self):
+            return _ScriptItem()
+
+    class _PhetArchive:
+        def _get_entry_by_id(self, _index):
+            return _HtmlEntry()
+
+        def has_entry_by_path(self, requested):
+            return requested == "sim.js"
+
+        def get_entry_by_path(self, requested):
+            assert requested == "sim.js"
+            return _ScriptEntry()
+
+    return _PhetArchive()
+
+
 class TextExtractionTests(unittest.TestCase):
     def test_extraction_prefers_first_substantial_paragraph(self):
         self.assertEqual(
@@ -818,6 +862,67 @@ class TextExtractionTests(unittest.TestCase):
         self.assertIn("Gleichgewichtskonzentration", row.excerpt)
         self.assertNotIn("Equilibrium Concentration", row.excerpt)
         self.assertNotIn("\u202a", row.excerpt)
+
+    def test_phet_mul_page_prefers_path_locale_over_shared_bundle(self):
+        html = (
+            b'<html><head><meta name="phet-sim-level" content="production">'
+            b'</head><body><script src="sim.js"></script></body></html>'
+        )
+        strings = {
+            "en": {"ACID_BASE_SOLUTIONS/screen.introduction": "Intro"},
+            "de": {"ACID_BASE_SOLUTIONS/screen.introduction": "Einführung"},
+        }
+        script = (
+            b"window.phet.chipper.project = 'acid-base-solutions';"
+            b"window.phet.chipper.locale = 'en';"
+            b"window.phet.chipper.strings = "
+            + json.dumps(strings).encode("utf-8")
+            + b";"
+        )
+
+        row = _read_entry(
+            _phet_archive(
+                html,
+                script,
+                path="acid-base-solutions_de.html",
+                title="Saure & basische Lösungen",
+            ),
+            0,
+            max_preview_chars=500,
+        )
+        self.assertIn("Einführung", row.excerpt)
+        self.assertNotIn("Intro", row.excerpt)
+
+    def test_phet_locale_matching_normalizes_separators_and_case(self):
+        html = (
+            b'<html lang="pt-BR"><head>'
+            b'<meta name="phet-sim-level" content="production">'
+            b'</head><body><script src="sim.js"></script></body></html>'
+        )
+        strings = {
+            "en": {"ACID_BASE_SOLUTIONS/screen.introduction": "Introduction"},
+            "pt_BR": {"ACID_BASE_SOLUTIONS/screen.introduction": "Introdução"},
+        }
+        script = (
+            b"window.phet.chipper.project = 'acid-base-solutions';"
+            b"window.phet.chipper.locale = 'pt-BR';"
+            b"window.phet.chipper.strings = "
+            + json.dumps(strings).encode("utf-8")
+            + b";"
+        )
+
+        row = _read_entry(
+            _phet_archive(
+                html,
+                script,
+                path="acid-base-solutions_pt-br.html",
+                title="Soluções Ácido-Base",
+            ),
+            0,
+            max_preview_chars=500,
+        )
+        self.assertIn("Introdução", row.excerpt)
+        self.assertNotIn("Introduction", row.excerpt)
 
     def test_meta_description_is_a_fallback_excerpt(self):
         html = (
