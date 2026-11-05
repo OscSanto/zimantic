@@ -34,7 +34,7 @@ zimantic/providers/kiwix/
 ### Collection and source mapping
 
 - **Collection** = one configured Kiwix server:
-  `[[sources]] type = "kiwix"`, `name = "..."`, `server = "..."`. Collection key
+  `[[collections]] type = "kiwix"`, `name = "..."`, `server = "..."`. Collection key
   is `kiwix:<name>`; the label defaults to `"Kiwix"` and may include the host.
 - **Source** = one catalog book. Source key is `kiwix:<name>:<book>`; duplicate
   slugs get a stable suffix. The book slug is also kept in provider metadata for
@@ -80,7 +80,7 @@ source/library APIs.
 - `type`, `name`, `server`, `catalog_path`, `catalog_limit`,
   `max_response_bytes`, and `max_remote_sources` are the only Kiwix keys.
 - There is no `kiwix_server` flat key. A Kiwix collection exists only through an
-  explicit `[[sources]]` entry.
+  explicit `[[collections]]` entry.
 - The search page and JSON API use the canonical source key and provider fields;
   there is no additive compatibility payload.
 

@@ -74,7 +74,7 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, contract tests, performance, staged release |
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
 
-Phase 00 introduces the minimal raw `[[sources]]` parser so phases 01 and 02
+Phase 00 introduces the minimal raw `[[collections]]` parser so phases 01 and 02
 can be configured as they land. Phase 05 adds files-provider validation and
 configuration semantics; phase 08 completes the full settings loader for all
 providers and operations. There is one parser and one normalized entry shape,
@@ -94,10 +94,12 @@ Every phase must hold these:
   `kiwix-serve` links.
 - **One index layout.** Every provider uses the same locator and the same index
   schema. Old index files are not discovered or upgraded; they are rebuilt.
-- **One config schema.** Collections are declared only with `[[sources]]`.
+- **One config schema.** Collections are declared only with `[[collections]]`.
   There are no flat `zim_dir` or `kiwix_server` shorthands.
-- **The catalog is disposable.** An incompatible `catalog.sqlite` is deleted
-  and rebuilt; no version detection, row migration, or old table aliases.
+- **The catalog is disposable.** `catalog.sqlite` is the ZIM archive metadata
+  cache; Files and Kolibri do not write it, and Kiwix has no persistent local
+  catalog. An incompatible catalog is deleted and rebuilt; no version
+  detection, row migration, or old table aliases.
 - **Items never become sources.** Any provider that discovers many items maps
   them to a bounded source set.
 - **Provider failure is isolated.** A broken or slow provider cannot crash the
@@ -144,7 +146,7 @@ explicitly marked truncated; serving must continue to cover all content.
 - The full test suite passes on Python 3.11–3.14, including provider contract
   tests, traversal/security tests, and catalog/rebuild tests.
 - `config.toml`, `README.md`, `CONTRIBUTING.md`, and deployment examples
-  document the `[[sources]]` schema and the uniform index layout.
+  document the `[[collections]]` schema and the uniform index layout.
 - A Pi Zero 2 W can serve a mixed library within the documented memory
   envelope.
 

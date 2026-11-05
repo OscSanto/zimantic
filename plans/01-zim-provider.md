@@ -41,15 +41,17 @@ zimantic/providers/zim/
     metadata.py      # ZIM metadata extraction, SourceInfo construction, icons
 ```
 
-`zimantic/catalog.py` becomes the provider-neutral `SourceCatalog` storage
-layer. The ZIM provider supplies normalized metadata records to it; the catalog
-schema and `SourceRecord` fields use generic identifiers (including the generic
-`provider` discriminator), with no provider-specific table, index, or column
-names.
+`zimantic/catalog.py` remains the persistent ZIM archive metadata cache, exposed
+through a provider-neutral `SourceCatalog` storage layer. The ZIM provider
+supplies normalized metadata records to it; the catalog schema and
+`SourceRecord` fields use generic identifiers (including the generic `provider`
+discriminator), with no provider-specific table, index, or column names. Files
+and Kolibri use their own manifests/databases, and Kiwix uses remote/in-memory
+metadata rather than writing this catalog.
 
 ### Collection and source mapping
 
-- **Collection** = the configured ZIM root: `[[sources]] type = "zim"`,
+- **Collection** = the configured ZIM root: `[[collections]] type = "zim"`,
   `name = "..."`, `path = "..."`. Collection key is `zim:<name>`.
 - **Source** = one ZIM archive. Source key is `zim:<name>:<stem>`; duplicate
   stems in one collection get a stable suffix. There are no `book`,
@@ -270,7 +272,7 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 ## Acceptance criteria
 
 - `python -m pytest` passes.
-- `zimantic serve` with a `[[sources]] type = "zim"` entry works after rebuilding
+- `zimantic serve` with a `[[collections]] type = "zim"` entry works after rebuilding
   indexes and the catalog.
 - `Search` has no fallback that treats every non-Kiwix source as a ZIM.
 - The only ZIM imports outside `providers/zim`, `build.py`, `catalog.py`, and

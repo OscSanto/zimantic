@@ -64,9 +64,11 @@ Each source uses:
 - `media_types` is an array drawn from `text`, `video`, `audio`, `image`, and
   `other`. It describes the indexed content families in a source; it may contain
   multiple values for mixed Files or Kolibri sources. ZIM classification uses
-  its MIME counter, while local providers use their indexed manifest. Providers
-  populate it (phase 01 for ZIM, phases 05 and 06 for local providers); the UI
-  only consumes it. It is not a source identity.
+  its MIME counter, while local providers use their indexed manifest. Before an
+  index exists, `[]` means unknown, not "no media"; the UI must include such a
+  source in every content-type filter. Providers populate it (phase 01 for ZIM,
+  phases 05 and 06 for local providers); the UI only consumes it. It is not a
+  source identity.
 
 ### `/collections.json`
 
@@ -148,8 +150,10 @@ Keep `indexes`, `sources`, and `cache` counters.
 - Add a provider filter (All / ZIM / Files / Kolibri / Kiwix) alongside the
   existing text filter. Do not remove the text filter.
 - Add an independent content-type filter (All / Text / Video / Audio / Images /
-  Other). A source matches when its `media_types` contains the selected type;
-  collection cards summarize the union of their sources' types.
+  Other). A source matches when its non-empty `media_types` contains the
+  selected type; an empty value is unknown and matches conservatively.
+  Collection cards summarize the union of their sources' types and remain
+  eligible when any member's type is unknown.
 - The existing "search within this source" action remains; add "search within
   this collection" using the new `collection` parameter.
 - Details/infobox continues to show source metadata; add provider and

@@ -17,7 +17,7 @@ directory of files into a directory of sources.
 Default granularity is `collection`: the whole root is one source. This keeps
 the library bounded even before the grouped collection UI (phase 07) lands.
 
-`granularity = "directory"` splits the root into sources:
+`granularity = "children"` splits the root into sources:
 
 - each immediate child directory of the configured root becomes one source;
 - loose files directly in the root become one source labelled after the root;
@@ -25,7 +25,7 @@ the library bounded even before the grouped collection UI (phase 07) lands.
 - a source's content root is that child directory (or the collection root for
   the loose-files source).
 
-Use `granularity = "directory"` when the tree has a handful of stable top-level
+Use `granularity = "children"` when the tree has a handful of stable top-level
 units and the grouped library/source filters from phase 07 are available;
 otherwise the default avoids a wall of cards.
 
@@ -34,18 +34,18 @@ configure a root per desired source.
 
 ## Configuration
 
-Phase 00 owns the minimal raw `[[sources]]` TOML parser. Phase 05 owns
+Phase 00 owns the minimal raw `[[collections]]` TOML parser. Phase 05 owns
 files-provider validation and configuration semantics; phase 08 completes the
 full loader and adds the remaining operations. Do not duplicate the parser in
 the provider.
 
 ```toml
-[[sources]]
+[[collections]]
 type = "files"
 name = "modules"                 # unique collection name; used in keys
 path = "/library/www/html/modules"
 label = "Modules"
-granularity = "collection"       # "collection" | "directory"
+granularity = "collection"       # "collection" | "children"
 include = ["**/*.html", "**/*.htm", "**/*.xhtml",
            "**/*.txt", "**/*.md", "**/*.pdf"]
 exclude = ["**/node_modules/**", "**/.git/**", "**/__pycache__/**"]
@@ -62,9 +62,9 @@ Rules:
 - `path` must exist and be readable; a missing root disables the collection
   with an error, it does not crash startup.
 - `name` must be unique across configured collections. Reject duplicates.
-- Unknown keys in a `[[sources]]` entry warn once and are ignored.
+- Unknown keys in a `[[collections]]` entry warn once and are ignored.
 - There is no flat `zim_dir` key; every collection, including ZIM, is declared
-  with `[[sources]]`.
+  with `[[collections]]`.
 - Absolute configured `path` values are allowed. Resolve the real root once
   and retain it only as a private runtime/content-store/catalog locator; do not
   expose it in API payloads, errors, redirects, or logs above debug level.
@@ -82,7 +82,7 @@ collection; document that.
 
 ### Source discovery
 
-For `granularity = "directory"`:
+For `granularity = "children"`:
 
 1. List immediate children of the root without following symlinked directories.
 2. Directories become candidate sources; skip hidden/system names and excludes.
@@ -98,7 +98,7 @@ For `granularity = "collection"`:
 - one source whose content root is the configured root and whose source key is
   `files:<name>:root`.
 
-For `granularity = "directory"`, the loose-files source uses the reserved
+For `granularity = "children"`, the loose-files source uses the reserved
 root-relative identifier `__loose__`, so its key is
 `files:<name>:__loose__`. A child directory named `__loose__` is excluded
 from discovery to keep this identity collision-free.
@@ -133,7 +133,9 @@ from discovery to keep this identity collision-free.
   otherwise.
 - `homepage` = relative `index.html`/`index.htm` when present, else `None`.
 - `media_types` = content families present in the indexed manifest (`text`,
-  `video`, `audio`, `image`, `other`), used by phase 07's content-type filter.
+  `video`, `audio`, `image`, `other`). Before an index exists, use `[]` for
+  unknown rather than claiming that no media is present; phase 07 must not
+  exclude an unknown source from a content-type filter.
 
 ## Indexing
 
@@ -223,9 +225,9 @@ setting still applies; document that untrusted file trees should enable it.
 - [ ] Add `zimantic/providers/files/` with provider, discovery, entries, and
       store modules.
 - [ ] Add provider-level validation for normalized files configuration, and
-      consume the phase-00 `[[sources]]` parser without adding a provider-local
+      consume the phase-00 `[[collections]]` parser without adding a provider-local
       parser.
-- [ ] Implement collection/source discovery with `directory` and `collection`
+- [ ] Implement collection/source discovery with `children` and `collection`
       granularity, excludes, and the source cap collapse.
 - [ ] Implement `FilesEntryProducer` with stable ids and a manifest
       fingerprint.
@@ -239,7 +241,7 @@ setting still applies; document that untrusted file trees should enable it.
       `zimantic build` entry point for configured files collections.
 - [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
       `homepage`, `article_count`, `indexed_count`, `truncated`, `media_types`
-      (derived from the indexed manifest).
+      (derived from the indexed manifest, or `[]` when unknown before indexing).
 - [ ] Document a recommended `/library/www/html/modules` configuration and the
       `granularity` trade-off in `README.md`.
 - [ ] Add a files-provider example to `config.toml` (commented out by default).
@@ -259,7 +261,7 @@ modules/
   broken/
 ```
 
-- [ ] `granularity = "directory"` yields sources for `algebra`, `biology`, and
+- [ ] `granularity = "children"` yields sources for `algebra`, `biology`, and
       one loose-files source with the reserved `__loose__` key;
       hidden/excluded directories are absent.
 - [ ] The default (`granularity = "collection"`) yields exactly one source.

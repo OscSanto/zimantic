@@ -152,9 +152,10 @@ Notes:
 
 - `SourceProvider.discover()` must be cheap and bounded. It returns collection
   descriptors, not items. A provider may cache expensive metadata on disk.
-- `CollectionRuntime.search()` is one source's work. Providers that natively
-  search a whole collection (Kolibri) map the source to the appropriate subtree
-  or content-node filter.
+- `CollectionRuntime.search()` is one source's work. Providers whose native
+  query scope is broader than one source map that source to the appropriate
+  subtree or content-node filter. Indexed providers still use the generic
+  entry/index pipeline.
 - `ContentStore` is defined in `content/store.py` during this phase but its
   provider implementations land in phase 03 and later. Providers can return
   `None` until their serving support lands.
@@ -213,9 +214,10 @@ paths.
 - Absolute configured roots are valid. Providers may resolve them once and
   retain the canonical absolute path as a private runtime or catalog locator;
   it is not part of `SourceInfo`, `key`, or any serialized payload.
-- `catalog.sqlite` uses a provider-neutral `sources` table keyed by `key`.
-  Store a canonical absolute path in a separate indexed `path` locator column;
-  it is not part of the key.
+- The persistent `catalog.sqlite` is the ZIM archive metadata cache. It uses a
+  provider-neutral `sources` table keyed by `key`; other providers are not
+  required to write it. Store a canonical absolute path in a separate indexed
+  `path` locator column; it is not part of the key.
 - Path relocation updates the locator, not a provider's stable logical key.
   Keep filesystem path normalization out of per-query identity resolution.
 
@@ -235,9 +237,9 @@ paths.
 Register `zim` and `kiwix` as placeholders in this phase. They may return empty
 discovery results until phases 01 and 02.
 
-### Minimal source configuration
+### Minimal collection configuration
 
-This phase owns the minimal `[[sources]]` TOML parser. It parses the
+This phase owns the minimal `[[collections]]` TOML parser. It parses the
 array-of-tables shape into normalized provider entries, requires `type` and
 `name`, rejects duplicate names, and preserves provider-specific keys for the
 provider validators that follow. It must not depend on provider modules that
@@ -279,7 +281,7 @@ keep a `mode` fallback.
 - [ ] Create `zimantic/providers/registry.py`; register `zim` and `kiwix`
       placeholders.
 - [ ] Add the normalized provider-configuration seam and minimal
-      `[[sources]]` TOML parser described above; providers consume normalized
+      `[[collections]]` TOML parser described above; providers consume normalized
       entries and later phases add provider-specific validation. Do not keep
       flat shorthands.
 - [ ] Extend `SourceInfo` and `to_dict()` in `zimantic/contracts.py`.

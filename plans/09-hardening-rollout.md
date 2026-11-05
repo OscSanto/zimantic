@@ -200,7 +200,7 @@ Measure and record:
 - [ ] Cache key/source selection across collections.
 - [ ] Reload after adding/removing each provider's content.
 - [ ] Migration path: an old config, catalog, or index layout is rejected or
-      ignored, and the documented `[[sources]]` configuration plus rebuild
+      ignored, and the documented `[[collections]]` configuration plus rebuild
       produces a working library.
 
 ### Security/adversarial
@@ -249,9 +249,9 @@ Each stage is independently revertible. There is no long-lived branch.
    rebuilt on the next start.
 2. **Generic serving and indexing (phases 03–04).** Ship content stores and the
    generic pipeline for ZIM. Revert = restore the ZIM-only code paths and rebuild.
-3. **Files provider and source config (phase 05).** Opt in by adding
-   `[[sources]] type = "files"`. Ship docs and a commented example. No
-   configured files source means no new work at startup.
+3. **Files provider and collection config (phase 05).** Opt in by adding
+   `[[collections]] type = "files"`. Ship docs and a commented example. No
+   configured files collection means no new work at startup.
 4. **Kolibri provider (phase 06).** Opt in by config; `captions`, `ocr`, and
    `asr` all default off and are independent.
    Ship a fixture-based integration test and supported-version note.
@@ -283,8 +283,8 @@ For a cautious rollout, ship with:
 
 ## Migration checklist
 
-- [ ] Replace flat `zim_dir`/`kiwix_server` keys with explicit `[[sources]]`
-      entries. There is no shorthand fallback.
+- [ ] Verify flat `zim_dir`/`kiwix_server` keys are absent and explicit
+      `[[collections]]` entries are required. There is no shorthand fallback.
 - [ ] Delete or ignore old `<stem>.sqlite`/`.faiss` files and rebuild every
       configured collection with the new locator.
 - [ ] Delete any old `catalog.sqlite`; it is recreated from a full scan.
@@ -302,7 +302,7 @@ For a cautious rollout, ship with:
 - [ ] Mixed-library smoke test on a low-resource profile.
 - [ ] Security review of path/zip/MIME/range handling.
 - [ ] Major version bump. Release notes list the new providers, the
-      `[[sources]]` config requirement, the catalog/index rebuild, and the
+      `[[collections]]` config requirement, the catalog/index rebuild, and the
       removed compatibility paths.
 - [ ] A known-issues note covering supported Kolibri schema versions and
       derived-text engine/model limitations.
@@ -320,13 +320,13 @@ For a cautious rollout, ship with:
 | Provider starvation | slow searches | per-provider task budgets |
 | Startup regression | Pi Zero timeouts | cached-first/background discovery, stat-only walks |
 | Contract churn | rework | minimal phase-00 protocol, contract tests |
-| Config complexity | user errors | one `[[sources]]` schema, validation warnings, `sources` command |
+| Config complexity | user errors | one `[[collections]]` schema, validation warnings, `sources` command |
 
 ## Final definition of done
 
 The effort is complete when:
 
-1. A ZIM-only install works after adding a `[[sources]] type = "zim"` entry and
+1. A ZIM-only install works after adding a `[[collections]] type = "zim"` entry and
    rebuilding its catalog and indexes.
 2. A configured `/library/www/html/modules` tree appears as one collection with
    bounded sources, is searchable, and serves pages/assets safely.

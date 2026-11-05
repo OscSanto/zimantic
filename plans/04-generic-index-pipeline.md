@@ -86,11 +86,14 @@ optional stage in `indexing/derived.py` so every provider gets the same policy,
 caching, provenance, and failure handling.
 
 ```python
+from pathlib import Path
+
 class DerivedTextInput(Protocol):
     kind: Literal["captions", "image", "audio", "video"]
     mimetype: str
     digest: str            # content identity for the cache
     size: int
+    path: Path | None      # provider-confined regular file, when available
     def open(self) -> BinaryIO: ...
 
 class DerivedTextProducer(Protocol):
@@ -146,10 +149,10 @@ its keys or precedence.
 - Worker functions and their arguments must be safe for `spawn` and
   `forkserver`, not just `fork`. Engine and model objects are created inside
   the worker, never pickled across the boundary.
-- Prefer the provider-confined regular file path as the worker input. When the
-  content only exists inside an archive or database blob, spool a bounded copy
-  to a private `0600` temp file and remove it after the task. Never send an
-  unbounded byte blob or an arbitrary path to a worker.
+- Prefer `DerivedTextInput.path` when it names a provider-confined regular
+  file. When the content only exists inside an archive or database blob, spool
+  a bounded copy to a private `0600` temp file and remove it after the task.
+  Never send an unbounded byte blob or an arbitrary path to a worker.
 - The pool is shared for the whole build run, not created per source, so
   `build_workers` cannot multiply model memory.
 - Engine-internal thread counts are set explicitly (normally 1) so process

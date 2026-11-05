@@ -11,27 +11,27 @@ and one index layout for every provider.
 ## Config schema
 
 Today `zimantic/settings.py` accepts only flat `KNOWN_KEYS`; `load_config`
-silently drops unknown keys and warns on bad types. `[[sources]]` is an
+silently drops unknown keys and warns on bad types. `[[collections]]` is an
 array-of-tables, so it needs explicit handling.
 
 ### Shape
 
 ```toml
 # Collections. Multiple entries are allowed. There are no flat provider keys.
-[[sources]]
+[[collections]]
 type = "zim"
 name = "library"
 path = "./zims"
 label = "ZIM files"
 
-[[sources]]
+[[collections]]
 type = "files"
 name = "modules"
 path = "/library/www/html/modules"
 label = "Modules"
 granularity = "collection"
 
-[[sources]]
+[[collections]]
 type = "kolibri"
 name = "kolibri"
 path = "/library/kolibri"
@@ -40,7 +40,7 @@ captions = "off"        # off | index: existing caption/subtitle tracks
 ocr = "off"             # off | tesseract: images and image-only pages
 asr = "off"             # off | whisper: audio/video speech-to-text
 
-[[sources]]
+[[collections]]
 type = "kiwix"
 name = "remote"
 server = "http://localhost:8085"
@@ -73,11 +73,11 @@ name.
 - Provider-specific keys are validated by the provider. Generic validation only
   checks `type`, `name`, and duplicate names.
 - Phase 00 defines the normalized provider-entry interface and minimal
-  `[[sources]]` TOML parser so provider phases can validate entries without
+  `[[collections]]` TOML parser so provider phases can validate entries without
   parsing TOML themselves. Phase 05 adds files-provider validation; this phase
   completes the loader for every provider and owns the remaining config
   operations.
-- Every collection, including ZIM and Kiwix, requires an explicit `[[sources]]`
+- Every collection, including ZIM and Kiwix, requires an explicit `[[collections]]`
   entry. There is no `zim_dir` or `kiwix_server` shorthand and no implicit
   default collection.
 - An invalid provider entry, including an unknown provider type, logs a single
@@ -87,7 +87,7 @@ name.
   fallback provider.
 - Unknown keys inside a provider entry warn once and are ignored; do not turn a
   typo into a crash.
-- Keep `sources` as a known top-level key and bypass the flat type coercion for
+- Keep `collections` as a known top-level key and bypass the flat type coercion for
   it in `_typed_user_values`.
 - Do not log absolute `path`/`database`/`storage` values above debug level.
 
@@ -134,11 +134,11 @@ scope and precedence; it does not introduce a second definition.
 - Keep `index_dir`, `cache_size`, `build_workers`, `embedding_workers`,
   `batch_size`, search limits, and model settings global.
 - Provider-specific limits (`max_sources`, `max_entries`, `max_file_bytes`,
-  `captions`, `ocr`, `asr`, `source_depth`) default in the provider and may be
+  `captions`, `ocr`, `asr`, `granularity`) default in the provider and may be
   overridden per entry.
-- `granularity` (files: `collection`/`directory`) and `source_depth` (Kolibri:
-  0/1) both bound source count but are not synonyms: files chooses a root
-  granularity, Kolibri chooses a topic depth.
+- `granularity` uses the same values for Files and Kolibri:
+  `collection` means one source for the whole collection and `children` means
+  immediate child groups.
 - `enabled_providers` is not needed: a provider is enabled by having at least
   one configured collection. Keep it that way.
 
@@ -218,10 +218,11 @@ Scope:
 - The phase-04 locator is the only code that computes index paths.
 - `index_dir` may itself be configured as an absolute path. Do not incorporate
   source-root absolute paths into logical IDs or generated index filenames.
-- `catalog.sqlite` is private local metadata beside `index_dir`. Keep the
-  resolved absolute `path` as a private indexed locator, separate from the
-  logical primary key `key`. Canonicalize paths at discovery/update time, not
-  repeatedly during search.
+- `catalog.sqlite` is the private ZIM archive metadata cache beside `index_dir`.
+  Files and Kolibri do not write it, and Kiwix has no persistent local catalog.
+  Keep the resolved absolute `path` as a private indexed locator, separate from
+  the logical primary key `key`. Canonicalize paths at discovery/update time,
+  not repeatedly during search.
 - Bump the catalog schema version. A catalog with any other version is deleted
   and rebuilt by a full provider scan. Do not detect, migrate, or alias old
   tables.
@@ -281,11 +282,9 @@ Scope:
 
 ## Work items
 
-- [ ] Complete `settings.py` from the phase-00 raw `[[sources]]` parser and
+- [ ] Complete `settings.py` from the phase-00 raw `[[collections]]` parser and
       phase-05 files validation to a list of tables for every provider;
       validate `type`/`name`/duplicates and delegate provider keys.
-- [ ] Remove flat `zim_dir`/`kiwix_server` handling; all collections require an
-      explicit `[[sources]]` entry.
 - [ ] Build a provider configuration registry with per-provider defaults and
       validation functions.
 - [ ] Expose the phase-04 `[derived_text]` schema and validate per-source
@@ -310,7 +309,7 @@ Scope:
 
 ## Tests
 
-- [ ] Config: `[[sources]]` entries parse; duplicate names, unknown types, bad
+- [ ] Config: `[[collections]]` entries parse; duplicate names, unknown types, bad
       types, and missing `path` produce clear warnings and do not crash. Flat
       `zim_dir`/`kiwix_server` keys are unknown and never create collections.
 - [ ] `build` no-arg builds all configured providers; `--provider`,
@@ -343,7 +342,7 @@ Scope:
 - One `config.toml` can describe ZIM, files, Kolibri, and Kiwix collections.
 - `zimantic build`, `serve`, `reload`, `sources`, and `prune` work with a mixed
   library.
-- Every ZIM-only install is migrated by adding a `[[sources]]` entry and
+- Every ZIM-only install is migrated by adding a `[[collections]]` entry and
   rebuilding its indexes.
 - Documentation contains a copy-pasteable IIAB example for each local provider.
 - `python -m pytest` passes.
