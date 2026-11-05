@@ -215,6 +215,25 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
     )
 
 
+_FILE_SHA256_CACHE: dict[tuple[str, int, int, int], str] = {}
+_FILE_SHA256_LOCK = threading.Lock()
+
+
+def _cached_sha256(path: Path) -> str:
+    """Return the SHA-256 of ``path``, memoized by file stat signature."""
+    resolved = path.resolve()
+    stat = resolved.stat()
+    key = (str(resolved), stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    with _FILE_SHA256_LOCK:
+        cached = _FILE_SHA256_CACHE.get(key)
+    if cached is not None:
+        return cached
+    digest = _sha256(resolved)
+    with _FILE_SHA256_LOCK:
+        _FILE_SHA256_CACHE[key] = digest
+    return digest
+
+
 def verify_model_files(model_dir, warn=None) -> dict[str, str]:
     """Warn (never fail) when a model file differs from the documented checksum.
 
@@ -230,7 +249,7 @@ def verify_model_files(model_dir, warn=None) -> dict[str, str]:
     for name, expected in EXPECTED_CHECKSUMS.items():
         path = Path(model_dir) / name
         try:
-            actual = _sha256(path)
+            actual = _cached_sha256(path)
         except OSError:
             continue  # a missing file fails later, with a clearer error
         actual_hashes[name] = actual
@@ -248,7 +267,7 @@ def verify_model_files(model_dir, warn=None) -> dict[str, str]:
             )
     for path in sorted(Path(model_dir).glob("*.onnx_data")):
         try:
-            actual_hashes[path.name] = _sha256(path)
+            actual_hashes[path.name] = _cached_sha256(path)
         except OSError:
             continue
     return actual_hashes
@@ -285,7 +304,7 @@ def model_fingerprint(model_dir, hashes: dict[str, str] | None = None) -> str:
         value = cached.get(path.name)
         if value is None:
             try:
-                value = _sha256(path)
+                value = _cached_sha256(path)
             except OSError:
                 return ""
         digest.update(label.encode("utf-8"))

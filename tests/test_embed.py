@@ -74,6 +74,18 @@ class ModelFingerprintTests(unittest.TestCase):
             _sentencepiece_dir(tmp)
             self.assertEqual(embed.model_fingerprint(tmp), "")
 
+    def test_verify_and_fingerprint_hash_unchanged_files_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "model.onnx").write_bytes(b"model-bytes")
+            (Path(tmp) / "sentencepiece.bpe.model").write_bytes(b"vocab-bytes")
+            with patch.object(embed, "_sha256", wraps=embed._sha256) as sha256:
+                embed.verify_model_files(tmp, warn=lambda _msg: None)
+                first = embed.model_fingerprint(tmp)
+                second = embed.model_fingerprint(tmp)
+            self.assertTrue(first)
+            self.assertEqual(first, second)
+            self.assertEqual(sha256.call_count, 2)
+
 
 class ModelProbeTests(unittest.TestCase):
     def test_serialize_round_trip(self):

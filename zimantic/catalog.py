@@ -131,6 +131,15 @@ _SCHEMA_COLUMNS = (
     "favicon", "favicon_mime", "icon_path", "available",
     "last_error", "scanned_at",
 )
+# Read queries that only build SourceInfo or compare paths/sizes replace the
+# raw favicon BLOB with its byte length so SQLite does not allocate and copy
+# megabytes of icon bytes on every source/library listing.
+_METADATA_SELECT = ", ".join(
+    "CASE WHEN favicon IS NOT NULL AND length(favicon) > 0 THEN X'01' ELSE NULL END AS favicon"
+    if col == "favicon"
+    else col
+    for col in _SCHEMA_COLUMNS
+)
 
 META_KEYS = (
     "Title",
@@ -787,7 +796,10 @@ class ZimCatalog:
         stats = {"added": 0, "updated": 0, "removed": 0, "skipped": 0, "invalid": 0}
         with self._lock:
             existing = {
-                row["path"]: row for row in self.db.execute("SELECT * FROM zims")
+                row["path"]: row
+                for row in self.db.execute(
+                    "SELECT path, size, mtime, available FROM zims"
+                )
             }
 
         def unreadable(path_str: str) -> bool:
@@ -898,32 +910,37 @@ class ZimCatalog:
             "SELECT * FROM zims WHERE path = ?", (str(Path(path).resolve()),)
         ).fetchone()
 
-    def rows(self) -> list[CatalogRecord]:
-        query = "SELECT * FROM zims ORDER BY stem, size DESC, path ASC"
+    def rows(self, *, include_favicon: bool = False) -> list[CatalogRecord]:
+        cols = "*" if include_favicon else _METADATA_SELECT
+        query = f"SELECT {cols} FROM zims ORDER BY stem, size DESC, path ASC"
         with self._lock:
             return [CatalogRecord.from_row(row) for row in self.db.execute(query)]
 
-    def get_stem(self, stem: str) -> CatalogRecord | None:
+    def get_stem(self, stem: str, *, include_favicon: bool = False) -> CatalogRecord | None:
+        cols = "*" if include_favicon else _METADATA_SELECT
         with self._lock:
             row = self.db.execute(
-                "SELECT * FROM zims WHERE stem = ? ORDER BY size DESC, path ASC LIMIT 1",
+                f"SELECT {cols} FROM zims WHERE stem = ? ORDER BY size DESC, path ASC LIMIT 1",
                 (stem,),
             ).fetchone()
         return CatalogRecord.from_row(row) if row else None
 
-    def get_stem_size(self, stem: str, size: int | None) -> CatalogRecord | None:
+    def get_stem_size(
+        self, stem: str, size: int | None, *, include_favicon: bool = False
+    ) -> CatalogRecord | None:
         """Prefer the row whose source size matches an index's recorded size."""
         if size is None:
-            return self.get_stem(stem)
+            return self.get_stem(stem, include_favicon=include_favicon)
+        cols = "*" if include_favicon else _METADATA_SELECT
         with self._lock:
             row = self.db.execute(
-                "SELECT * FROM zims WHERE stem = ? AND size = ? "
+                f"SELECT {cols} FROM zims WHERE stem = ? AND size = ? "
                 "ORDER BY path ASC LIMIT 1",
                 (stem, size),
             ).fetchone()
         if row:
             return CatalogRecord.from_row(row)
-        return self.get_stem(stem)
+        return self.get_stem(stem, include_favicon=include_favicon)
 
     def find_path(self, stem: str, size: int | None = None) -> Path | None:
         """Return the matching-size archive path, or the largest same-stem copy."""

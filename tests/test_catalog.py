@@ -83,6 +83,17 @@ class CatalogTests(unittest.TestCase):
             self.assertIn("_pictures:yes", record.tags)
             self.assertEqual(record.public_tags, "")
             self.assertIn("text/html", record.counter)
+            self.assertIsNone(record.favicon)
+
+            catalog.db.execute(
+                "UPDATE zims SET favicon = ?, favicon_mime = 'image/png' WHERE stem = 'manual'",
+                (b"x" * 2048,),
+            )
+            catalog.db.commit()
+            light = catalog.get_stem("manual")
+            full = catalog.get_stem("manual", include_favicon=True)
+            self.assertEqual(light.favicon, b"\x01")
+            self.assertEqual(full.favicon, b"x" * 2048)
 
             second = catalog.scan()
             self.assertEqual(second["skipped"], 1)

@@ -17,6 +17,7 @@ import atexit
 import json
 import logging
 import queue
+import selectors
 import subprocess
 import sys
 import threading
@@ -29,6 +30,22 @@ _WORKER_MODULE = "zimantic.fulltext_worker"
 # without duplicating every archive on a small host.
 DEFAULT_WORKERS = 4
 FULLTEXT_TIMEOUT_SECONDS = 30.0
+
+
+def _wait_readable(stream: object, timeout: float) -> bool:
+    """Wait up to ``timeout`` seconds for ``stream`` to become readable."""
+    try:
+        fileno = stream.fileno()  # type: ignore[attr-defined]
+        selector = selectors.DefaultSelector()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return True
+    try:
+        selector.register(fileno, selectors.EVENT_READ)
+        return bool(selector.select(timeout))
+    except (OSError, TypeError, ValueError):
+        return True
+    finally:
+        selector.close()
 
 
 class _Worker:
@@ -87,27 +104,15 @@ class _Worker:
                     + "\n"
                 )
                 process.stdin.flush()
-                response: queue.Queue[str] = queue.Queue(maxsize=1)
-
-                def read_response() -> None:
-                    try:
-                        line = process.stdout.readline()
-                    except (OSError, ValueError):
-                        line = ""
-                    response.put(line)
-
-                reader = threading.Thread(target=read_response, daemon=True)
-                reader.start()
-                try:
-                    line = response.get(timeout=FULLTEXT_TIMEOUT_SECONDS)
-                except queue.Empty:
+                if not _wait_readable(process.stdout, FULLTEXT_TIMEOUT_SECONDS):
                     logger.warning(
                         "zimantic: native full-text search timed out for %s",
                         zim_path,
                     )
                     self.close()
-                    reader.join(timeout=1)
                     line = ""
+                else:
+                    line = process.stdout.readline()
             except (BrokenPipeError, OSError, ValueError):
                 line = ""
             if not line:

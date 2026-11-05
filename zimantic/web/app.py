@@ -104,7 +104,7 @@ def _cached_asset(
         return cached
     data = loader()
     compressed = (
-        gzip.compress(data, compresslevel=9)
+        gzip.compress(data, compresslevel=6)
         if _compressible(media_type) and len(data) >= GZIP_MIN_SIZE
         else None
     )

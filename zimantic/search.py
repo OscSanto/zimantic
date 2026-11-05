@@ -712,14 +712,20 @@ class Search:
         except OSError:
             return path, False
 
-    def _scan_zim_paths(self, *, refresh: bool = True) -> dict[str, Path]:
+    def _scan_zim_paths(
+        self,
+        *,
+        refresh: bool = True,
+        records: list[Any] | None = None,
+    ) -> dict[str, Path]:
         """Return one catalogued archive per stem, preferring the largest copy."""
         catalog = self._ensure_catalog()
         if catalog.zim_dir is None or not catalog.zim_dir.is_dir():
             return {}
         if refresh and not self._scan_catalog(force=True):
             return {}
-        records = catalog.rows()
+        if records is None:
+            records = catalog.rows()
         sizes_by_path = {Path(record.path): record.size for record in records}
         found = largest_zims_by_stem(sizes_by_path)
         sizes_by_stem: dict[str, set[int]] = {}
@@ -734,6 +740,26 @@ class Search:
                     found[stem],
                 )
         return found
+
+    @staticmethod
+    def _read_index_meta(db: sqlite3.Connection) -> tuple[bool, str, int | None, str]:
+        """Read ``(finished, done_value, source_size, model_fingerprint)`` in one query."""
+        rows = dict(
+            db.execute(
+                "SELECT key, value FROM meta WHERE key IN ('done', 'filesize', 'model_fingerprint')"
+            ).fetchall()
+        )
+        done_raw = rows.get("done")
+        done_value = str(done_raw) if done_raw is not None else ""
+        finished = done_value in {"1", "fast"}
+        size_raw = rows.get("filesize")
+        try:
+            source_size = int(size_raw) if size_raw is not None else None
+        except (TypeError, ValueError):
+            source_size = None
+        fingerprint_raw = rows.get("model_fingerprint")
+        stored_fingerprint = str(fingerprint_raw) if fingerprint_raw is not None else ""
+        return finished, done_value, source_size, stored_fingerprint
 
     @staticmethod
     def _read_index_state(db_path: Path) -> tuple[bool, int | None]:
@@ -751,19 +777,11 @@ class Search:
         except sqlite3.Error:
             return False, None
         try:
-            done = db.execute("SELECT value FROM meta WHERE key = 'done'").fetchone()
-            size_row = db.execute(
-                "SELECT value FROM meta WHERE key = 'filesize'"
-            ).fetchone()
+            finished, _done_value, source_size, _fp = Search._read_index_meta(db)
         except sqlite3.Error:
             return False, None
         finally:
             db.close()
-        finished = done is not None and str(done[0]) in {"1", "fast"}
-        try:
-            source_size = int(size_row[0]) if size_row else None
-        except (TypeError, ValueError):
-            source_size = None
         return finished, source_size
 
     def _stale_zim_archive(
@@ -809,7 +827,12 @@ class Search:
                 finished[path.stem] = path
                 recorded_sizes[path.stem] = source_size
 
-        zim_paths = self._scan_zim_paths(refresh=refresh_catalog)
+        catalog = self._ensure_catalog()
+        if refresh_catalog and catalog.zim_dir is not None and catalog.zim_dir.is_dir():
+            if not self._scan_catalog(force=True):
+                return {}
+        records = catalog.rows()
+        zim_paths = self._scan_zim_paths(refresh=False, records=records)
         found: dict[str, tuple[str, Path]] = {}
         for stem, db_path in finished.items():
             scanned = zim_paths.get(stem)
@@ -843,10 +866,18 @@ class Search:
         # UUID, different filename/path) must not appear as two sources. Keep
         # one deterministic copy: readable first, then one that can serve a
         # search, then the larger file, then the shorter path.
-        catalog = self._ensure_catalog()
+        # catalog.rows() is ordered by (stem, size DESC, path ASC), so the first
+        # row per stem is identical to catalog.get_stem(stem).
+        stem_records: dict[str, Any] = {}
+        for record in records:
+            stem_records.setdefault(record.stem, record)
         chosen: dict[str, tuple[tuple, str]] = {}
         for stem, (kind, _path) in found.items():
-            record = catalog.get_stem(stem)
+            record = stem_records.get(stem)
+            if record is None and not records:
+                record = catalog.get_stem(stem)
+                if record is not None:
+                    stem_records[stem] = record
             uuid_value = record.uuid if record is not None else ""
             if not uuid_value:
                 continue
@@ -882,7 +913,7 @@ class Search:
                 )
         keep = {stem for _rank, stem in chosen.values()}
         for stem in list(found):
-            record = catalog.get_stem(stem)
+            record = stem_records.get(stem)
             if record is not None and record.uuid and stem not in keep:
                 del found[stem]
         return found
@@ -963,22 +994,12 @@ class Search:
             return None
 
         try:
-            done = db.execute("SELECT value FROM meta WHERE key = 'done'").fetchone()
-            if not done or str(done[0]) not in {"1", "fast"}:
+            finished, done_value, source_size, stored_fingerprint = (
+                self._read_index_meta(db)
+            )
+            if not finished:
                 db.close()
                 return None
-            done_value = str(done[0])
-            size_row = db.execute(
-                "SELECT value FROM meta WHERE key = 'filesize'"
-            ).fetchone()
-            fingerprint_row = db.execute(
-                "SELECT value FROM meta WHERE key = 'model_fingerprint'"
-            ).fetchone()
-            try:
-                source_size = int(size_row[0]) if size_row else None
-            except (TypeError, ValueError):
-                source_size = None
-            stored_fingerprint = str(fingerprint_row[0]) if fingerprint_row else ""
 
             faiss_index = None
             faiss_path = db_path.with_suffix(".faiss")
@@ -3598,9 +3619,13 @@ class Search:
                     try:
                         entry = archive.get_entry_by_path(doc["path"])
                         try:
-                            entry_size = int(
-                                getattr(entry.get_item(), "size", 0) or 0
-                            )
+                            item = entry.get_item()
+                            entry_size = int(getattr(item, "size", 0) or 0)
+                            if not doc.get("mimetype"):
+                                doc["mimetype"] = (
+                                    getattr(item, "mimetype", None)
+                                    or "application/octet-stream"
+                                ).split(";", 1)[0].strip().lower()
                         except (AttributeError, TypeError, ValueError):
                             entry_size = 0
                         row = read_entry(
@@ -3744,18 +3769,18 @@ class Search:
                 continue
             grouped.setdefault(source.local_name, []).append(result)
 
-        found = False
-        for local_name, result_docs in grouped.items():
+        def enrich_source(local_name: str, result_docs: list[dict[str, Any]]) -> bool:
             index = indexes.get(local_name)
             if index is None:
-                continue
+                return False
             archive = index.ensure_open()
             if archive is None:
-                continue
+                return False
             try:
                 self._acquire_index(index)
             except RuntimeError:
-                continue
+                return False
+            source_found = False
             try:
                 with index.read_lock:
                     for result in result_docs:
@@ -3791,9 +3816,25 @@ class Search:
                         if source_doc is not None:
                             source_doc["_content_phrase"] = hit
                         if hit:
-                            found = True
+                            source_found = True
             finally:
                 self._release_index(index)
+            return source_found
+
+        executor = getattr(self, "_executor", None)
+        found = False
+        if executor is not None and len(grouped) > 1:
+            futures = [
+                executor.submit(enrich_source, local_name, result_docs)
+                for local_name, result_docs in grouped.items()
+            ]
+            for future in as_completed(futures):
+                if future.result():
+                    found = True
+        else:
+            for local_name, result_docs in grouped.items():
+                if enrich_source(local_name, result_docs):
+                    found = True
         return self._rank_results(source_results, query, limit) if found else pool
 
     def _preview(self, text: str) -> str:
