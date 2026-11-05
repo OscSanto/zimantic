@@ -39,6 +39,7 @@ zimantic/indexing/
     locator.py        # provider-scoped index paths
     search.py         # generic local semantic/keyword/native search
     native.py         # NativeSearcher protocol and helper
+    derived.py        # optional captions/OCR/ASR enrichment stage
 
 zimantic/providers/zim/
     entries.py        # ArchiveEntryProducer
@@ -71,10 +72,98 @@ class EntryProducer(Protocol):
   ZIM, or queries Kolibri.
 
 Resume rule: store `source_fingerprint` in `meta` when a build starts. On
-resume, if it differs, discard staging and start over. Verify the same
+resume, if it differs, discard staging and start over. The fingerprint includes
+the enabled derived-text operations and their engine/model identifiers, so
+toggling `captions`, `ocr`, or `asr` rebuilds the index. Verify the same
 fingerprint again immediately before publication; if the source changed during
 the build, discard or retry the build rather than publishing a mixed snapshot.
 Never resume a `meta.next` against a changed item list.
+
+### Derived text enrichment
+
+Native text extraction stays in the existing readers. Derived text is a shared,
+optional stage in `indexing/derived.py` so every provider gets the same policy,
+caching, provenance, and failure handling.
+
+```python
+class DerivedTextInput(Protocol):
+    kind: Literal["captions", "image", "audio", "video"]
+    mimetype: str
+    digest: str            # content identity for the cache
+    size: int
+    def open(self) -> BinaryIO: ...
+
+class DerivedTextProducer(Protocol):
+    def derived_text_inputs(self, index: int) -> Iterable[DerivedTextInput]: ...
+```
+
+- The producer decides which candidate files exist and yields bounded,
+  provider-confined streams. The core decides whether to read them.
+- The hook is provider-neutral: ZIM, files, and Kolibri can implement it, while
+  a provider with no local content bytes (Kiwix) cannot. A provider without the
+  hook is simply not enrichable. ZIM adoption may follow files/Kolibri rather
+  than delaying this phase.
+- Operations are independent and off by default:
+  - `captions = "index"` parses existing subtitle/caption tracks; no model.
+  - `ocr = "tesseract"` extracts text from images and image-only pages.
+  - `asr = "whisper"` transcribes speech from audio/video.
+- The core skips an input kind that the source has not enabled. Prefer native
+  text, then captions, then OCR/ASR, so ASR is skipped when a usable caption
+  track exists and OCR is skipped when a page already has a text layer.
+- Extractors run only during build. Search, previews, and serving never decode
+  media or run a model.
+- OCR and ASR are optional dependency extras. A configured but missing engine or
+  model marks only that operation unavailable for the source; it does not crash
+  the server, fail the whole build, or silently substitute another operation.
+- No network. Models must be provisioned locally before the build.
+- Results are cached by `(operation, engine, model, engine_version, digest)` in
+  a private cache directory and reused across rebuilds. Cache entries are not
+  source identity and may be removed by `zimantic prune`.
+- Provenance: append derived text to `EntryRecord.excerpt` in a deterministic
+  order and record the contributing operations in index metadata and the build
+  report. Optionally expose the per-result contributors as an additive field.
+- Budgets come from the global `[derived_text]` config: caption bytes, OCR
+  pages/pixels/output bytes, ASR media seconds/bytes, and `workers`. A skipped
+  or truncated input is logged once and reported, never invented.
+
+#### Execution model
+
+- Caption parsing is pure Python and cheap. It runs in-process; it does not need
+  a worker pool.
+- OCR and ASR run in a single shared `ProcessPoolExecutor`, created lazily only
+  when an enabled operation needs it. Process isolation contains native engines
+  that are not thread-safe and prevents an engine crash from taking down the
+  build.
+- Worker functions and their arguments must be safe for `spawn` and
+  `forkserver`, not just `fork`. Engine and model objects are created inside
+  the worker, never pickled across the boundary.
+- Prefer the provider-confined regular file path as the worker input. When the
+  content only exists inside an archive or database blob, spool a bounded copy
+  to a private `0600` temp file and remove it after the task. Never send an
+  unbounded byte blob or an arbitrary path to a worker.
+- The pool is shared for the whole build run, not created per source, so
+  `build_workers` cannot multiply model memory.
+- Engine-internal thread counts are set explicitly (normally 1) so process
+  workers do not multiply CPU threads. Parallelism comes from the process pool,
+  not from every worker starting an N-thread BLAS/OpenMP/whisper runtime.
+- `workers = "auto"` is the default and is resource-derived, not
+  `os.cpu_count()`:
+  - `cpu_task_limit = max(1, usable_cores - headroom)`, leaving room for
+    extraction, the embedding pipeline, concurrent source builds, and the OS;
+  - `memory_worker_limit = max(1, usable_memory // per_worker_memory)`, where
+    `usable_memory` is currently available memory (MemAvailable plus cgroup
+    headroom where detectable), not installed RAM, and `per_worker_memory` is
+    the sum of the enabled engines' estimated resident sets plus interpreter
+    overhead;
+  - `workers = max(1, min(cpu_task_limit, memory_worker_limit))`.
+- There is no low fixed cap such as 4. A large host may use more workers when
+  memory allows; a 512 MB–1 GB host such as a Pi Zero 2 W still resolves to 1.
+  An explicit positive integer overrides auto; warn if it exceeds the estimated
+  memory budget but do not silently clamp it. Report the resolved value and the
+  binding limit (`cpu` or `memory`) in the build report.
+- An abrupt engine/worker crash marks that input as failed or skipped and
+  continues the build. Recreate a broken executor rather than failing the
+  source or leaving a half-written index.
 
 ### Index locator
 
@@ -133,7 +222,7 @@ Move `_search_local_locked` and its helpers out of `Search` into
 - Keep the existing `docs` FTS5 schema and rowids for legacy ZIM indexes. New
   Files and Kolibri indexes also use a separate FTS5 `body` table keyed by the
   same rowids, populated from `EntryRecord.excerpt`. This supplies lexical
-  body/transcript search without a native index and avoids rewriting existing
+  body/derived-text search without a native index and avoids rewriting existing
   ZIM `docs` tables. Indexes without `body` remain readable and use their
   existing title/native channels.
 - A normal Files/Kolibri build makes indexed body text searchable through
@@ -208,6 +297,11 @@ borrows it and must never close it independently.
 - [ ] Add `NativeSearcher`; wrap libzim and keep isolation unchanged.
 - [ ] Delete the temporary `Search.indexes`/`catalog` compatibility aliases
       once provider tests pass.
+- [ ] Add the shared derived-text stage with independent `captions`, `ocr`, and
+      `asr` opt-ins, optional engine extras, a digest cache, provenance, and
+      fingerprint inputs.
+- [ ] Add the lazy shared process pool for OCR/ASR with spawn-safe workers,
+      auto worker resolution, bounded temp-file spooling, and crash recovery.
 - [ ] Add a synthetic in-memory producer in tests to prove the pipeline has no
       libzim dependency.
 
@@ -229,6 +323,17 @@ borrows it and must never close it independently.
       title/body keyword, and preview results without importing libzim.
 - [ ] A non-ZIM body-term query returns a lexical result without embeddings or
       a `NativeSearcher`; a fast build is explicitly title/path-only.
+- [ ] Derived text is off by default: caption/image/media inputs are never
+      read. Each operation works alone with a fake engine, records provenance,
+      respects its caps, and reuses the digest cache across rebuilds.
+- [ ] Changing an operation, engine, or model changes the fingerprint and
+      restarts the build.
+- [ ] `workers = "auto"` resolves to 1 on a low-memory host, scales above 4 on
+      a large host when memory allows, and reports whether CPU or memory was
+      binding; an explicit integer overrides it. The OCR/ASR pool is lazy,
+      shared across sources, and not created when those operations are off.
+- [ ] A fake engine that crashes the worker does not fail the build or another
+      source; the task is reported and the executor recovers.
 - [ ] Native fulltext absence yields the same partial status as now.
 - [ ] Concurrent builds and `build_workers` still work under the global lock.
 
@@ -253,3 +358,6 @@ borrows it and must never close it independently.
   tests and avoid rewriting ranking or limits.
 - **FAISS memory on small hosts.** Keep the existing batch/queue behavior; the
   generic pipeline must not add per-provider caches.
+- **Derived-text cost on small hosts.** Engines are opt-in, build-time-only, and
+  capped; `workers = "auto"` resolves to 1 on low-memory hosts; `serve` never
+  loads them.

@@ -17,9 +17,12 @@ re-litigation inside the phase plans:
 
 1. **Kolibri channel = collection.** A channel is not a source. Its searchable
    subtrees/content roots are sources.
-2. **Transcripts are opt-in.** Never transcribe audio or video as part of a
-   normal build. Only index transcript/caption files that already exist, and
-   only when a provider config enables it.
+2. **Derived text is opt-in, operation by operation.** Native text (titles,
+   descriptions, document text) is indexed normally. Text derived from other
+   media is off by default and enabled explicitly per source: `captions` for
+   existing subtitle/caption tracks, `ocr` for images and image-only pages, and
+   `asr` for audio/video speech-to-text. Enabling one never enables another, and
+   no derived-text operation runs unless it is enabled.
 3. **Files: one configured directory = one collection.** Within it, a source is
    the searchable unit and content root. Items (individual files/pages/videos)
    are never sources.
@@ -39,6 +42,7 @@ re-litigation inside the phase plans:
 | Source | The searchable unit and content root. What source filters select and `/content/{source}/{path}` addresses. | Yes |
 | Item | An article, file, content node, video, or other result row. | Yes, as a result |
 | Content store | Path-addressed reader for one source (archive, filesystem tree, Kolibri storage tree). | No |
+| Derived text | Text produced from non-native media during a build: existing caption tracks (`captions`), images (`ocr`), or audio/video (`asr`). Each operation is an independent opt-in. | No |
 
 The scale rule that came out of the earlier `stash@{0}` attempt:
 
@@ -56,7 +60,7 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 03 | [Content stores and serving](03-content-stores-and-serving.md) | 00, 01 | One `/content/{source}/{path}` route for every local content provider |
 | 04 | [Generic index pipeline](04-generic-index-pipeline.md) | 00, 01, 03 | Reusable SQLite/FAISS build and index handles for non-ZIM entries |
 | 05 | [Files provider](05-files-provider.md) | 03, 04 | Configured directories as collections with bounded sources |
-| 06 | [Kolibri provider](06-kolibri-provider.md) | 03, 04 | Channels as collections; content nodes as items; opt-in transcripts |
+| 06 | [Kolibri provider](06-kolibri-provider.md) | 03, 04 | Channels as collections; content nodes as items; opt-in captions/OCR/ASR |
 | 07 | [Collections, API, and UI](07-collections-api-ui.md) | 01–06 | Grouped library and source filters that do not explode |
 | 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers; migration and docs |
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, parity tests, performance, staged release |
@@ -118,8 +122,9 @@ explicitly marked truncated; serving must continue to cover all content.
   with a bounded set of sources, is searchable, and serves its pages/assets
   through the normal content route.
 - A Kolibri installation appears as one collection per channel, searchable by
-  title/description, serving documents, PDFs, HTML5 apps, and media; transcripts
-  are included only when explicitly enabled.
+  title/description, serving documents, PDFs, HTML5 apps, and media; derived
+  text (captions, OCR, or ASR) is included only for the operations explicitly
+  enabled on that source.
 - ZIM and Kiwix behavior, URLs, payload fields, and performance are unchanged
   except for additive metadata.
 - The full test suite passes on Python 3.11–3.14, including new provider
@@ -133,7 +138,10 @@ explicitly marked truncated; serving must continue to cover all content.
 
 - A public plugin marketplace or loading provider code from outside the package.
 - Crawling remote websites or performing live web search.
-- Audio/video transcription (ASR). Transcripts must already exist.
+- Network or hosted OCR/ASR services. Derived-text engines run locally during a
+  build, against models provisioned ahead of time.
+- Implicit enrichment. `captions`, `ocr`, and `asr` are independent opt-ins;
+  selecting an engine does not enable an operation.
 - Kolibri synchronization, content import, or writes to Kolibri's database.
 - Distributed/remote indexing or a shared index server.
 - Replacing libzim, FAISS, or the existing ranking design.

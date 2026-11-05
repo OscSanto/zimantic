@@ -46,7 +46,9 @@ exclude = ["**/node_modules/**", "**/.git/**", "**/__pycache__/**"]
 max_sources = 64
 max_entries = 100000
 max_file_bytes = 268435456
-# transcripts = false            # reserved; files provider has no media ASR
+# captions = "off"               # off | index: existing subtitle/caption tracks
+# ocr = "off"                    # off | tesseract: images and image-only pages
+# asr = "off"                    # off | whisper: audio/video speech-to-text
 ```
 
 Rules:
@@ -141,6 +143,9 @@ Reuse the phase-04 extraction layer:
   the existing text parser can do so without adding a dependency.
 - Skip binaries, assets, empty files, and files above `max_file_bytes`;
   log at debug level.
+- Derived text is off by default. When a source enables `captions`, `ocr`, or
+  `asr`, feed the matching files through the shared phase-04 stage; a sidecar
+  caption file belongs to the media file it names, not to a separate item.
 - `EntryRecord.path` = relative path within the source root (POSIX
   separators). `target` = `None`.
 - Title fallback order: HTML `<title>`, PDF metadata title, first heading,
@@ -208,6 +213,8 @@ setting still applies; document that untrusted file trees should enable it.
       fingerprint.
 - [ ] Add Markdown/plain-text extraction support if not already covered by the
       refactored extractors.
+- [ ] Wire opt-in `captions`, `ocr`, and `asr` to the shared derived-text stage;
+      keep all three off by default.
 - [ ] Implement `FilesContentStore` with confinement, MIME policy, directory
       index handling, icons, and random.
 - [ ] Wire build and index discovery into the runtime.
@@ -240,6 +247,8 @@ modules/
       changing a file fingerprint restarts.
 - [ ] Indexing extracts HTML, PDF, text, and Markdown; skips binaries and
       oversized files.
+- [ ] Derived text is absent by default and no image/media bytes are decoded;
+      enabling `ocr` or `asr` indexes fake-engine output and records provenance.
 - [ ] `/content/<source>/` serves `index.html`; `/assets/style.css` resolves;
       nested pages keep working.
 - [ ] Range requests for `video.mp4` return 206 and correct bytes.
@@ -265,8 +274,9 @@ modules/
 - **Source explosion.** The cap-collapse rule is mandatory and tested.
 - **Untrusted HTML.** Keep the content-shell sandbox, `nosniff`, and attachment
   policy; recommend `secure_browsing = true` for file trees.
-- **Indexing cost.** Bound entries, bytes, and file types; never index assets or
-  media bodies. Start with metadata-only media items (servable, not searchable).
+- **Indexing cost.** Bound entries, bytes, and file types; do not index assets or
+  decode media by default. Media items start servable but not searchable;
+  `ocr`/`asr` are explicit, capped build-time operations.
 - **Resume drift.** Fingerprint the manifest; never resume against a changed
   file list.
 - **MIME confusion.** Prefer extension, then constrained sniffing; never serve

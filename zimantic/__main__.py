@@ -81,6 +81,17 @@ def _device_argument(value: str) -> str:
     return normalized
 
 
+def _precision_argument(value: str) -> str:
+    from .model_files import PRECISIONS
+
+    if value not in PRECISIONS:
+        supported = ", ".join(repr(precision) for precision in PRECISIONS)
+        raise argparse.ArgumentTypeError(
+            f"invalid precision {value!r} (choose from {supported})"
+        )
+    return value
+
+
 def _add_device_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--device",
@@ -252,7 +263,7 @@ def _make_parser() -> argparse.ArgumentParser:
     model_cmd.add_argument(
         "precision",
         nargs="*",
-        choices=("fp32", "fp16", "int8"),
+        type=_precision_argument,
         metavar="PRECISION",
         help=(
             "fp32, fp16 or int8; repeat for several. Default: int8 for CPU; "

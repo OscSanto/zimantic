@@ -40,14 +40,34 @@ type = "kolibri"
 name = "kolibri"
 path = "/library/kolibri"
 label = "Kolibri"
-transcripts = false
+captions = "off"        # off | index: existing caption/subtitle tracks
+ocr = "off"             # off | tesseract: images and image-only pages
+asr = "off"             # off | whisper: audio/video speech-to-text
 
 [[sources]]
 type = "kiwix"
 name = "remote"
 server = "http://localhost:8085"
 label = "Remote Kiwix"
+
+# Engines run locally at build time. This table configures them; it does not
+# enable any operation. Only a source's captions/ocr/asr key can do that.
+[derived_text]
+max_caption_bytes = 1048576
+ocr_languages = ["eng"]
+max_ocr_pages = 20
+max_ocr_pixels = 50000000
+max_ocr_output_bytes = 262144
+asr_model = "base.en"
+max_asr_seconds = 3600
+max_asr_bytes = 1073741824
+workers = "auto"   # "auto" | positive int; auto is CPU/memory-derived, floor 1
+cache = true
 ```
+
+All three operations are off unless a source explicitly names one. `captions`
+accepts only `"off"` or `"index"`; `ocr` and `asr` accept `"off"` or the engine
+name.
 
 ### Rules
 
@@ -75,14 +95,47 @@ label = "Remote Kiwix"
   it in `_typed_user_values`.
 - Do not log absolute `path`/`database`/`storage` values above debug level.
 
+### Derived text
+
+- `captions`, `ocr`, and `asr` are per-source switches, all `off` by default.
+  There is no global "enable enrichment" switch, and enabling one operation
+  never enables another.
+- `captions = "index"` parses existing tracks. `ocr` and `asr` name the engine
+  (`"tesseract"`, `"whisper"`); `[derived_text]` holds only model, language,
+  cache, concurrency, and cap settings.
+- Validate engine names at config load. OCR and ASR are optional dependency
+  extras; a configured engine that is not installed marks only that operation
+  unavailable for the source with a clear error. It must not crash startup or
+  block builds for sources that do not request it.
+- Models are local files or preinstalled packages. Never download at build time
+  and never contact a hosted OCR/ASR service.
+- Include the resolved operations and engine/model/version in the source
+  fingerprint so changing them rebuilds the index.
+- `workers` accepts `"auto"` or a positive integer. Auto is
+  `max(1, min(cpu_task_limit, memory_worker_limit))`, derived from usable cores,
+  currently available memory (including cgroup headroom where detectable), the
+  enabled engines' estimated working set, and headroom for `build_workers` and
+  the embedding pipeline. There is no arbitrary low cap; low-memory hosts
+  resolve to 1, while a large host may use more than 4. An explicit integer is
+  honored with a warning if it exceeds the estimated memory budget.
+- Engine-internal threads are set to 1 by default so process workers do not
+  oversubscribe CPU. Report the resolved worker count and the binding limit in
+  the build report.
+- Caption parsing runs in-process. OCR/ASR use one lazy, shared process pool per
+  build run, not one pool per source. This isolates native engines that are not
+  thread-safe and keeps model memory bounded under concurrent source builds.
+- `zimantic sources` and health report each operation's state
+  (`off`/`ready`/`unavailable`); the build report counts extracted, cached, and
+  cap-skipped inputs per operation.
+
 ### Profiles and defaults
 
 - Provider entries are independent of the hardware profile.
 - Keep `index_dir`, `cache_size`, `build_workers`, `embedding_workers`,
   `batch_size`, search limits, and model settings global.
 - Provider-specific limits (`max_sources`, `max_entries`, `max_file_bytes`,
-  `transcripts`, `source_depth`) default in the provider and may be overridden
-  per entry.
+  `captions`, `ocr`, `asr`, `source_depth`) default in the provider and may be
+  overridden per entry.
 - `enabled_providers` is not needed: a provider is enabled by having at least
   one configured collection. Keep it that way.
 
@@ -223,6 +276,8 @@ Scope:
   - collection/source explanation and the bounded-source rule;
   - index layout and migration note;
   - security note for untrusted file trees (`secure_browsing`);
+  - derived-text section: the three independent opt-ins, local-only engines,
+    optional dependencies, and build-time-only execution;
   - IIAB layout examples (`/library/www/html/modules`, `/library/kolibri`).
 - `CONTRIBUTING.md`:
   - "Adding an in-tree provider" checklist;
@@ -243,6 +298,11 @@ Scope:
 - [ ] Implement legacy shorthand merging for `zim_dir` and `kiwix_server`.
 - [ ] Build a provider configuration registry with per-provider defaults and
       validation functions.
+- [ ] Parse and validate `[derived_text]` plus per-source `captions`, `ocr`,
+      and `asr`; all default off, unknown engines are explicit errors, and
+      missing engines degrade only that operation.
+- [ ] Implement resource-derived `workers = "auto"` resolution (CPU and memory
+      limits, floor 1, no arbitrary low cap) and an explicit integer override.
 - [ ] Refactor `__main__.py`:
       - `_run_build` into a provider-aware orchestrator;
       - add `--provider`, `--collection`, `--source`, `--list`;
@@ -277,6 +337,15 @@ Scope:
       deletes only those.
 - [ ] `reload` picks up a new files directory, a new Kolibri channel, and a new
       ZIM.
+- [ ] `captions`, `ocr`, and `asr` are independently off by default; setting
+      one does not enable the others; a missing engine marks only that operation
+      unavailable and never crashes or blocks other builds.
+- [ ] `workers = "auto"` resolves to 1 on a simulated low-memory host and can
+      exceed 4 on a simulated large host; CPU and memory binding limits are
+      reported. The OCR/ASR pool is lazy and shared, and concurrent source
+      builds do not multiply its size.
+- [ ] Changing a derived-text operation or engine/model changes the fingerprint
+      and forces a rebuild.
 - [ ] Legacy indexes are discovered without a rebuild.
 - [ ] A slow provider does not delay ZIM startup beyond the configured budget.
 

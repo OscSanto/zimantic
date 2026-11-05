@@ -19,6 +19,7 @@ that surface:
 | Kolibri database | malformed/schema-shifted SQLite, duplicate ids, inconsistent file mappings |
 | Kolibri HTML5 apps | zip-slip, asset path escape, executable content |
 | Kolibri media | range abuse, oversized responses, missing files |
+| Derived-text engines | image decompression bombs, oversized/corrupt media, expensive models, untrusted metadata |
 | Kiwix server | existing SSRF/oversized-response/XML risks |
 | Config | absolute paths leaked in API/logs, duplicate collections, unsafe roots |
 
@@ -79,7 +80,13 @@ Keep the roadmap defaults and make them configurable per provider:
 | sources overall | 512 | soft materialization budget; never silently drop sources |
 | entries per source | 500k | indexing truncates only with explicit `truncated`/`indexed_count` metadata |
 | bytes per indexed item | existing `max_entry_bytes` | extraction |
-| transcript bytes | 1 MiB | transcript parser |
+| caption bytes | 1 MiB | caption parser |
+| OCR pages per item | 20 | OCR stage |
+| OCR pixels per page | 50 MP | image decode guard |
+| OCR output bytes | 256 KiB | OCR stage |
+| ASR media per item | 1 h / configured | ASR stage |
+| ASR media bytes | 1 GiB | ASR stage |
+| derived-text workers | `"auto"` (CPU/memory-derived, floor 1) | enrichment scheduler |
 | preview bytes | existing limits | preview hydration |
 | content response | existing `max_article_bytes` | store read |
 | discovery time | 10 s per provider | background publication after deadline |
@@ -89,8 +96,23 @@ Keep the roadmap defaults and make them configurable per provider:
 Additional rules:
 
 - Discovery must never recurse without a cap and exclude list.
-- Indexing a files tree must not parse assets or media bodies.
-- Kolibri must not read video/audio bytes for indexing.
+- Indexing a files tree must not parse assets or media bodies unless the
+  matching derived-text operation is explicitly enabled.
+- By default, Kolibri must not read video/audio/image bytes for indexing. Only
+  an enabled `asr`/`ocr` operation may decode them, under its caps.
+- Derived-text engines run only during builds, never on search, preview, or
+  serving paths. Bound decoded pixels, audio duration, output text, and worker
+  count; reject decode failures and truncated inputs instead of retrying
+  unbounded.
+- Caption parsing is in-process. OCR/ASR run in one lazy, shared process pool so
+  non-thread-safe native engines cannot corrupt each other and one engine crash
+  cannot kill the build. Worker inputs are bounded, spawn-safe, and never
+  arbitrary provider paths.
+- Auto worker resolution is `min(cpu_limit, memory_limit)`, never a fixed
+  `#CPU` or a magic cap. It must account for per-worker model memory, headroom
+  for `build_workers`/embedding/OS, and engine-internal threads (normally set
+  to 1). Concurrent source builds share one pool and cannot multiply model
+  memory.
 - A truncated source must still serve all content; only indexing is truncated.
   Search/API/health output must expose `truncated` and `indexed_count` so
   reduced search coverage is never presented as complete.
@@ -111,6 +133,8 @@ Additional rules:
   without native search must not change that path.
 - A provider must be removable by deleting its config entry; no orphaned
   background thread, open DB, or index handle.
+- An engine/worker crash marks the input as failed or skipped and continues the
+  build. A broken derived-text executor is recreated, not reused indefinitely.
 
 ## Observability
 
@@ -134,7 +158,8 @@ library on a Pi Zero 2 W.
 Required:
 
 - ZIM-only startup time and search latency are unchanged within noise.
-- Adding an unconfigured provider costs zero background work.
+- Adding an unconfigured provider costs zero background work. A derived-text
+  engine that is not enabled costs zero work and is never loaded by `serve`.
 - Adding a files collection with `max_sources` sources does not load file
   contents at startup; discovery is `stat`-only.
 - Kolibri discovery is one bounded DB read; no storage walk at startup.
@@ -142,6 +167,9 @@ Required:
   per-provider budget.
 - FAISS/index memory is still per-open index; do not add per-provider caches
   proportional to item count.
+- A derived-text worker's model memory is counted once per pool worker, not once
+  per source; auto resolution must keep a low-memory host at one worker and
+  scale by memory, not blindly by core count.
 - Preview/cache byte limits remain global and respected for non-ZIM content.
 
 Measure and record:
@@ -183,7 +211,16 @@ Measure and record:
       absent from APIs, errors, and logs; relocating a provider root preserves
       its logical source ID and index locator when its identity is unchanged.
 - [ ] MIME confusion and `nosniff`.
-- [ ] Oversized files, PDFs, transcripts, ranges, and XML.
+- [ ] Oversized files, PDFs, caption files, ranges, and XML.
+- [ ] Derived text off by default: no caption, image, or media bytes are read;
+      fake engines prove each operation is independently opt-in.
+- [ ] OCR/ASR adversarial inputs: decompression bomb, huge dimensions, corrupt
+      codec, over-duration media, missing model, and cap-skipped output.
+- [ ] Auto worker resolution: 1 on a low-memory host, above 4 on a large host
+      when memory allows, correct CPU-vs-memory binding, one shared pool across
+      concurrent source builds, and no pool created when OCR/ASR are off.
+- [ ] A crashing or non-thread-safe fake engine does not fail the build or leak
+      a worker; worker inputs use bounded spooled files, not arbitrary paths.
 - [ ] Malicious/unsupported Kolibri DB schema and duplicate ids.
 - [ ] Untrusted HTML in sandbox/secure mode.
 - [ ] No writes to Kolibri DB or configured content roots.
@@ -216,7 +253,8 @@ Each stage is independently revertible. There is no long-lived branch.
 3. **Files provider (phase 05).** Opt-in by adding `[[sources]] type = "files"`.
    Ship docs and a commented example. No configured files source means no new
    work at startup.
-4. **Kolibri provider (phase 06).** Opt-in by config; transcripts default off.
+4. **Kolibri provider (phase 06).** Opt-in by config; `captions`, `ocr`, and
+   `asr` all default off and are independent.
    Ship a fixture-based integration test and supported-version note.
 5. **Collections UI (phase 07).** Enable grouping and provider filters. Keep
    flat APIs. Ship a migration note for old bookmarked URLs.
@@ -231,7 +269,8 @@ collection is dormant. Do not add a second global "enable providers" switch.
 For a cautious rollout, ship with:
 
 - files and Kolibri examples commented out in `config.toml`;
-- transcript support documented but off;
+- captions/OCR/ASR documented but off, with no engine dependency installed by
+  default;
 - collection grouping behind the normal UI, with a fallback flat view if
   `/collections.json` is unavailable.
 
@@ -268,7 +307,7 @@ For a cautious rollout, ship with:
 - [ ] Version bump and release notes listing new providers, config, and any
       deprecations.
 - [ ] A known-issues note covering supported Kolibri schema versions and
-      transcript limitations.
+      derived-text engine/model limitations.
 
 ## Risks register
 
@@ -294,7 +333,7 @@ The effort is complete when:
    bounded sources, is searchable, and serves pages/assets safely.
 3. A local Kolibri install appears as one collection per channel, with topics
    as sources, searchable documents, servable media/HTML5 apps, and opt-in
-   transcripts.
+   captions/OCR/ASR.
 4. The library and source filters remain usable at scale because items never
    become sources.
 5. The core has no provider-specific branches outside serialization and
