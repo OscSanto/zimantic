@@ -37,8 +37,14 @@ zimantic/providers/zim/
     discovery.py     # catalog + index discovery, source identity
     search.py        # one-source ZIM search (moved from Search)
     serving.py       # thin adapter over content/serving.py (phase 03 removes it)
-    metadata.py      # SourceInfo construction, intent phrases, icons
+    metadata.py      # ZIM metadata extraction, SourceInfo construction, icons
 ```
+
+`zimantic/catalog.py` becomes the provider-neutral `SourceCatalog` storage
+layer. The ZIM provider supplies normalized metadata records to it; the catalog
+schema and `SourceRecord` fields use generic identifiers (including the generic
+`provider` discriminator), with no provider-specific table, index, or column
+names.
 
 ### Collection and source mapping
 
@@ -55,13 +61,122 @@ zimantic/providers/zim/
   `collection_key` / `collection_label` populated.
 - `SourceInfo.intent_phrases` comes from the existing `_intent_phrases`.
 
+### ZIM catalog paths
+
+- Store ZIM records in the shared `sources` table with `provider = "zim"`,
+  `collection_key`, and the existing compatible `source_key`.
+- The composite `(provider, collection_key, source_key)` is the row identity.
+  Keep the canonical absolute archive path in the separate indexed `path`
+  locator column; it is private and is not serialized or logged.
+- Normalize a path when scanning/upserting, then reuse that normalized value
+  for catalog point lookups; avoid repeated filesystem resolution on hot paths.
+- A moved archive updates its `path` locator during catalog refresh. Preserve
+  the existing stem-based index path and source-key collision behavior.
+
+The generic catalog schema replaces the legacy `zims` table and its
+provider-specific indexes. Bump the schema version and transactionally migrate
+the known legacy schema once; do not retain legacy table/column aliases. Keep
+the public ZIM metadata payload unchanged by mapping generic `SourceRecord`
+fields and provider metadata back to the existing `SourceInfo` fields.
+
+| Legacy catalog name | Generic catalog name |
+|---|---|
+| table `zims` | table `sources` |
+| `stem` | `source_name` |
+| `uuid` | `provider_id` |
+| `article_count` | `document_count` |
+| `entry_count` | `item_count` |
+| `counter` | `mime_counts` |
+| `has_fulltext_index` | `native_fulltext_available` |
+| `favicon` / `favicon_mime` | `icon_data` / `icon_mime_type` |
+| `source` | `origin` |
+| `name`, `flavour`, `scraper`, and other provider-only metadata | `provider_metadata` |
+
+Keep genuinely generic fields such as `path`, `size`, `mtime`, `title`,
+`description`, `language`, `tags`, `media_count`, `homepage`, `available`, and
+`last_error`. Name indexes generically (for example, `sources_name` and
+`sources_provider_id`), never `zims_*`.
+
+The target table has generic columns and a composite logical key:
+
+```sql
+CREATE TABLE sources (
+    provider TEXT NOT NULL,
+    collection_key TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    path TEXT,
+    provider_id TEXT NOT NULL DEFAULT '',
+    source_name TEXT NOT NULL DEFAULT '',
+    size INTEGER,
+    mtime REAL,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    long_description TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT '',
+    creator TEXT NOT NULL DEFAULT '',
+    publisher TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    public_tags TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    document_count INTEGER NOT NULL DEFAULT 0,
+    media_count INTEGER NOT NULL DEFAULT 0,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    license TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL DEFAULT '',
+    attribution TEXT NOT NULL DEFAULT '',
+    relation TEXT NOT NULL DEFAULT '',
+    mime_counts TEXT NOT NULL DEFAULT '',
+    homepage TEXT NOT NULL DEFAULT '',
+    native_fulltext_available INTEGER NOT NULL DEFAULT 0,
+    icon_data BLOB,
+    icon_mime_type TEXT NOT NULL DEFAULT '',
+    icon_path TEXT NOT NULL DEFAULT '',
+    available INTEGER NOT NULL DEFAULT 1,
+    last_error TEXT NOT NULL DEFAULT '',
+    scanned_at REAL NOT NULL,
+    provider_metadata TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (provider, collection_key, source_key)
+);
+CREATE INDEX sources_path ON sources(path);
+CREATE INDEX sources_name ON sources(provider, source_name);
+CREATE INDEX sources_provider_id ON sources(provider, provider_id);
+```
+
+`path` is nullable for records without a local filesystem locator and is never
+the logical primary key. `provider_metadata` is JSON for metadata that has no
+provider-neutral typed column; its contents are interpreted only by that
+provider's adapter.
+
+### Catalog schema migration
+
+- Recognize the supported legacy `zims` schema by its version and complete
+  column set. Do not infer a migration from a matching filename alone.
+- In one SQLite transaction, create the generic `sources` table and indexes,
+  copy every legacy row, verify row counts and required metadata, then remove
+  the legacy table/indexes and set the new schema version. Roll back completely
+  on any failure.
+- Map each legacy row to `provider = "zim"` and the legacy ZIM collection;
+  retain its canonical absolute `path` as the private locator. Generate
+  `source_key` using the same stable stem/collision rules as normal discovery,
+  not from the absolute path.
+- Map legacy columns as shown above; preserve icon BLOBs, availability/errors,
+  scan times, and ZIM-only fields in `provider_metadata`. The ZIM adapter
+  continues to expose the existing API field names.
+- Run this migration once. If the catalog is corrupt or has an unsupported
+  schema, rebuild it with a full provider scan. Do not leave a `zims` view or
+  compatibility table in the new schema.
+- The new on-disk schema intentionally replaces the IIAB-compatible layout.
+  Document that external tools expecting the old `zims` table must use their
+  own catalog file.
+
 ### Runtime
 
 ```python
 class ZimRuntime:
     collection: CollectionInfo
     sources: Sequence[SourceInfo]
-    catalog: ZimCatalog
+    catalog: SourceCatalog
     indexes: dict[str, _LocalIndex]
 
     def search(self, source, request) -> SourceResult: ...
@@ -100,7 +215,14 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 ### Discovery and lifecycle
 
 - [ ] Move `_ensure_catalog`, `_scan_catalog`, `_catalog_entries`, and catalog
-      construction into `providers/zim/provider.py`.
+      scanning into the ZIM provider; keep generic SQLite schema/access in
+      `SourceCatalog`.
+- [ ] Replace the `zims` table with the generic `sources` schema in
+      `SourceCatalog`; use the composite logical primary key and a separately
+      indexed canonical `path` locator.
+- [ ] Bump the catalog schema version and add the transactional legacy-schema
+      migration above; remove `zims`-named tables/indexes/columns without
+      changing public ZIM metadata serialization.
 - [ ] Move `_scan_zim_paths`, `_find_zim_path`, `_match_zim_path`, `_scan_catalog`
       calls, and `_discover_local_indexes` into `providers/zim/discovery.py`.
 - [ ] Move `_open_index`, `_open_zim_index`, `_read_index_meta`,
@@ -168,6 +290,14 @@ Add tests that compare pre/post payloads for a fixture library:
 - [ ] A source-key collision logs one warning identifying both archives with
       paths relative to `zim_dir`; paths outside that root use a basename or
       `<unknown>`, never an absolute path.
+- [ ] Catalog lookup uses canonical absolute paths only internally; serialized
+      source/library records contain no filesystem locator.
+- [ ] Migration from the supported legacy catalog preserves all records and
+      public metadata, is atomic/idempotent, and leaves no legacy table or
+      index names; corrupt/unsupported catalogs fall back to a full scan.
+- [ ] The database schema has no `zims` table or `zims_*` indexes, and its
+      provider-neutral column names preserve the existing public ZIM metadata
+      through the provider adapter.
 
 ## Acceptance criteria
 

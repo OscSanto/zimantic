@@ -51,6 +51,9 @@ Rules:
 - The database is opened read-only (`mode=ro`, `PRAGMA query_only=ON`). Never
   write, migrate, vacuum, or checkpoint it.
 - `path`/`database`/`storage` must be local. No network access.
+- These configured paths may be absolute and may be retained as private
+  runtime/catalog locators. They must not be used as collection/source keys or
+  exposed in API payloads, errors, redirects, or logs above debug level.
 - A missing database or storage dir disables the collection with a clear error
   and does not crash startup.
 - Multiple Kolibri installations are allowed via multiple `[[sources]]` entries

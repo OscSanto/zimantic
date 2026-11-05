@@ -102,6 +102,9 @@ Behavior:
 - `icon` may return an archive illustration, a discovered favicon, or `None`.
 - `random_path` is best-effort and bounded; do not scan an entire tree.
 - Implementations must be read-only and thread-safe or documented otherwise.
+- Configured store roots may be absolute and are retained privately by the
+  runtime/store. Request paths remain normalized relative paths; rejecting an
+  absolute request path does not prohibit an absolute configured root.
 
 ### ZIM adapter
 

@@ -37,7 +37,11 @@ return a path it should not.
 - Directory requests never generate listings; only a known index file is
   served.
 - Do not expose absolute paths in API payloads, errors, redirects, logs above
-  debug level, or ETags.
+  debug level, or ETags. This is an exposure rule, not a ban on private local
+  locators: `catalog.sqlite` may store canonical absolute roots internally.
+- Keep any catalog locator separate from provider/collection/source identity;
+  protect the catalog with the same local filesystem permissions as the index
+  directory, and never serialize its path column.
 
 ### MIME and response policy
 
@@ -167,11 +171,17 @@ Measure and record:
 - [ ] Cache key/source selection across collections.
 - [ ] Reload after adding/removing each provider's content.
 - [ ] Legacy config and legacy index fixture upgrade with no rebuild.
+- [ ] Legacy catalog migration is atomic and preserves metadata; the resulting
+      schema is generic, contains no `zims` table/indexes, and does not alter
+      legacy index files.
 
 ### Security/adversarial
 
 - [ ] Traversal: `..`, URL-encoded, double-encoded, backslash, NUL, absolute.
 - [ ] Symlink escape and zip-slip.
+- [ ] Absolute configured roots and private catalog locators are accepted, but
+      absent from APIs, errors, and logs; relocating a provider root preserves
+      its logical source ID and index locator when its identity is unchanged.
 - [ ] MIME confusion and `nosniff`.
 - [ ] Oversized files, PDFs, transcripts, ranges, and XML.
 - [ ] Malicious/unsupported Kolibri DB schema and duplicate ids.

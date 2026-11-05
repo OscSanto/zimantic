@@ -81,13 +81,23 @@ Never resume a `meta.next` against a changed item list.
 Keep existing ZIM files valid:
 
 - ZIM: `<index_dir>/<archive stem>.sqlite` and `.faiss` — unchanged.
-- New providers: `<index_dir>/<provider>/<collection-key>/<source-slug>-<hash>.sqlite`
+- New providers:
+  `<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.sqlite`
   and `.faiss`.
 
 The locator must:
 
 - keep filenames filesystem-safe and collision-free;
-- never embed an absolute path;
+- derive provider index paths from stable logical identity, not the source's
+  absolute path. The configured `index_dir` itself may be absolute; source
+  roots must not appear in generated filenames, source IDs, or public metadata;
+- make every generated component a bounded filesystem-safe slug plus a
+  collision-resistant digest; never use raw collection names or source paths
+  as path components;
+- derive the collection digest from `(provider, collection_key)` and the source
+  digest from `(provider, collection_key, source_key)`;
+- keep `source_fingerprint` out of the locator; content changes reuse the same
+  path and are handled by the fingerprint/resume rules;
 - expose `legacy_paths(source)` for ZIM and `paths(source)` for new providers;
 - be shared by `serve`, `build`, `reload`, cleanup, and health.
 
@@ -213,7 +223,8 @@ borrows it and must never close it independently.
       all keep current behavior.
 - [ ] Model fingerprint/probe mismatch still falls back to lexical search.
 - [ ] Index locator: legacy ZIM paths unchanged; new paths safe, unique, and
-      bounded; no absolute paths.
+      bounded; independent of source-root relocation; no source absolute path
+      in generated filenames or public metadata.
 - [ ] Generic local search over a synthetic producer returns semantic,
       title/body keyword, and preview results without importing libzim.
 - [ ] A non-ZIM body-term query returns a lexical result without embeddings or

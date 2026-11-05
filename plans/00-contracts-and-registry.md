@@ -193,6 +193,21 @@ Keep `mode` exactly as-is for now:
 available (for example, a hand-built test source). Do not expose local
 absolute paths.
 
+### Logical identity and filesystem locators
+
+- Treat `(provider, collection_key, source_key)` as the canonical internal
+  source identity, where `source_key` is `SourceInfo.key`. New provider keys
+  are namespaced and derived from stable collection/source identifiers, never
+  from an absolute filesystem path.
+- Absolute configured roots are valid. Providers may resolve them once and
+  retain the canonical absolute path as a private runtime or catalog locator;
+  it is not part of `SourceInfo`, `content_id`, or any serialized payload.
+- `catalog.sqlite` uses a provider-neutral `sources` table keyed by
+  `(provider, collection_key, source_key)`. Store a canonical absolute path in
+  a separate indexed `path` locator column; it is not part of the key.
+- Path relocation updates the locator, not a provider's stable logical key.
+  Keep filesystem path normalization out of per-query identity resolution.
+
 ### Registry
 
 `zimantic/providers/registry.py`:
@@ -258,6 +273,8 @@ Do **not** route `_search_source` through `provider` yet. Keep the existing
 - `SourceInfo.to_dict()` snapshots for ZIM and non-ZIM values; ensure
   `collection` is always present and `null` when unset, and no absolute path
   leaks.
+- Absolute configured roots are accepted without changing logical source
+  identity; private catalog locators never appear in source serialization.
 - `CollectionInfo.to_dict()` snapshots use the same fields and nullability in
   API, CLI, and SSE serialization.
 - `resolve_source` still matches ZIM `key`, `name`, `book`, `local_name`, and

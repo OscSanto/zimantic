@@ -167,8 +167,20 @@ Scope:
 
 - Legacy ZIM indexes stay at `<index_dir>/<stem>.sqlite` and `.faiss`.
 - New providers use the phase-04 locator's
-  `<index_dir>/<provider>/<collection-key>/<source-slug>-<hash>.*` layout.
+  `<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.*`
+  layout.
 - The phase-04 locator is the only code that computes index paths.
+- `index_dir` may itself be configured as an absolute path. Do not incorporate
+  source-root absolute paths into logical IDs or generated index filenames.
+- `catalog.sqlite` is private local metadata beside `index_dir`. Preserve the
+  resolved absolute `path` as a private indexed locator, separate from the
+  logical primary key `(provider, collection_key, source_key)`. Canonicalize
+  paths at discovery/update time, not repeatedly during search.
+- Migrate the supported legacy `zims` catalog schema transactionally to the
+  generic `sources` schema on first run; retain the catalog filename and
+  metadata, but remove old table/index names. Rebuild only if the legacy
+  schema is corrupt or unsupported. This intentionally ends on-disk
+  compatibility with tools that expect the old IIAB `zims` table.
 - On first run after upgrade:
   - discover legacy ZIM indexes exactly as before; do not migrate or rewrite
     them;
@@ -177,6 +189,8 @@ Scope:
 - Store provider, collection, source key, and content fingerprint in index
   metadata; use them for `sources`, health, and prune, not for changing the
   legacy ZIM layout.
+- Never serialize catalog locators into `sources --json`, HTTP responses, or
+  user-visible errors.
 - Removal/rename of a configured collection does not delete indexes
   automatically. `prune` is the explicit cleanup path.
 

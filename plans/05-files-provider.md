@@ -56,7 +56,11 @@ Rules:
 - `name` must be unique across configured collections. Reject duplicates.
 - Unknown keys in a `[[sources]]` entry warn once and are ignored.
 - The legacy flat `zim_dir` remains a ZIM collection and is unaffected.
-- Do not expose `path` in API payloads or logs above debug level.
+- Absolute configured `path` values are allowed. Resolve the real root once
+  and retain it only as a private runtime/content-store/catalog locator; do not
+  expose it in API payloads, errors, redirects, or logs above debug level.
+- Source and collection keys derive from the configured name and
+  root-relative identifiers, never the absolute root path.
 
 ## Discovery
 
