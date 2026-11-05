@@ -230,6 +230,23 @@ class TextExtractionTests(unittest.TestCase):
         self.assertEqual(len(bounded), 1)
         self.assertNotIn("Navigation", bounded[0])
 
+    def test_bounded_extraction_can_stop_inside_an_open_lower_priority_container(self):
+        # The closed paragraph fills the budget while a non-paragraph container
+        # is still open. That container can only yield lower-priority text, so
+        # stopping early must not change the excerpt.
+        lead = " ".join(f"word{i}" for i in range(120))
+        tail = " ".join(f"tail{i}" for i in range(120))
+        html = (
+            b"<html><body><div>"
+            b"<p>" + lead.encode() + b"</p>"
+            b"<span>" + (b"z" * 9000) + b"</span>"
+            b"<p>" + tail.encode() + b"</p>"
+            b"</div></body></html>"
+        )
+        excerpt = extract_excerpt(html, max_preview_chars=200)
+        self.assertTrue(excerpt.startswith("word0 "))
+        self.assertNotIn("tail", excerpt)
+
     def test_bounded_parse_does_not_stop_before_parallel_translations(self):
         # A lang-* page must still be parsed fully so the lang-default copy wins.
         html = (

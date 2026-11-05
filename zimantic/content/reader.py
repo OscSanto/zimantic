@@ -134,6 +134,11 @@ _HTML_ASSET_PATH = re.compile(
 )
 REFRESH_SCAN_BYTES = 64 << 10
 REFRESH_CONTENT = re.compile(r"^\s*0\s*;\s*url\s*=\s*(.*?)\s*$", re.IGNORECASE)
+# Most pages have no meta refresh at all. A cheap marker test over the scan
+# window avoids running a full HTMLParser over every article just to find out.
+_META_REFRESH_MARKER = re.compile(
+    rb"<meta\b[^>]*\bhttp-equiv\s*=\s*[\"']?\s*refresh\b", re.IGNORECASE
+)
 BOILERPLATE = re.compile(
     r"This article or its section is a stub\."
     r"|You can help by expanding the article\."
@@ -244,8 +249,11 @@ class _MetaRefresh(HTMLParser):
 
 
 def _refresh_url(html: bytes):
+    prefix = html[:REFRESH_SCAN_BYTES]
+    if not _META_REFRESH_MARKER.search(prefix):
+        return None
     parser = _MetaRefresh()
-    parser.feed(html[:REFRESH_SCAN_BYTES].decode("utf-8", "ignore"))
+    parser.feed(prefix.decode("utf-8", "ignore"))
     return parser.url
 
 
@@ -422,15 +430,16 @@ class _TextExtractor(HTMLParser):
         The excerpt is the opening blocks in (priority, order) order, filled to
         ``max_chars``. Once the closed top-priority blocks already sum past that
         budget, no later block can sort before them (top priority is the minimum
-        and order only grows), so the lead alone determines the result. We stop
-        only when every still-open block is already marked nested: an open
-        non-nested container could otherwise still yield a candidate later.
-        Overflow containers are treated as satisfied (they never yield text).
+        and order only grows), so the lead alone determines the result. An open
+        non-nested container with a lower priority cannot displace that lead;
+        only an open top-priority block could, because its earlier order would
+        put it first. Overflow containers never yield text.
         """
         if self._saw_lang or self._priority0_chars < max_chars:
             return False
         return all(
-            block["nested"] or block.get("overflow") for block in self.active
+            block["nested"] or block.get("overflow") or block["priority"] > 0
+            for block in self.active
         )
 
 

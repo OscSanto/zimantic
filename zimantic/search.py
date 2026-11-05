@@ -182,6 +182,11 @@ SELECTIVE_SOURCE_LIMIT = 10
 SELECTIVE_SOURCE_RATIO = 0.35
 DEFAULT_MAX_REMOTE_SOURCES = 100
 MAX_PHRASE_CANDIDATES = 32
+# Previews only need the opening of an article. Reading a bounded prefix keeps
+# a few unusually large pages from dominating search latency; the preview path
+# falls back to the full limit when the prefix has no text at all. Phrase
+# checks deliberately still read the whole article.
+PREVIEW_HTML_BYTES = 32 << 10
 # How long an owner waits for a search slot before reporting busy. A cold
 # search on a Pi can run for several seconds, and a superseded stream can take
 # a moment to release its slot, so a short wait would turn normal queueing into
@@ -277,6 +282,16 @@ def _source_info_from_metadata(
             None if raw_fulltext is None else bool(raw_fulltext)
         ),
     )
+
+
+def _entry_excerpt(row: Any) -> str:
+    """Return an entry record's excerpt, tolerating tuple-shaped test doubles."""
+    if not row:
+        return ""
+    try:
+        return getattr(row, "excerpt", row[2])
+    except (AttributeError, IndexError, TypeError):
+        return ""
 
 
 def _readable_words(text: str) -> Iterator[str]:
@@ -3578,17 +3593,41 @@ class Search:
         previews: dict[str, str] = {}
         try:
             with index.read_lock:
+                preview_bytes = min(self.max_html_bytes, PREVIEW_HTML_BYTES)
                 for doc in docs:
                     try:
                         entry = archive.get_entry_by_path(doc["path"])
+                        try:
+                            entry_size = int(
+                                getattr(entry.get_item(), "size", 0) or 0
+                            )
+                        except (AttributeError, TypeError, ValueError):
+                            entry_size = 0
                         row = read_entry(
                             archive,
                             entry._index,
-                            max_html_bytes=self.max_html_bytes,
+                            max_html_bytes=preview_bytes,
                             max_entry_bytes=self.max_article_bytes,
                             max_preview_chars=self.preview_chars,
                             timeout=DEFAULT_PARSE_TIMEOUT,
                         )
+                        excerpt = _entry_excerpt(row)
+                        if (
+                            not excerpt
+                            and entry_size > preview_bytes
+                            and preview_bytes < self.max_html_bytes
+                        ):
+                            # The bounded prefix had no readable text; fall
+                            # back to the full parser limit for this page.
+                            row = read_entry(
+                                archive,
+                                entry._index,
+                                max_html_bytes=self.max_html_bytes,
+                                max_entry_bytes=self.max_article_bytes,
+                                max_preview_chars=self.preview_chars,
+                                timeout=DEFAULT_PARSE_TIMEOUT,
+                            )
+                            excerpt = _entry_excerpt(row)
                     except (KeyError, OSError, RuntimeError, ValueError) as error:
                         logger.warning(
                             "%s: preview unavailable for %s (%s)",
@@ -3598,10 +3637,6 @@ class Search:
                         )
                         previews[doc["id"]] = ""
                         continue
-                    if row:
-                        excerpt = getattr(row, "excerpt", row[2])
-                    else:
-                        excerpt = ""
                     previews[doc["id"]] = self._preview(excerpt)
         finally:
             self._release_index(index)

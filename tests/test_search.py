@@ -17,6 +17,7 @@ from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult
 from zimantic.search import (
     ArticleUnavailableError,
+    PREVIEW_HTML_BYTES,
     Search,
     SearchBusyError,
     _bounded_catalog_url,
@@ -1195,13 +1196,16 @@ class SearchContractTests(unittest.TestCase):
             with patch(
                 "zimantic.search.read_entry",
                 return_value=(1, "Long page", "one " * 400, "long-page", None),
-            ):
+            ) as read:
                 search._hydrate_results([doc])
         finally:
             search._executor.shutdown(wait=True)
 
         self.assertLessEqual(len(doc["lead"]), 24)
         self.assertTrue(doc["lead"].endswith("one"))
+        self.assertEqual(
+            read.call_args.kwargs["max_html_bytes"], PREVIEW_HTML_BYTES
+        )
 
     def test_preview_hydration_is_bounded(self):
         class _Entry:
