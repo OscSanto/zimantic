@@ -6,7 +6,7 @@ Status: proposed.
 
 Replace archive-specific article serving with a `ContentStore` per source, so
 one set of routes serves ZIM archives, filesystem trees, and Kolibri storage.
-Existing ZIM URLs and behavior must not change.
+URLs use the canonical source key; there is no ZIM-specific URL identity.
 
 ## Current state
 
@@ -24,8 +24,8 @@ Existing ZIM URLs and behavior must not change.
   `/article/{zim}`, `/article/{zim}/{path}`, `/source-icon/{zim}`.
 - `zimantic/web/app.py` — `_content_url`, `_article_url`, `_content_shell`,
   `_decorate_article_bridge`, `_article_content_response`.
-- Result URLs currently use `source.local_name` for ZIM, which is the archive
-  stem, not the date-stripped source `key`. Preserve that.
+- Result URLs use `source.key`. Remove `local_name` and the archive-stem
+  special case.
 
 ## Target shape
 
@@ -43,35 +43,26 @@ zimantic/providers/zim/
 ### Content identity
 
 A source needs one identifier that is stable in URLs and resolves to its
-content root. Add to `SourceInfo`:
-
-```python
-content_id: str = ""   # ZIM archive stem; source key for files/Kolibri
-```
+content root. `SourceInfo.key` is that identifier; do not add a separate
+`content_id`.
 
 Rules:
 
-- ZIM: `content_id = local_name` (archive stem). Existing links keep working.
-- Files/Kolibri: `content_id = source key` (opaque, namespaced, no absolute
-  path). URL helpers percent-encode it as one path segment with
-  `quote_path(content_id, safe='')`; for example, `files:modules:algebra` is
+- `key` is globally unique and namespaced by provider and collection. ZIM keys
+  are `zim:<name>:<stem>`; files and Kolibri keys use their provider prefixes.
+  There is no archive-stem or alias special case.
+- URL helpers percent-encode the key as one path segment with
+  `quote_path(key, safe='')`; for example, `files:modules:algebra` becomes
   `/content/files%3Amodules%3Aalgebra/...`. Keep this encoding consistent in
   generated links, referer parsing, the navigation bridge, and tests.
-- `Search.resolve_content_source(identifier)` matches `content_id`, then
-  `key`, `name`, `book`, `local_name`. Exact matches must be unique among
-  non-ZIM providers; a collision between two new-provider `content_id`s returns
-  a dedicated ambiguity error with a documented 4xx mapping rather than
-  selecting an arbitrary provider. Legacy ZIM `content_id`s (archive stems) keep
-  the existing largest-by-stem precedence instead of becoming errors.
-- New content IDs are stable and namespaced; URL helpers quote them as one
-  path segment. Legacy ZIM IDs remain the archive stem for URL compatibility,
-  so the resolver preserves their existing collision and alias precedence.
-- Route parameter names change from `zim` to `source` internally, but the URL
-  shape stays `/content/{source}/{path}`.
+- `Search.resolve_content_source(identifier)` matches the exact `key` only.
+  There is no `content_id`, alias, or collision-precedence fallback.
+- Route parameter names change from `zim` to `source`; the URL shape stays
+  `/content/{source}/{path}`.
 - Path parameters and referers are decoded exactly once at the HTTP boundary;
   never introduce a second decode of `%3A` or content paths.
-- `SourceInfo.to_dict()` may expose `content_id` as additive metadata; the web
-  UI continues to use `icon_url` and generated links only.
+- `SourceInfo.to_dict()` exposes `key`; the web UI continues to use `icon_url`
+  and generated links only.
 
 ### `ContentStore`
 
@@ -110,7 +101,7 @@ Behavior:
 
 ### ZIM adapter
 
-`ArchiveContentStore` wraps an `Archive` and preserves exactly:
+`ArchiveContentStore` wraps an `Archive` and implements:
 
 - `read_archive_article`, `read_archive_icon`, redirect resolution, MIME
   normalization, size limits, and error types.
@@ -125,28 +116,25 @@ store = self.runtimes[source.collection_key].content_store(source)
 return store.read(path, head_only=..., max_bytes=...)
 ```
 
-If no source matches, keep raising `ArticleSourceNotFoundError` with the same
+If no source matches, raise `ArticleSourceNotFoundError` with the documented
 HTTP status.
 
 ### Routes
 
-- Keep every existing route and response status.
-- Resolve the path parameter through `resolve_content_source`, not a ZIM-only
-  lookup.
-- Generate `/content/{content_id}/...` URLs from `source.content_id`.
-- Keep `/source-icon/{source}` and `/article/{source}/...`.
-- Preserve the referer-based ZIM extraction in
-  `_referer_article_zim` by treating any source content ID as valid; rename it
-  to `_referer_content_id` as part of this migration.
-- Update `zim_icon_url` and `zim_search_available` to resolve by `content_id`
-  (with the existing ZIM aliases as fallbacks), not only `local_name`.
-- Update `random_local_source` to select any available local source with a
-  `content_id` and homepage. `/random` must redirect using that `content_id`,
-  including for Files and Kolibri sources whose `local_name` is `None`.
-- Keep the legacy `/random?zim=...` query name for compatibility, but pass the
-  percent-encoded `content_id` as its value.
+- Use `/content/{source}`, `/article/{source}`, `/source-icon/{source}`, and
+  `/random`.
+- Resolve the path parameter through `resolve_content_source`.
+- Generate `/content/{key}/...` URLs from `source.key`.
+- Rename `_referer_article_zim` to `_referer_source_key` and resolve any source
+  key, not only ZIM.
+- Rename `zim_icon_url` to `source_icon_url` and `zim_search_available` to
+  `source_search_available`; both resolve by exact `key`.
+- `random_local_source` selects any available local source with a homepage.
+  `/random` redirects using that source key, including Files and Kolibri
+  sources.
+- `/random` accepts a `source` query parameter. There is no `zim` parameter.
 - `_decorate_article_bridge` and `_content_shell` remain source-agnostic; only
-  the content ID and base path change.
+  the source key and base path change.
 
 ### Byte ranges (required by later media providers)
 
@@ -157,7 +145,7 @@ Add optional `Range` handling to the raw content response:
 - Read only the requested slice when the store supports it; otherwise read the
   full item subject to `max_article_bytes`.
 - Disable gzip for partial responses.
-- Keep existing full-content ETag/cache behavior.
+- Keep full-content ETag/cache behavior.
 
 This can ship unused in this phase; files and Kolibri media need it.
 
@@ -172,8 +160,8 @@ This can ship unused in this phase; files and Kolibri media need it.
   - reject symlink escapes when following symlinks (default: do not follow);
   - never expose paths outside the configured root in errors, payloads, or
     redirects.
-- HTML is still rendered through the content shell and the existing secure
-  browsing switch. Do not add a second HTML viewer.
+- HTML is rendered through the content shell and the secure browsing switch.
+  Do not add a second HTML viewer.
 
 ## Work items
 
@@ -184,39 +172,36 @@ This can ship unused in this phase; files and Kolibri media need it.
       related path rules there.
 - [ ] Implement `ArchiveContentStore` in `providers/zim/store.py` using the
       existing `content/serving.py` functions.
-- [ ] Add `content_id` to `SourceInfo`; populate it in the ZIM provider.
+- [ ] Use `SourceInfo.key` as the URL identity; do not add a `content_id` field.
 - [ ] Add `Search.resolve_content_source` and replace ZIM-only lookups in
       `read_article`, `read_article_head`, `article_path_exists`,
       `read_source_icon`, `random_article_path`, `random_local_source`.
-- [ ] Add `CollectionRuntime.content_store(source)` to `ZimRuntime`; keep a
-      compatibility adapter for tests that construct `Search` partially.
-- [ ] Update `_result_doc` and the web URL helpers to use `content_id`.
-- [ ] Update routes to resolve any provider source; keep URL shapes.
-- [ ] Update `zim_icon_url`, `zim_search_available`, `random_local_source`,
-      and `/random` to use `content_id` while retaining ZIM alias behavior.
-- [ ] Keep colon-containing IDs percent-encoded in the source path segment and
+- [ ] Add `CollectionRuntime.content_store(source)` to `ZimRuntime`.
+- [ ] Update `_result_doc` and the web URL helpers to use `key`.
+- [ ] Update routes to resolve any provider source by key.
+- [ ] Update `source_icon_url`, `source_search_available`, `random_local_source`,
+      and `/random` to use `key`.
+- [ ] Keep colon-containing keys percent-encoded in the source path segment and
       test generated URLs, route resolution, referers, and the navigation bridge.
 - [ ] Add `Range` support to `_article_content_response`.
 - [ ] Define `Range` behavior precisely: `206` for one valid range, `416` for
       an unsatisfiable range, `HEAD` returns headers without a body, and
-      conditional requests/ETags retain existing full-response semantics.
-- [ ] Keep the old `read_archive_*` functions as deprecated shims that the ZIM
-      store calls; delete them when nothing else imports them.
+      conditional requests/ETags retain full-response semantics.
+- [ ] Delete the old `read_archive_*` functions after moving their logic into
+      the ZIM store; do not leave deprecated shims.
 - [ ] Add content-store contract tests that every local provider with a
-      `ContentStore` must pass; Kiwix remains an external-only provider.
+      `ContentStore` must pass; Kiwix returns `None`.
 
 ## Tests
 
-- [ ] URL parity: every existing `/content` and `/article` URL still returns
-      the same bytes/MIME/status; result URLs are byte-identical for ZIMs.
+- [ ] Canonical-key URLs: every `/content` and `/article` URL returns correct
+      bytes/MIME/status; result URLs use the source key.
 - [ ] Redirect chains, missing entries, too-large entries, invalid paths, and
       assets with unusual filenames.
-- [ ] `/source-icon` still prefers `-/icon`, then homepage links, then
-      illustration.
+- [ ] `/source-icon` prefers `-/icon`, then homepage links, then illustration.
 - [ ] Random article works for indexed and unindexed ZIMs.
 - [ ] Range: full, prefix, suffix, out-of-range, multiple ranges, HEAD.
-- [ ] A source with no content store returns the same 404/error shape as an
-      unknown ZIM today.
+- [ ] A source with no content store returns the documented 404/error shape.
 - [ ] Traversal tests: `..`, encoded separators, backslashes, NUL, absolute
       paths, symlink escape (for the filesystem store in phase 05).
 - [ ] Concurrent reads and reload/close do not race; runtime ownership is
@@ -227,17 +212,18 @@ This can ship unused in this phase; files and Kolibri media need it.
 - `python -m pytest` passes, including the new content-store contract suite.
 - No route contains ZIM-specific lookup logic.
 - No provider-specific URL prefix exists.
-- Existing ZIM article links, redirects, assets, and homepages are unchanged.
+- Every local provider's articles, redirects, assets, and homepages are served
+  through the canonical source key.
 - The raw response supports byte ranges without changing full-response
   caching or compression semantics.
 
 ## Risks and mitigations
 
-- **URL breakage.** Preserve `content_id = local_name` for ZIM and add tests
-  that assert exact result URLs.
+- **URL churn.** Canonical keys replace archive stems. Update generated links,
+  bookmarks documentation, and tests; do not keep a stem fallback.
 - **Range/compression bugs.** Test `Range` against full, partial, and
   conditional requests. Do not gzip partial bodies.
 - **Path traversal.** Centralize normalization and add adversarial tests before
   landing the filesystem store.
-- **Thread safety.** Document each store's guarantees; ZIM stores already rely
-  on libzim entry reads being thread-safe and a courtesy `read_lock`.
+- **Thread safety.** Document each store's guarantees; ZIM stores rely on libzim
+  entry reads being thread-safe and a courtesy `read_lock`.

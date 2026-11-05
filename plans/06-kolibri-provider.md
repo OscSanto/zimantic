@@ -115,7 +115,7 @@ docstring.
 - Source label: topic title. Source title may include the channel title for
   disambiguation.
 - Source `homepage`: the topic node's first browsable child, or `None`.
-- `content_id` = source key; paths inside it address only nodes/files belonging
+- `key` = source key; paths inside it address only nodes/files belonging
   to that source.
 - Caps:
   - if sources exceed `max_sources`, collapse to one source covering the whole
@@ -194,7 +194,7 @@ another.
 ## Content store
 
 `KolibriContentStore` maps a synthetic path to a local file or HTML5 entry.
-The source-level `content_id` is the URL root; node identifiers are deliberately
+The source-level `key` is the URL root; node identifiers are deliberately
 named separately:
 
 - `node/<node_id>` — a document/PDF/plain file, HTML5 entry page, or media
@@ -212,7 +212,7 @@ Handling:
   - support both extracted app directories and zipped apps if the installed
     Kolibri version uses them;
   - resolve the entry file from the DB or the zip manifest;
-  - serve relative assets under the same `content_id`;
+  - serve relative assets under the same source key;
   - never traverse outside the app's extracted directory or zip.
 - Missing local files: `ArticleNotFoundError` for reads; mark the node
   unavailable during discovery. Do not return a different node's bytes.
@@ -254,14 +254,14 @@ Handling:
       opt-in `ocr`/`asr` through the shared derived-text stage.
 - [ ] Implement `KolibriContentStore`, including HTML5 asset resolution and
       media ranges.
-- [ ] Add source metadata: `provider`, `collection`, `content_id`,
-      `searchable`, `available`, `article_count`, `indexed_count`,
-      `truncated`, `media_types` (derived from the indexed manifest).
+- [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
+      `available`, `article_count`, `indexed_count`, `truncated`, `media_types`
+      (derived from the indexed manifest).
 - [ ] Document supported Kolibri versions and the read-only guarantee.
 - [ ] Add a annotated example config for IIAB's `/library/kolibri` layout.
 - [ ] Define `--collection` selection for a multi-channel installation:
-      an exact collection key selects one channel; the configured `name`
-      (or `kolibri:<name>` alias) selects every channel from that entry.
+      an exact collection key selects one channel. Selecting a configured entry
+      name resolves all of its channels; do not add a separate alias string.
 
 ## Tests
 

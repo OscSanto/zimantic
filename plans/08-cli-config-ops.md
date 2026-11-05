@@ -6,7 +6,7 @@ Status: proposed.
 
 Make multiple providers configurable and operable: one config schema, one build
 command that covers every provider, one source/collection inspection command,
-and a predictable index layout that keeps existing ZIM installations working.
+and one index layout for every provider.
 
 ## Config schema
 
@@ -17,14 +17,10 @@ array-of-tables, so it needs explicit handling.
 ### Shape
 
 ```toml
-# Legacy shorthand, still accepted and unchanged.
-zim_dir = "./zims"
-kiwix_server = ""
-
-# Explicit providers. Multiple entries are allowed.
+# Collections. Multiple entries are allowed. There are no flat provider keys.
 [[sources]]
 type = "zim"
-name = "zim"
+name = "library"
 path = "./zims"
 label = "ZIM files"
 
@@ -78,13 +74,11 @@ name.
   checks `type`, `name`, and duplicate names.
 - Phase 00 defines a normalized provider-entry interface so provider phases can
   validate entries without parsing TOML themselves. Phase 05 introduces the
-  minimal TOML `[[sources]]` parser for the first non-ZIM provider; this phase
+  `[[sources]]` TOML parser for the first non-ZIM provider; this phase
   generalizes it to every provider and owns the full config loader.
-- Legacy `zim_dir` creates the default `zim` collection unless an explicit
-  `[[sources]] type = "zim"` already uses the same resolved path; in that case
-  warn and skip the legacy shorthand to avoid duplicate sources.
-- Legacy `kiwix_server` creates the default `kiwix` collection unless an
-  explicit Kiwix entry uses the same server.
+- Every collection, including ZIM and Kiwix, requires an explicit `[[sources]]`
+  entry. There is no `zim_dir` or `kiwix_server` shorthand and no implicit
+  default collection.
 - An invalid provider entry, including an unknown provider type, logs a single
   clear error and marks that collection unavailable. It must not prevent the
   server from starting or other providers from working. Invalid TOML remains
@@ -149,17 +143,8 @@ Current commands: `serve`, `build`, `reload`, `model`.
 
 ### `build`
 
-Backward compatibility:
-
-- `zimantic build` with no paths still builds every ZIM under `zim_dir` (and any
-  explicit ZIM collections).
-- `zimantic build <path>...` still treats paths as ZIM files/folders,
-  recursively, exactly as today.
-
-New behavior:
-
 ```bash
-zimantic build                     # all configured providers
+zimantic build                     # all configured collections
 zimantic build --provider files    # only files collections
 zimantic build --collection modules
 zimantic build --source files:modules:algebra
@@ -171,16 +156,16 @@ zimantic build --list              # show what would be built; no work
   When one entry expands to multiple collections (Kolibri channels), the entry
   name selects all of its collections; do not resolve this by an ambiguous
   string-prefix match.
-- Provider builds run under the existing global `BuildLock`; do not run one
-  lock per provider.
-- ZIM builds keep `--workers`, `-j`, `--wait-stable`, `--no-wait-lock`,
-  `--lock-timeout`, `--fast`, `--force`, and `--device`.
-- For non-ZIM providers, `--fast` means title/path-only indexing; `--force`
-  rebuilds; `--wait-stable` is a no-op (there is no download handoff).
+- There are no positional path arguments. Build only configured collections;
+  use `zimantic open` to browse an unconfigured archive without indexing it.
+- Provider builds run under the global `BuildLock`; do not run one lock per
+  provider.
+- `--workers`, `-j`, `--lock-timeout`, `--no-wait-lock`, `--fast`, `--force`,
+  and `--device` apply to every provider where meaningful. `--fast` means
+  title/path-only indexing; `--force` rebuilds.
 - The shared `EmbeddingPipeline` remains global; provider workers submit into
   it.
-- Report per-source failures at the end and exit non-zero if any failed,
-  matching today's ZIM behavior.
+- Report per-source failures at the end and exit non-zero if any failed.
 
 ### `sources`
 
@@ -215,37 +200,31 @@ Scope:
 
 ### `serve` and `reload`
 
-- `serve` warning changes from "no local ZIM sources" to "no searchable
-  sources" while mentioning the configured providers.
+- `serve` warns "no searchable sources" while mentioning the configured
+  providers.
 - `reload` rescans all providers, not only ZIM.
-- Keep SIGHUP and PID-file behavior unchanged.
+- Keep SIGHUP and PID-file behavior.
 
 ## Index layout and catalog rebuild
 
-- Legacy ZIM indexes stay at `<index_dir>/<stem>.sqlite` and `.faiss`.
-- New providers use the phase-04 locator's
+- Every provider uses the phase-04 locator's
   `<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.*`
-  layout.
+  layout. There is no ZIM-only path exception.
 - The phase-04 locator is the only code that computes index paths.
 - `index_dir` may itself be configured as an absolute path. Do not incorporate
   source-root absolute paths into logical IDs or generated index filenames.
-- `catalog.sqlite` is private local metadata beside `index_dir`. Preserve the
+- `catalog.sqlite` is private local metadata beside `index_dir`. Keep the
   resolved absolute `path` as a private indexed locator, separate from the
-  logical primary key `(provider, collection_key, source_key)`. Canonicalize
-  paths at discovery/update time, not repeatedly during search.
-- Detect a pre-change `zims` catalog as stale (schema version 5 → 6) and rebuild
-  it into the generic `sources` schema with a full provider scan on first run;
-  retain the catalog filename but remove old table/index names. Do not migrate
-  rows in place. This intentionally ends on-disk compatibility with tools that
-  expect the old IIAB `zims` table, which was never Zimantic's layout anyway.
-- On first run after upgrade:
-  - discover legacy ZIM indexes exactly as before; do not migrate or rewrite
-    them;
-  - create provider subdirectories lazily;
-  - ignore unknown files and stale `.tmp`/`.upgrade` files except in `prune`.
+  logical primary key `key`. Canonicalize paths at discovery/update time, not
+  repeatedly during search.
+- Bump the catalog schema version. A catalog with any other version is deleted
+  and rebuilt by a full provider scan. Do not detect, migrate, or alias old
+  tables.
+- Ignore unknown files and stale `.tmp`/`.upgrade` files except in `prune`.
+  Old index files are not discovered; they are removed by `prune` after the
+  operator rebuilds configured collections.
 - Store provider, collection, source key, and content fingerprint in index
-  metadata; use them for `sources`, health, and prune, not for changing the
-  legacy ZIM layout.
+  metadata; use them for `sources`, health, and prune.
 - Never serialize catalog locators into `sources --json`, HTTP responses, or
   user-visible errors.
 - Removal/rename of a configured collection does not delete indexes
@@ -266,7 +245,7 @@ Scope:
   increasing snapshot version. Closing a provider cancels or joins all
   background work before releasing its database/store handles.
 - Apply a per-provider search-task budget so one provider cannot occupy all
-  `search_workers`. Keep the global search slot and cache behavior unchanged.
+  `search_workers`. Keep the global search slot and cache behavior.
 - `max_sources`/`max_entries` caps apply to discovery and indexing; serving a
   file does not require it to be indexed.
 - Health reports per-collection counts, errors, and whether discovery is still
@@ -297,10 +276,11 @@ Scope:
 
 ## Work items
 
-- [ ] Generalize `settings.py` from the phase-05 minimal `[[sources]]` parser to
-      a list of tables for every provider; validate `type`/`name`/duplicates and
+- [ ] Generalize `settings.py` from the phase-05 `[[sources]]` parser to a list
+      of tables for every provider; validate `type`/`name`/duplicates and
       delegate provider keys.
-- [ ] Implement legacy shorthand merging for `zim_dir` and `kiwix_server`.
+- [ ] Remove flat `zim_dir`/`kiwix_server` handling; all collections require an
+      explicit `[[sources]]` entry.
 - [ ] Build a provider configuration registry with per-provider defaults and
       validation functions.
 - [ ] Parse and validate `[derived_text]` plus per-source `captions`, `ocr`,
@@ -320,19 +300,18 @@ Scope:
 - [ ] Add per-provider search budgets.
 - [ ] Add unit tests for config validation and CLI argument handling.
 - [ ] Update `config.toml`, `README.md`, `CONTRIBUTING.md`, and `deploy/`.
-- [ ] Add an upgrade test starting from a pre-change `index_dir` and
-      `config.toml`.
+- [ ] Add a migration test showing that an old config, catalog, or index layout
+      is not read and that the documented rebuild path works.
 
 ## Tests
 
-- [ ] Config: legacy-only config behaves exactly as today; `[[sources]]`
-      entries parse; duplicate names, unknown types, bad types, and missing
-      `path` produce clear warnings and do not crash.
-- [ ] Legacy shorthand + explicit entry for the same path does not duplicate
-      sources.
+- [ ] Config: `[[sources]]` entries parse; duplicate names, unknown types, bad
+      types, and missing `path` produce clear warnings and do not crash. Flat
+      `zim_dir`/`kiwix_server` keys are unknown and never create collections.
 - [ ] `build` no-arg builds all configured providers; `--provider`,
       `--collection`, and `--source` filter correctly; `--list` does no work.
-- [ ] `build <path>` remains ZIM-only and recursive.
+- [ ] Positional build paths are rejected with a clear message pointing at
+      configured collections and `zimantic open`.
 - [ ] Build failures for one provider/source do not block the others; exit
       code is non-zero.
 - [ ] `sources --json` has no absolute paths, uses the same collection/source
@@ -351,7 +330,7 @@ Scope:
       builds do not multiply its size.
 - [ ] Changing a derived-text operation or engine/model changes the fingerprint
       and forces a rebuild.
-- [ ] Legacy indexes are discovered without a rebuild.
+- [ ] Old-format indexes are ignored; `prune` can remove them after a rebuild.
 - [ ] A slow provider does not delay ZIM startup beyond the configured budget.
 
 ## Acceptance criteria
@@ -359,16 +338,17 @@ Scope:
 - One `config.toml` can describe ZIM, files, Kolibri, and Kiwix collections.
 - `zimantic build`, `serve`, `reload`, `sources`, and `prune` work with a mixed
   library.
-- Existing ZIM-only installs need no config or index changes.
+- Every ZIM-only install is migrated by adding a `[[sources]]` entry and
+  rebuilding its indexes.
 - Documentation contains a copy-pasteable IIAB example for each local provider.
 - `python -m pytest` passes.
 
 ## Risks and mitigations
 
-- **Config ambiguity.** Keep legacy shorthands and explicit entries additive,
-  with duplicate detection; never silently create two collections for one root.
-- **CLI behavior change.** Preserve no-arg and path-argument ZIM semantics;
-  document provider flags clearly.
+- **Config ambiguity.** One schema only; there are no legacy shorthands to
+  merge with explicit entries. Duplicate `name` values are rejected.
+- **CLI behavior change.** There are no positional build paths. Document the
+  configured-collection and `open` workflows.
 - **Startup regressions.** Background discovery for slow providers and a hard
   time budget for synchronous ones.
 - **Deleting user data.** `prune` is opt-in, scoped to known index files, and

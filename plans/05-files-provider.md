@@ -62,7 +62,8 @@ Rules:
   with an error, it does not crash startup.
 - `name` must be unique across configured collections. Reject duplicates.
 - Unknown keys in a `[[sources]]` entry warn once and are ignored.
-- The legacy flat `zim_dir` remains a ZIM collection and is unaffected.
+- There is no flat `zim_dir` key; every collection, including ZIM, is declared
+  with `[[sources]]`.
 - Absolute configured `path` values are allowed. Resolve the real root once
   and retain it only as a private runtime/content-store/catalog locator; do not
   expose it in API payloads, errors, redirects, or logs above debug level.
@@ -110,10 +111,10 @@ For `granularity = "collection"`:
 
 ### Source metadata
 
-- `SourceInfo.provider = "files"`, `content_kind = "filesystem"`,
-  `mode = "local"`, `collection_key`, `collection_label`.
-- `name` = stable source slug; `title` = display label (directory name).
-- `content_id` = source key.
+- `SourceInfo.provider = "files"`, `collection_key`, `collection_label`. There
+  is no `content_kind` or `mode`.
+- `key` is the canonical source identity and URL identity.
+- `title` = display label (directory name).
 - `searchable` = an index exists for this source; files have no native
   full-text fallback.
 - `available` = the root/directory is readable.
@@ -194,8 +195,8 @@ Create `providers/files/store.py` implementing `ContentStore`.
 - Random: choose from the indexed manifest when present; otherwise sample
   shallowly without walking a huge tree on every request.
 
-HTML pages are rendered through the existing article shell. Relative links and
-assets resolve under the same `content_id`. The global `secure_browsing`
+HTML pages are rendered through the article shell. Relative links and
+assets resolve under the same source key. The global `secure_browsing`
 setting still applies; document that untrusted file trees should enable it.
 
 ## Library and search behavior
@@ -206,7 +207,7 @@ setting still applies; document that untrusted file trees should enable it.
   cannot show them all, group under the collection rather than truncating
   silently.
 - Results: `source` = source display title, `source_key` = source key,
-  `path` = relative path, `url` = `/content/<content_id>/<path>`.
+  `path` = relative path, `url` = `/content/<key>/<path>`.
 - Previews: read through the content store; never open files without the root
   confinement check.
 
@@ -228,9 +229,9 @@ setting still applies; document that untrusted file trees should enable it.
       index handling, icons, and random.
 - [ ] Wire build and index discovery into the runtime, including the
       `zimantic build` entry point for configured files collections.
-- [ ] Add source metadata: `provider`, `collection`, `content_id`,
-      `searchable`, `homepage`, `article_count`, `indexed_count`, `truncated`,
-      `media_types` (derived from the indexed manifest).
+- [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
+      `homepage`, `article_count`, `indexed_count`, `truncated`, `media_types`
+      (derived from the indexed manifest).
 - [ ] Document a recommended `/library/www/html/modules` configuration and the
       `granularity` trade-off in `README.md`.
 - [ ] Add a files-provider example to `config.toml` (commented out by default).
@@ -260,7 +261,7 @@ modules/
       oversized files.
 - [ ] Derived text is absent by default and no image/media bytes are decoded;
       enabling `ocr` or `asr` indexes fake-engine output and records provenance.
-- [ ] `/content/<source>/` serves `index.html`; `/assets/style.css` resolves;
+- [ ] `/content/<key>/` serves `index.html`; `/assets/style.css` resolves;
       nested pages keep working.
 - [ ] Range requests for `video.mp4` return 206 and correct bytes.
 - [ ] Traversal and symlink-escape requests return 404, never outside bytes.

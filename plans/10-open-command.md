@@ -27,8 +27,8 @@ PID files, or locks behind.
    `catalog.sqlite`, `zimantic.pid`, or build lock.
 2. **Explicit scope.** Only the ZIMs named on the command line (after folder
    expansion) are discoverable, searchable, and visible through `/sources`,
-   `/library.json`, random-article links, and search. The configured `zim_dir`
-   and Kiwix catalog are ignored.
+   `/library.json`, random-article links, and search. The configured
+   collections and Kiwix catalogs are ignored.
 3. **Loopback only.** The server binds `127.0.0.1`. The default port is chosen
    by the OS (`0`); `--port` may pin one. There is no authentication, so `open`
    must not expose the server to a network.
@@ -36,22 +36,23 @@ PID files, or locks behind.
    arguments. Previous/next wrap around and open the adjacent ZIM's homepage.
 5. **Dedicated switch controls.** The existing left/right arrows remain the
    search-result and parent-page navigation controls. ZIM switching gets its
-   own arrow group so search navigation keeps working unchanged.
-6. **No build step.** A finished per-ZIM SQLite/FAISS index under `index_dir` is
-   reused when it matches the selected archive. Otherwise the archive's native
-   full-text index is used, exactly as `serve` does. A ZIM with neither remains
-   readable and navigable but is not searchable; log that once.
+   own arrow group so search navigation remains independent.
+6. **No build step.** A finished source index at the phase-04 locator under
+   `index_dir` is reused when it matches the selected archive. Otherwise the
+   archive's native full-text index is used, exactly as `serve` does. A ZIM
+   with neither remains readable and navigable but is not searchable; log that
+   once.
 7. **Normal `serve` does not grow a ZIM switcher.** The navigation order exists
    only in an `open` process.
 
 ## Current state
 
 - `zimantic/__main__.py` has `serve`, `build`, `reload`, and `model`.
-  `_collect_zims` already expands files and folders, but defaults to `zim_dir`
-  and `serve` always scans the configured library.
+  `_collect_zims` already expands files and folders, but defaults to the
+  configured ZIM collection and `serve` always scans every configured library.
 - `Search.__init__` builds its source set from every finished index under
-  `index_dir` plus every ZIM under `zim_dir`; `ZimCatalog.scan()` walks the whole
-  tree.
+  `index_dir` plus every ZIM in the configured collections; `ZimCatalog.scan()`
+  walks the whole tree.
 - `web/app.py:serve()` always writes `zimantic.pid`, binds `0.0.0.0`, starts the
   Kiwix catalog refresh, and installs SIGHUP reload/restart handlers.
 - `web/app.py:_article_toolbar()` already has result-context and parent-link
@@ -102,9 +103,9 @@ zimantic open zims/a.zim --debug
 - Duplicate resolved paths are removed.
 - File arguments keep their command-line order. Folder arguments contribute
   their ZIMs in `iter_zim_files` order (sorted, recursive).
-- If two selected files share a stem (the index identity), reuse the `build`
-  policy: keep the largest copy and log a warning. The surviving file occupies
-  the position of the first occurrence in the expanded list.
+- If two selected files share a stem, reuse the `build` policy: keep the
+  largest copy and log a warning. The surviving file occupies the position of
+  the first occurrence in the expanded list.
 - More than `--max-sources` archives is a usage error that suggests
   `zimantic serve` for a whole library.
 - The first *available* source in that order is the initial browser URL. If
@@ -113,7 +114,7 @@ zimantic open zims/a.zim --debug
 ### Output and lifetime
 
 Before serving, print the expanded source count. After the socket is listening,
-print the actual local URL and the initial `/content/<zim>/` URL. The browser
+print the actual local URL and the initial `/content/<key>/` URL. The browser
 opens only after the server accepts requests.
 
 The process runs until Ctrl-C or `SIGTERM`, then calls `Search.close()`. It does
@@ -126,23 +127,25 @@ startup failures return 1.
 ### Source scope
 
 Add an explicit scope to the local ZIM runtime instead of faking a temporary
-`zim_dir` with symlinks:
+collection with symlinks:
 
 ```python
 @dataclass(frozen=True)
 class ZimOpenScope:
     paths: tuple[Path, ...]       # resolved, ordered
-    order: tuple[str, ...]        # source local names / stems, same order
+    order: tuple[str, ...]        # source keys, same order
 ```
 
+The scope uses collection key `zim:open` and source keys `zim:open:<stem>`.
 `Search` accepts an optional scope. When present:
 
 - `ZimCatalog` is created in memory (`db_path=None`) and populated with only
   the scoped archives. Add `ZimCatalog.scan_paths(paths)` that upserts those
-  files without walking `zim_dir` and without deleting unrelated rows.
-- `_discover_local_indexes` considers only `<index_dir>/<stem>.sqlite` for
-  scoped stems. It applies the existing finished/size/staleness checks and
-  never opens or validates indexes for other ZIMs.
+  files without walking configured collections and without deleting unrelated
+  rows.
+- `_discover_local_indexes` considers only the indexes for scoped source keys
+  via the phase-04 locator. It applies the finished/size/staleness checks and
+  never opens or validates indexes for other sources.
 - `_scan_zim_paths`, library rows, `source_dicts`, and random-source selection
   resolve only scoped archives.
 - Kiwix catalog refresh is disabled.
@@ -170,8 +173,8 @@ Refactor the current `serve()` rather than copying it:
 
 - Accept host, port, an optional PID path (or `None`), and an optional
   "listening" callback.
-- Keep the existing `serve` defaults: `0.0.0.0`, configured port, PID file,
-  SIGHUP behavior, and Kiwix refresh.
+- Keep the `serve` defaults: `0.0.0.0`, configured port, PID file, SIGHUP
+  behavior, and Kiwix refresh.
 - For `open`, pre-bind a `127.0.0.1` socket, pass it to `uvicorn.Server`, and
   read the actual port from the bound socket. This avoids a free-port race and
   gives a reliable URL for `webbrowser.open`.
@@ -188,11 +191,11 @@ Refactor the current `serve()` rather than copying it:
 ```python
 @dataclass(frozen=True)
 class SourceNavigation:
-    local_name: str
+    key: str
     title: str
 
 def source_neighbors(
-    self, local_name: str
+    self, key: str
 ) -> tuple[SourceNavigation, SourceNavigation] | None:
     """Previous and next available scoped sources, wrapping at both ends."""
 ```
@@ -203,11 +206,11 @@ def source_neighbors(
 - Only unavailable archives are skipped.
 - Fewer than two available sources returns `None`; the toolbar renders no
   switcher.
-- `content_shell_response` passes the previous/next source names, titles, and
+- `content_shell_response` passes the previous/next source keys, titles, and
   homepage URLs into `_content_shell` / `_article_toolbar`.
 - The switcher is present on normal article shells and on error shells for a
   selected source, so a bad article does not strand the reader.
-- URLs use the normal `/content/<zim>/` route and `web_base_path` helpers. They
+- URLs use the normal `/content/<key>/` route and `web_base_path` helpers. They
   do not expose filesystem paths.
 
 ### Markup and behavior
@@ -252,8 +255,8 @@ order.
 
 - [ ] Add `open` to `_make_parser` with the options above and require at least
       one positional path.
-- [ ] Extract ordered path expansion and the stem-dedup rule from `build` so
-      `open` and `build` agree on what a folder means.
+- [ ] Extract ordered path expansion and the stem-dedup rule into an `open`
+      helper.
 - [ ] Add `ZimOpenScope` and the in-memory/scoped catalog path.
 - [ ] Implement `ZimCatalog.scan_paths(paths)` and ensure it never deletes
       persistent rows.
@@ -262,8 +265,7 @@ order.
 - [ ] Add `Search.source_neighbors()` and expose the ordered source set to the
       content-shell route.
 - [ ] Refactor `web/app.py:serve()` into a shared server runner with optional
-      host, port, PID path, and startup callback; preserve all `serve`
-      defaults.
+      host, port, PID path, and startup callback; keep the `serve` defaults.
 - [ ] Implement `_run_open`: scope construction, in-memory catalog, server
       runner, URL printing, browser launch, signal handling, and cleanup.
 - [ ] Add the source-switch group to `_article_toolbar`, and wire it through
@@ -293,7 +295,7 @@ order.
 - [ ] `/sources`, `/library.json`, `/search`, `/search/stream`, and
       `/random?zim=` see only the selected ZIMs even when `index_dir` contains
       indexes for other archives.
-- [ ] The configured `zim_dir` is never scanned; `kiwix_server` is never
+- [ ] The configured collections are never scanned; no Kiwix collection is
       contacted.
 - [ ] A matching finished index is reused; a stale or missing index falls back
       to native full-text; a ZIM with no index at all still serves articles.
@@ -305,7 +307,7 @@ order.
 ### Server and browser
 
 - [ ] Port `0` produces a real bound loopback port, and `webbrowser.open`
-      receives the first available `/content/<zim>/` URL exactly once after the
+      receives the first available `/content/<key>/` URL exactly once after the
       server is ready (patch the browser call in tests).
 - [ ] `--no-browser` never calls `webbrowser.open`.
 - [ ] A browser-launch failure leaves the server running and printable.
@@ -335,7 +337,8 @@ order.
   left/right ZIM arrows switch between their homepages in both directions.
 - Every terminal stop leaves the user's catalog, indexes, PID file, and locks
   untouched.
-- `zimantic serve`, its config, and its API payloads are unchanged.
+- `zimantic serve` uses its persistent catalog and configured collections;
+  `open` touches no persistent state.
 - The command works with a prebuilt index, with a native-fulltext-only ZIM, and
   with a ZIM that has neither (readable but not searchable).
 - `python -m pytest` and the JavaScript tests pass.
@@ -347,8 +350,8 @@ order.
 - **Ephemeral writes user state.** Use an in-memory catalog, read-only index
   handles, no PID file, and no build lock; assert this in tests.
 - **Clobbering a running server.** `open` must not write `zimantic.pid` or send
-  SIGHUP; refactor the shared server helper carefully so `serve` keeps its
-  current PID/signal behavior.
+  SIGHUP; refactor the shared server helper carefully so `serve` keeps its own
+  PID/signal behavior.
 - **Port race or opening the browser too early.** Pre-bind the socket, derive
   the actual port, and launch the browser only after startup.
 - **Network exposure.** Hard-code a loopback bind; do not add a `--host` escape
@@ -357,7 +360,7 @@ order.
   family and explicit "Previous ZIM"/"Next ZIM" labels.
 - **Large folder expansion.** Cap the scope and direct whole-library use to
   `zimantic serve`.
-- **Index mismatch.** Reuse the existing stale-index fallback and warnings; do
-  not silently serve a wrong index.
+- **Index mismatch.** Reuse the stale-index fallback and warnings; do not
+  silently serve a wrong index.
 - **Slow model startup.** Keep model and FAISS loading in the background so the
   browser opens promptly.

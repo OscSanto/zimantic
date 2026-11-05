@@ -6,9 +6,11 @@ This directory turns Zimantic from a ZIM search engine with a Kiwix remote
 special case into a search engine whose core is source-agnostic, with in-tree
 providers for ZIM, Kiwix, configured file directories, and Kolibri channels.
 
-The plans are ordered. Each phase is intended to ship on its own, leave `main`
-green, and preserve existing URLs, APIs, indexes, and config. Do not build all
-phases on one long-lived branch.
+The plans are ordered. Each phase is intended to ship on its own and leave
+`main` green. There are no compatibility promises: the redesign may change
+URLs, API payloads, config keys, the catalog schema, and the index layout.
+Every breaking change ships with a migration note and a rebuild path. Do not
+build all phases on one long-lived branch.
 
 ## Locked decisions
 
@@ -32,17 +34,23 @@ re-litigation inside the phase plans:
 5. **The core stays tight.** Fan-out, ranking, result merging, progressive
    streaming, caching, and source selection keep operating on `SourceInfo` and
    `SourceResult`. Provider-specific behavior lives behind the seam.
+6. **No compatibility layers.** Do not carry legacy fields, aliases, URL
+   shapes, config shorthands, catalog detection, or dual index formats. Replace
+   the old design outright and document the migration.
 
 ## Vocabulary
 
 | Term | Meaning | Public surface |
 |---|---|---|
-| Provider | In-tree adapter for one kind of content: `zim`, `kiwix`, `files`, `kolibri`. | No |
+| Provider | In-tree adapter for one kind of content: `zim`, `kiwix`, `files`, `kolibri`. The only source discriminator. | No |
 | Collection | A configured root, server, or channel. Owns a bounded set of sources and is the library grouping. | Yes, as grouping metadata |
-| Source | The searchable unit and content root. What source filters select and `/content/{source}/{path}` addresses. | Yes |
+| Source | The searchable unit and content root. `SourceInfo.key` is its identity and `/content/{key}/{path}` address. | Yes |
 | Item | An article, file, content node, video, or other result row. | Yes, as a result |
 | Content store | Path-addressed reader for one source (archive, filesystem tree, Kolibri storage tree). | No |
 | Derived text | Text produced from non-native media during a build: existing caption tracks (`captions`), images (`ocr`), or audio/video (`asr`). Each operation is an independent opt-in. | No |
+
+There is no `content_kind` or `mode` field. A source's provider determines what
+it is and how it is served.
 
 The scale rule that came out of the earlier `stash@{0}` attempt:
 
@@ -54,7 +62,7 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 
 | Phase | Plan | Depends on | Primary outcome |
 |---|---|---|---|
-| 00 | [Contracts and registry](00-contracts-and-registry.md) | — | Freeze provider/collection/source/content contracts; no behavior change |
+| 00 | [Contracts and registry](00-contracts-and-registry.md) | — | Freeze provider/collection/source/content contracts |
 | 01 | [ZIM provider](01-zim-provider.md) | 00 | Local ZIM discovery/search behind the provider seam |
 | 02 | [Kiwix provider](02-kiwix-provider.md) | 00, 01 | Remote Kiwix is a first-class provider, not a `mode` special case |
 | 03 | [Content stores and serving](03-content-stores-and-serving.md) | 00, 01 | One `/content/{source}/{path}` route for every local content provider |
@@ -63,36 +71,33 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 06 | [Kolibri provider](06-kolibri-provider.md) | 03, 04, 05 | Channels as collections; content nodes as items; opt-in captions/OCR/ASR |
 | 07 | [Collections, API, and UI](07-collections-api-ui.md) | 01–06 | Grouped library and source filters that do not explode |
 | 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers; catalog rebuild and docs |
-| 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, parity tests, performance, staged release |
+| 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, contract tests, performance, staged release |
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
 
 Provider configuration follows its first consumer: phase 05 introduces the
 minimal `[[sources]]` parser needed to enable a non-ZIM provider, and phase 08
 generalizes it to every provider and adds the remaining operations.
 
-## Global invariants
+## Design invariants
 
-Every phase must preserve these:
+Every phase must hold these:
 
-- **Existing ZIM URLs keep working.** `/content/<zim>/<path>`,
-  `/article/<zim>/<path>`, `/source-icon/<zim>`, and existing `key`/`book`/
-  `name` aliases continue to resolve.
-- **Existing index files keep working.** A pre-change `<stem>.sqlite` /
-  `<stem>.faiss` pair remains valid and is still discovered.
-- **The catalog cache is rebuilt once.** `catalog.sqlite` is disposable; a
-  pre-change catalog is detected as stale and rebuilt by a full provider scan on
-  first run. Per-ZIM index files are never rewritten.
-- **Existing config keeps working.** Flat keys such as `zim_dir`,
-  `kiwix_server`, `index_dir`, and `max_remote_sources` remain accepted.
-- **Existing API payloads remain additive.** New fields are optional; no field
-  is removed or repurposed without a deprecation note.
+- **One discriminator.** `provider` is the only source discriminator. There is
+  no `mode`, no `content_kind`, and no derived alias field.
+- **One identity.** `SourceInfo.key` is globally unique, stable, URL-safe, and
+  the URL identity used by `/content/{key}/{path}` and `/article/{key}/{path}`.
+  There are no `name`, `book`, or `local_name` lookup aliases.
+- **One content route.** No `/kolibri/...`, `/files/...`, or `/modules/...`
+  parallel content APIs. Kiwix remains external-only and returns absolute
+  `kiwix-serve` links.
+- **One index layout.** Every provider uses the same locator and the same index
+  schema. Old index files are not discovered or upgraded; they are rebuilt.
+- **One config schema.** Collections are declared only with `[[sources]]`.
+  There are no flat `zim_dir` or `kiwix_server` shorthands.
+- **The catalog is disposable.** An incompatible `catalog.sqlite` is deleted
+  and rebuilt; no version detection, row migration, or old table aliases.
 - **Items never become sources.** Any provider that discovers many items maps
   them to a bounded source set.
-- **One local content route.** No `/kolibri/...`, `/files/...`, or
-  `/modules/...` parallel content APIs. Kiwix remains external-only and keeps
-  its absolute `kiwix-serve` result links.
-- **One index schema.** Providers supply entries; the core owns FTS, vectors,
-  FAISS, resume, and publication.
 - **Provider failure is isolated.** A broken or slow provider cannot crash the
   server or starve other providers of search slots.
 - **Local providers do not use the network.** Discovery and reading are local
@@ -109,10 +114,10 @@ These are defaults, not hard-coded promises. Each provider may tighten them.
 | Sources per collection | 64 | Hard discovery cap for providers that can safely collapse sources; otherwise a fan-out/UI budget |
 | Sources overall | 512 | Soft materialization budget; use paging and provider fan-out limits rather than silently dropping sources |
 | Indexed items per source | 500,000 | Avoid pathological trees |
-| Indexed bytes per item | existing `max_entry_bytes` | Reuse current limits |
+| Indexed bytes per item | global `max_entry_bytes` | One limit for every provider |
 | Discovery time per provider | 10 s startup budget | Do not block serving on discovery |
 | Search tasks per provider | `min(4, search_workers)` | Fair scheduling across providers |
-| Remote sources per search | existing `max_remote_sources` | Preserve current Kiwix behavior |
+| Remote sources per search | `max_remote_sources` | Bound remote fan-out |
 
 When a hierarchical provider exceeds a discovery cap, it must collapse to a
 coarser source granularity (for example, the whole collection as one source)
@@ -132,14 +137,14 @@ explicitly marked truncated; serving must continue to cover all content.
   title/description, serving documents, PDFs, HTML5 apps, and media; derived
   text (captions, OCR, or ASR) is included only for the operations explicitly
   enabled on that source.
-- ZIM and Kiwix behavior, URLs, payload fields, and performance are unchanged
-  except for additive metadata.
-- The full test suite passes on Python 3.11–3.14, including new provider
-  contract tests, traversal/security tests, and catalog-rebuild tests.
+- Every provider uses one source key, one content route, and one index layout;
+  there are no provider-specific branches or compatibility shims in the core.
+- The full test suite passes on Python 3.11–3.14, including provider contract
+  tests, traversal/security tests, and catalog/rebuild tests.
 - `config.toml`, `README.md`, `CONTRIBUTING.md`, and deployment examples
-  document the new source configuration and index layout.
-- A Pi Zero 2 W can still serve a mixed library without exceeding the current
-  memory envelope; startup with no new providers is not measurably slower.
+  document the `[[sources]]` schema and the uniform index layout.
+- A Pi Zero 2 W can serve a mixed library within the documented memory
+  envelope.
 
 ## Non-goals
 
@@ -156,10 +161,10 @@ explicitly marked truncated; serving must continue to cover all content.
 ## Working agreement for each phase
 
 1. Start from a green `main`; create one branch/worktree per phase.
-2. Add the provider contract tests before moving behavior; keep parity tests
-   comparing old and new source/search payloads.
-3. Keep the old path available behind a temporary adapter until parity tests
-   pass, then delete the adapter in the same phase.
+2. Add the provider contract tests before moving behavior. Test the new
+   contract directly; do not add old-payload parity tests.
+3. Move behavior directly and delete the replaced implementation in the same
+   phase. Do not add a temporary adapter, dual config path, or alias layer.
 4. Update `plans/README.md` checkboxes and the phase document as work lands.
 5. Finish with `python -m pytest`, a manual `/search` smoke test, and a
    `/library` smoke test with at least one non-ZIM source.

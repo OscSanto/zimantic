@@ -5,9 +5,9 @@ Status: proposed.
 ## Goal
 
 Expose collections as a first-class grouping without letting non-ZIM content
-explode the source list. Keep the flat source/search APIs working, and make the
-library and source filters usable when a files collection has dozens of sources
-or a Kolibri channel has many topics.
+explode the source list. The flat source/search APIs and the grouped library
+use the same canonical source records, so there is no separate compatibility
+view.
 
 The files provider defaults to `granularity = "collection"` until this phase
 lands, so the flat fallback stays bounded even without the grouped view. Once
@@ -30,21 +30,22 @@ grouping is available, users can opt into directory granularity.
 The referenced stash (git diff 20997b04ee00537ab51b91d65c17df33ed6a7723^ 20997b04ee00537ab51b91d65c17df33ed6a7723) adds useful library facets: provider/source kind, coarse
 media classification, and grouping of related files. Keep this plan's
 collection-based identity instead of reviving its source-per-file model:
-`provider`/`content_kind` already identify the source kind, and collection
-cards group sources without exposing a filesystem folder key or path.
+`provider` identifies the source kind, and collection cards group sources
+without exposing a filesystem folder key or path.
 
 ## API design
 
-All changes are additive.
+There is one source payload. Do not add compatibility aliases or duplicate
+fields.
 
 ### Source payload
 
-Each source gains:
+Each source uses:
 
 ```json
 {
+  "key": "files:modules:algebra",
   "provider": "files",
-  "content_id": "files:modules:algebra",
   "media_types": ["text", "video"],
   "collection": {
     "key": "files:modules",
@@ -57,16 +58,15 @@ Each source gains:
 - `collection` is always present: it is an object for discovered sources and
   `null` for hand-built test sources. The object always contains `key`, `label`,
   and `provider`.
-- `content_id` is the value used in `/content/{content_id}/...`; for ZIM it is
-  the archive stem, preserving links.
+- `key` is the canonical source identity and the value used in
+  `/content/{key}/...` and `/article/{key}/...`.
 - Do not expose filesystem paths, database paths, or storage roots.
-- `media_types` is an additive, possibly empty array drawn from `text`,
-  `video`, `audio`, `image`, and `other`. It describes the indexed content
-  families in a source; it may contain multiple values for mixed Files or
-  Kolibri sources. ZIM classification uses its MIME counter, while local
-  providers use their indexed manifest. Providers populate it (phase 01 for
-  ZIM, phases 05 and 06 for local providers); the UI only consumes it. It is
-  not a source identity.
+- `media_types` is an array drawn from `text`, `video`, `audio`, `image`, and
+  `other`. It describes the indexed content families in a source; it may contain
+  multiple values for mixed Files or Kolibri sources. ZIM classification uses
+  its MIME counter, while local providers use their indexed manifest. Providers
+  populate it (phase 01 for ZIM, phases 05 and 06 for local providers); the UI
+  only consumes it. It is not a source identity.
 
 ### `/collections.json`
 
@@ -106,7 +106,7 @@ Add an optional `collection` query parameter to `/search` and
 
 - It expands to all available sources in that collection before the normal
   source-selection rules.
-- It composes with an explicit `zim` list by intersecting them.
+- It composes with an explicit `source` list by intersecting them.
 - An unknown collection is ignored with a warning and falls back to the normal
   scope only when no valid collection/source selector remains. If selectors
   resolve to an empty intersection, search no sources rather than broadening to
@@ -114,18 +114,18 @@ Add an optional `collection` query parameter to `/search` and
 - The cache key uses the expanded source keys, not the collection name, so
   adding/removing a source cannot serve a stale pool.
 
-Keep `zim` as the canonical source-selection parameter. Do not add a parallel
-source-selection API.
+Use `source` as the canonical source-selection query parameter. There is no
+`zim` parameter and no parallel source-selection API.
 
 ### `/library.json`
 
-Keep the flat list and existing pagination. Each card carries `collection` and
+Return a flat list with standard pagination. Each card carries `collection` and
 `provider` so the client can group without a second request. Optionally add a
-`group=collection` query later; do not change the default shape now.
+`group=collection` query later; the default remains the flat list.
 
 ### `/health`
 
-Add per-provider/collection counters without removing existing fields:
+Add per-provider/collection counters:
 
 ```json
 {
@@ -135,7 +135,7 @@ Add per-provider/collection counters without removing existing fields:
 }
 ```
 
-Keep `indexes`, `sources`, and `cache`.
+Keep `indexes`, `sources`, and `cache` counters.
 
 ## UI behavior
 
@@ -188,9 +188,9 @@ Keep `indexes`, `sources`, and `cache`.
 - [ ] Add `collection` query parsing to `/search` and `/search/stream`; expand
       in `Search._search_scope` before selection.
 - [ ] Keep `_cache_key` based on the expanded source keys.
-- [ ] Add optional `collection` filtering to `/sources` and `/library.json`,
-      preserving their existing pagination so opening a collection can fetch
-      all of its sources without an unbounded payload.
+- [ ] Add `collection` filtering to `/sources` and `/library.json` using the
+      standard pagination so opening a collection can fetch all its sources
+      without an unbounded payload.
 - [ ] Add `collection_source_limit` only if the UI cannot stay bounded with the
       existing limit; default to the global source limit.
 - [ ] Update `/config` with the new limit and provider list.
@@ -208,13 +208,13 @@ Keep `indexes`, `sources`, and `cache`.
 
 ## Tests
 
-- [ ] `/sources` and `/library.json` remain valid for old clients; new fields
-      are additive and paths are absent.
+- [ ] `/sources` and `/library.json` use the canonical source payload; no
+      `zim`, `content_id`, `mode`, or alias fields remain.
 - [ ] `/collections.json` paging, version invalidation, and empty/error cases.
 - [ ] Collection records use the same schema and nullability in APIs, CLI
       output, and SSE snapshots.
 - [ ] `collection` search expands to the right sources; intersection with
-      `zim`; unknown collection falls back; cache key changes when the
+      `source`; unknown collection falls back; cache key changes when the
       collection membership changes.
 - [ ] Library grouping: one-source collections, multi-source collections,
       empty collections, unavailable collections.
@@ -235,7 +235,7 @@ Keep `indexes`, `sources`, and `cache`.
 - A mixed library (ZIM + files + Kolibri) is navigable in `/library` by
   collection and provider.
 - Source filters remain bounded and usable with hundreds of underlying sources.
-- Existing API consumers and bookmarked search URLs keep working.
+- API clients use the canonical `source` query parameter.
 - Selecting a collection searches all of its sources without a huge URL.
 - `python -m pytest` and the JS tests pass.
 

@@ -121,7 +121,7 @@ class DerivedTextProducer(Protocol):
   source identity and may be removed by `zimantic prune`.
 - Provenance: append derived text to `EntryRecord.excerpt` in a deterministic
   order and record the contributing operations in index metadata and the build
-  report. Optionally expose the per-result contributors as an additive field.
+  report. Optionally expose the per-result contributors as an optional field.
 - Budgets come from the global `[derived_text]` config: caption bytes, OCR
   pages/pixels/output bytes, ASR media seconds/bytes, and `workers`. A skipped
   or truncated input is logged once and reported, never invented.
@@ -167,12 +167,16 @@ class DerivedTextProducer(Protocol):
 
 ### Index locator
 
-Keep existing ZIM files valid:
+Every provider uses one layout:
 
-- ZIM: `<index_dir>/<archive stem>.sqlite` and `.faiss` — unchanged.
-- New providers:
-  `<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.sqlite`
-  and `.faiss`.
+```
+<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.sqlite
+<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.faiss
+```
+
+There is no ZIM-specific index path, no discovery of old `<stem>.sqlite` /
+`<stem>.faiss` pairs, and no `legacy_paths()` branch. Existing indexes are
+ignored and must be rebuilt with the new layout.
 
 The locator must:
 
@@ -183,11 +187,11 @@ The locator must:
 - make every generated component a bounded filesystem-safe slug plus a
   collision-resistant digest; never use raw collection names or source paths
   as path components;
-- derive the collection digest from `(provider, collection_key)` and the source
-  digest from `(provider, collection_key, source_key)`;
+- derive the collection digest from `collection_key` and the source digest from
+  `key`;
 - keep `source_fingerprint` out of the locator; content changes reuse the same
   path and are handled by the fingerprint/resume rules;
-- expose `legacy_paths(source)` for ZIM and `paths(source)` for new providers;
+- expose one `paths(source)` function;
 - be shared by `serve`, `build`, `reload`, cleanup, and health.
 
 ### Generic build
@@ -218,13 +222,11 @@ Move `_search_local_locked` and its helpers out of `Search` into
   preview hook.
 - Channels: semantic (FAISS), keyword/title (FTS5 `docs`), body/excerpt
   lexical (FTS5 where a provider supplies body text), native full-text
-  (optional), and the same fusion/limits as today.
-- Keep the existing `docs` FTS5 schema and rowids for legacy ZIM indexes. New
-  Files and Kolibri indexes also use a separate FTS5 `body` table keyed by the
-  same rowids, populated from `EntryRecord.excerpt`. This supplies lexical
-  body/derived-text search without a native index and avoids rewriting existing
-  ZIM `docs` tables. Indexes without `body` remain readable and use their
-  existing title/native channels.
+  (optional), and the documented fusion/limits.
+- One `docs` FTS5 schema and rowid model for every provider. Add an optional
+  `body` FTS5 table keyed by the same rowids, populated from
+  `EntryRecord.excerpt`. There are no legacy index variants or schema
+  fallbacks.
 - A normal Files/Kolibri build makes indexed body text searchable through
   `body`; `--fast` intentionally remains title/path-only, with neither body
   FTS nor embeddings, as specified in phase 08.
@@ -272,12 +274,12 @@ borrows it and must never close it independently.
       `indexing/schema.py`; add the separate optional `body` FTS5 table for
       provider excerpts, plus `provider`, `source_key`, and
       `source_fingerprint` meta keys.
-- [ ] Split `build.py`: keep the public `build()` as a ZIM compatibility
-      wrapper, and implement `build_index(producer, ...)`.
+- [ ] Split `build.py`: replace the ZIM-only `build()` with
+      `build_index(producer, ...)`. Do not keep a compatibility wrapper.
 - [ ] Move `_index_entries`, `_save`, `_finish_build`, `_write_faiss`, and
       staging/upgrade helpers into `indexing/pipeline.py` with no libzim
       imports.
-- [ ] Add `indexing/locator.py`; make ZIM paths legacy-identical.
+- [ ] Add `indexing/locator.py` with one layout for every provider.
 - [ ] Create `providers/zim/entries.py` with `ArchiveEntryProducer`, wrapping
       `read_entry` and preserving ids, progress, and fast mode.
 - [ ] Split `content/reader.py` into pure extractors and a ZIM adapter only if
@@ -290,13 +292,13 @@ borrows it and must never close it independently.
 - [ ] Persist provider excerpts in the `body` FTS5 table and query it as a
       lexical channel; preserve title/path-only `--fast` behavior.
 - [ ] Move `_enrich_pool` exact-phrase verification and MIME population behind
-      `ContentStore` reads, retaining current byte limits and error handling;
-      it must not open a ZIM archive directly.
+      `ContentStore` reads, retaining byte limits and error handling; it must
+      not open a ZIM archive directly.
 - [ ] Replace `_LocalIndex` with `IndexHandle`; move lazy archive opening to
       `ArchiveContentStore`.
-- [ ] Add `NativeSearcher`; wrap libzim and keep isolation unchanged.
-- [ ] Delete the temporary `Search.indexes`/`catalog` compatibility aliases
-      once provider tests pass.
+- [ ] Add `NativeSearcher`; wrap libzim and keep isolation.
+- [ ] Delete `Search.indexes` and `Search.catalog` in the same change; do not
+      leave aliases.
 - [ ] Add the shared derived-text stage with independent `captions`, `ocr`, and
       `asr` opt-ins, optional engine extras, a digest cache, provenance, and
       fingerprint inputs.
@@ -307,18 +309,18 @@ borrows it and must never close it independently.
 
 ## Tests
 
-- [ ] ZIM build parity: same `docs` rows, `meta.done`/`next`, FAISS ids, and
-      search results before/after the refactor.
+- [ ] ZIM build produces the generic `docs`/`body` schema, `meta.done`/`next`,
+      FAISS ids, and search results through `build_index`.
 - [ ] Resume after interruption works; changing the fingerprint restarts the
       build safely.
 - [ ] A source changing during a build is detected before publication and
       cannot produce a mixed or stale published index.
 - [ ] Fast build, force rebuild, upgrade-in-place, and a corrupt staging file
-      all keep current behavior.
-- [ ] Model fingerprint/probe mismatch still falls back to lexical search.
-- [ ] Index locator: legacy ZIM paths unchanged; new paths safe, unique, and
-      bounded; independent of source-root relocation; no source absolute path
-      in generated filenames or public metadata.
+      all work.
+- [ ] Model fingerprint/probe mismatch falls back to lexical search.
+- [ ] Index locator: all providers use the same layout; paths are safe, unique,
+      and bounded; independent of source-root relocation; no source absolute
+      path in generated filenames or public metadata.
 - [ ] Generic local search over a synthetic producer returns semantic,
       title/body keyword, and preview results without importing libzim.
 - [ ] A non-ZIM body-term query returns a lexical result without embeddings or
@@ -334,13 +336,14 @@ borrows it and must never close it independently.
       shared across sources, and not created when those operations are off.
 - [ ] A fake engine that crashes the worker does not fail the build or another
       source; the task is reported and the executor recovers.
-- [ ] Native fulltext absence yields the same partial status as now.
+- [ ] Native fulltext absence yields the documented partial status.
 - [ ] Concurrent builds and `build_workers` still work under the global lock.
 
 ## Acceptance criteria
 
 - `python -m pytest` passes.
-- Existing ZIM indexes are discovered and served without a rebuild.
+- Every provider uses the same index layout and schema; old indexes are ignored
+  and rebuilt.
 - `build.py` no longer imports provider-specific discovery.
 - `indexing/` imports no libzim, FAISS, or web modules at module scope except
   inside the FAISS loaders.
@@ -349,15 +352,14 @@ borrows it and must never close it independently.
 
 ## Risks and mitigations
 
-- **Index compatibility.** Keep the existing `docs` schema and rowid
-  semantics; the optional body FTS table is absent on legacy indexes. Test
-  both a pre-change ZIM index and a new non-ZIM index.
+- **Index churn.** One schema means old indexes are discarded. Ship the rebuild
+  path and document it; do not add a legacy reader.
 - **Resume correctness.** Fingerprint checking is mandatory; a mismatch must
   rebuild rather than produce shifted row ids.
-- **Large mechanical move.** Move code before changing behavior; use parity
+- **Large mechanical move.** Move code before changing behavior; use contract
   tests and avoid rewriting ranking or limits.
-- **FAISS memory on small hosts.** Keep the existing batch/queue behavior; the
-  generic pipeline must not add per-provider caches.
+- **FAISS memory on small hosts.** Keep the batch/queue behavior; the generic
+  pipeline must not add per-provider caches.
 - **Derived-text cost on small hosts.** Engines are opt-in, build-time-only, and
   capped; `workers = "auto"` resolves to 1 on low-memory hosts; `serve` never
   loads them.

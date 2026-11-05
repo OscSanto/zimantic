@@ -4,9 +4,10 @@ Status: proposed.
 
 ## Goal
 
-Prove the provider seam is safe, bounded, observable, and backward compatible
-before enabling files and Kolibri in a release. This phase is not a feature
-phase; it is the gate that lets the earlier phases ship.
+Prove the provider seam is safe, bounded, and observable before enabling files
+and Kolibri in a release. This phase is not a feature phase; it is the gate that
+lets the earlier phases ship. Compatibility is explicitly out of scope: the
+release notes document the required config, catalog, and index rebuild.
 
 ## Threat model
 
@@ -157,7 +158,7 @@ library on a Pi Zero 2 W.
 
 Required:
 
-- ZIM-only startup time and search latency are unchanged within noise.
+- ZIM-only startup time and search latency meet the documented target.
 - Adding an unconfigured provider costs zero background work. A derived-text
   engine that is not enabled costs zero work and is never loaded by `serve`.
 - Adding a files collection with `max_sources` sources does not load file
@@ -183,7 +184,7 @@ Measure and record:
 
 ### Unit and contract
 
-- [ ] `SourceInfo`/`CollectionInfo` serialization and alias resolution.
+- [ ] `SourceInfo`/`CollectionInfo` serialization and exact source-key resolution.
 - [ ] Provider contract suite run against ZIM, files, Kolibri (and Kiwix for
       search-only).
 - [ ] Content-store contract suite: read, resolve, redirect, exists, icon,
@@ -198,10 +199,9 @@ Measure and record:
 - [ ] Progressive stream with providers finishing at different times.
 - [ ] Cache key/source selection across collections.
 - [ ] Reload after adding/removing each provider's content.
-- [ ] Legacy config and legacy index fixture upgrade with no rebuild.
-- [ ] A pre-change catalog is detected as stale and rebuilt into the generic
-      `sources` schema by a full scan; the result preserves public metadata,
-      contains no `zims` table/indexes, and does not alter legacy index files.
+- [ ] Migration path: an old config, catalog, or index layout is rejected or
+      ignored, and the documented `[[sources]]` configuration plus rebuild
+      produces a working library.
 
 ### Security/adversarial
 
@@ -244,21 +244,19 @@ Measure and record:
 
 Each stage is independently revertible. There is no long-lived branch.
 
-1. **Internal seam (phases 00–02).** Ship contracts, ZIM provider, Kiwix
-   provider. No behavior change. Revert = revert the refactor; indexes and
-   config untouched.
+1. **Internal seam (phases 00–02).** Ship contracts, ZIM provider, and Kiwix
+   provider. Revert = revert the refactor; config, catalog, and indexes are
+   rebuilt on the next start.
 2. **Generic serving and indexing (phases 03–04).** Ship content stores and the
-   generic pipeline while only ZIM uses them. No new config. Revert = restore
-   the ZIM-only code paths; legacy indexes still valid.
-3. **Files provider and minimal source config (phase 05).** Opt-in by adding
-   `[[sources]] type = "files"`; this stage introduces the minimal parser.
-   Ship docs and a commented example. No configured files source means no new
-   work at startup.
-4. **Kolibri provider (phase 06).** Opt-in by config; `captions`, `ocr`, and
+   generic pipeline for ZIM. Revert = restore the ZIM-only code paths and rebuild.
+3. **Files provider and source config (phase 05).** Opt in by adding
+   `[[sources]] type = "files"`. Ship docs and a commented example. No
+   configured files source means no new work at startup.
+4. **Kolibri provider (phase 06).** Opt in by config; `captions`, `ocr`, and
    `asr` all default off and are independent.
    Ship a fixture-based integration test and supported-version note.
-5. **Collections UI (phase 07).** Enable grouping and provider filters. Keep
-   flat APIs. Ship a migration note for old bookmarked URLs.
+5. **Collections UI (phase 07).** Enable grouping and provider filters. Ship the
+   new source/collection API shape; there is no flat compatibility view.
 6. **Operations (phase 08) and hardening (phase 09).** Add `sources`/`prune`,
    complete docs, run the full matrix, then cut the release.
 
@@ -272,33 +270,29 @@ For a cautious rollout, ship with:
 - files and Kolibri examples commented out in `config.toml`;
 - captions/OCR/ASR documented but off, with no engine dependency installed by
   default;
-- collection grouping behind the normal UI, with a fallback flat view if
-  `/collections.json` is unavailable.
+- collection grouping is the normal UI; there is no fallback flat view.
 
 ### Rollback
 
 - Remove the provider entry; sources disappear, indexes remain on disk.
 - `zimantic prune` removes orphan indexes explicitly.
-- Legacy ZIM indexes are never rewritten, so downgrading to the previous
-  release keeps working.
-- If the collections UI breaks, the flat `/sources` and `/library.json` APIs
-  remain sufficient to render the old view.
+- Reverting to an older release requires rebuilding the catalog and indexes;
+  there is no downgrade compatibility guarantee.
+- The flat `/sources` and `/library.json` payloads use the canonical source
+  fields, not a legacy view.
 
-## Backward-compatibility checklist
+## Migration checklist
 
-- [ ] `/content/<zim>/<path>`, `/article/<zim>/<path>`, `/source-icon/<zim>`
-      unchanged for ZIM.
-- [ ] `/sources`, `/library.json`, `/search`, `/search/stream`, `/health`
-      remain valid; new fields are additive.
-- [ ] Existing config keys work with the same meaning.
-- [ ] Existing index files are discovered without rebuild.
-- [ ] A pre-change `catalog.sqlite` is rebuilt once by a full scan; no user
-      action is required and per-ZIM indexes are untouched.
-- [ ] Existing source keys/aliases and bookmarked `?zim=` selections resolve.
-- [ ] ZIM-only startup/search memory and latency unchanged.
-- [ ] No new mandatory dependency for ZIM-only installs.
-- [ ] Local providers use the unified content route; Kiwix remains explicitly
-      external-only and does not gain a local content-store fallback.
+- [ ] Replace flat `zim_dir`/`kiwix_server` keys with explicit `[[sources]]`
+      entries. There is no shorthand fallback.
+- [ ] Delete or ignore old `<stem>.sqlite`/`.faiss` files and rebuild every
+      configured collection with the new locator.
+- [ ] Delete any old `catalog.sqlite`; it is recreated from a full scan.
+- [ ] Update bookmarks and API clients to canonical source keys, the `source`
+      query parameter, and the new payload fields.
+- [ ] Verify the new `/content/{key}/...` and `/article/{key}/...` URLs.
+- [ ] Local providers use the unified content route; Kiwix remains
+      external-only and has no local content-store fallback.
 
 ## Release checklist
 
@@ -307,9 +301,9 @@ For a cautious rollout, ship with:
 - [ ] `README.md`, `CONTRIBUTING.md`, `config.toml`, `deploy/` updated.
 - [ ] Mixed-library smoke test on a low-resource profile.
 - [ ] Security review of path/zip/MIME/range handling.
-- [ ] Major version bump: the generic `sources` catalog layout intentionally
-      ends external `zims`-table compatibility. Release notes list the new
-      providers, config, and deprecations.
+- [ ] Major version bump. Release notes list the new providers, the
+      `[[sources]]` config requirement, the catalog/index rebuild, and the
+      removed compatibility paths.
 - [ ] A known-issues note covering supported Kolibri schema versions and
       derived-text engine/model limitations.
 
@@ -326,13 +320,14 @@ For a cautious rollout, ship with:
 | Provider starvation | slow searches | per-provider task budgets |
 | Startup regression | Pi Zero timeouts | cached-first/background discovery, stat-only walks |
 | Contract churn | rework | minimal phase-00 protocol, contract tests |
-| Config complexity | user errors | legacy shorthands, validation warnings, `sources` command |
+| Config complexity | user errors | one `[[sources]]` schema, validation warnings, `sources` command |
 
 ## Final definition of done
 
 The effort is complete when:
 
-1. ZIM-only users see no behavior, URL, config, index, or performance change.
+1. A ZIM-only install works after adding a `[[sources]] type = "zim"` entry and
+   rebuilding its catalog and indexes.
 2. A configured `/library/www/html/modules` tree appears as one collection with
    bounded sources, is searchable, and serves pages/assets safely.
 3. A local Kolibri install appears as one collection per channel, with topics
@@ -340,7 +335,6 @@ The effort is complete when:
    captions/OCR/ASR.
 4. The library and source filters remain usable at scale because items never
    become sources.
-5. The core has no provider-specific branches outside serialization and
-   compatibility shims.
+5. The core has no provider-specific branches outside serialization.
 6. The security, resource, and failure-isolation requirements above are tested
    and documented.

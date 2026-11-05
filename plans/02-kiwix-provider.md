@@ -4,10 +4,9 @@ Status: proposed.
 
 ## Goal
 
-Formalize remote Kiwix as a provider. After this phase the core has no
-`mode == "kiwix"` branch: it dispatches by source provider like any other
-source. Kiwix remains metadata-only and delegates both search and serving to
-`kiwix-serve`.
+Formalize remote Kiwix as a provider. After this phase the core dispatches by
+`source.provider` like any other source; there is no `mode` branch. Kiwix
+remains metadata-only and delegates both search and serving to `kiwix-serve`.
 
 ## Current state
 
@@ -34,13 +33,14 @@ zimantic/providers/kiwix/
 
 ### Collection and source mapping
 
-- **Collection** = one Kiwix server (`kiwix_server`, later an explicit
-  `[[sources]] type = "kiwix" server = "..."`). Key is stable and opaque;
-  label defaults to `"Kiwix"` and may include the host.
-- **Source** = one catalog book, as today. Preserve `book` slugs, display-name
-  disambiguation, `perma_ref` keys, and dated/flavour collapsing.
-- `SourceInfo.provider = "kiwix"`, `content_kind = "external"`,
-  `mode = "kiwix"`, `searchable = True`, `available = True`.
+- **Collection** = one configured Kiwix server:
+  `[[sources]] type = "kiwix"`, `name = "..."`, `server = "..."`. Collection key
+  is `kiwix:<name>`; the label defaults to `"Kiwix"` and may include the host.
+- **Source** = one catalog book. Source key is `kiwix:<name>:<book>`; duplicate
+  slugs get a stable suffix. The book slug is also kept in provider metadata for
+  the remote API. There are no alias keys.
+- `SourceInfo.provider = "kiwix"`, `searchable = True`, `available = True`.
+  There is no `content_kind` or `mode`.
 - `SourceInfo.homepage`/`icon_url` remain absent unless the catalog provides
   them. Do not fetch remote icons during discovery.
 
@@ -51,17 +51,16 @@ zimantic/providers/kiwix/
 - `open()` returns a runtime with the catalog entries and a
   `search(source, request)` implementation that calls `search_kiwix`.
 - No local `ContentStore`; return `None`. Result documents keep absolute
-  `url` links and continue to be served by `kiwix-serve`, not by
-  `/content/{source}/...`. The unified content route applies to local
-  providers; Kiwix keeps the existing external-link behavior.
+  `url` links and are served by `kiwix-serve`, not by `/content/{key}/...`. The
+  unified content route applies to local providers; Kiwix keeps external links.
 - The runtime owns retry/backoff, response-size limits, and XML hardening.
-- `refresh()` is non-blocking for the server startup path and preserves the
-  last good catalog on failure.
+- `refresh()` is non-blocking for the server startup path and keeps the last good
+  catalog on failure.
 
 ### Fan-out budget
 
-Remote sources are unbounded in a large Kiwix catalog, so keep the existing
-behavior but move the policy to the provider:
+Remote sources are unbounded in a large Kiwix catalog, so keep the policy in the
+provider:
 
 - `CollectionRuntime.max_sources_per_search()` returns
   `max_remote_sources` for Kiwix (default 100; `0` disables unscoped remote
@@ -76,13 +75,14 @@ Keep the one-time warning text and behavior for truncated remote fan-out. The
 cap does not truncate catalog discovery or remove Kiwix books from paged
 source/library APIs.
 
-### Config and compatibility
+### Config
 
-- `kiwix_server`, `kiwix_catalog_path`, `kiwix_catalog_limit`,
-  `max_kiwix_response_bytes`, and `max_remote_sources` keep their meaning.
-- `kiwix_server = ""` means no Kiwix provider/collection, exactly as today.
-- The search page and JSON API payloads do not change except for additive
-  `provider`/`collection` fields.
+- `type`, `name`, `server`, `catalog_path`, `catalog_limit`,
+  `max_response_bytes`, and `max_remote_sources` are the only Kiwix keys.
+- There is no `kiwix_server` flat key. A Kiwix collection exists only through an
+  explicit `[[sources]]` entry.
+- The search page and JSON API use the canonical source key and provider fields;
+  there is no additive compatibility payload.
 
 ## Work items
 
@@ -99,41 +99,39 @@ source/library APIs.
 - [ ] Move `start_catalog_refresh` and the cached-entry fallback into the
       runtime.
 - [ ] Use the phase-00 `max_sources_per_search()` contract in
-      `Search._search_scope` instead of `mode == "kiwix"`.
+      `Search._search_scope`; do not branch on a mode.
 - [ ] Make timed-out remote tasks cancellable or explicitly detached from the
       search result so they cannot consume provider slots after
       `source_timeout`.
-- [ ] Keep local sources authoritative for identities they share with remote
-      entries.
 - [ ] Delete the `mode == "kiwix"` branch from `_search_source`.
-- [ ] Keep `source_dicts()` ordering (name casefold) and collisions.
+- [ ] Keep `source_dicts()` ordering (title casefold) and duplicate-book
+      handling.
 
 ## Tests
 
 - [ ] Catalog parse, retry/backoff, non-retryable 4xx, DTD rejection, and
       response-size limits (existing tests, relocated).
-- [ ] Catalog failure preserves the last good source set and logs once.
-- [ ] Remote search returns the same documents/links/ordering as before.
+- [ ] Catalog failure keeps the last good source set and logs once.
+- [ ] Remote search returns the expected documents/links/ordering.
 - [ ] `max_remote_sources = 0` suppresses unscoped remote search; an explicit
       selection still searches.
-- [ ] Local ZIM wins over a remote book with the same identity.
 - [ ] A slow remote source times out as `status="error"` without failing the
       merged search.
-- [ ] No network access when `kiwix_server` is unset.
+- [ ] No network access when no Kiwix collection is configured.
 
 ## Acceptance criteria
 
-- `grep` finds no `mode == "kiwix"` dispatch outside payload/serialization code.
-- A Kiwix-configured server still discovers books, searches them, and returns
-  the same absolute links.
+- `grep` finds no `mode` dispatch.
+- A configured Kiwix server discovers books, searches them, and returns absolute
+  links.
 - A Kiwix outage cannot delay startup or break local search.
 - `python -m pytest` passes.
 
 ## Risks and mitigations
 
 - **Turning discovery into a startup dependency.** Keep discovery/cache
-  semantics identical: cached first, background refresh, last-good fallback.
-- **Remote cap semantics drifting.** Preserve the exact "explicit selection
-  overrides the cap" rule and its warning.
-- **Security.** Keep the existing hardened XML parser and bounded reads; do not
-  add HTML scraping of the Kiwix UI.
+  semantics: cached first, background refresh, last-good fallback.
+- **Remote cap semantics drifting.** Keep the "explicit selection overrides the
+  cap" rule and its warning.
+- **Security.** Keep the hardened XML parser and bounded reads; do not add HTML
+  scraping of the Kiwix UI.

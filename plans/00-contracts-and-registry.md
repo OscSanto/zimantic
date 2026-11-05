@@ -4,9 +4,11 @@ Status: proposed.
 
 ## Goal
 
-Introduce the internal seam that every later phase depends on, without changing
-search results, URLs, index files, or config behavior. After this phase, ZIM is
-still the only working provider, but it is reachable through the new contracts.
+Introduce the internal seam that every later phase depends on. This phase is
+structural: it defines the provider, collection, source, and content contracts
+and the registry. ZIM remains the only working provider, but it reaches the core
+through the new contracts. The old `mode`/`content_kind` shape is replaced, not
+carried forward.
 
 ## Non-goals
 
@@ -166,58 +168,52 @@ Notes:
 - `SourceResult` and its four ranking channels (`semantic`, `keyword`,
   `fulltext`, `items`) stay unchanged.
 
-### `SourceInfo` additions
+### `SourceInfo` shape
 
-Add fields with backward-compatible defaults:
+`SourceInfo` has one discriminator and one identity:
 
 ```python
+key: str                       # globally unique, URL-safe source key
+title: str | None = None       # display name
 provider: str = "zim"
 collection_key: str = ""
 collection_label: str | None = None
-content_kind: str = "zim"      # "zim" | "filesystem" | "kolibri" | "external"
 ```
 
-Keep `mode` exactly as-is for now:
+- `provider` is the canonical discriminator. There is no `content_kind`, no
+  `mode`, and no derived alias field.
+- `key` is globally unique, stable, and URL-safe. It is also the URL identity
+  used by `/content/{key}/...` and `/article/{key}/...`; there is no separate
+  `content_id` field.
+- `title` is the display name. Remove `name`, `book`, `local_name`, and their
+  alias precedence. Provider-specific identifiers such as a Kiwix book slug or a
+  ZIM archive stem live in provider metadata or in the canonical `key`.
 
-- `"local"` for ZIM, files, and Kolibri.
-- `"kiwix"` for remote Kiwix.
-
-`provider` is the canonical discriminator. `content_kind` and `mode` are
-derived views and must not disagree with it:
-
-- `content_kind`: `zim` → `zim`, `files` → `filesystem`, `kolibri` → `kolibri`,
-  `kiwix` → `external`.
-- `mode`: `kiwix` → `kiwix`, every other provider → `local`.
-
-Contract tests assert the derivation; serializers must never emit a
-contradictory combination.
-
-`SourceInfo.to_dict()` adds:
+`SourceInfo.to_dict()` emits only the canonical fields:
 
 ```json
 {
+  "key": "zim:library:wikipedia_en_all",
   "provider": "zim",
-  "collection": {"key": "...", "label": "...", "provider": "zim"},
-  "content_kind": "zim"
+  "collection": {"key": "zim:library", "label": "Library", "provider": "zim"}
 }
 ```
 
 `collection` is always present and is `null` when no collection metadata is
-available (for example, a hand-built test source). Do not expose local
-absolute paths.
+available (for example, a hand-built test source). Do not expose local absolute
+paths.
 
 ### Logical identity and filesystem locators
 
-- Treat `(provider, collection_key, source_key)` as the canonical internal
-  source identity, where `source_key` is `SourceInfo.key`. New provider keys
-  are namespaced and derived from stable collection/source identifiers, never
-  from an absolute filesystem path.
+- Treat `key` as the canonical internal source identity. `key` is globally
+  unique and namespaced by provider and collection; never derive it from an
+  absolute filesystem path.
 - Absolute configured roots are valid. Providers may resolve them once and
   retain the canonical absolute path as a private runtime or catalog locator;
-  it is not part of `SourceInfo`, `content_id`, or any serialized payload.
-- `catalog.sqlite` uses a provider-neutral `sources` table keyed by
-  `(provider, collection_key, source_key)`. Store a canonical absolute path in
-  a separate indexed `path` locator column; it is not part of the key.
+  it is not part of `SourceInfo`, `key`, or any serialized payload.
+- `catalog.sqlite` uses a provider-neutral `sources` table keyed by `key`.
+  Store a canonical absolute path in a separate indexed `path` locator column;
+  it is not part of the key.
 - Path relocation updates the locator, not a provider's stable logical key.
   Keep filesystem path normalization out of per-query identity resolution.
 
@@ -248,14 +244,14 @@ In `Search.__init__`:
 Add:
 
 - `Search.resolve_source(identifier: str) -> SourceInfo | None` — one place
-  that matches exact `key`, then `name`/`book`/`local_name`, then provider
-  aliases. Phase 01 moves the ZIM-specific `_book_identity` matching here.
+  that matches an exact `key`. Do not add name, book, local-name, dated, or
+  flavoured alias matching.
 - `Search.refresh_collections(...)` — a thin loop over providers; no behavior
   change yet.
 - `Search.collection_dicts()` — serialization helper for later API work.
 
-Do **not** route `_search_source` through `provider` yet. Keep the existing
-`mode` dispatch so this phase is a pure refactor.
+`_search_source` dispatches by `source.provider` from this phase onward. Do not
+keep a `mode` fallback.
 
 ## Work items
 
@@ -266,10 +262,9 @@ Do **not** route `_search_source` through `provider` yet. Keep the existing
       03 implements it rather than extending the contract.
 - [ ] Create `zimantic/providers/registry.py`; register `zim` and `kiwix`
       placeholders.
-- [ ] Add a normalized provider-configuration seam that preserves the legacy
-      flat settings. Phase 05 introduces the minimal `[[sources]]` TOML parser
-      and phase 08 generalizes it; later providers consume normalized entries
-      rather than adding private config parsers.
+- [ ] Add a normalized provider-configuration seam. Phase 05 introduces the
+      `[[sources]]` TOML parser and phase 08 generalizes it; providers consume
+      normalized entries. Do not keep flat shorthands.
 - [ ] Extend `SourceInfo` and `to_dict()` in `zimantic/contracts.py`.
 - [ ] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
       public import path).
@@ -277,35 +272,34 @@ Do **not** route `_search_source` through `provider` yet. Keep the existing
 - [ ] Add `CollectionInfo.to_dict()`, `collection_dicts()`, and make
       `source_dicts()` include the new fields using the frozen nullability/schema
       rules above.
-- [ ] Update `zimantic/web/routes.py` type hints/param names only where they
-      describe source identity; do not change URLs.
+- [ ] Update `zimantic/web/routes.py` to use `key` as the source parameter;
+      there is no alias lookup.
 - [ ] Add `tests/providers/test_contracts.py` and
       `tests/providers/test_registry.py`.
 - [ ] Add a short "Provider contracts" section to `CONTRIBUTING.md`.
 
 ## Tests
 
-- `SourceInfo.to_dict()` snapshots for ZIM and non-ZIM values; ensure
-  `collection` is always present and `null` when unset, and no absolute path
-  leaks.
+- `SourceInfo.to_dict()` snapshots for ZIM and non-ZIM values; ensure the
+  payload contains `provider` and `collection`, contains no `mode`,
+  `content_kind`, `name`, `book`, or `local_name`, and leaks no absolute path.
 - Absolute configured roots are accepted without changing logical source
   identity; private catalog locators never appear in source serialization.
 - `CollectionInfo.to_dict()` snapshots use the same fields and nullability in
   API, CLI, and SSE serialization.
-- `resolve_source` still matches ZIM `key`, `name`, `book`, `local_name`, and
-  dated/flavoured aliases (`_book_identity` behavior preserved).
+- `resolve_source` matches exact `key` values only.
 - Registry returns the two built-ins and rejects unknown kinds.
-- `provider`, `content_kind`, and `mode` are internally consistent for every
-  built-in provider (`content_kind` and `mode` are derived from `provider`).
+- `provider` is the only discriminator; no serializer emits a derived kind or
+  mode.
 - The frozen `ContentStore` method set is unchanged when phase 03 implements it.
-- Existing search/API tests pass with no payload changes other than additive
-  fields.
+- Search and API tests are updated to the new payload in the same phase; there
+  is no old-payload compatibility suite.
 
 ## Acceptance criteria
 
 - `python -m pytest` passes.
-- Searching, `/sources`, `/library.json`, `/content/...`, and `/health` behave
-  identically for a ZIM-only library.
+- Searching, `/sources`, `/library.json`, `/content/...`, and `/health` work
+  through the new source key and contract.
 - No provider-specific branching is added to ranking, caching, or streaming.
 - The new contracts are importable without importing libzim, FAISS, or FastAPI.
 
@@ -313,10 +307,10 @@ Do **not** route `_search_source` through `provider` yet. Keep the existing
 
 - **Contract churn.** Keep the first version minimal; do not add hooks for
   features that no plan needs (auth, live crawling, remote indexing).
-- **API churn.** New payload fields are additive and nullable. Do not rename
-  `mode`; add `provider` alongside it.
+- **Payload churn.** Serializers have one schema. Remove obsolete fields
+  outright and update clients and tests in the same phase.
 - **Hidden coupling in tests.** Snapshot tests may assert exact dict keys;
-  update them in this phase and document the additions in `README.md`.
+  update them in this phase and document the new payload in `README.md`.
 - **Protocol surface.** Keep the seam minimal; `EntrySource` and `EntryRecord`
   remain internal adapters rather than additional public contracts. Add a
   protocol only when a plan needs it.
