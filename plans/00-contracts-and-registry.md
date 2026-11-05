@@ -6,13 +6,14 @@ Status: proposed.
 
 Introduce the internal seam that every later phase depends on. This phase is
 structural: it defines the provider, collection, source, and content contracts
-and the registry. ZIM remains the only working provider, but it reaches the core
-through the new contracts. The old `mode`/`content_kind` shape is replaced, not
-carried forward.
+and the registry. Existing ZIM and Kiwix search continue working through real
+runtimes. The old `mode`/`content_kind` shape is replaced, not carried forward.
 
 ## Non-goals
 
-- Do not move ZIM discovery or search yet. Phase 01 does that.
+- Move the per-source dispatch and search implementations needed for real
+  runtimes; phase 01 moves the remaining ZIM discovery and lifecycle, and phase
+  02 moves the remaining Kiwix catalog lifecycle.
 - Do not change `SourceResult`, ranking, fan-out, caching, or streaming.
 - Do not publish a third-party plugin API.
 - Do not rename the public `{zim}` route parameters yet. Phase 03 owns the
@@ -49,8 +50,8 @@ zimantic/providers/
 canonical definition in `zimantic/content/store.py`. `providers/base.py`
 imports and re-exports those content contracts; it must not define a second
 copy. The phase-00 contract tests cover both import paths and pin the complete
-`ContentStore` method set (including `read_range`) even though implementations
-return `None` until phase 03, so the contract is genuinely frozen here.
+`ContentStore` method set (including `read_range`) even though a runtime may
+return `None` until its store lands, so the contract is genuinely frozen here.
 
 ### Dataclasses
 
@@ -75,6 +76,7 @@ class CollectionInfo:
     description: str | None = None
     icon_url: str | None = None
     source_count: int = 0
+    media_types: tuple[str, ...] | None = None
     available: bool = True
     error: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -144,23 +146,56 @@ class CollectionRuntime(Protocol):
 
 class SourceProvider(Protocol):
     kind: str
-    def discover(self, ctx: ProviderContext) -> Iterable[CollectionInfo]: ...
-    def open(self, collection: CollectionInfo, ctx: ProviderContext) -> CollectionRuntime: ...
+    def discover(
+        self, entry: Mapping[str, Any], ctx: ProviderContext
+    ) -> Iterable[CollectionInfo]: ...
+    def open(
+        self, entry: Mapping[str, Any], collection: CollectionInfo, ctx: ProviderContext
+    ) -> CollectionRuntime: ...
 ```
+
+The canonical `ContentStore` protocol defined in `content/store.py` is:
+
+```python
+class ContentStore(Protocol):
+    def main_path(self) -> str | None: ...
+    def resolve(self, path: str | None) -> ContentEntry: ...
+    def exists(self, path: str) -> bool: ...
+    def read(self, path: str | None, *, head_only: bool, max_bytes: int) -> ArticleData: ...
+    def read_range(
+        self, path: str, *, start: int, end: int, max_bytes: int
+    ) -> ContentRange: ...
+    def random_path(self) -> str | None: ...
+    def icon(self, max_bytes: int) -> ArticleData | None: ...
+    def close(self) -> None: ...
+```
+
+`head_only` is a bounded content-prefix read for internal preview/metadata
+extraction, not an HTTP HEAD response. HTTP HEAD returns no body; it uses
+`resolve` metadata for unchanged content and bounded representation processing
+when HTML decoration changes the response. Phase 03 specifies the remaining
+error, range, redirect, and ownership rules.
 
 Notes:
 
-- `SourceProvider.discover()` must be cheap and bounded. It returns collection
-  descriptors, not items. A provider may cache expensive metadata on disk.
+- `discover()` receives one normalized configured entry and returns its
+  collection descriptors, not items. One entry may produce several collections
+  (Kolibri), or none. It is bounded; slow discovery runs in the background.
+  Configured-entry diagnostics exist independently of collection descriptors,
+  so a failed multi-collection discovery is still visible.
 - `CollectionRuntime.search()` is one source's work. Providers whose native
   query scope is broader than one source map that source to the appropriate
   subtree or content-node filter. Indexed providers still use the generic
   entry/index pipeline.
-- `ContentStore` is defined in `content/store.py` during this phase but its
-  provider implementations land in phase 03 and later. Providers can return
-  `None` until their serving support lands.
+- `ContentStore` is defined in `content/store.py` during this phase. The ZIM
+  store starts in phase 01 and is completed in phase 03; other local providers
+  implement it later. Kiwix always returns `None`.
 - `library_sources()` defaults conceptually to `sources`; ZIM overrides it to
-  include unreadable archives and duplicates.
+  include unreadable archives. `sources` includes readable but unsearchable
+  sources; search scheduling filters on both `available` and `searchable`.
+  Content lookup also resolves unsearchable library sources, and
+  `CollectionInfo.source_count` counts `library_sources`, not just searchable
+  sources.
 - `max_sources_per_search()` returns `None` for providers without a special
   fan-out cap. Refreshes publish an immutable source/collection snapshot
   atomically and increment `snapshot_version`; non-blocking refreshes expose
@@ -168,6 +203,20 @@ Notes:
 - `CollectionInfo` is a descriptor and remains frozen. Dynamic source counts,
   availability, errors, and discovery state come from the current runtime
   snapshot; serializers must not mutate a previously published descriptor.
+- Provider-private `metadata` and config must not be serialized wholesale;
+  expose only explicitly approved fields and never filesystem locators.
+- `media_types` is the union of observed source media families in the
+  snapshot. `None` means no usable classification was observed; a non-null
+  tuple lists families that were observed, even when the scan was partial.
+  An empty tuple is published only after a complete classification finds no
+  supported families. A collection with no observed families is rescanned once
+  and emits a warning if the rescan is still empty.
+- A specific content-type filter is conservative: a source or collection with
+  `media_types is None` does not match it. The unfiltered "All" view still
+  includes both unknown (`None`) and known-empty (`()`) sources.
+- A `sources` sequence is a snapshot, not an item-level manifest. API paging
+  limits response size, not necessarily snapshot memory; the roadmap's 512
+  sources is an advisory target, not a promise of lazy source storage.
 - `SourceResult` and its four ranking channels (`semantic`, `keyword`,
   `fulltext`, `items`) stay unchanged.
 
@@ -177,10 +226,14 @@ Notes:
 
 ```python
 key: str                       # globally unique, URL-safe source key
+provider: str                  # required; never infer a fallback provider
 title: str | None = None       # display name
-provider: str = "zim"
 collection_key: str = ""
 collection_label: str | None = None
+media_types: tuple[str, ...] | None = None
+indexed_count: int | None = None
+truncated: bool | None = None
+index_freshness: str | None = None  # current | stale | unknown; None if no index
 ```
 
 - `provider` is the canonical discriminator. There is no `content_kind`, no
@@ -191,12 +244,22 @@ collection_label: str | None = None
 - `title` is the display name. Remove `name`, `book`, `local_name`, and their
   alias precedence. Provider-specific identifiers such as a Kiwix book slug or a
   ZIM archive stem live in provider metadata or in the canonical `key`.
+- `indexed_count` and `truncated` describe the published index; both are
+  unknown (`null`) before one exists. Freshness is `unknown` until validated.
+  Later phases populate these fields without introducing alternate payloads.
+- `media_types is None` means no usable classification was observed for the
+  source. A non-null tuple lists observed families and may be partial;
+  incidental web assets need not count as separate content items.
+- A source matches a specific content-type filter only when `media_types` is
+  not `None` and contains the requested family. Unknown classification is
+  intentionally excluded from specific filters.
 
-`SourceInfo.to_dict()` emits only the canonical fields:
+`SourceInfo.to_dict()` emits canonical identity fields alongside the common
+display/status fields. This is an excerpt, not the complete payload:
 
 ```json
 {
-  "key": "zim:library:wikipedia_en_all",
+  "key": "zim:library:wikipedia_en_all-0123456789abcdef0123456789abcdef",
   "provider": "zim",
   "collection": {"key": "zim:library", "label": "Library", "provider": "zim"}
 }
@@ -211,6 +274,11 @@ paths.
 - Treat `key` as the canonical internal source identity. `key` is globally
   unique and namespaced by provider and collection; never derive it from an
   absolute filesystem path.
+- Require configured names to match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`;
+  reserve the ZIM name `open` for phase 10. Encode or slug provider identifiers
+  into URL-safe components and include a collision-resistant digest of the
+  original identifier when needed. Detect collisions instead of overwriting.
+  Phase 01 specifies ZIM identity; provider-specific examples are illustrative.
 - Absolute configured roots are valid. Providers may resolve them once and
   retain the canonical absolute path as a private runtime or catalog locator;
   it is not part of `SourceInfo`, `key`, or any serialized payload.
@@ -218,8 +286,10 @@ paths.
   provider-neutral `sources` table keyed by `key`; other providers are not
   required to write it. Store a canonical absolute path in a separate indexed
   `path` locator column; it is not part of the key.
-- Path relocation updates the locator, not a provider's stable logical key.
-  Keep filesystem path normalization out of per-query identity resolution.
+- Relocating a configured root without changing its root-relative layout updates
+  locators, not keys. Renaming or moving an item within that root may change
+  its key; providers document that boundary. Keep filesystem path
+  normalization out of per-query identity resolution.
 
 ### Registry
 
@@ -229,27 +299,27 @@ paths.
 - `get_provider(kind: str) -> SourceProvider`
 - `register(provider)` for tests only.
 - Registry lookup raises a clear config-validation error rather than silently
-  selecting a fallback provider. The top-level config loader decides whether
-  that invalid entry is fatal; phase 08 uses the failure-isolated behavior
-  described there and marks the entry unavailable without blocking other
-  collections.
+  selecting a fallback provider. The config layer reports an invalid entry
+  without blocking other entries, as specified below and in phase 08.
 
-Register `zim` and `kiwix` as placeholders in this phase. They may return empty
-discovery results until phases 01 and 02.
+Register working `zim` and `kiwix` runtimes in this phase. Move their existing
+per-source search code directly behind those runtimes, without a mode fallback;
+their remaining discovery/lifecycle code moves in phases 01 and 02.
 
 ### Minimal collection configuration
 
 This phase owns the minimal `[[collections]]` TOML parser. It parses the
-array-of-tables shape into normalized provider entries, requires `type` and
+array-of-tables shape into normalized provider entries, validates `type` and
 `name`, rejects duplicate names, and preserves provider-specific keys for the
 provider validators that follow. It must not depend on provider modules that
 are introduced later. Flat `zim_dir` and `kiwix_server` shorthands are not
 accepted.
 
-The parser reports invalid TOML as fatal and defers provider-specific
-validation and unavailable-entry handling to the registry/config layer. Phase
-05 adds files-provider validation, and phase 08 completes the full settings
-loader without introducing a second parser.
+Invalid TOML is fatal. Other invalid entries produce config diagnostics without
+blocking valid entries; disable every entry sharing a duplicate name rather
+than choosing one. Entries without a valid name/type have no invented
+collection key. Provider-specific validation belongs to the provider. Phase 05
+adds files validation, and phase 08 completes the loader without another parser.
 
 ### `Search` integration skeleton
 
@@ -264,8 +334,8 @@ Add:
 - `Search.resolve_source(identifier: str) -> SourceInfo | None` — one place
   that matches an exact `key`. Do not add name, book, local-name, dated, or
   flavoured alias matching.
-- `Search.refresh_collections(...)` — a thin loop over providers; no behavior
-  change yet.
+- `Search.refresh_collections(...)` — a thin loop over configured entries and
+  their providers.
 - `Search.collection_dicts()` — serialization helper for later API work.
 
 `_search_source` dispatches by `source.provider` from this phase onward. Do not
@@ -278,12 +348,16 @@ keep a `mode` fallback.
       `zimantic/content/store.py` and re-export it from `providers/base.py`.
       Define the complete `ContentStore` protocol, including `read_range`; phase
       03 implements it rather than extending the contract.
-- [ ] Create `zimantic/providers/registry.py`; register `zim` and `kiwix`
-      placeholders.
+- [ ] Create `zimantic/providers/registry.py`; register working `zim` and
+      `kiwix` runtimes and move the existing per-source search dispatch into
+      them.
 - [ ] Add the normalized provider-configuration seam and minimal
       `[[collections]]` TOML parser described above; providers consume normalized
       entries and later phases add provider-specific validation. Do not keep
       flat shorthands.
+- [ ] Migrate the shipped config, deployment examples, and documentation that
+      use flat provider keys in this phase. Keep global TOML keys before the
+      first `[[collections]]` table so they do not become collection fields.
 - [ ] Extend `SourceInfo` and `to_dict()` in `zimantic/contracts.py`.
 - [ ] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
       public import path).
@@ -308,10 +382,15 @@ keep a `mode` fallback.
 - `CollectionInfo.to_dict()` snapshots use the same fields and nullability in
   API, CLI, and SSE serialization.
 - `resolve_source` matches exact `key` values only.
-- Registry returns the two built-ins and rejects unknown kinds.
+- Registry returns the two built-ins and rejects unknown kinds; configured
+  ZIM and Kiwix searches both continue working in this phase.
+- Constructing a source without an explicit provider fails rather than silently
+  treating it as ZIM.
 - `provider` is the only discriminator; no serializer emits a derived kind or
   mode.
 - The frozen `ContentStore` method set is unchanged when phase 03 implements it.
+- One configured entry can discover multiple collections; invalid or duplicate
+  entries produce diagnostics without disabling unrelated valid entries.
 - Search and API tests are updated to the new payload in the same phase; there
   is no old-payload compatibility suite.
 

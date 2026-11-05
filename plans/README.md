@@ -43,7 +43,7 @@ re-litigation inside the phase plans:
 | Term | Meaning | Public surface |
 |---|---|---|
 | Provider | In-tree adapter for one kind of content: `zim`, `kiwix`, `files`, `kolibri`. The only source discriminator. | No |
-| Collection | A configured root, server, or channel. Owns a bounded set of sources and is the library grouping. | Yes, as grouping metadata |
+| Collection | A configured root, server, or channel. Groups sources; hierarchical providers bound their source count. | Yes, as grouping metadata |
 | Source | The searchable unit and content root. `SourceInfo.key` is its identity and `/content/{key}/{path}` address. | Yes |
 | Item | An article, file, content node, video, or other result row. | Yes, as a result |
 | Content store | Path-addressed reader for one source (archive, filesystem tree, Kolibri storage tree). | No |
@@ -74,11 +74,12 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, contract tests, performance, staged release |
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
 
-Phase 00 introduces the minimal raw `[[collections]]` parser so phases 01 and 02
-can be configured as they land. Phase 05 adds files-provider validation and
-configuration semantics; phase 08 completes the full settings loader for all
-providers and operations. There is one parser and one normalized entry shape,
-not a temporary parser per provider.
+Phase 00 introduces the minimal `[[collections]]` parser and preserves both
+existing search backends through real runtimes. Phase 01 introduces the shared
+index locator; phase 04 extends it and changes the index schema, requiring a
+rebuild at that phase as well. Phase 05 adds files-provider validation; phase 08
+completes the full settings loader. There is one parser and one normalized
+entry shape, not a temporary parser per provider.
 
 ## Design invariants
 
@@ -92,22 +93,24 @@ Every phase must hold these:
 - **One content route.** No `/kolibri/...`, `/files/...`, or `/modules/...`
   parallel content APIs. Kiwix remains external-only and returns absolute
   `kiwix-serve` links.
-- **One index layout.** Every provider uses the same locator and the same index
-  schema. Old index files are not discovered or upgraded; they are rebuilt.
+- **One index layout.** Every local indexed provider uses the same locator and
+  index schema. Kiwix is remote/search-only. Old index files are not discovered
+  or upgraded; they are rebuilt.
 - **One config schema.** Collections are declared only with `[[collections]]`.
   There are no flat `zim_dir` or `kiwix_server` shorthands.
 - **The catalog is disposable.** `catalog.sqlite` is the ZIM archive metadata
   cache; Files and Kolibri do not write it, and Kiwix has no persistent local
-  catalog. An incompatible catalog is deleted and rebuilt; no version
-  detection, row migration, or old table aliases.
+  catalog. An incompatible catalog is rebuilt after checking its schema version;
+  no old-table inspection, row migration, or aliases.
 - **Items never become sources.** Any provider that discovers many items maps
   them to a bounded source set.
 - **Provider failure is isolated.** A broken or slow provider cannot crash the
   server or starve other providers of search slots.
 - **Local providers do not use the network.** Discovery and reading are local
   and read-only unless a provider is explicitly remote (`kiwix`).
-- **No unbounded walks.** Every directory/provider traversal has a root, an
-  exclude list, a source cap, an entry cap, and a byte/time budget.
+- **No unbounded walks.** Every directory/provider traversal has a root,
+  exclusions where applicable, and explicit visit, entry, byte, and time
+  budgets. Reaching a budget is reported, not mistaken for a complete scan.
 
 ## Cross-cutting budgets
 
@@ -116,11 +119,13 @@ These are defaults, not hard-coded promises. Each provider may tighten them.
 | Budget | Default | Purpose |
 |---|---|---|
 | Sources per collection | 64 | Hard discovery cap for providers that can safely collapse sources; otherwise a fan-out/UI budget |
-| Sources overall | 512 | Soft materialization budget; use paging and provider fan-out limits rather than silently dropping sources |
+| Sources overall | 512 | Advisory target, not a hard in-memory cap; page API responses and bound search fan-out |
 | Indexed items per source | 500,000 | Avoid pathological trees |
 | Indexed bytes per item | global `max_entry_bytes` | One limit for every provider |
 | Discovery time per provider | 10 s startup budget | Do not block serving on discovery |
-| Search tasks per provider | `min(4, search_workers)` | Fair scheduling across providers |
+| Entries examined per traversal | 1,000,000 | Includes excluded and non-indexable entries |
+| Traversal time | 300 s | Hard work budget, distinct from the startup budget |
+| Search tasks per provider | up to `min(4, search_workers)` | Fair scheduling; reserve capacity for competitors when possible |
 | Remote sources per search | `max_remote_sources` | Bound remote fan-out |
 
 When a hierarchical provider exceeds a discovery cap, it must collapse to a
@@ -128,9 +133,12 @@ coarser source granularity (for example, the whole collection as one source)
 and log the collapse. Providers whose source identity is fixed by the content
 (ZIM archives and Kiwix books) must not invent an aggregate source: they keep
 the complete source set, expose it through paged APIs, and enforce limits only
-on search fan-out. No provider may silently drop sources. Indexing caps are a
-separate concern: they may reduce search coverage only when the source is
-explicitly marked truncated; serving must continue to cover all content.
+on search fan-out. Discovery that cannot complete within its other budgets must
+report an incomplete/error state and retain the last complete snapshot; it
+must not present a prefix as complete. Indexing caps are separate: they may
+reduce search coverage only when the source is explicitly marked truncated;
+serving must continue to cover all content permitted by the provider's access
+and exclusion rules.
 
 ## Definition of done for the whole effort
 
@@ -141,8 +149,9 @@ explicitly marked truncated; serving must continue to cover all content.
   title/description, serving documents, PDFs, HTML5 apps, and media; derived
   text (captions, OCR, or ASR) is included only for the operations explicitly
   enabled on that source.
-- Every provider uses one source key, one content route, and one index layout;
-  there are no provider-specific branches or compatibility shims in the core.
+- Every source has one key; local providers use one content route and index
+  layout, while Kiwix remains external-only. There are no provider-specific
+  branches or compatibility shims in the core.
 - The full test suite passes on Python 3.11–3.14, including provider contract
   tests, traversal/security tests, and catalog/rebuild tests.
 - `config.toml`, `README.md`, `CONTRIBUTING.md`, and deployment examples
@@ -170,5 +179,5 @@ explicitly marked truncated; serving must continue to cover all content.
 3. Move behavior directly and delete the replaced implementation in the same
    phase. Do not add a temporary adapter, dual config path, or alias layer.
 4. Update `plans/README.md` checkboxes and the phase document as work lands.
-5. Finish with `python -m pytest`, a manual `/search` smoke test, and a
-   `/library` smoke test with at least one non-ZIM source.
+5. Finish with `python -m pytest` and manual `/search` and `/library` smoke
+   tests. Include a non-ZIM source once phase 05 makes one available locally.

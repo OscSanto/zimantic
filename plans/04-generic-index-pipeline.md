@@ -52,32 +52,51 @@ zimantic/providers/zim/
 class EntryProducer(Protocol):
     key: str                 # source key
     provider: str
-    fingerprint: str         # changes when the underlying content changes
+    fingerprint: str         # initial snapshot and build inputs
     count: int
     def entry_at(self, index: int) -> EntryRecord | None: ...
+    def validate_snapshot(self) -> bool: ...
 ```
 
 - `EntryRecord.id` is the stable row id written to `docs.rowid`. Providers must
   keep it stable for the duration of a source snapshot and across unchanged
-  rebuilds. The producer's `count` is the complete snapshot manifest length;
-  non-indexable entries return `None` and are reported as skipped rather than
-  changing row-id assignment.
+  rebuilds. `count` is the length of the bounded build manifest, not necessarily
+  the total source size. Non-indexable entries return `None` and are reported as
+  skipped rather than changing row-id assignment.
 - `entry_at` returns `None` for non-indexable items; the producer is
   responsible for harmless skips.
-- `fingerprint` must be cheap and must cover everything that can change item
-  identity/content: archive size+mtime for ZIM; a manifest hash for files;
-  database mtime + node count for Kolibri; remote catalog version for future
-  providers.
+- `validate_snapshot()` independently checks the live source and build inputs
+  against the initial fingerprint under the traversal budgets. It returns
+  false on a detected change and raises a reported error if validation cannot
+  finish; merely rereading the stored `fingerprint` is not validation.
+- `fingerprint` covers the ordered selected manifest, relevant source
+  signatures, extraction settings, and enabled derived-text inputs. Use ZIM
+  UUID/size/mtime, a files manifest, and a consistent Kolibri DB snapshot plus
+  selected storage-file signatures as specified in the provider plans.
+- Size/mtime signatures are a practical change detector, not a proof of
+  identical bytes: same-size writes with restored timestamps can evade them.
+  Document that limitation and require immutable content or an external
+  snapshot for strong consistency. Do not read disabled media solely to hash
+  it. Builds and reloads must report detected changes rather than claiming
+  arbitrary concurrent writes are impossible.
 - The producer owns traversal order. The core never walks a filesystem, opens a
   ZIM, or queries Kolibri.
 
 Resume rule: store `source_fingerprint` in `meta` when a build starts. On
 resume, if it differs, discard staging and start over. The fingerprint includes
-the enabled derived-text operations and their engine/model identifiers, so
-toggling `captions`, `ocr`, or `asr` rebuilds the index. Verify the same
-fingerprint again immediately before publication; if the source changed during
-the build, discard or retry the build rather than publishing a mixed snapshot.
-Never resume a `meta.next` against a changed item list.
+enabled derived-text operations, engine version, local model/data identity, and
+availability, so changing them or making a previously missing engine available
+triggers a rebuild. A model identifier alone is insufficient if its local files
+can change in place. Call `validate_snapshot()` immediately before publication;
+if the selected manifest or observed signatures changed during the build,
+discard or retry rather than publish it. Never resume a `meta.next` against a
+changed item list. A change after the final check can still race publication.
+On reload, perform a bounded
+signature check or report index freshness as unknown until one can finish;
+never treat an unchecked index as verified current. A detectably stale index is
+not searched until rebuilt; native full-text and content serving remain
+available. An unchecked index may still be searched, but its unknown freshness
+is exposed.
 
 ### Derived text enrichment
 
@@ -86,73 +105,95 @@ optional stage in `indexing/derived.py` so every provider gets the same policy,
 caching, provenance, and failure handling.
 
 ```python
-from pathlib import Path
-
 class DerivedTextInput(Protocol):
     kind: Literal["captions", "image", "audio", "video"]
     mimetype: str
-    digest: str            # content identity for the cache
     size: int
-    path: Path | None      # provider-confined regular file, when available
-    def open(self) -> BinaryIO: ...
+    def open(self) -> BinaryIO: ...  # race-safe, provider-confined
 
 class DerivedTextProducer(Protocol):
     def derived_text_inputs(self, index: int) -> Iterable[DerivedTextInput]: ...
 ```
 
 - The producer decides which candidate files exist and yields bounded,
-  provider-confined streams. The core decides whether to read them.
+  provider-confined inputs. The core decides whether to read them and computes
+  the digest while consuming an enabled input, rather than requiring a separate
+  digest read. Enumeration itself must not read bytes for a disabled operation.
 - The hook is provider-neutral: ZIM, files, and Kolibri can implement it, while
   a provider with no local content bytes (Kiwix) cannot. A provider without the
-  hook is simply not enrichable. ZIM adoption may follow files/Kolibri rather
-  than delaying this phase.
+  hook is not enrichable; a requested operation is reported unavailable, not
+  silently ignored. ZIM adoption may follow files/Kolibri rather than delaying
+  this phase.
 - Operations are independent and off by default:
   - `captions = "index"` parses existing subtitle/caption tracks; no model.
   - `ocr = "tesseract"` extracts text from images and image-only pages.
   - `asr = "whisper"` transcribes speech from audio/video.
 - The core skips an input kind that the source has not enabled. Prefer native
-  text, then captions, then OCR/ASR, so ASR is skipped when a usable caption
-  track exists and OCR is skipped when a page already has a text layer.
+  text, then enabled captions, then OCR/ASR: skip ASR when enabled caption
+  parsing produced usable text, and skip OCR for each page with a text layer.
+  When captions are off, never read them to decide whether ASR should run.
 - Extractors run only during build. Search, previews, and serving never decode
   media or run a model.
 - OCR and ASR are optional dependency extras. A configured but missing engine or
   model marks only that operation unavailable for the source; it does not crash
-  the server, fail the whole build, or silently substitute another operation.
+  the server, prevent other sources from building, or silently substitute
+  another operation. Publish available channels with an explicit partial
+  enrichment status and non-zero build exit, and retry the requested operation
+  on a later build when its availability changes.
 - No network. Models must be provisioned locally before the build.
-- Results are cached by `(operation, engine, model, engine_version, digest)` in
-  a private cache directory and reused across rebuilds. Cache entries are not
-  source identity and may be removed by `zimantic prune`.
+- Results are cached in a private directory by content digest, operation,
+  engine/model and version, and every output-affecting option (including
+  language, parser version, and caps). Partial/failed outputs are not cached as
+  complete. Cache entries are not source identity and may be removed by
+  `zimantic prune`.
 - Provenance: append derived text to `EntryRecord.excerpt` in a deterministic
   order and record the contributing operations in index metadata and the build
   report. Optionally expose the per-result contributors as an optional field.
+- Source/health output reports the last build's per-operation state:
+  `off`, `not_checked`, `ready`, `partial`, or `unavailable`. A changed config
+  or a fast build is `not_checked` until a matching full build runs. `serve`
+  reads this metadata; it never loads an engine to probe its state.
 - Budgets come from the global `[derived_text]` config: caption bytes, OCR
-  pages/pixels/output bytes, ASR media seconds/bytes, and `workers`. A skipped
-  or truncated input is logged once and reported, never invented.
+  pages/pixels/output bytes, ASR media seconds/input/output bytes, task time,
+  aggregate spool bytes, and `workers`. The global `max_entry_bytes` also
+  applies to each input. An input skipped or truncated because of a cap,
+  malformed data, or failure is logged and reported as partial enrichment;
+  other items continue and the overall build exits non-zero. Intentionally
+  disabled or unnecessary inputs are not failures.
 
 #### Derived-text configuration ownership
 
 Phase 04 defines and validates the normalized global `[derived_text]` schema
 consumed by this stage, including `max_caption_bytes`, OCR/ASR caps, engine
-settings, cache behavior, and `workers`. Source entries only select
-`captions`, `ocr`, or `asr`; they do not carry operation budgets. Phase 08
-exposes this schema through the complete settings loader without redefining
-its keys or precedence.
+settings, cache behavior, and `workers`. Each configured entry may contain
+`[[collections.sources]]` tables with an exact source `key` and explicit
+`captions`, `ocr`, or `asr` switches. Unspecified operations and sources are
+off; there are no collection-wide enable defaults. Reject all conflicting
+overrides for a duplicate key and report unknown/stale keys rather than
+applying them to a different source. An override may only name a source
+belonging to its configured entry. Defer stale-key diagnostics until
+discovery has completed; a loading snapshot is not evidence that a key is
+unknown. Overrides carry no budgets. Phase 08 exposes the same schema.
 
 #### Execution model
 
 - Caption parsing is pure Python and cheap. It runs in-process; it does not need
   a worker pool.
-- OCR and ASR run in a single shared `ProcessPoolExecutor`, created lazily only
+- OCR and ASR run in a single shared process pool, created lazily only
   when an enabled operation needs it. Process isolation contains native engines
   that are not thread-safe and prevents an engine crash from taking down the
-  build.
+  build. Use a pool with a supported terminate-and-join operation on Python
+  3.11–3.14; timing out a `Future` alone does not stop a hung native worker.
 - Worker functions and their arguments must be safe for `spawn` and
   `forkserver`, not just `fork`. Engine and model objects are created inside
   the worker, never pickled across the boundary.
-- Prefer `DerivedTextInput.path` when it names a provider-confined regular
-  file. When the content only exists inside an archive or database blob, spool
-  a bounded copy to a private `0600` temp file and remove it after the task.
-  Never send an unbounded byte blob or an arbitrary path to a worker.
+- Spool each enabled worker input from its confined stream into a bounded,
+  private `0600` temp file; remove it after completion, cancellation, or
+  failure. Enforce an aggregate temp-space budget across concurrent workers,
+  check storage availability, and report failures. Clean up only recognized
+  stale private spools after an uncatchable process exit. Never send an
+  unbounded blob or a provider path that could be swapped after validation to a
+  worker.
 - The pool is shared for the whole build run, not created per source, so
   `build_workers` cannot multiply model memory.
 - Engine-internal thread counts are set explicitly (normally 1) so process
@@ -162,24 +203,28 @@ its keys or precedence.
   `os.cpu_count()`:
   - `cpu_task_limit = max(1, usable_cores - headroom)`, leaving room for
     extraction, the embedding pipeline, concurrent source builds, and the OS;
-  - `memory_worker_limit = max(1, usable_memory // per_worker_memory)`, where
-    `usable_memory` is currently available memory (MemAvailable plus cgroup
-    headroom where detectable), not installed RAM, and `per_worker_memory` is
-    the sum of the enabled engines' estimated resident sets plus interpreter
+  - `memory_worker_limit = usable_memory // per_worker_memory`, where
+    `usable_memory` is currently available memory after reserves, bounded by
+    cgroup headroom where detectable, not installed RAM, and `per_worker_memory`
+    is the sum of the enabled engines' estimated resident sets plus interpreter
     overhead;
-  - `workers = max(1, min(cpu_task_limit, memory_worker_limit))`.
+  - if that limit is positive, `workers = min(cpu_task_limit, memory_worker_limit)`.
 - There is no low fixed cap such as 4. A large host may use more workers when
-  memory allows; a 512 MB–1 GB host such as a Pi Zero 2 W still resolves to 1.
+  memory allows; a 512 MB–1 GB host such as a Pi Zero 2 W resolves to 1 when
+  one worker fits. If the memory limit is zero, report the operation unavailable
+  instead of starting it and risking OOM.
   An explicit positive integer overrides auto; warn if it exceeds the estimated
   memory budget but do not silently clamp it. Report the resolved value and the
   binding limit (`cpu` or `memory`) in the build report.
-- An abrupt engine/worker crash marks that input as failed or skipped and
-  continues the build. Recreate a broken executor rather than failing the
-  source or leaving a half-written index.
+- Give each engine task a wall-clock budget. On a crash or timeout, terminate
+  and join the affected pool, report the input, and recreate it; requeue other
+  interrupted work only within a bounded retry limit. Continue building other
+  sources and never loop indefinitely on a repeatable failure.
 
 ### Index locator
 
-Every provider uses one layout:
+The shared locator introduced in phase 01 uses one layout for every local
+indexed provider:
 
 ```
 <index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.sqlite
@@ -205,20 +250,23 @@ The locator must:
   path and are handled by the fingerprint/resume rules;
 - expose one `paths(source)` function;
 - be shared by `serve`, `build`, `reload`, cleanup, and health.
-- A read-only consumer may reuse a finished index through the logical
-  `source_key` stored in its metadata even when the consumer exposes a
-  temporary source alias. The alias must not produce a second locator or
-  change the indexed source identity.
 
 ### Generic build
 
 `pipeline.py` keeps the current semantics:
 
-- staging DB/FAISS, upgrade and atomic publish;
+- staging DB/FAISS and upgrade; publish each artifact atomically and verify the
+  SQLite/FAISS pair as described below;
 - progress, batching, embedding pipeline, fast mode;
 - model probes and fingerprint compatibility;
 - `meta.done`, `meta.next`, and crash resumability;
 - build locking remains global in `zimantic/locking.py`.
+
+Even a forced rebuild stages its replacement without deleting the last
+published index first. A fatal traversal, extraction, or build failure leaves
+that artifact in place; a detectably stale artifact is not searched. Requested
+derived-text failures instead publish the available channels as partial, as
+specified above.
 
 Only the entry source changes:
 
@@ -227,7 +275,24 @@ def build_index(producer, locator, embedder, cfg, fast=False, force=False): ...
 ```
 
 The ZIM provider calls it with `ArchiveEntryProducer`; files and Kolibri call
-the same function with their producers.
+the same function with their producers. Phase 04 changes the index schema and
+requires rebuilding phase-01 indexes; the locator itself does not change.
+The per-source item cap applies to ZIM too, so very large ZIMs can have
+truncated semantic/title coverage after rebuilding; native full-text may still
+cover the archive. Report `truncated` and `indexed_count` and call out this
+change in the migration notes.
+
+Two file renames are not an atomic pair. Record a digest of the completed FAISS
+file and a unique build generation in staged SQLite metadata. Before enabling
+semantic search, verify the same opened bytes that FAISS loads, not a pathname
+that can be replaced between verification and loading. Pin each index handle to
+that generation; verify newly opened per-thread SQLite connections match it, or
+reopen/retry against the current generation. If publication is interrupted or a
+reader observes mismatched generations, retain safe lexical/native behavior and
+report the mismatch; never pair vectors with the wrong document rows. Fast
+indexes have no FAISS digest and must not load a leftover FAISS file. Cache
+verification on the loaded handle so searches do not repeatedly hash vectors;
+verify again when reopening a pair rather than trusting file signatures alone.
 
 ### Generic local search
 
@@ -239,13 +304,19 @@ Move `_search_local_locked` and its helpers out of `Search` into
 - Channels: semantic (FAISS), keyword/title (FTS5 `docs`), body/excerpt
   lexical (FTS5 where a provider supplies body text), native full-text
   (optional), and the documented fusion/limits.
-- One `docs` FTS5 schema and rowid model for every provider. Add an optional
+- Merge body lexical and native hits into the existing `fulltext` result
+  channel by reciprocal ranks, deduplicating by document ID and breaking ties
+  deterministically; their native and BM25 scores are not comparable. Do not
+  introduce a fifth `SourceResult` channel. A provider with no native searcher
+  is not partial solely because it lacks one.
+- One `docs` FTS5 schema and rowid model for every local indexed provider. Add an optional
   `body` FTS5 table keyed by the same rowids, populated from
   `EntryRecord.excerpt`. There are no legacy index variants or schema
   fallbacks.
 - A normal Files/Kolibri build makes indexed body text searchable through
   `body`; `--fast` intentionally remains title/path-only, with neither body
-  FTS nor embeddings, as specified in phase 08.
+  FTS nor embeddings or derived-text processing, as specified in phase 08.
+  Report that configured enrichment was not attempted in a fast build.
 - Preview hydration calls `ContentStore.read`, not libzim directly.
 - Redirect resolution still follows `docs.target` chains for all providers.
 - Providers without a native index return no native hits; they still get
@@ -299,7 +370,7 @@ borrows it and must never close it independently.
 - [ ] Move `_index_entries`, `_save`, `_finish_build`, `_write_faiss`, and
       staging/upgrade helpers into `indexing/pipeline.py` with no libzim
       imports.
-- [ ] Add `indexing/locator.py` with one layout for every provider.
+- [ ] Reuse the phase-01 `indexing/locator.py` for every local indexed provider.
 - [ ] Create `providers/zim/entries.py` with `ArchiveEntryProducer`, wrapping
       `read_entry` and preserving ids, progress, and fast mode.
 - [ ] Split `content/reader.py` into pure extractors and a ZIM adapter only if
@@ -324,6 +395,9 @@ borrows it and must never close it independently.
       fingerprint inputs.
 - [ ] Add the lazy shared process pool for OCR/ASR with spawn-safe workers,
       auto worker resolution, bounded temp-file spooling, and crash recovery.
+- [ ] Validate the SQLite/FAISS digest on open, including interrupted
+      publication and per-thread connections opened during a rebuild; do not
+      serve mismatched vectors and document rows.
 - [ ] Add a synthetic in-memory producer in tests to prove the pipeline has no
       libzim dependency.
 
@@ -331,14 +405,19 @@ borrows it and must never close it independently.
 
 - [ ] ZIM build produces the generic `docs`/`body` schema, `meta.done`/`next`,
       FAISS ids, and search results through `build_index`.
+- [ ] A ZIM exceeding the item cap reports truncated index coverage while its
+      available native full-text and content serving continue to work.
 - [ ] Resume after interruption works; changing the fingerprint restarts the
       build safely.
-- [ ] A source changing during a build is detected before publication and
-      cannot produce a mixed or stale published index.
+- [ ] A detectable manifest/signature change during a build prevents
+      publication; a later detectable change marks the index stale on reload.
+- [ ] Interrupted publication or concurrent opening cannot pair a SQLite index
+      with a different FAISS generation.
+- [ ] A failed forced rebuild leaves the previous published index intact.
 - [ ] Fast build, force rebuild, upgrade-in-place, and a corrupt staging file
       all work.
 - [ ] Model fingerprint/probe mismatch falls back to lexical search.
-- [ ] Index locator: all providers use the same layout; paths are safe, unique,
+- [ ] Index locator: all local indexed providers use the same layout; paths are safe, unique,
       and bounded; independent of source-root relocation; no source absolute
       path in generated filenames or public metadata.
 - [ ] Generic local search over a synthetic producer returns semantic,
@@ -350,25 +429,31 @@ borrows it and must never close it independently.
       respects its caps, and reuses the digest cache across rebuilds.
 - [ ] Changing an operation, engine, or model changes the fingerprint and
       restarts the build.
+- [ ] ASR works alone even when a caption file exists; with captions enabled,
+      usable caption text suppresses ASR. Cache entries vary with language and
+      caps, and unavailable engines are retried when they become available.
 - [ ] `workers = "auto"` resolves to 1 on a low-memory host, scales above 4 on
-      a large host when memory allows, and reports whether CPU or memory was
-      binding; an explicit integer overrides it. The OCR/ASR pool is lazy,
+      a large host when memory allows, reports unavailable when none fits, and
+      reports whether CPU or memory was binding; an explicit integer overrides
+      it. The OCR/ASR pool is lazy,
       shared across sources, and not created when those operations are off.
-- [ ] A fake engine that crashes the worker does not fail the build or another
-      source; the task is reported and the executor recovers.
-- [ ] Native fulltext absence yields the documented partial status.
+- [ ] A fake engine that crashes the worker does not prevent other sources from
+      building; report partial enrichment and exit non-zero. A hung worker is
+      terminated on timeout on Python 3.11 as well as newer versions.
+- [ ] An absent optional native searcher is not an error; failure of an expected
+      isolated native search retains the documented partial/error status.
 - [ ] Concurrent builds and `build_workers` still work under the global lock.
 
 ## Acceptance criteria
 
 - `python -m pytest` passes.
-- Every provider uses the same index layout and schema; old indexes are ignored
-  and rebuilt.
+- Every local indexed provider uses the same index layout and schema; Kiwix
+  remains search-only. Old indexes are ignored and rebuilt.
 - `build.py` no longer imports provider-specific discovery.
 - `indexing/` imports no libzim, FAISS, or web modules at module scope except
   inside the FAISS loaders.
-- Files and Kolibri can implement only `EntryProducer` + `ContentStore` and
-  get FTS, semantic search, previews, resume, and publication for free.
+- Files and Kolibri use `EntryProducer` + `ContentStore` for FTS, semantic
+  search, previews, resume, and publication, alongside their provider runtimes.
 
 ## Risks and mitigations
 

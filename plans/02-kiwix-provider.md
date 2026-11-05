@@ -36,9 +36,11 @@ zimantic/providers/kiwix/
 - **Collection** = one configured Kiwix server:
   `[[collections]] type = "kiwix"`, `name = "..."`, `server = "..."`. Collection key
   is `kiwix:<name>`; the label defaults to `"Kiwix"` and may include the host.
-- **Source** = one catalog book. Source key is `kiwix:<name>:<book>`; duplicate
-  slugs get a stable suffix. The book slug is also kept in provider metadata for
-  the remote API. There are no alias keys.
+- **Source** = one addressable catalog book. The key uses a safe slug plus a
+  digest of the exact remote book slug, under `kiwix:<name>:`. Keep that remote
+  slug privately for the remote API. Exact duplicate slugs name the same remote
+  endpoint and are deduplicated; distinct dated or flavoured slugs are not
+  merged. Detect key collisions instead of overwriting. There are no aliases.
 - `SourceInfo.provider = "kiwix"`, `searchable = True`, `available = True`.
   There is no `content_kind` or `mode`.
 - `SourceInfo.homepage`/`icon_url` remain absent unless the catalog provides
@@ -46,16 +48,28 @@ zimantic/providers/kiwix/
 
 ### Runtime behavior
 
-- `discover()` returns the cached catalog immediately when present; a refresh
-  runs in a daemon thread and swaps the source set atomically when it changes.
+- Entry discovery creates the configured server collection without waiting for
+  the network. Its runtime exposes the last complete in-memory catalog, if
+  any, while a background refresh runs and atomically publishes a complete
+  replacement.
 - `open()` returns a runtime with the catalog entries and a
   `search(source, request)` implementation that calls `search_kiwix`.
 - No local `ContentStore`; return `None`. Result documents keep absolute
   `url` links and are served by `kiwix-serve`, not by `/content/{key}/...`. The
   unified content route applies to local providers; Kiwix keeps external links.
+- Validate result URLs and redirects: only HTTP(S) links on the configured
+  Kiwix origin are accepted, with no embedded credentials. Resolve relative
+  links against that origin; reject `javascript:`, `data:`, scheme-relative
+  foreign hosts, and cross-origin redirects rather than exposing or fetching
+  them.
 - The runtime owns retry/backoff, response-size limits, and XML hardening.
 - `refresh()` is non-blocking for the server startup path and keeps the last good
   catalog on failure.
+- `catalog_limit` is a per-page request size, not a total-book cutoff. Fetch
+  pages within explicit response-byte, total-entry, and time budgets. If the
+  server cannot be paged or the refresh cannot finish consistently within
+  those budgets, report an incomplete/error state and keep the last complete
+  snapshot; never silently publish a truncated catalog as complete.
 
 ### Fan-out budget
 
@@ -68,8 +82,9 @@ provider:
 - The core applies the budget only to unscoped searches and still honors an
   explicit selection that names a source outside the budget.
 - `source_timeout` bounds each remote source search.
-- The per-provider task cap from the roadmap applies here first; a slow server
-  cannot occupy every search worker.
+- The per-provider task cap and fair scheduling apply here first. With more
+  than one worker and competing providers, reserve capacity for other providers;
+  with one worker, fairness is bounded by the in-flight task's deadline.
 
 Keep the one-time warning text and behavior for truncated remote fan-out. The
 cap does not truncate catalog discovery or remove Kiwix books from paged
@@ -77,8 +92,9 @@ source/library APIs.
 
 ### Config
 
-- `type`, `name`, `server`, `catalog_path`, `catalog_limit`,
-  `max_response_bytes`, and `max_remote_sources` are the only Kiwix keys.
+- `type`, `name`, `label`, `server`, `catalog_path`, `catalog_limit`,
+  `max_response_bytes`, and `max_remote_sources` are the Kiwix keys, alongside
+  the common bounded-discovery settings.
 - There is no `kiwix_server` flat key. A Kiwix collection exists only through an
   explicit `[[collections]]` entry.
 - The search page and JSON API use the canonical source key and provider fields;
@@ -100,9 +116,10 @@ source/library APIs.
       runtime.
 - [ ] Use the phase-00 `max_sources_per_search()` contract in
       `Search._search_scope`; do not branch on a mode.
-- [ ] Make timed-out remote tasks cancellable or explicitly detached from the
-      search result so they cannot consume provider slots after
-      `source_timeout`.
+- [ ] Bound connect/read and total request time, cancel queued work on timeout,
+      and detach timed-out results from the response. A running thread retains
+      its worker/provider slot until it actually exits; detaching a future does
+      not cancel the underlying I/O.
 - [ ] Delete the `mode == "kiwix"` branch from `_search_source`.
 - [ ] Keep `source_dicts()` ordering (title casefold) and duplicate-book
       handling.
@@ -112,11 +129,17 @@ source/library APIs.
 - [ ] Catalog parse, retry/backoff, non-retryable 4xx, DTD rejection, and
       response-size limits (existing tests, relocated).
 - [ ] Catalog failure keeps the last good source set and logs once.
+- [ ] Multiple catalog pages are discovered; a budget-exhausted or unpageable
+      catalog is reported as incomplete rather than silently truncated.
 - [ ] Remote search returns the expected documents/links/ordering.
+- [ ] Unsafe or cross-origin result links and redirects are rejected without
+      exposing credentials or interrupting other providers.
 - [ ] `max_remote_sources = 0` suppresses unscoped remote search; an explicit
       selection still searches.
 - [ ] A slow remote source times out as `status="error"` without failing the
       merged search.
+- [ ] Blocked remote work cannot starve local work, including with a small
+      worker pool; timed-out work is counted until it really exits.
 - [ ] No network access when no Kiwix collection is configured.
 
 ## Acceptance criteria

@@ -4,10 +4,11 @@ Status: proposed.
 
 ## Goal
 
-Prove the provider seam is safe, bounded, and observable before enabling files
-and Kolibri in a release. This phase is not a feature phase; it is the gate that
-lets the earlier phases ship. Compatibility is explicitly out of scope: the
-release notes document the required config, catalog, and index rebuild.
+Prove the provider seam is safe, bounded, and observable before the mixed-library
+release. Each earlier phase must already meet its own safety tests and can ship
+independently; this phase is the final cross-provider release gate, not permission
+to ship unsafe earlier work. Compatibility is explicitly out of scope: release
+notes document the required config, catalog, and index rebuilds.
 
 ## Threat model
 
@@ -31,11 +32,13 @@ return a path it should not.
 
 ### Path and content confinement
 
-- Every filesystem/Kolibri store resolves the real root once and rejects any
-  target that escapes it, including via symlinks, `..`, encoded separators,
-  NUL bytes, and Windows-style paths.
+- Every filesystem/Kolibri store uses race-safe root-confined opens and rejects
+  symlinks, `..`, encoded separators, NUL bytes, and Windows-style paths.
+- Files-provider hidden paths and configured excludes are denied for serving as
+  well as discovery/indexing; includes restrict indexing only.
 - Zip extraction/reading uses a manifest and validates every member path;
-  reject absolute members and `..` (zip-slip tests).
+  reject absolute members, `..`, links, oversized decompressed members, and
+  archive bombs (zip-slip and bounded-decompression tests).
 - Directory requests never generate listings; only a known index file is
   served.
 - Do not expose absolute paths in API payloads, errors, redirects, logs above
@@ -65,7 +68,8 @@ return a path it should not.
 
 ### Database and network
 
-- Kolibri DB is opened read-only; no writes, migrations, or schema changes.
+- Kolibri channel DBs are opened without writes, migrations, sidecar creation,
+  or schema changes. Live WAL contents must not be silently ignored.
 - All SQL uses parameters; schema/table names are hard-coded per supported
   version.
 - Local providers perform no network I/O. Kiwix is the only remote provider and
@@ -78,7 +82,7 @@ Keep the roadmap defaults and make them configurable per provider:
 | Limit | Default | Enforcement |
 |---|---|---|
 | sources per collection | 64 | hierarchical providers collapse; fixed-identity providers use paging/fan-out limits |
-| sources overall | 512 | soft materialization budget; never silently drop sources |
+| sources overall | 512 | advisory target, not a hard in-memory cap; never silently drop sources |
 | entries per source | 500k | indexing truncates only with explicit `truncated`/`indexed_count` metadata |
 | bytes per indexed item | existing `max_entry_bytes` | extraction |
 | caption bytes | 1 MiB | caption parser |
@@ -87,16 +91,20 @@ Keep the roadmap defaults and make them configurable per provider:
 | OCR output bytes | 256 KiB | OCR stage |
 | ASR media per item | 1 h / configured | ASR stage |
 | ASR media bytes | 1 GiB | ASR stage |
-| derived-text workers | `"auto"` (CPU/memory-derived, floor 1) | enrichment scheduler |
+| derived-text workers | `"auto"` (CPU/memory-derived, unavailable if none fits) | enrichment scheduler |
 | preview bytes | existing limits | preview hydration |
 | content response | existing `max_article_bytes` | store read |
 | discovery time | 10 s per provider | background publication after deadline |
-| search tasks per provider | `min(4, search_workers)` | provider scheduler |
+| entries examined per traversal | 1 million | includes skipped/excluded entries |
+| traversal time | 300 s | hard bound on each traversal |
+| search tasks per provider | up to `min(4, search_workers)` | fair scheduler reserves capacity for competitors when possible |
 | remote sources per search | `max_remote_sources` | Kiwix runtime |
 
 Additional rules:
 
 - Discovery must never recurse without a cap and exclude list.
+- A traversal/time budget that prevents a complete discovery or a deterministically
+  capped build is an explicit incomplete/error state, not a complete prefix.
 - Indexing a files tree must not parse assets or media bodies unless the
   matching derived-text operation is explicitly enabled.
 - By default, Kolibri must not read video/audio/image bytes for indexing. Only
@@ -114,15 +122,16 @@ Additional rules:
   for `build_workers`/embedding/OS, and engine-internal threads (normally set
   to 1). Concurrent source builds share one pool and cannot multiply model
   memory.
-- A truncated source must still serve all content; only indexing is truncated.
+- A truncated source must still serve all permitted content; only indexing is
+  truncated.
   Search/API/health output must expose `truncated` and `indexed_count` so
   reduced search coverage is never presented as complete.
 - A provider hitting a limit logs once and degrades, never crashes or loops.
 
 ## Failure isolation
 
-- `SourceProvider.discover()` errors mark the collection unavailable with an
-  error message; other collections continue.
+- `SourceProvider.discover()` errors produce an entry-level diagnostic and mark
+  affected known collections unavailable; other entries/collections continue.
 - `CollectionRuntime.search()` errors become `SourceResult(status="error")`;
   the merged search continues.
 - `ContentStore` errors map to the existing HTTP error shapes; a broken source
@@ -135,7 +144,9 @@ Additional rules:
 - A provider must be removable by deleting its config entry; no orphaned
   background thread, open DB, or index handle.
 - An engine/worker crash marks the input as failed or skipped and continues the
-  build. A broken derived-text executor is recreated, not reused indefinitely.
+  build. A broken derived-text executor is recreated with bounded retries, not
+  reused indefinitely. Partial requested enrichment is reported and results in
+  a non-zero build exit.
 
 ## Observability
 
@@ -163,14 +174,15 @@ Required:
   engine that is not enabled costs zero work and is never loaded by `serve`.
 - Adding a files collection with `max_sources` sources does not load file
   contents at startup; discovery is `stat`-only.
-- Kolibri discovery is one bounded DB read; no storage walk at startup.
+- Kolibri discovery uses bounded reads of the per-channel DBs; no storage walk
+  at startup.
 - Search fan-out over a mixed library stays within `search_workers` and the
   per-provider budget.
 - FAISS/index memory is still per-open index; do not add per-provider caches
   proportional to item count.
 - A derived-text worker's model memory is counted once per pool worker, not once
-  per source; auto resolution must keep a low-memory host at one worker and
-  scale by memory, not blindly by core count.
+  per source; auto resolution uses one worker on a low-memory host when one
+  fits, reports unavailable otherwise, and scales by memory, not just core count.
 - Preview/cache byte limits remain global and respected for non-ZIM content.
 
 Measure and record:
@@ -207,6 +219,8 @@ Measure and record:
 
 - [ ] Traversal: `..`, URL-encoded, double-encoded, backslash, NUL, absolute.
 - [ ] Symlink escape and zip-slip.
+- [ ] Race-safe confinement under symlink replacement; hidden/excluded files are
+      not directly servable, while allowed assets remain accessible.
 - [ ] Absolute configured roots and private catalog locators are accepted, but
       absent from APIs, errors, and logs; relocating a provider root preserves
       its logical source ID and index locator when its identity is unchanged.
@@ -217,13 +231,17 @@ Measure and record:
 - [ ] OCR/ASR adversarial inputs: decompression bomb, huge dimensions, corrupt
       codec, over-duration media, missing model, and cap-skipped output.
 - [ ] Auto worker resolution: 1 on a low-memory host, above 4 on a large host
-      when memory allows, correct CPU-vs-memory binding, one shared pool across
-      concurrent source builds, and no pool created when OCR/ASR are off.
-- [ ] A crashing or non-thread-safe fake engine does not fail the build or leak
-      a worker; worker inputs use bounded spooled files, not arbitrary paths.
+      when memory allows, unavailable when none fits, correct CPU-vs-memory
+      binding, one shared pool across concurrent source builds, and no pool
+      created when OCR/ASR are off.
+- [ ] A crashing fake engine is reported as partial with a non-zero build exit,
+      without stopping other sources or leaking a worker. A non-thread-safe
+      engine is safely isolated; inputs use bounded spooled files, not
+      arbitrary paths.
 - [ ] Malicious/unsupported Kolibri DB schema and duplicate ids.
 - [ ] Untrusted HTML in sandbox/secure mode.
-- [ ] No writes to Kolibri DB or configured content roots.
+- [ ] No writes to Kolibri channel DBs, SQLite sidecars, or configured content
+      roots, including with a live WAL.
 - [ ] Provider refresh/close tests prove that background discovery is
       cancelled or joined and stores/database handles are closed exactly once.
 
@@ -245,8 +263,8 @@ Measure and record:
 Each stage is independently revertible. There is no long-lived branch.
 
 1. **Internal seam (phases 00–02).** Ship contracts, ZIM provider, and Kiwix
-   provider. Revert = revert the refactor; config, catalog, and indexes are
-   rebuilt on the next start.
+   provider. Revert = revert the refactor and follow that release's config,
+   catalog, and explicit index rebuild instructions.
 2. **Generic serving and indexing (phases 03–04).** Ship content stores and the
    generic pipeline for ZIM. Revert = restore the ZIM-only code paths and rebuild.
 3. **Files provider and collection config (phase 05).** Opt in by adding
@@ -255,8 +273,9 @@ Each stage is independently revertible. There is no long-lived branch.
 4. **Kolibri provider (phase 06).** Opt in by config; `captions`, `ocr`, and
    `asr` all default off and are independent.
    Ship a fixture-based integration test and supported-version note.
-5. **Collections UI (phase 07).** Enable grouping and provider filters. Ship the
-   new source/collection API shape; there is no flat compatibility view.
+5. **Collections UI (phase 07).** Enable grouping, collection APIs, and provider
+   filters using the source payload introduced in phase 00; there is no legacy
+   compatibility view.
 6. **Operations (phase 08) and hardening (phase 09).** Add `sources`/`prune`,
    complete docs, run the full matrix, then cut the release.
 
@@ -287,7 +306,8 @@ For a cautious rollout, ship with:
       `[[collections]]` entries are required. There is no shorthand fallback.
 - [ ] Delete or ignore old `<stem>.sqlite`/`.faiss` files and rebuild every
       configured collection with the new locator.
-- [ ] Delete any old `catalog.sqlite`; it is recreated from a full scan.
+- [ ] Allow the disposable catalog to be rebuilt by a full scan under the
+      catalog's coordination rules; do not delete a live SQLite database.
 - [ ] Update bookmarks and API clients to canonical source keys, the `source`
       query parameter, and the new payload fields.
 - [ ] Verify the new `/content/{key}/...` and `/article/{key}/...` URLs.

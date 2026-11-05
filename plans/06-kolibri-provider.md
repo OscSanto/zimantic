@@ -33,20 +33,24 @@ seam, then supplies discovery metadata, a `ContentStore`, and an
 [[collections]]
 type = "kolibri"
 name = "kolibri"                  # unique collection namespace
-path = "/library/kolibri"         # reads content/database/content.db + content/storage
+path = "/library/kolibri"         # reads content/databases + content/storage
 label = "Kolibri"
 granularity = "children"         # top-level topics; "collection" = whole channel
 max_sources = 64
 max_entries = 500000
-captions = "off"                  # off | index: existing caption/subtitle tracks
-ocr = "off"                       # off | tesseract: images and image-only pages
-asr = "off"                       # off | whisper: audio/video speech-to-text
+
+# After discovering the exact key via `/sources` (or `sources --json` in phase 08):
+# [[collections.sources]]
+# key = "<exact-discovered-source-key>"
+# captions = "index"
+# ocr = "tesseract"
+# asr = "whisper"
 ```
 
 Optional overrides when the installation is non-standard:
 
 ```toml
-database = "/library/kolibri/content/database/content.db"
+database_dir = "/library/kolibri/content/databases"
 storage = "/library/kolibri/content/storage"
 ```
 
@@ -55,14 +59,19 @@ its own keys and does not add a private TOML parser.
 
 Rules:
 
-- The database is opened read-only (`mode=ro`, `PRAGMA query_only=ON`). Never
-  write, migrate, vacuum, or checkpoint it.
-- `path`/`database`/`storage` must be local. No network access.
+- Channel databases are opened read-only; never write, migrate, vacuum, or
+  checkpoint them or create/modify SQLite sidecars in the installation. SQLite
+  `mode=ro` and `query_only` alone do not guarantee this for a live WAL. Use a
+  demonstrably read-only VFS/filesystem or a consistent private snapshot that
+  includes committed WAL data; if that cannot be obtained, report the channel
+  unavailable. Do not use `immutable=1` on a live DB and silently ignore WAL.
+- `path`/`database_dir`/`storage` must be local. No network access.
 - These configured paths may be absolute and may be retained as private
   runtime/catalog locators. They must not be used as collection/source keys or
   exposed in API payloads, errors, redirects, or logs above debug level.
-- A missing database or storage dir disables the collection with a clear error
-  and does not crash startup.
+- A missing database directory or storage dir disables the configured entry
+  with a clear error and does not crash startup; an invalid channel DB affects
+  that channel, not other channels.
 - Multiple Kolibri installations are allowed via multiple `[[collections]]` entries
   with distinct `name` values.
 - `path` and absolute database/storage paths never appear in API payloads.
@@ -82,6 +91,14 @@ captions.py        # discover provider-side caption files; parsing is shared
 
 ### Database access
 
+- Discover the channel databases as bounded, non-recursive
+  `content/databases/<channel_id>.sqlite3` entries, ignoring Kolibri's
+  `-upgrade`/`-annotated` temporary files and symlinked DB entries. Verify the
+  channel ID in each DB matches its filename; reject mismatches rather than
+  attributing nodes to the wrong channel. Each database contains a channel's
+  metadata and nodes; there is no shared `content/database/content.db`.
+  Kolibri's [v0.19.5 path implementation](https://github.com/learningequality/kolibri/blob/v0.19.5/kolibri/core/content/utils/paths.py)
+  documents this layout and the checksum-addressed storage paths.
 - Detect the schema version before querying. Kolibri schema changes across
   releases; keep every table/column name in `schema.py`, not scattered through
   the provider.
@@ -89,28 +106,36 @@ captions.py        # discover provider-side caption files; parsing is shared
   error such as "unsupported Kolibri content database version"; do not guess.
 - Queries must be bounded and indexed by channel/parent. Never `SELECT *` from
   the whole node table into memory.
-- Treat duplicate content IDs and orphaned files as normal; skip and log at
-  debug level.
+- Distinct node IDs may share a content ID; preserve each node's context and
+  source membership. Orphaned files can be skipped with a debug log.
 - Do not hold a long-lived write transaction or block Kolibri's writers.
 
-The expected core tables are `content_channelmetadata`, `content_contentnode`,
-`content_file`, and `content_localfile`. Confirm names and columns against each
-supported Kolibri release and record the tested versions in the provider
-docstring.
+The expected per-channel tables are `content_channelmetadata`,
+`content_contentnode`, `content_file`, and `content_localfile`. Confirm names,
+columns, availability/visibility flags, schema-version detection, and storage
+mapping against each supported release; record tested versions and use
+release-derived fixtures. Do not claim support based only on a hand-invented
+fixture.
 
 ### Collection and source mapping
 
 - Collection key: `kolibri:<name>:<channel_id>`. The channel ID is required
   because one configured installation expands into one collection per
   channel; keys must not collide in runtime maps or index paths.
-- One collection per channel in the database.
+- One collection per discovered channel database.
 - Sources:
   - `granularity = "children"` (default): each top-level topic node under the channel
     root becomes a source; leaf nodes directly under the root form one
-    "Ungrouped" source.
+    "Ungrouped" source. If there are no usable topics, use one whole-channel
+    `:root` source instead.
   - `granularity = "collection"`: one source for the whole channel.
   - Other values are rejected rather than silently changing source identity.
-- Source key: `kolibri:<name>:<channel_id>:<node_id>` (opaque, URL-safe).
+- Source keys use `kolibri:<name>:<channel_id>:node:<node_id>` for topics,
+  `:ungrouped` for direct leaf nodes, and `:root` for the whole channel.
+  An automatic cap collapse uses the distinct `:collapsed` key so an override
+  for `:root` cannot silently opt in the collapsed source.
+  Validate or safely encode channel/node IDs as URL-safe components and detect
+  collisions. Synthetic keys cannot collide with real node IDs.
 - Source label: topic title. Source title may include the channel title for
   disambiguation.
 - Source `homepage`: the topic node's first browsable child, or `None`.
@@ -121,15 +146,25 @@ docstring.
     channel and log the collapse;
   - if nodes exceed `max_entries`, index up to the cap and mark
     `truncated: true`; serving still works for all nodes.
-- `available` = database + storage readable; `searchable` = an index exists.
-- `article_count` = local content-node count from a cheap `COUNT` when possible.
+- Collapse or recovery changes the source keys; report the change and rebuild
+  the new sources. Never transfer an enrichment opt-in implicitly to the
+  collapsed source. A scan that hits its separate traversal/time budget before
+  proving truncation fails explicitly and retains the last published index.
+- `available` = database + storage readable; `searchable` = a usable, not
+  detectably stale index exists.
+- `article_count` = local indexable-node count only when known without an
+  unbounded count; otherwise `None`.
 - `indexed_count` = nodes actually present in the index; `truncated` is true
   when the source exceeds `max_entries`, and the reduced search coverage is
   reported in health/API metadata.
 - `media_types` = content families present in the indexed manifest (`text`,
-  `video`, `audio`, `image`, `other`). Before an index exists, use `[]` for
-  unknown; phase 07 must not exclude an unknown source from a content-type
-  filter.
+  `video`, `audio`, `image`, `other`). Use `None` only when no usable family
+  was observed; otherwise list every observed family, including from a
+  partial or truncated manifest. Use `()` only after complete classification
+  finds no supported families; rescan that result once and warn if it remains
+  empty. A specific content-type filter matches only a non-null value
+  containing the requested family; the unfiltered "All" view still includes
+  both `None` and empty values.
 
 ### Channel and source icons
 
@@ -141,9 +176,9 @@ docstring.
 `KolibriEntryProducer`:
 
 - Enumerates **leaf content nodes with at least one locally available file**.
-  A topic or exercise node without a local file is indexed only when its
-  normalized description or safe coach content is non-empty; otherwise it is
-  excluded. This is the final inclusion rule, not a later TODO.
+  Topic nodes are grouping only. An exercise without a local file is indexed
+  only when its public, normalized description is non-empty; serve a generated
+  plain-text metadata page for that node. Never index coach-only/private text.
 - Node IDs are opaque strings and are always mapped to a deterministic
   positive 63-bit row id derived from `(channel_id, node_id)`. Keep a reverse
   mapping in the producer and fail the build clearly if two distinct nodes
@@ -151,21 +186,23 @@ docstring.
 - `EntryRecord.title` = node title; `path` = synthetic stable path
   `node/<node_id>`; `target = None`.
 - Excerpt sources, in order:
-  1. node description / coach content that is safe to index;
+  1. public node description;
   2. document text (HTML/PDF/plain) when the file is a readable document;
   3. caption text when `captions = "index"` and a caption/subtitle track
      exists;
   4. OCR text when `ocr` is enabled and the item is an image or an image-only
      page;
-  5. ASR text when `asr` is enabled and the item is audio/video with no usable
-     caption track.
+  5. ASR text when `asr` is enabled and the item is audio/video, unless
+     enabled caption parsing already produced usable text.
 - By default, do not decode video/audio/image bytes for indexing. Only an
   explicitly enabled derived-text operation may read those bytes, under the
   phase-04 budgets.
 - HTML5 apps: index their entry HTML/description, not every bundled asset.
-- Fingerprint: database file size/mtime + channel/node counts + storage root
-  signature (mtime of the storage dir is not enough; use the DB version and a
-  bounded manifest of selected files). A changed fingerprint rebuilds.
+- Fingerprint a consistent channel DB snapshot, including committed WAL
+  changes, plus a bounded ordered manifest of selected storage-file
+  signatures and build settings. Recheck observable changes before publication;
+  a storage directory's mtime or node count alone is insufficient. Apply the
+  phase-04 caveat about metadata-preserving writes and publication races.
 - `max_caption_bytes` is the global `[derived_text]` setting and bounds
   caption parsing; it is not a per-source Kolibri key. OCR and ASR caps come
   from the same phase-04-owned global settings.
@@ -182,14 +219,16 @@ another.
   - parse to plain text with the shared phase-04 caption extractor: strip cue
     numbers, timestamps, styling, and duplicate lines; cap by
     `max_caption_bytes`;
-  - malformed tracks are skipped with a debug log and do not fail the build.
+  - malformed tracks are reported as partial enrichment; skip them and keep
+    building other items, with a non-zero overall build exit.
 - `ocr = "tesseract"`: OCR image nodes and image-only document pages for which
   the native extractor found no text. Cap pages, pixels, and output bytes; never
   OCR a page that already has a text layer.
-- `asr = "whisper"`: transcribe audio/video nodes that have no usable caption
-  track. Cap media duration and bytes; run at build time through the shared
+- `asr = "whisper"`: transcribe audio/video nodes unless enabled caption
+  parsing already produced usable text. With captions off, do not read tracks
+  to make that decision. Cap media duration and bytes; run through the shared
   phase-04 process pool with its auto-resolved worker budget (1 on a low-memory
-  host). Never transcribe at request time.
+  host when one fits). Never transcribe at request time.
 - Engines, models, languages, and caps come from the global phase-04
   `[derived_text]` settings, exposed by phase 08's complete loader. A missing
   engine or model disables just that operation for the source with a clear
@@ -202,11 +241,19 @@ another.
 The source-level `key` is the URL root; node identifiers are deliberately
 named separately:
 
-- `node/<node_id>` — a document/PDF/plain file, HTML5 entry page, or media
-  file.
+- `node/<node_id>` — a document/PDF/plain file, generated public exercise
+  metadata, or media file. For HTML5, redirect to its actual entry path under
+  `node/<node_id>/` so relative URLs resolve against the entry's directory.
 - `node/<node_id>/<relative asset path>` — assets inside an HTML5 app.
-- `channel/<channel_id>/<file>` — channel icon/thumbnail, if needed.
+- `channel/<channel_id>/<file>` — only the channel's DB-mapped thumbnail, if
+  needed; never an arbitrary storage filename.
 - Paths are opaque and stable. Never expose the storage path.
+- Validate node IDs or encode them as reversible URL-safe single components;
+  use the same mapping for results, membership checks, and asset requests.
+  Never treat a raw node ID containing separators as a filesystem path.
+- Resolve each local file through its DB mapping to the checksum-addressed
+  storage layout. Validate the entire checksum/extension filename against the
+  supported release's format before opening it, and enforce root confinement.
 
 Handling:
 
@@ -214,15 +261,23 @@ Handling:
 - Video/audio: serve inline with byte ranges (phase 03); do not load the whole
   file for a range request.
 - HTML5 apps:
-  - support both extracted app directories and zipped apps if the installed
-    Kolibri version uses them;
-  - resolve the entry file from the DB or the zip manifest;
+  - support Kolibri's `html5_zip` preset, whose entry is `index.html` at the
+    zip root ([format specification](https://github.com/learningequality/ricecooker/blob/develop/docs/htmlapps.md));
+    support extracted directories only where a tested release actually uses
+    them;
+  - other presets such as H5P/IMSCP can require Kolibri-specific viewers; mark
+    unsupported formats explicitly instead of treating every zip as an app;
   - serve relative assets under the same source key;
-  - never traverse outside the app's extracted directory or zip.
+  - apply the phase-05 web-asset MIME policy and never traverse outside the
+    app's extracted directory or zip.
 - Missing local files: `ArticleNotFoundError` for reads; mark the node
   unavailable during discovery. Do not return a different node's bytes.
+- Validate node membership in the selected topic, ungrouped set, or whole
+  channel on every content request. A valid node ID from another source must
+  not bypass that scope.
 - External/on-device resources: only local files are served; external URLs are
-  not proxied.
+  not proxied. Untrusted app HTML may still ask the user's browser to contact
+  external URLs; explain the secure-browsing and offline implications.
 - Range and size limits follow phase 03.
 - HTML is rendered through the existing content shell and secure browsing
   switch.
@@ -235,8 +290,8 @@ Handling:
 
 ## Build and reload behavior
 
-- `zimantic build` (phase 08) builds each configured Kolibri collection/source
-  with the phase-04 pipeline.
+- Wire `zimantic build` to configured Kolibri sources in this phase using the
+  phase-04 pipeline; phase 08 adds the full selection/inspection CLI.
 - `reload` re-reads channel/source metadata and picks up new indexes.
 - Adding/removing a channel changes the collection set and clears the relevant
   source caches.
@@ -261,9 +316,10 @@ Handling:
       opt-in `ocr`/`asr` through the shared derived-text stage.
 - [ ] Implement `KolibriContentStore`, including HTML5 asset resolution and
       media ranges.
+- [ ] Wire configured Kolibri sources into the build command in this phase.
 - [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
-      `available`, `article_count`, `indexed_count`, `truncated`, `media_types`
-      (derived from the indexed manifest, or `[]` when unknown before indexing).
+      `available`, `article_count`, `indexed_count`, `truncated`, and nullable
+      `media_types`.
 - [ ] Document supported Kolibri versions and the read-only guarantee.
 - [ ] Add a annotated example config for IIAB's `/library/kolibri` layout.
 
@@ -272,15 +328,16 @@ Handling:
 Build a fixture Kolibri root:
 
 ```
-kolibri/content/database/content.db
-kolibri/content/storage/<channel>/<node>/...
+kolibri/content/databases/<channel_id>.sqlite3
+kolibri/content/storage/<checksum[0]>/<checksum[1]>/<checksum>.<extension>
 ```
 
 with:
 
 - two channels, one with topics and leaves, one with only leaves;
 - video/audio with and without `.vtt`/`.srt`;
-- PDF, HTML document, extracted HTML5 app, zipped HTML5 app;
+- PDF, HTML document, a realistic `html5_zip` app, and extracted apps only if a
+  supported Kolibri release uses them;
 - missing file, duplicate/orphan node, external-only node, unknown schema row;
 - a channel with more topics than `max_sources`.
 
@@ -289,17 +346,23 @@ Assertions:
 - [ ] Channel = collection; top-level topics = sources; leaves = items.
 - [ ] `granularity = "collection"` yields one source per channel.
 - [ ] `max_sources` collapse produces one source and logs once.
-- [ ] Topic/exercise nodes without local files are indexed only when their
-      normalized description or safe coach content is non-empty.
+- [ ] A whole-channel `:root` override does not opt in the distinct
+      `:collapsed` source.
+- [ ] Topics never become result rows; a no-file exercise with a public
+      description gets a readable metadata page. Coach-only text is excluded.
 - [ ] Deterministic node-id mapping is stable across builds and a forced
-      64-bit collision fails clearly instead of merging documents.
+      63-bit collision fails clearly instead of merging documents.
 - [ ] Captions absent by default; present and parsed with `captions = "index"`;
       malformed files are skipped. OCR/ASR are never invoked unless enabled.
 - [ ] Missing local files do not break the build or serve another node's bytes.
-- [ ] HTML5 apps serve entry HTML and relative assets; zip path traversal fails.
+- [ ] Mismatched channel DB names, malicious storage filenames, and arbitrary
+      thumbnail requests cannot expose another channel's data.
+- [ ] HTML5 zip entry pages and nested pages serve relative CSS/JS assets;
+      unsupported presets are reported; zip traversal and requests for nodes
+      outside the source fail.
 - [ ] Video/audio range requests return correct bytes.
-- [ ] Database is opened read-only: its mtime/content is unchanged after
-      discovery, build, search, and serving.
+- [ ] Channel DBs and their WAL/SHM sidecars remain unchanged after discovery,
+      build, search, and serving; committed WAL changes are not silently missed.
 - [ ] Unsupported schema disables the collection with an error, not a crash.
 - [ ] Concurrent Kolibri writes do not crash Zimantic; reload recovers.
 - [ ] No network access; no absolute paths in payloads.
@@ -308,8 +371,9 @@ Assertions:
 
 - An IIAB-style `/library/kolibri` installation appears as one collection per
   channel, with sources for top-level topics.
-- Titles/descriptions and readable documents are searchable; media is servable
-  and searchable only through the opt-ins `captions`, `ocr`, and `asr`.
+- Titles/descriptions and readable documents are searchable, including media
+  node metadata. Media bodies contribute text only through the independent
+  opt-ins `captions`, `ocr`, and `asr`.
 - The provider never writes to Kolibri, and generates no derived text unless
   that operation is explicitly enabled.
 - `python -m pytest` passes, including a fixture DB that needs no Kolibri

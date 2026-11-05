@@ -44,7 +44,7 @@ Each source uses:
 
 ```json
 {
-  "key": "files:modules:algebra",
+  "key": "files:modules:root",
   "provider": "files",
   "media_types": ["text", "video"],
   "collection": {
@@ -62,13 +62,16 @@ Each source uses:
   `/content/{key}/...` and `/article/{key}/...`.
 - Do not expose filesystem paths, database paths, or storage roots.
 - `media_types` is an array drawn from `text`, `video`, `audio`, `image`, and
-  `other`. It describes the indexed content families in a source; it may contain
-  multiple values for mixed Files or Kolibri sources. ZIM classification uses
-  its MIME counter, while local providers use their indexed manifest. Before an
-  index exists, `[]` means unknown, not "no media"; the UI must include such a
-  source in every content-type filter. Providers populate it (phase 01 for ZIM,
-  phases 05 and 06 for local providers); the UI only consumes it. It is not a
-  source identity.
+  `other`. It describes known content families and can contain multiple values.
+  ZIM classification uses its MIME counter; other local providers may use their
+  indexed manifest as a partial summary. Use `null` only when no usable family
+  was observed; otherwise list every observed family, including from partial
+  classification. Use `[]` only when complete classification found no
+  supported families. A complete empty collection is rescanned once and emits
+  a warning if it remains empty. A source matches a specific content-type
+  filter when `media_types` is non-null and contains the requested family; the
+  unfiltered "All" view still includes both `null` and empty arrays. Providers
+  populate this field; it is not a source identity.
 
 ### `/collections.json`
 
@@ -84,6 +87,7 @@ New endpoint, paged like `/sources`:
       "title": "Modules",
       "description": null,
       "source_count": 12,
+      "media_types": ["text", "video"],
       "available": true,
       "error": null,
       "icon_url": null
@@ -98,32 +102,43 @@ New endpoint, paged like `/sources`:
 
 Use the existing paged JSON envelope and cache/version helpers. `source_count`
 means all discovered sources, including unavailable or unsearchable sources;
-health exposes separate available/searchable counts. Add `collection_version()`
-to `Search`, invalidated when the collection set or its metadata changes.
+health exposes separate available/searchable counts. The media fields are the
+snapshot-wide union and unknown flag defined in phase 00, not a summary of one
+page. Add `collection_version()` to `Search`, invalidated when collection
+membership, discovery state, or metadata changes.
 
 ### Collection-scoped search
 
 Add an optional `collection` query parameter to `/search` and
 `/search/stream`:
 
-- It expands to all available sources in that collection before the normal
-  source-selection rules.
+- It expands to all available, searchable sources in that collection before
+  the normal source-selection rules.
 - It composes with an explicit `source` list by intersecting them.
-- An unknown collection is ignored with a warning and falls back to the normal
-  scope only when no valid collection/source selector remains. If selectors
-  resolve to an empty intersection, search no sources rather than broadening to
-  the entire library.
-- The cache key uses the expanded source keys, not the collection name, so
-  adding/removing a source cannot serve a stale pool.
+- An explicit selection always limits the actual search work to its resolved
+  scope. Do not promote a large selection to an unscoped cached pool; doing so
+  would search outside the collection and violate the intersection.
+- An unknown explicit collection or source key returns HTTP 400 before a
+  streaming response starts; never turn a stale selection into an unscoped
+  search. If valid selectors resolve to an empty intersection, search no
+  sources rather than broadening to the entire library.
+- The cache key uses the expanded source keys plus the relevant source/index
+  generation, not just the collection name. Invalidate affected pools when
+  membership, content, or index generation changes even if the keys do not.
+- A collection selector is explicit scope and bypasses the unscoped Kiwix
+  fan-out cap, like an explicit source. Scheduling and search deadlines remain
+  bounded; report partial searches rather than claiming every selected source
+  completed.
 
 Use `source` as the canonical source-selection query parameter. There is no
 `zim` parameter and no parallel source-selection API.
 
 ### `/library.json`
 
-Return a flat list with standard pagination. Each card carries `collection` and
-`provider` so the client can group without a second request. Optionally add a
-`group=collection` query later; the default remains the flat list.
+Return a flat, paged list of all providers' library sources, including
+external-only Kiwix books. Each record carries `collection` and `provider`.
+Kiwix links remain external; there is no local content store. Use
+`/collections.json` for collection-wide counts and media summaries.
 
 ### `/health`
 
@@ -147,13 +162,21 @@ Keep `indexes`, `sources`, and `cache` counters.
   (one card, optionally with a small collection label).
 - A collection with many sources renders a collection card/header with a count
   and a bounded number of preview cards; opening it shows its sources.
+- Fetch collections in pages and fetch a bounded first page of sources for each
+  visible collection; opening a group pages through its remaining sources.
+  Never treat the first source page as the full collection. If page versions
+  change while loading, refresh the group rather than silently mixing snapshots.
 - Add a provider filter (All / ZIM / Files / Kolibri / Kiwix) alongside the
   existing text filter. Do not remove the text filter.
 - Add an independent content-type filter (All / Text / Video / Audio / Images /
-  Other). A source matches when its non-empty `media_types` contains the
-  selected type; an empty value is unknown and matches conservatively.
-  Collection cards summarize the union of their sources' types and remain
-  eligible when any member's type is unknown.
+  Other). A source matches a selected type only when `media_types` contains
+  that type and `media_types` is not `null`. Unknown sources are hidden for
+  specific type filters rather than treated as possible matches. "All" does
+  not apply this exclusion.
+  Collection cards summarize the union of known source types. A collection is
+  eligible for a specific type when its union contains that type; an unknown
+  member with no observed types does not make the collection eligible by
+  itself.
 - The existing "search within this source" action remains; add "search within
   this collection" using the new `collection` parameter.
 - Details/infobox continues to show source metadata; add provider and
@@ -166,8 +189,13 @@ Keep `indexes`, `sources`, and `cache` counters.
 
 - Group options by collection. Keep the existing top-N + "Other" logic per
   group so the panel stays bounded.
-- A collection group can be selected/deselected as a unit; the UI sends the
-  `collection` parameter rather than hundreds of source keys.
+- At most one collection group is selected as a unit; selecting another
+  replaces it. The UI sends the single `collection` parameter rather than
+  hundreds of source keys. Selecting a group clears individual selections.
+  Choosing an individual source while a group is selected switches to
+  individual-selection mode, clearing the group; users can then select sources
+  from different groups. API clients may still supply both selectors to
+  intersect them without broadening the scope.
 - Selected sources stay visible even when the group is collapsed.
 - Keep the existing `source_filter_limit` behavior for ungrouped/top-level
   display; add a separate `collection_source_limit` config if needed.
@@ -191,7 +219,8 @@ Keep `indexes`, `sources`, and `cache` counters.
       sources populate it.
 - [ ] Add `collection` query parsing to `/search` and `/search/stream`; expand
       in `Search._search_scope` before selection.
-- [ ] Keep `_cache_key` based on the expanded source keys.
+- [ ] Key/invalidate cached pools using the expanded source keys and relevant
+      source/index generations.
 - [ ] Add `collection` filtering to `/sources` and `/library.json` using the
       standard pagination so opening a collection can fetch all its sources
       without an unbounded payload.
@@ -218,18 +247,25 @@ Keep `indexes`, `sources`, and `cache` counters.
 - [ ] Collection records use the same schema and nullability in APIs, CLI
       output, and SSE snapshots.
 - [ ] `collection` search expands to the right sources; intersection with
-      `source`; unknown collection falls back; cache key changes when the
+      `source`; unknown selectors return a client error; cache key changes when
       collection membership changes.
+- [ ] A large explicit selection never schedules a source outside its scope;
+      switching between group and individual selection has predictable UI state.
 - [ ] Library grouping: one-source collections, multi-source collections,
       empty collections, unavailable collections.
 - [ ] Content-type classification and filtering for ZIM MIME counters and
-      mixed Files/Kolibri sources; folder paths and absolute paths stay hidden.
+      mixed Files/Kolibri sources, including exclusion of a truncated source
+      with known types from specific filters; folder paths and absolute paths
+      stay hidden.
+- [ ] Replacing an index without changing source keys invalidates cached
+      results and previews.
 - [ ] Filter grouping: top-N + Other per collection; selected sources stay
       visible; collection select/deselect sends the expected request.
 - [ ] Provider filter and text filter compose.
 - [ ] "Search within collection" from a library card.
 - [ ] Opening a collection fetches its paged sources through the documented
-      collection filter.
+      collection filter; collection media facets remain correct when members
+      appear on later pages and page versions change.
 - [ ] Progressive results show the correct collection label.
 - [ ] Keyboard/focus behavior in the source filter panel is preserved.
 - [ ] No source explosion when a files collection has `max_sources` sources.

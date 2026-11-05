@@ -4,8 +4,8 @@ Status: proposed.
 
 ## Goal
 
-Move all ZIM-specific discovery, index lifecycle, and per-source search behind
-the phase-00 provider seam. ZIM becomes the reference implementation. Source
+Move the remaining ZIM-specific discovery and index lifecycle behind the
+phase-00 provider seam. ZIM becomes the reference implementation. Source
 keys, catalog rows, index paths, and content IDs move to the provider-neutral
 scheme; there is no ZIM compatibility layer.
 
@@ -37,7 +37,7 @@ zimantic/providers/zim/
     provider.py      # ZimProvider, ZimRuntime
     discovery.py     # catalog + index discovery, source identity
     search.py        # one-source ZIM search (moved from Search)
-    serving.py       # thin adapter over content/serving.py (phase 03 removes it)
+    store.py         # ArchiveContentStore; range support is completed in phase 03
     metadata.py      # ZIM metadata extraction, SourceInfo construction, icons
 ```
 
@@ -53,8 +53,11 @@ metadata rather than writing this catalog.
 
 - **Collection** = the configured ZIM root: `[[collections]] type = "zim"`,
   `name = "..."`, `path = "..."`. Collection key is `zim:<name>`.
-- **Source** = one ZIM archive. Source key is `zim:<name>:<stem>`; duplicate
-  stems in one collection get a stable suffix. There are no `book`,
+- **Source** = one ZIM archive. Its key is
+  `zim:<name>:<safe-stem>-<digest>`, where the digest always derives from its
+  root-relative archive path, not just when a collision is discovered. Check
+  for digest collisions and report them rather than overwrite a source. Adding
+  or removing a same-stem archive cannot rename an existing source. There are no `book`,
   `local_name`, dated, or flavour alias keys; the display `title` comes from
   archive metadata.
 - ZIM source identity is fixed by the archive. The global source budgets are
@@ -63,6 +66,10 @@ metadata rather than writing this catalog.
 - `SourceInfo.provider = "zim"`, `collection_key` / `collection_label`
   populated. There is no `content_kind` or `mode`.
 - `SourceInfo.intent_phrases` comes from the existing `_intent_phrases`.
+- Relocating the collection root preserves keys when relative paths stay the
+  same. Moving or renaming an archive within the root changes its key and
+  requires a rebuild; content replacement at the same path retains the key
+  but invalidates a stale index.
 
 ### ZIM catalog paths
 
@@ -73,8 +80,10 @@ metadata rather than writing this catalog.
   or logged.
 - Normalize a path when scanning/upserting, then reuse that normalized value
   for catalog point lookups; avoid repeated filesystem resolution on hot paths.
-- A moved archive updates its `path` locator during catalog refresh. Index paths
-  come from the generic locator; there is no stem-based special case.
+- A relocated root updates its `path` locators during catalog refresh. Introduce
+  the shared phase-04 index locator here for both build and serve; there is no
+  stem-based special case. Phase 04 adds its generic schema and requires another
+  rebuild rather than trying to read phase-01 indexes.
 
 The generic catalog schema replaces the ZIM-specific `zims` table outright.
 Bump `SCHEMA_VERSION`. An older or unrecognized catalog is deleted and rebuilt
@@ -128,7 +137,9 @@ CREATE INDEX sources_provider_id ON sources(provider, provider_id);
 `path` is nullable for records without a local filesystem locator and is never
 the logical primary key. `provider_metadata` is JSON for metadata that has no
 provider-neutral typed column; its contents are interpreted only by that
-provider's adapter.
+provider's adapter. For ZIM rows, `provider_id` stores the archive UUID when
+available; phase 10 requires matching path and size and the same nonempty UUID
+in the row and live archive before reusing a catalog identity.
 
 ### Catalog schema rebuild
 
@@ -142,6 +153,10 @@ archives, so this phase rebuilds instead of migrating.
   availability, and provider metadata.
 - On a corrupt or unsupported catalog, delete and recreate it. Do not leave a
   `zims` view, compatibility table, or old index name in the new schema.
+- Coordinate rebuilds across processes and close existing connections before
+  replacing a database and its SQLite sidecars; never unlink a live catalog
+  while another process can keep using or writing the old inode. If exclusive
+  coordination cannot be obtained, report the failure and retry later.
 - This is a breaking change: release notes state that old catalogs are
   discarded and old index files must be rebuilt.
 
@@ -156,9 +171,7 @@ class ZimRuntime:
 
     def search(self, source, request) -> SourceResult: ...
     def library_sources(self) -> Sequence[SourceInfo]: ...
-    def read_article(...): ...
-    def icon(...): ...
-    def random_path(...): ...
+    def content_store(self, source: SourceInfo) -> ContentStore: ...
     def refresh(self, *, wait: bool = True) -> bool: ...
     def close(self) -> None: ...
 ```
@@ -202,27 +215,35 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Move `_open_index`, `_open_zim_index`, `_read_index_meta`,
       `_read_index_state`, `_stale_zim_archive`, and
       `_model_probes_compatible` into the ZIM runtime.
+- [ ] Introduce the shared phase-04 index locator and use it in both ZIM build
+      and serve; do not discover or write old stem-based paths.
 - [ ] Move the local-source branch of `_rebuild_sources` and
       `_source_from_catalog` into `providers/zim/metadata.py`.
 - [ ] Move `refresh_local_sources` / local half of `refresh_sources` into the
       runtime; `Search.refresh_sources` becomes a provider loop.
-- [ ] Keep `reload()` behavior: rescan catalog/indexes, preserve open indexes
-      whose files did not change, clear caches only when the source set changes.
+- [ ] Keep `reload()` behavior: rescan catalog/indexes and preserve open
+      indexes whose files did not change. Invalidate affected search/preview
+      caches when membership, index generation, content signature, or relevant
+      source metadata changes, even when keys stay the same.
 - [ ] Keep `start_faiss` and `start_fulltext_isolation` startup sequencing, but
       iterate runtimes; ZIM capability checks stay in the ZIM runtime.
-- [ ] Add `ZimRuntime.library_sources()` for unreadable archives and duplicates.
+- [ ] Add `ZimRuntime.library_sources()` for unreadable archives; distinct
+      readable duplicate-stem archives are normal sources.
 
 ### Search
 
-- [ ] Move `_search_local` and `_search_local_locked` into
-      `providers/zim/search.py`.
+- [ ] Finish moving `_search_local` and `_search_local_locked` into
+      `providers/zim/search.py`; phase 00 already moved what its real runtime
+      needs for per-source dispatch.
 - [ ] Pass explicit dependencies instead of `self`: `candidate_count`,
       `preview_chars`, `max_html_bytes`, `max_entry_bytes`, `nprobe`, preview
       cache hooks, and the request object.
 - [ ] Move `_fetch_docs`, `_fetch_archive_docs`, `_extract_previews` (ZIM
       previews), and the ZIM half of `_result_doc` with them.
-- [ ] Keep `_hydrate_results` in `Search`; it calls the runtime for previews.
-      Phase 03 replaces the runtime-specific call with `ContentStore`.
+- [ ] Keep `_hydrate_results` in `Search`; call the ZIM `ContentStore` for
+      previews through the shared runtime contract. Move existing serving
+      behavior into its final `ArchiveContentStore` now; `read_range` may
+      explicitly report unsupported until phase 03 implements range handling.
 - [ ] Keep the four `SourceResult` channels (`semantic`, `keyword`, `fulltext`,
       `items`) identical. This is a move, not a ranking change.
 - [ ] Keep native full-text isolation and its partial/error statuses.
@@ -233,9 +254,10 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       `_book_identity` and the dated/flavoured alias matcher.
 - [ ] Replace `local_names()` with `source_keys()`; update health and callers.
 - [ ] `Search.health()` reports ZIM collection/index stats from the runtime.
-- [ ] Populate `SourceInfo.media_types` for ZIM from the existing MIME counter
-      (`counter`) using the phase-07 classification, so the content-type filter
-      needs no provider call.
+- [ ] Populate nullable `SourceInfo.media_types` for ZIM from the existing MIME
+      counter using the phase-07 classification; include observed families even
+      when the counter is partial, use `null` only when none are usable, and
+      rescan and warn when a complete collection remains empty.
 
 ### Cleanup
 
@@ -251,13 +273,15 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       sizes, metadata, and icons from the new catalog.
 - [ ] `/search` and `/search/stream` return correct document ids, order,
       scores, and previews for a fixed query.
-- [ ] `/content/<key>/<path>` and `/article/<key>/<path>` return correct bytes,
+- [ ] `/content/<key>/<path>` returns the correct shell and
+      `/article/<key>/<path>` returns the expected raw/decorated representation,
       MIME, redirects, and status codes.
 - [ ] Unindexed ZIM native full-text fallback still works.
 - [ ] A missing/corrupt/archived-elsewhere index produces the documented
       `searchable`/`error` state.
 - [ ] `reload()` finds a newly added ZIM and drops a removed one.
-- [ ] Duplicate stems in one collection get distinct stable keys.
+- [ ] Duplicate stems in one collection get distinct stable keys; adding or
+      removing one does not change the other's key.
 - [ ] A duplicate-stem collision logs one warning identifying both archives with
       paths relative to the configured root; paths outside that root use a
       basename or `<unknown>`, never an absolute path.
