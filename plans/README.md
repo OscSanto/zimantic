@@ -71,15 +71,17 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 06 | [Kolibri provider](06-kolibri-provider.md) | 03, 04, 05 | Channels as collections; content nodes as items; opt-in captions/OCR/ASR |
 | 07 | [Collections, API, and UI](07-collections-api-ui.md) | 01–06 | Grouped library and source filters that do not explode |
 | 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers; catalog rebuild and docs |
-| 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, contract tests, performance, staged release |
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
+| 09 | [Hardening and rollout](09-hardening-rollout.md) | 00–08, 10 | Security, limits, contract tests, performance, staged release |
 
 Phase 00 introduces the minimal `[[collections]]` parser and preserves both
-existing search backends through real runtimes. Phase 01 introduces the shared
-index locator; phase 04 extends it and changes the index schema, requiring a
-rebuild at that phase as well. Phase 05 adds files-provider validation; phase 08
-completes the full settings loader. There is one parser and one normalized
-entry shape, not a temporary parser per provider.
+existing search backends through real runtimes. It also freezes the common media
+family taxonomy; phase 07 only presents that taxonomy in the UI. Phase 01
+introduces the shared index locator; phase 04 extends its schema and validation,
+requiring a rebuild at that phase as well. Phase 05 adds files-provider
+validation; phase 08 completes the full settings loader. There is one parser
+and one normalized entry shape, not a temporary parser per provider. Execute
+phase 10 after phase 08 and before phase 09, which is the final release gate.
 
 ## Design invariants
 

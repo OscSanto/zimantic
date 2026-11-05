@@ -204,6 +204,9 @@ Measure and record:
       random, errors, ranges.
 - [ ] Entry-producer contract: stable ids, fingerprint change, resume,
       truncation.
+- [ ] Ephemeral-open contract: loopback-only binding, selected-source scope,
+      read-only catalog/index access with no SQLite sidecars, and no persistent
+      PID, lock, index, or cache writes.
 
 ### Integration
 
@@ -211,6 +214,8 @@ Measure and record:
       `/collections.json`, `/library.json`, `/health`.
 - [ ] Progressive stream with providers finishing at different times.
 - [ ] Cache key/source selection across collections.
+- [ ] `open` with matched and fallback ZIM identities, stale/missing indexes,
+      and an unaffected normal `serve` process.
 - [ ] Reload after adding/removing each provider's content.
 - [ ] Migration path: an old config, catalog, or index layout is rejected or
       ignored, and the documented `[[collections]]` configuration plus rebuild
@@ -245,6 +250,9 @@ Measure and record:
       roots, including with a live WAL.
 - [ ] Provider refresh/close tests prove that background discovery is
       cancelled or joined and stores/database handles are closed exactly once.
+- [ ] `open` rejects index reuse when a sidecar-free read-only SQLite handle
+      cannot be created, binds only loopback, and its toolbar cannot navigate
+      outside the selected source scope.
 
 ### Platform
 
@@ -277,8 +285,10 @@ Each stage is independently revertible. There is no long-lived branch.
 5. **Collections UI (phase 07).** Enable grouping, collection APIs, and provider
    filters using the source payload introduced in phase 00; there is no legacy
    compatibility view.
-6. **Operations (phase 08) and hardening (phase 09).** Add `sources`/`prune`,
-   complete docs, run the full matrix, then cut the release.
+6. **Operations and ephemeral open (phases 08 and 10).** Add `sources`/`prune`,
+   complete docs, and ship the scoped read-only ZIM workflow.
+7. **Hardening (phase 09).** Run the full matrix, including `open`, then cut
+   the release.
 
 ### Feature flag
 
@@ -318,6 +328,8 @@ For a cautious rollout, ship with:
 ## Release checklist
 
 - [ ] All phase acceptance criteria met and checked off.
+- [ ] The Phase 10 acceptance criteria and its read-only persistence guarantees
+      are met and checked off.
 - [ ] Full test matrix green.
 - [ ] `README.md`, `CONTRIBUTING.md`, `config.toml`, `deploy/` updated.
 - [ ] Mixed-library smoke test on a low-resource profile.

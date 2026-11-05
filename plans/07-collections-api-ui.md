@@ -125,10 +125,13 @@ Add an optional `collection` query parameter to `/search` and
 - The cache key uses the expanded source keys plus the relevant source/index
   generation, not just the collection name. Invalidate affected pools when
   membership, content, or index generation changes even if the keys do not.
-- A collection selector is explicit scope and bypasses the unscoped Kiwix
-  fan-out cap, like an explicit source. Scheduling and search deadlines remain
-  bounded; report partial searches rather than claiming every selected source
-  completed.
+- A collection selector is explicit scope and bypasses the *unscoped* Kiwix
+  fan-out cap, but not resource bounds. A Kiwix collection request schedules
+  sources in canonical catalog order up to
+  `max_explicit_collection_sources` (default 500) and the request deadline;
+  it returns an explicit partial status and scheduled/completed counts when
+  either bound is hit. An explicit individual source remains one task. Do not
+  claim every selected book completed when the collection cap or deadline wins.
 
 Use `source` as the canonical source-selection query parameter. There is no
 `zim` parameter and no parallel source-selection API.
@@ -222,6 +225,8 @@ Keep `indexes`, `sources`, and `cache` counters.
       in `Search._search_scope` before selection.
 - [ ] Key/invalidate cached pools using the expanded source keys and relevant
       source/index generations.
+- [ ] Apply the documented Kiwix explicit-collection cap, deadline, canonical
+      ordering, and partial-result metadata.
 - [ ] Add `collection` filtering to `/sources` and `/library.json` using the
       standard pagination so opening a collection can fetch all its sources
       without an unbounded payload.
@@ -252,6 +257,8 @@ Keep `indexes`, `sources`, and `cache` counters.
       collection membership changes.
 - [ ] A large explicit selection never schedules a source outside its scope;
       switching between group and individual selection has predictable UI state.
+- [ ] A Kiwix collection selection stops at its explicit collection cap or
+      deadline deterministically and reports partial scheduled/completed counts.
 - [ ] Library grouping: one-source collections, multi-source collections,
       empty collections, unavailable collections.
 - [ ] Content-type classification and filtering for ZIM MIME counters and

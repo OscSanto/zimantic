@@ -79,6 +79,10 @@ class EntryProducer(Protocol):
   as skipped rather than changing row-id assignment.
 - `entry_at` returns `None` for non-indexable items; the producer is
   responsible for harmless skips.
+- `entry_at(index)` accepts a zero-based manifest ordinal in
+  `0 <= index < count`; a caller outside that range receives `None`.
+  `meta.next` is the next zero-based ordinal to visit, so `0` starts a build
+  and `count` means enumeration is complete. It is not a SQLite row id.
 - `validate_snapshot()` independently checks the live source and build inputs
   against the initial fingerprint under the traversal budgets. It returns
   false on a detected change and raises a reported error if validation cannot
@@ -237,7 +241,7 @@ unknown. Overrides carry no budgets. Phase 08 exposes the same schema.
 
 ### Index locator
 
-The shared locator introduced in phase 01 uses one layout for every local
+The shared locator module introduced in phase 01 uses one layout for every local
 indexed provider:
 
 ```
@@ -389,6 +393,7 @@ class IndexHandle:
     native: NativeSearcher | None
     signatures: tuple[int, int, int, int] | None
     locks: IndexLocks
+    read_only: bool = False
 
 # signatures = (db_size, db_mtime_ns, faiss_size, faiss_mtime_ns); a missing
 # artifact uses the corresponding zero pair. IndexLocks contains the
@@ -399,6 +404,12 @@ ZIM-specific lazy archive opening moves into `ArchiveContentStore`; the handle
 keeps lifecycle reference counting, per-thread SQLite connections, and
 search/read locks. The runtime owns the content store; an `IndexHandle` only
 borrows it and must never close it independently.
+
+When `read_only` is true, every SQLite connection uses a tested read-only URI
+mode that cannot create journal/WAL/SHM sidecars, and opening a FAISS artifact
+must not write beside it. If that guarantee is unavailable for an artifact or
+platform, the handle is unavailable rather than falling back to a writable
+connection. Phase 10 uses this mode for reused indexes.
 
 ### Native full-text isolation
 

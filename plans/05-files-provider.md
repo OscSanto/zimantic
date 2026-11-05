@@ -116,7 +116,11 @@ root-relative identifier `__loose__`, so its key is
 `files:<name>:__loose__`. The `dir-` namespace keeps an actual child named
 `__loose__` distinct. Its producer indexes only loose root files; its store
 uses the collection root so root-page assets and links can resolve, even when
-that overlaps a child source's content root.
+that overlaps a child source's content root. This overlap is intentional:
+source membership scopes discovery and indexing, not authorization. Any source
+in the same files collection may directly serve a permitted descendant under
+the collection root; confinement, hidden-path, and exclusion rules apply
+identically to every such request.
 
 ### Caps
 

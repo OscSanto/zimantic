@@ -17,6 +17,10 @@ array-of-tables, so it needs explicit handling.
 ### Shape
 
 ```toml
+# Global search bound for an explicitly selected large remote collection.
+# A request reports partial completion when this count or its deadline is hit.
+max_explicit_collection_sources = 500
+
 # Collections. Multiple entries are allowed. There are no flat provider keys.
 [[collections]]
 type = "zim"
@@ -83,11 +87,18 @@ name.
   and reserve `open` for the ephemeral ZIM collection.
 - Provider-specific keys are validated by the provider. Generic validation only
   checks `type`, `name`, and duplicate names.
-- Phase 00 defines the normalized provider-entry interface and minimal
-  `[[collections]]` TOML parser so provider phases can validate entries without
-  parsing TOML themselves. Phase 05 adds files-provider validation; this phase
-  completes the loader for every provider and owns the remaining config
-  operations.
+- `max_explicit_collection_sources` is a positive global request-work cap for
+  an explicitly selected Kiwix collection. It defaults to `500`; it does not
+  affect a single explicit source or local collection discovery. Reaching it is
+  reported as a partial search, never silently broadened or treated as complete.
+- Phase 00 defines the normalized provider-entry interface, minimal
+  `[[collections]]` TOML parser, and public `RuntimeConfig.collections`
+  discovery API. Phases 04–06 may use that API plus the phase-04
+  derived-text settings envelope to discover and build configured sources;
+  they do not depend on CLI selectors or final diagnostics. Phase 05 adds
+  files-provider validation; this phase completes the loader for every
+  provider and owns selector parsing, diagnostics presentation, and remaining
+  config operations.
 - Every collection, including ZIM and Kiwix, requires an explicit `[[collections]]`
   entry. There is no `zim_dir` or `kiwix_server` shorthand and no implicit
   default collection.

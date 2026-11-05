@@ -190,8 +190,10 @@ When present:
 - A selected ZIM with a finished index at its key's locator in `index_dir`
   uses that SQLite/FAISS pair read-only; the runtime key is the indexed source
   key, not an alias. Validate the pair as in phase 04. Opening it must not
-  create or modify SQLite sidecars; if that cannot be guaranteed, report the
-  index unavailable and use native full-text instead.
+  create or modify SQLite sidecars: use Phase 04's `IndexHandle(read_only=True)`
+  connection path and verify it is sidecar-free before exposing the index. If
+  that cannot be guaranteed, report the index unavailable and use native
+  full-text instead.
 - A missing, in-progress, stale, or size-mismatched index falls back to the
   archive's native full-text search, with the same warnings as `serve`.
 - Model and FAISS loading stay off the startup path. The browser opens while

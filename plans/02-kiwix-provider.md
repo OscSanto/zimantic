@@ -41,7 +41,11 @@ zimantic/providers/kiwix/
   slug privately for the remote API. Exact duplicate slugs name the same remote
   endpoint and are deduplicated; distinct dated or flavoured slugs are not
   merged. Detect key collisions instead of overwriting. There are no aliases.
-- `SourceInfo.provider = "kiwix"`, `searchable = True`, `available = True`.
+- `SourceInfo.provider = "kiwix"`. A book in the last complete catalog is
+  `available = True` because it remains addressable, but `searchable` reflects
+  current remote-search capability: it is false after a known outage or
+  request-health failure and true after a successful probe/search. A refresh
+  failure retains catalog visibility without claiming the server is reachable.
   There is no `content_kind` or `mode`.
 - `SourceInfo.homepage`/`icon_url` remain absent unless the catalog provides
   them. Do not fetch remote icons during discovery.

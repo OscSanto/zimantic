@@ -65,6 +65,13 @@ Rules:
   demonstrably read-only VFS/filesystem or a consistent private snapshot that
   includes committed WAL data; if that cannot be obtained, report the channel
   unavailable. Do not use `immutable=1` on a live DB and silently ignore WAL.
+- A private snapshot is created only in Zimantic's private temporary directory,
+  by copying the database and its committed WAL/SHM state through a
+  SQLite-consistent backup mechanism. Creation has explicit byte and time
+  budgets, is retried once on a detected concurrent schema change, is deleted
+  after the discovery/build attempt, and is never placed beside Kolibri files.
+  Failure to make or validate that snapshot marks the channel unavailable and
+  schedules discovery for the next reload.
 - `path`/`database_dir`/`storage` must be local. No network access.
 - These configured paths may be absolute and may be retained as private
   runtime/catalog locators. They must not be used as collection/source keys or
@@ -233,7 +240,9 @@ another.
   phase-04 process pool with its auto-resolved worker budget (1 on a low-memory
   host when one fits). Never transcribe at request time.
 - Engines, models, languages, and caps come from the global phase-04
-  `[derived_text]` settings, exposed by phase 08's complete loader. A missing
+  `[derived_text]` settings. The phase-00 normalized settings envelope exposes
+  this already-defined subset to this provider; phase 08 later completes the
+  user-facing loader and diagnostics. A missing
   engine or model disables just that operation for the source with a clear
   health error.
 - No network access: models must be provisioned locally before the build.

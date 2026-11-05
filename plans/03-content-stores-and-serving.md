@@ -112,6 +112,19 @@ return store.read(path, head_only=..., max_bytes=...)
 If no source matches, raise `ArticleSourceNotFoundError` with the documented
 HTTP status.
 
+The route error contract is fixed:
+
+| Condition | `/content` and `/article` response |
+|---|---|
+| Unknown source key | `404` with the standard not-found error envelope |
+| Known source with no `ContentStore` (for example Kiwix) | `404` with the same envelope; do not redirect or proxy |
+| Known but unavailable local source | `503` with a retryable source-unavailable error |
+| Missing path in an available store | `404` with the standard not-found envelope |
+
+`/article` includes its normal CORS headers on every row above. Error payloads
+contain a stable error code and public source key only; they never include a
+private locator or exception text.
+
 ### Routes
 
 - Use `/content/{source}`, `/article/{source}`, `/source-icon/{source}`, and

@@ -308,6 +308,11 @@ provider: str                  # required; never infer a fallback provider
 title: str | None = None       # display name
 collection_key: str = ""
 collection_label: str | None = None
+available: bool = False        # the provider can currently read/search the source
+searchable: bool = False       # a supported search path is currently usable
+homepage: str | None = None    # source-relative path, never a filesystem locator
+icon_url: str | None = None    # generated public URL, never a provider locator
+intent_phrases: tuple[str, ...] = ()
 media_types: tuple[str, ...] | None = None
 document_count: int | None = None
 media_count: int | None = None
@@ -328,6 +333,14 @@ index_freshness: str | None = None  # current | stale | unknown; None if no inde
 - `indexed_count` and `truncated` describe the published index; both are
   unknown (`null`) before one exists. Freshness is `unknown` until validated.
   Later phases populate these fields without introducing alternate payloads.
+- `available` means the provider can currently open the source for its supported
+  read or remote-search operation. `searchable` means it has at least one usable
+  search path; it may be false for a readable source with no finished local
+  index or native searcher. `homepage`, `icon_url`, and `intent_phrases` are
+  nullable/empty when unavailable rather than inferred from a private locator.
+- `media_types` uses the phase-00 taxonomy `text`, `video`, `audio`, `image`,
+  and `other`. Providers classify content into those values; phase 07 only
+  chooses labels and filters for this frozen taxonomy.
 - `document_count` is the provider's total document-like content-item count,
   `media_count` is its total media-item count, and `item_count` is its total
   permitted source-item count (documents plus media where the provider can
@@ -465,12 +478,12 @@ and byte/time budgets are positive integers when present; `name` and provider
 strings are non-empty and names use the phase-00 safe-name pattern. Include,
 exclude, language, and operation lists are immutable tuples.
 
-The global `[derived_text]` schema is also typed: caps are positive integers,
-`ocr_languages` is a tuple of non-empty strings, `cache` is a boolean, and
-`workers` is `"auto"` or a positive integer. Per-source overrides use an exact
-source key and `captions ∈ {"off", "index"}`, `ocr ∈ {"off", "tesseract"}`,
-and `asr ∈ {"off", "whisper"}`. Unknown keys, wrong scalar types, zero or
-negative limits, and invalid operation values are diagnostics; they are never
+The parser preserves `[derived_text]` and `[[collections.sources]]` values in
+the normalized settings envelope so phases 05 and 06 can consume discovered
+source overrides. Phase 04 owns their canonical schema and semantic validation:
+caps, languages, cache, workers, exact-key ownership, and operation values.
+Until that phase lands, an invalid derived-text value is reported as an
+unsupported optional setting and no derived operation runs; it is never
 silently coerced to a default.
 
 Invalid TOML is fatal. Other invalid entries produce config diagnostics without

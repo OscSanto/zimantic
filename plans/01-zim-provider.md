@@ -81,9 +81,9 @@ metadata rather than writing this catalog.
 - Normalize a path when scanning/upserting, then reuse that normalized value
   for catalog point lookups; avoid repeated filesystem resolution on hot paths.
 - A relocated root updates its `path` locators during catalog refresh. Introduce
-  the shared phase-04 index locator here for both build and serve; there is no
-  stem-based special case. Phase 04 adds its generic schema and requires another
-  rebuild rather than trying to read phase-01 indexes.
+  the shared generic index locator here for both build and serve; there is no
+  stem-based special case. Phase 04 extends its index schema and validation and
+  requires another rebuild rather than trying to read phase-01 indexes.
 
 The generic catalog schema replaces the ZIM-specific `zims` table outright.
 Bump `SCHEMA_VERSION`. An older or unrecognized catalog is deleted and rebuilt
@@ -230,7 +230,7 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Move `_open_index`, `_open_zim_index`, `_read_index_meta`,
       `_read_index_state`, `_stale_zim_archive`, and
       `_model_probes_compatible` into the ZIM runtime.
-- [ ] Introduce the shared phase-04 index locator and use it in both ZIM build
+- [ ] Create the shared index-locator module and use it in both ZIM build
       and serve; do not discover or write old stem-based paths.
 - [ ] Add the ZIM `EntryProducer` mapping: archive `_index + 1` is the canonical
       positive row id, and redirect targets use the same mapping. Preserve
@@ -273,7 +273,7 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Replace `local_names()` with `source_keys()`; update health and callers.
 - [ ] `Search.health()` reports ZIM collection/index stats from the runtime.
 - [ ] Populate nullable `SourceInfo.media_types` for ZIM from the existing MIME
-      counter using the phase-07 classification; include observed families even
+      counter using the phase-00 media-family taxonomy; include observed families even
       when the counter is partial, use `null` only when none are usable, and
       rescan and warn when a complete collection remains empty.
 
@@ -307,7 +307,7 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       source/library records contain no filesystem locator.
 - [ ] A mismatched catalog is deleted and rebuilt into `sources` by a full scan;
       corrupt/unsupported catalogs rebuild the same way.
-- [ ] `media_types` derives from the MIME counter and matches the phase-07
+- [ ] `media_types` derives from the MIME counter and matches the phase-00
       classification (`text`/`video`/`audio`/`image`/`other`).
 - [ ] The database schema has no `zims` table or `zims_*` indexes.
 
