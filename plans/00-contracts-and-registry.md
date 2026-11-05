@@ -44,7 +44,9 @@ zimantic/providers/
 `ContentStore`, `ContentEntry`, `ArticleData`, and range-response types have one
 canonical definition in `zimantic/content/store.py`. `providers/base.py`
 imports and re-exports those content contracts; it must not define a second
-copy. The phase-00 contract tests cover both import paths.
+copy. The phase-00 contract tests cover both import paths and pin the complete
+`ContentStore` method set (including `read_range`) even though implementations
+return `None` until phase 03, so the contract is genuinely frozen here.
 
 ### Dataclasses
 
@@ -161,7 +163,8 @@ Notes:
 - `CollectionInfo` is a descriptor and remains frozen. Dynamic source counts,
   availability, errors, and discovery state come from the current runtime
   snapshot; serializers must not mutate a previously published descriptor.
-- `SourceResult` and its five ranking channels stay unchanged.
+- `SourceResult` and its four ranking channels (`semantic`, `keyword`,
+  `fulltext`, `items`) stay unchanged.
 
 ### `SourceInfo` additions
 
@@ -178,6 +181,16 @@ Keep `mode` exactly as-is for now:
 
 - `"local"` for ZIM, files, and Kolibri.
 - `"kiwix"` for remote Kiwix.
+
+`provider` is the canonical discriminator. `content_kind` and `mode` are
+derived views and must not disagree with it:
+
+- `content_kind`: `zim` → `zim`, `files` → `filesystem`, `kolibri` → `kolibri`,
+  `kiwix` → `external`.
+- `mode`: `kiwix` → `kiwix`, every other provider → `local`.
+
+Contract tests assert the derivation; serializers must never emit a
+contradictory combination.
 
 `SourceInfo.to_dict()` adds:
 
@@ -249,12 +262,14 @@ Do **not** route `_search_source` through `provider` yet. Keep the existing
 - [ ] Create `zimantic/providers/base.py` with the dataclasses and protocols.
 - [ ] Create the canonical content-contract module at
       `zimantic/content/store.py` and re-export it from `providers/base.py`.
+      Define the complete `ContentStore` protocol, including `read_range`; phase
+      03 implements it rather than extending the contract.
 - [ ] Create `zimantic/providers/registry.py`; register `zim` and `kiwix`
       placeholders.
 - [ ] Add a normalized provider-configuration seam that preserves the legacy
-      flat settings. Parsing the new `[[sources]]` syntax remains phase 08's
-      responsibility; later providers consume normalized entries rather than
-      adding private config parsers.
+      flat settings. Phase 05 introduces the minimal `[[sources]]` TOML parser
+      and phase 08 generalizes it; later providers consume normalized entries
+      rather than adding private config parsers.
 - [ ] Extend `SourceInfo` and `to_dict()` in `zimantic/contracts.py`.
 - [ ] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
       public import path).
@@ -280,6 +295,9 @@ Do **not** route `_search_source` through `provider` yet. Keep the existing
 - `resolve_source` still matches ZIM `key`, `name`, `book`, `local_name`, and
   dated/flavoured aliases (`_book_identity` behavior preserved).
 - Registry returns the two built-ins and rejects unknown kinds.
+- `provider`, `content_kind`, and `mode` are internally consistent for every
+  built-in provider (`content_kind` and `mode` are derived from `provider`).
+- The frozen `ContentStore` method set is unchanged when phase 03 implements it.
 - Existing search/API tests pass with no payload changes other than additive
   fields.
 
@@ -299,3 +317,6 @@ Do **not** route `_search_source` through `provider` yet. Keep the existing
   `mode`; add `provider` alongside it.
 - **Hidden coupling in tests.** Snapshot tests may assert exact dict keys;
   update them in this phase and document the additions in `README.md`.
+- **Protocol surface.** Keep the seam minimal; `EntrySource` and `EntryRecord`
+  remain internal adapters rather than additional public contracts. Add a
+  protocol only when a plan needs it.

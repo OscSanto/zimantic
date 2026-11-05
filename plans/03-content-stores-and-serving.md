@@ -58,9 +58,11 @@ Rules:
   `/content/files%3Amodules%3Aalgebra/...`. Keep this encoding consistent in
   generated links, referer parsing, the navigation bridge, and tests.
 - `Search.resolve_content_source(identifier)` matches `content_id`, then
-  `key`, `name`, `book`, `local_name`. Exact matches must be globally unique;
-  ambiguous aliases return a dedicated ambiguity error with a documented
-  4xx mapping rather than selecting an arbitrary provider.
+  `key`, `name`, `book`, `local_name`. Exact matches must be unique among
+  non-ZIM providers; a collision between two new-provider `content_id`s returns
+  a dedicated ambiguity error with a documented 4xx mapping rather than
+  selecting an arbitrary provider. Legacy ZIM `content_id`s (archive stems) keep
+  the existing largest-by-stem precedence instead of becoming errors.
 - New content IDs are stable and namespaced; URL helpers quote them as one
   path segment. Legacy ZIM IDs remain the archive stem for URL compatibility,
   so the resolver preserves their existing collision and alias precedence.
@@ -73,9 +75,9 @@ Rules:
 
 ### `ContentStore`
 
-The protocol below is the canonical contract introduced in phase 00 and
-extended here with range-capable reads. Provider modules import it; they do not
-redeclare it.
+The protocol below is the canonical contract frozen in phase 00. This phase
+implements it for ZIM, including range-capable reads. Provider modules import
+it; they do not redeclare it.
 
 ```python
 class ContentStore(Protocol):
@@ -175,9 +177,9 @@ This can ship unused in this phase; files and Kolibri media need it.
 
 ## Work items
 
-- [ ] Extend the canonical `zimantic/content/store.py` contract with
-      `ContentRange`/`read_range`; provider implementations import it rather
-      than define local variants.
+- [ ] Implement `ContentRange`/`read_range` for ZIM on `ArchiveContentStore`;
+      provider implementations import the phase-00 contract rather than define
+      local variants.
 - [ ] Create `zimantic/content/path.py`; move `normalize_article_path` and
       related path rules there.
 - [ ] Implement `ArchiveContentStore` in `providers/zim/store.py` using the

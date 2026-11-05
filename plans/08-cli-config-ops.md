@@ -33,7 +33,7 @@ type = "files"
 name = "modules"
 path = "/library/www/html/modules"
 label = "Modules"
-granularity = "directory"
+granularity = "collection"
 
 [[sources]]
 type = "kolibri"
@@ -77,8 +77,9 @@ name.
 - Provider-specific keys are validated by the provider. Generic validation only
   checks `type`, `name`, and duplicate names.
 - Phase 00 defines a normalized provider-entry interface so provider phases can
-  validate entries without parsing TOML themselves. This phase owns the TOML
-  `[[sources]]` parser and conversion into that interface.
+  validate entries without parsing TOML themselves. Phase 05 introduces the
+  minimal TOML `[[sources]]` parser for the first non-ZIM provider; this phase
+  generalizes it to every provider and owns the full config loader.
 - Legacy `zim_dir` creates the default `zim` collection unless an explicit
   `[[sources]] type = "zim"` already uses the same resolved path; in that case
   warn and skip the legacy shorthand to avoid duplicate sources.
@@ -136,6 +137,9 @@ name.
 - Provider-specific limits (`max_sources`, `max_entries`, `max_file_bytes`,
   `captions`, `ocr`, `asr`, `source_depth`) default in the provider and may be
   overridden per entry.
+- `granularity` (files: `collection`/`directory`) and `source_depth` (Kolibri:
+  0/1) both bound source count but are not synonyms: files chooses a root
+  granularity, Kolibri chooses a topic depth.
 - `enabled_providers` is not needed: a provider is enabled by having at least
   one configured collection. Keep it that way.
 
@@ -216,7 +220,7 @@ Scope:
 - `reload` rescans all providers, not only ZIM.
 - Keep SIGHUP and PID-file behavior unchanged.
 
-## Index layout and migration
+## Index layout and catalog rebuild
 
 - Legacy ZIM indexes stay at `<index_dir>/<stem>.sqlite` and `.faiss`.
 - New providers use the phase-04 locator's
@@ -229,11 +233,11 @@ Scope:
   resolved absolute `path` as a private indexed locator, separate from the
   logical primary key `(provider, collection_key, source_key)`. Canonicalize
   paths at discovery/update time, not repeatedly during search.
-- Migrate the supported legacy `zims` catalog schema transactionally to the
-  generic `sources` schema on first run; retain the catalog filename and
-  metadata, but remove old table/index names. Rebuild only if the legacy
-  schema is corrupt or unsupported. This intentionally ends on-disk
-  compatibility with tools that expect the old IIAB `zims` table.
+- Detect a pre-change `zims` catalog as stale (schema version 5 → 6) and rebuild
+  it into the generic `sources` schema with a full provider scan on first run;
+  retain the catalog filename but remove old table/index names. Do not migrate
+  rows in place. This intentionally ends on-disk compatibility with tools that
+  expect the old IIAB `zims` table, which was never Zimantic's layout anyway.
 - On first run after upgrade:
   - discover legacy ZIM indexes exactly as before; do not migrate or rewrite
     them;
@@ -274,7 +278,7 @@ Scope:
   - new "Sources and providers" section;
   - config examples for ZIM, files, Kolibri, and Kiwix;
   - collection/source explanation and the bounded-source rule;
-  - index layout and migration note;
+  - index layout and catalog-rebuild note;
   - security note for untrusted file trees (`secure_browsing`);
   - derived-text section: the three independent opt-ins, local-only engines,
     optional dependencies, and build-time-only execution;
@@ -293,8 +297,9 @@ Scope:
 
 ## Work items
 
-- [ ] Extend `settings.py` to accept `sources` as a list of tables, validate
-      `type`/`name`/duplicates, and delegate provider keys.
+- [ ] Generalize `settings.py` from the phase-05 minimal `[[sources]]` parser to
+      a list of tables for every provider; validate `type`/`name`/duplicates and
+      delegate provider keys.
 - [ ] Implement legacy shorthand merging for `zim_dir` and `kiwix_server`.
 - [ ] Build a provider configuration registry with per-provider defaults and
       validation functions.

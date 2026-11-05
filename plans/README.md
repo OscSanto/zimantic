@@ -60,11 +60,15 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 03 | [Content stores and serving](03-content-stores-and-serving.md) | 00, 01 | One `/content/{source}/{path}` route for every local content provider |
 | 04 | [Generic index pipeline](04-generic-index-pipeline.md) | 00, 01, 03 | Reusable SQLite/FAISS build and index handles for non-ZIM entries |
 | 05 | [Files provider](05-files-provider.md) | 03, 04 | Configured directories as collections with bounded sources |
-| 06 | [Kolibri provider](06-kolibri-provider.md) | 03, 04 | Channels as collections; content nodes as items; opt-in captions/OCR/ASR |
+| 06 | [Kolibri provider](06-kolibri-provider.md) | 03, 04, 05 | Channels as collections; content nodes as items; opt-in captions/OCR/ASR |
 | 07 | [Collections, API, and UI](07-collections-api-ui.md) | 01–06 | Grouped library and source filters that do not explode |
-| 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers; migration and docs |
+| 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers; catalog rebuild and docs |
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | all | Security, limits, parity tests, performance, staged release |
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
+
+Provider configuration follows its first consumer: phase 05 introduces the
+minimal `[[sources]]` parser needed to enable a non-ZIM provider, and phase 08
+generalizes it to every provider and adds the remaining operations.
 
 ## Global invariants
 
@@ -75,6 +79,9 @@ Every phase must preserve these:
   `name` aliases continue to resolve.
 - **Existing index files keep working.** A pre-change `<stem>.sqlite` /
   `<stem>.faiss` pair remains valid and is still discovered.
+- **The catalog cache is rebuilt once.** `catalog.sqlite` is disposable; a
+  pre-change catalog is detected as stale and rebuilt by a full provider scan on
+  first run. Per-ZIM index files are never rewritten.
 - **Existing config keeps working.** Flat keys such as `zim_dir`,
   `kiwix_server`, `index_dir`, and `max_remote_sources` remain accepted.
 - **Existing API payloads remain additive.** New fields are optional; no field
@@ -128,7 +135,7 @@ explicitly marked truncated; serving must continue to cover all content.
 - ZIM and Kiwix behavior, URLs, payload fields, and performance are unchanged
   except for additive metadata.
 - The full test suite passes on Python 3.11–3.14, including new provider
-  contract tests, traversal/security tests, and migration tests.
+  contract tests, traversal/security tests, and catalog-rebuild tests.
 - `config.toml`, `README.md`, `CONTRIBUTING.md`, and deployment examples
   document the new source configuration and index layout.
 - A Pi Zero 2 W can still serve a mixed library without exceeding the current

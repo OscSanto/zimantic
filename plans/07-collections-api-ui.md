@@ -9,6 +9,10 @@ explode the source list. Keep the flat source/search APIs working, and make the
 library and source filters usable when a files collection has dozens of sources
 or a Kolibri channel has many topics.
 
+The files provider defaults to `granularity = "collection"` until this phase
+lands, so the flat fallback stays bounded even without the grouped view. Once
+grouping is available, users can opt into directory granularity.
+
 ## Current state
 
 - `SourceInfo.to_dict()` returns a flat source record.
@@ -60,7 +64,9 @@ Each source gains:
   `video`, `audio`, `image`, and `other`. It describes the indexed content
   families in a source; it may contain multiple values for mixed Files or
   Kolibri sources. ZIM classification uses its MIME counter, while local
-  providers use their indexed manifest. It is not a source identity.
+  providers use their indexed manifest. Providers populate it (phase 01 for
+  ZIM, phases 05 and 06 for local providers); the UI only consumes it. It is
+  not a source identity.
 
 ### `/collections.json`
 

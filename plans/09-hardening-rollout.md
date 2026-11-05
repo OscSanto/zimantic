@@ -90,7 +90,7 @@ Keep the roadmap defaults and make them configurable per provider:
 | preview bytes | existing limits | preview hydration |
 | content response | existing `max_article_bytes` | store read |
 | discovery time | 10 s per provider | background publication after deadline |
-| search tasks per provider | 4 or `search_workers` | provider scheduler |
+| search tasks per provider | `min(4, search_workers)` | provider scheduler |
 | remote sources per search | `max_remote_sources` | Kiwix runtime |
 
 Additional rules:
@@ -199,9 +199,9 @@ Measure and record:
 - [ ] Cache key/source selection across collections.
 - [ ] Reload after adding/removing each provider's content.
 - [ ] Legacy config and legacy index fixture upgrade with no rebuild.
-- [ ] Legacy catalog migration is atomic and preserves metadata; the resulting
-      schema is generic, contains no `zims` table/indexes, and does not alter
-      legacy index files.
+- [ ] A pre-change catalog is detected as stale and rebuilt into the generic
+      `sources` schema by a full scan; the result preserves public metadata,
+      contains no `zims` table/indexes, and does not alter legacy index files.
 
 ### Security/adversarial
 
@@ -250,7 +250,8 @@ Each stage is independently revertible. There is no long-lived branch.
 2. **Generic serving and indexing (phases 03–04).** Ship content stores and the
    generic pipeline while only ZIM uses them. No new config. Revert = restore
    the ZIM-only code paths; legacy indexes still valid.
-3. **Files provider (phase 05).** Opt-in by adding `[[sources]] type = "files"`.
+3. **Files provider and minimal source config (phase 05).** Opt-in by adding
+   `[[sources]] type = "files"`; this stage introduces the minimal parser.
    Ship docs and a commented example. No configured files source means no new
    work at startup.
 4. **Kolibri provider (phase 06).** Opt-in by config; `captions`, `ocr`, and
@@ -291,6 +292,8 @@ For a cautious rollout, ship with:
       remain valid; new fields are additive.
 - [ ] Existing config keys work with the same meaning.
 - [ ] Existing index files are discovered without rebuild.
+- [ ] A pre-change `catalog.sqlite` is rebuilt once by a full scan; no user
+      action is required and per-ZIM indexes are untouched.
 - [ ] Existing source keys/aliases and bookmarked `?zim=` selections resolve.
 - [ ] ZIM-only startup/search memory and latency unchanged.
 - [ ] No new mandatory dependency for ZIM-only installs.
@@ -304,8 +307,9 @@ For a cautious rollout, ship with:
 - [ ] `README.md`, `CONTRIBUTING.md`, `config.toml`, `deploy/` updated.
 - [ ] Mixed-library smoke test on a low-resource profile.
 - [ ] Security review of path/zip/MIME/range handling.
-- [ ] Version bump and release notes listing new providers, config, and any
-      deprecations.
+- [ ] Major version bump: the generic `sources` catalog layout intentionally
+      ends external `zims`-table compatibility. Release notes list the new
+      providers, config, and deprecations.
 - [ ] A known-issues note covering supported Kolibri schema versions and
       derived-text engine/model limitations.
 

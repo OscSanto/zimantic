@@ -14,7 +14,10 @@ directory of files into a directory of sources.
 - **A source is the searchable unit and content root inside that collection.**
 - **Items are never sources.** A source may contain any number of files/pages.
 
-Default granularity is `directory`:
+Default granularity is `collection`: the whole root is one source. This keeps
+the library bounded even before the grouped collection UI (phase 07) lands.
+
+`granularity = "directory"` splits the root into sources:
 
 - each immediate child directory of the configured root becomes one source;
 - loose files directly in the root become one source labelled after the root;
@@ -22,16 +25,18 @@ Default granularity is `directory`:
 - a source's content root is that child directory (or the collection root for
   the loose-files source).
 
-`granularity = "collection"` makes the whole root one source. That is the
-recommended setting for large or unpredictable trees.
+Use `granularity = "directory"` when the tree has a handful of stable top-level
+units and the grouped library/source filters from phase 07 are available;
+otherwise the default avoids a wall of cards.
 
 Per-file sources are deliberately not supported. If someone needs that, they
 configure a root per desired source.
 
 ## Configuration
 
-Phase 08 owns the general config loader; phase 05 introduces the minimal
-structure and validation.
+Phase 05 owns the minimal `[[sources]]` TOML parser needed to enable a non-ZIM
+provider; phase 08 generalizes it to every provider and adds the remaining
+operations. Do not duplicate the parser in the provider.
 
 ```toml
 [[sources]]
@@ -39,7 +44,7 @@ type = "files"
 name = "modules"                 # unique collection name; used in keys
 path = "/library/www/html/modules"
 label = "Modules"
-granularity = "directory"        # "directory" | "collection"
+granularity = "collection"       # "collection" | "directory"
 include = ["**/*.html", "**/*.htm", "**/*.xhtml",
            "**/*.txt", "**/*.md", "**/*.pdf"]
 exclude = ["**/node_modules/**", "**/.git/**", "**/__pycache__/**"]
@@ -119,6 +124,8 @@ For `granularity = "collection"`:
 - `size` = optional cheap sum from discovery only if already available; skip
   otherwise.
 - `homepage` = relative `index.html`/`index.htm` when present, else `None`.
+- `media_types` = content families present in the indexed manifest (`text`,
+  `video`, `audio`, `image`, `other`), used by phase 07's content-type filter.
 
 ## Indexing
 
@@ -153,9 +160,11 @@ Reuse the phase-04 extraction layer:
 
 ### Build entry point
 
-`FilesProvider` exposes a `build(source, ...)` path that phase 08's CLI calls.
-Use the phase-04 locator and pipeline; do not write a files-specific index
-format.
+`FilesProvider` exposes a `build(source, ...)` path, and phase 05 wires it into
+`zimantic build` so configured files collections can be built without waiting
+for phase 08. Phase 08 adds the `--provider`/`--collection`/`--source`/`--list`
+selection. Use the phase-04 locator and pipeline; do not write a
+files-specific index format.
 
 ## Content store
 
@@ -205,8 +214,8 @@ setting still applies; document that untrusted file trees should enable it.
 
 - [ ] Add `zimantic/providers/files/` with provider, discovery, entries, and
       store modules.
-- [ ] Add provider-level validation for normalized files configuration; the
-      shared `[[sources]]` parser lands in phase 08.
+- [ ] Add provider-level validation for normalized files configuration, and
+      implement the minimal `[[sources]]` TOML parser (phase 08 generalizes it).
 - [ ] Implement collection/source discovery with `directory` and `collection`
       granularity, excludes, and the source cap collapse.
 - [ ] Implement `FilesEntryProducer` with stable ids and a manifest
@@ -217,9 +226,11 @@ setting still applies; document that untrusted file trees should enable it.
       keep all three off by default.
 - [ ] Implement `FilesContentStore` with confinement, MIME policy, directory
       index handling, icons, and random.
-- [ ] Wire build and index discovery into the runtime.
+- [ ] Wire build and index discovery into the runtime, including the
+      `zimantic build` entry point for configured files collections.
 - [ ] Add source metadata: `provider`, `collection`, `content_id`,
-      `searchable`, `homepage`, `article_count`, `indexed_count`, `truncated`.
+      `searchable`, `homepage`, `article_count`, `indexed_count`, `truncated`,
+      `media_types` (derived from the indexed manifest).
 - [ ] Document a recommended `/library/www/html/modules` configuration and the
       `granularity` trade-off in `README.md`.
 - [ ] Add a files-provider example to `config.toml` (commented out by default).
@@ -241,7 +252,7 @@ modules/
 
 - [ ] `granularity = "directory"` yields sources for `algebra`, `biology`, and
       one loose-files source; hidden/excluded directories are absent.
-- [ ] `granularity = "collection"` yields exactly one source.
+- [ ] The default (`granularity = "collection"`) yields exactly one source.
 - [ ] Exceeding `max_sources` collapses to one source and logs once.
 - [ ] Stable ids and resume: interrupt/restart with unchanged tree resumes;
       changing a file fingerprint restarts.

@@ -74,10 +74,11 @@ names.
   the existing stem-based index path and source-key collision behavior.
 
 The generic catalog schema replaces the legacy `zims` table and its
-provider-specific indexes. Bump the schema version and transactionally migrate
-the known legacy schema once; do not retain legacy table/column aliases. Keep
-the public ZIM metadata payload unchanged by mapping generic `SourceRecord`
-fields and provider metadata back to the existing `SourceInfo` fields.
+provider-specific indexes. Bump `SCHEMA_VERSION` (5 → 6) and rebuild a stale
+catalog with a full provider scan; do not migrate rows in place and do not
+retain legacy table/column aliases. Keep the public ZIM metadata payload
+unchanged by mapping generic `SourceRecord` fields and provider metadata back to
+the existing `SourceInfo` fields.
 
 | Legacy catalog name | Generic catalog name |
 |---|---|
@@ -148,27 +149,29 @@ the logical primary key. `provider_metadata` is JSON for metadata that has no
 provider-neutral typed column; its contents are interpreted only by that
 provider's adapter.
 
-### Catalog schema migration
+### Catalog schema rebuild
 
-- Recognize the supported legacy `zims` schema by its version and complete
-  column set. Do not infer a migration from a matching filename alone.
-- In one SQLite transaction, create the generic `sources` table and indexes,
-  copy every legacy row, verify row counts and required metadata, then remove
-  the legacy table/indexes and set the new schema version. Roll back completely
-  on any failure.
-- Map each legacy row to `provider = "zim"` and the legacy ZIM collection;
-  retain its canonical absolute `path` as the private locator. Generate
-  `source_key` using the same stable stem/collision rules as normal discovery,
-  not from the absolute path.
-- Map legacy columns as shown above; preserve icon BLOBs, availability/errors,
-  scan times, and ZIM-only fields in `provider_metadata`. The ZIM adapter
-  continues to expose the existing API field names.
-- Run this migration once. If the catalog is corrupt or has an unsupported
-  schema, rebuild it with a full provider scan. Do not leave a `zims` view or
-  compatibility table in the new schema.
-- The new on-disk schema intentionally replaces the IIAB-compatible layout.
-  Document that external tools expecting the old `zims` table must use their
-  own catalog file.
+The catalog is a disposable cache: it can always be recreated from the archives,
+so this phase rebuilds instead of migrating.
+
+- Bump the catalog `SCHEMA_VERSION` (5 → 6) so an existing catalog is recognized
+  as stale. On first run, drop the legacy `zims` table and its indexes, create
+  the generic `sources` table, and let the normal provider scan repopulate it. Do
+  not copy rows and do not write an in-place migration.
+- Recognize the legacy layout by its version and complete column set before
+  dropping it, exactly as the current disposable-cache check does; do not infer
+  from a matching filename alone.
+- Rebuilding re-opens every archive once, which also refreshes icons,
+  availability, and provider metadata. That one-time cost is acceptable and
+  preserves the existing "delete the catalog to rebuild it" guarantee.
+- On a corrupt or unsupported catalog, delete and recreate it exactly as today.
+  Do not leave a `zims` view or compatibility table in the new schema.
+- The generic `sources` layout is Zimantic's own, not IIAB's catalog layout: IIAB
+  already reuses the filename and version with a different table shape. Document
+  that external tools expecting the old `zims` table must use their own catalog
+  file.
+- Because this intentionally ends external `zims`-table compatibility, the
+  release that carries it is a major version bump.
 
 ### Runtime
 
@@ -220,9 +223,9 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Replace the `zims` table with the generic `sources` schema in
       `SourceCatalog`; use the composite logical primary key and a separately
       indexed canonical `path` locator.
-- [ ] Bump the catalog schema version and add the transactional legacy-schema
-      migration above; remove `zims`-named tables/indexes/columns without
-      changing public ZIM metadata serialization.
+- [ ] Bump the catalog `SCHEMA_VERSION` (5 → 6) and rebuild a stale catalog into
+      the generic `sources` schema; remove `zims`-named tables/indexes/columns
+      without changing public ZIM metadata serialization.
 - [ ] Move `_scan_zim_paths`, `_find_zim_path`, `_match_zim_path`, `_scan_catalog`
       calls, and `_discover_local_indexes` into `providers/zim/discovery.py`.
 - [ ] Move `_open_index`, `_open_zim_index`, `_read_index_meta`,
@@ -249,8 +252,8 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       previews), and the ZIM half of `_result_doc` with them.
 - [ ] Keep `_hydrate_results` in `Search`; it calls the runtime for previews.
       Phase 03 replaces the runtime-specific call with `ContentStore`.
-- [ ] Keep the five `SourceResult` channels (`semantic`, `keyword`, `fulltext`,
-      items) identical. This is a move, not a ranking change.
+- [ ] Keep the four `SourceResult` channels (`semantic`, `keyword`, `fulltext`,
+      `items`) identical. This is a move, not a ranking change.
 - [ ] Keep native full-text isolation and its partial/error statuses.
 
 ### Identity and API
@@ -262,6 +265,9 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       `searchable_source_keys()` for new callers.
 - [ ] `Search.health()` reports ZIM collection/index stats from the runtime,
       with the same keys as today.
+- [ ] Populate `SourceInfo.media_types` for ZIM from the existing MIME counter
+      (`counter`) using the phase-07 classification, so the content-type filter
+      needs no provider call.
 
 ### Cleanup
 
@@ -292,9 +298,12 @@ Add tests that compare pre/post payloads for a fixture library:
       `<unknown>`, never an absolute path.
 - [ ] Catalog lookup uses canonical absolute paths only internally; serialized
       source/library records contain no filesystem locator.
-- [ ] Migration from the supported legacy catalog preserves all records and
-      public metadata, is atomic/idempotent, and leaves no legacy table or
-      index names; corrupt/unsupported catalogs fall back to a full scan.
+- [ ] A pre-change catalog is detected as stale, dropped, and rebuilt into
+      `sources` by a full scan; the rescan preserves public ZIM metadata and
+      leaves no legacy table or index names. Corrupt/unsupported catalogs
+      rebuild the same way.
+- [ ] `media_types` derives from the MIME counter and matches the phase-07
+      classification (`text`/`video`/`audio`/`image`/`other`).
 - [ ] The database schema has no `zims` table or `zims_*` indexes, and its
       provider-neutral column names preserve the existing public ZIM metadata
       through the provider adapter.
