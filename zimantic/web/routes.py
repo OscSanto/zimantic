@@ -5,7 +5,7 @@ import json
 from urllib.parse import unquote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ..search import (
     SELECTIVE_SOURCE_LIMIT,
@@ -92,7 +92,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     base_path = web_app._search_base_path(search_class)
     cfg = getattr(search_class, "cfg", {}) or {}
     secure_browsing = bool(cfg.get("secure_browsing", False))
-    dev_cache_headers = {"Cache-Control": "no-store"} if debug else None
 
     def paged_json_response(
         request: Request,
@@ -156,35 +155,64 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         )
 
     @app.get("/", include_in_schema=False)
-    def page():
-        return FileResponse(web_app.PAGE, headers=dev_cache_headers)
+    def page(request: Request):
+        return web_app.page_response(request, debug=debug)
 
     @app.get("/library", include_in_schema=False)
-    def library_page():
-        return FileResponse(web_app.PAGE, headers=dev_cache_headers)
+    def library_page(request: Request):
+        return web_app.page_response(request, debug=debug)
 
     static_routes = (
-        ("/app.css", web_app.APP_CSS, "text/css"),
-        ("/app.js", web_app.APP_JS, "application/javascript"),
-        ("/i18n.js", web_app.I18N, "application/javascript"),
-        ("/indexeddb-shim.js", web_app.INDEXEDDB_SHIM, "application/javascript"),
-        ("/favicon.ico", web_app.FAVICON, "image/x-icon"),
-        ("/favicon.svg", web_app.FAVICON_SVG, "image/svg+xml"),
-        ("/favicon-16x16.png", web_app.FAVICON_16, "image/png"),
-        ("/favicon-32x32.png", web_app.FAVICON_32, "image/png"),
-        ("/apple-touch-icon.png", web_app.APPLE_TOUCH_ICON, "image/png"),
-        ("/android-chrome-192x192.png", web_app.ANDROID_CHROME_192, "image/png"),
-        ("/android-chrome-512x512.png", web_app.ANDROID_CHROME_512, "image/png"),
-        ("/site.webmanifest", web_app.WEB_MANIFEST, "application/manifest+json"),
+        ("/app.css", web_app.APP_CSS, "text/css", True),
+        ("/app.js", web_app.APP_JS, "application/javascript", True),
+        ("/i18n.js", web_app.I18N, "application/javascript", True),
+        (
+            "/indexeddb-shim.js",
+            web_app.INDEXEDDB_SHIM,
+            "application/javascript",
+            False,
+        ),
+        ("/favicon.ico", web_app.FAVICON, "image/x-icon", False),
+        ("/favicon.svg", web_app.FAVICON_SVG, "image/svg+xml", False),
+        ("/favicon-16x16.png", web_app.FAVICON_16, "image/png", False),
+        ("/favicon-32x32.png", web_app.FAVICON_32, "image/png", False),
+        ("/apple-touch-icon.png", web_app.APPLE_TOUCH_ICON, "image/png", False),
+        (
+            "/android-chrome-192x192.png",
+            web_app.ANDROID_CHROME_192,
+            "image/png",
+            False,
+        ),
+        (
+            "/android-chrome-512x512.png",
+            web_app.ANDROID_CHROME_512,
+            "image/png",
+            False,
+        ),
+        (
+            "/site.webmanifest",
+            web_app.WEB_MANIFEST,
+            "application/manifest+json",
+            False,
+        ),
     )
-    for route, file, mime in static_routes:
-        app.get(route, include_in_schema=False)(
-            lambda file=file, mime=mime: FileResponse(
+    for route, file, mime, versioned in static_routes:
+
+        def static_asset(
+            request: Request,
+            file=file,
+            mime=mime,
+            versioned=versioned,
+        ):
+            return web_app.static_response(
+                request,
                 file,
-                media_type=mime,
-                headers=dev_cache_headers,
+                mime,
+                versioned=versioned,
+                debug=debug,
             )
-        )
+
+        app.get(route, include_in_schema=False)(static_asset)
 
     @app.get("/source-icon/{zim}", include_in_schema=False)
     def source_icon(zim: str):

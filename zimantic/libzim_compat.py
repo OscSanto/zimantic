@@ -31,10 +31,18 @@ def search_results(
         getter = search.getResults
     results = []
     for result in getter(start, count):
-        path = getattr(result, "path", result)
-        title = getattr(result, "title", "")
+        # Older libzim builds yield bare path strings. A string's ``title`` is
+        # the built-in str.title method, so inspect the type before reading it.
+        if isinstance(result, str):
+            path = result
+            title = ""
+        else:
+            path = getattr(result, "path", result)
+            title = getattr(result, "title", "")
+            if not isinstance(title, str):
+                title = str(title or "")
         results.append({
             "path": str(path),
-            "title": str(title or ""),
+            "title": title,
         })
     return results

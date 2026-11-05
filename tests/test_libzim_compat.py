@@ -1,6 +1,6 @@
 import unittest
 
-from zimantic.libzim_compat import get_entry_by_id, search_paths
+from zimantic.libzim_compat import get_entry_by_id, search_paths, search_results
 
 
 class _OldArchive:
@@ -21,7 +21,7 @@ class _OldSearch:
 class _NewSearch:
     def get_results(self, start, count):
         return [
-            type("Result", (), {"path": path})()
+            type("Result", (), {"path": path, "title": path.title()})()
             for path in ["alpha", "beta"][start:start + count]
         ]
 
@@ -35,6 +35,22 @@ class LibzimCompatTests(unittest.TestCase):
         self.assertEqual(search_paths(_OldSearch(), 0, 2), ["alpha", "beta"])
         self.assertEqual(search_paths(_NewSearch(), 0, 2), ["alpha", "beta"])
         self.assertEqual(search_paths(_NewSearch(), 1, 1), ["beta"])
+
+    def test_search_results_does_not_treat_a_path_string_as_a_title(self):
+        self.assertEqual(
+            search_results(_OldSearch(), 0, 2),
+            [
+                {"path": "alpha", "title": ""},
+                {"path": "beta", "title": ""},
+            ],
+        )
+        self.assertEqual(
+            search_results(_NewSearch(), 0, 2),
+            [
+                {"path": "alpha", "title": "Alpha"},
+                {"path": "beta", "title": "Beta"},
+            ],
+        )
 
 
 if __name__ == "__main__":

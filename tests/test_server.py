@@ -162,8 +162,10 @@ class ServerTests(unittest.TestCase):
     def test_page_assets_are_served(self):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
-        self.assertIn('href="app.css"', page.text)
-        self.assertIn('src="app.js"', page.text)
+        self.assertIn('href="app.css?v=', page.text)
+        self.assertIn('src="app.js?v=', page.text)
+        self.assertIn('src="i18n.js?v=', page.text)
+        self.assertEqual(page.headers["cache-control"], "no-cache")
         self.assertNotIn('id="libraryRandom"', page.text)
         self.assertIn('id="articleModalFrame"', page.text)
         # The modal shell itself is trusted; the article document inside it is
@@ -194,6 +196,30 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(shim.headers["content-type"].startswith("application/javascript"))
         self.assertIn("fake-indexeddb", shim.text)
         self.assertIn("zimantic-article-storage-blocked", shim.text)
+
+    def test_versioned_static_assets_are_immutable_and_precompressed(self):
+        page = self.client.get("/")
+        version = page.text.split('src="app.js?v=')[1].split('"', 1)[0]
+        response = self.client.get(
+            f"/app.js?v={version}",
+            headers={"Accept-Encoding": "gzip"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-encoding"], "gzip")
+        self.assertIn("immutable", response.headers["cache-control"])
+        self.assertIn("initialize();", response.text)
+        etag = response.headers["etag"]
+        conditional = self.client.get(
+            f"/app.js?v={version}",
+            headers={"If-None-Match": etag},
+        )
+        self.assertEqual(conditional.status_code, 304)
+        self.assertEqual(conditional.headers["etag"], etag)
+
+    def test_unversioned_static_assets_are_revalidated(self):
+        response = self.client.get("/app.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-cache")
 
     def test_debug_page_assets_are_not_cached(self):
         for path in (

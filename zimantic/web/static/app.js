@@ -2819,6 +2819,10 @@
                 const decoder = new TextDecoder();
                 let buffer = "";
                 let busy = false;
+                // Paint the first ranked snapshot immediately. Later snapshots
+                // coalesce on the slow render cadence, but a fast search should
+                // not wait for that timer just to show its first results.
+                let renderedSnapshot = false;
                 const applyPage = (event) => {
                     current.completed = event.completed;
                     // A snapshot whose page didn't move omits `results`; keep the
@@ -2880,7 +2884,18 @@
                             sourceProgressText(event.completed, event.total_sources);
                     } else if (event.type === "snapshot") {
                         applyPage(event);
-                        scheduleStreamRender(sequence);
+                        const firstResults =
+                            !renderedSnapshot &&
+                            Array.isArray(event.results) &&
+                            event.results.length > 0;
+                        if (firstResults) {
+                            renderedSnapshot = true;
+                            lastStreamRenderAt = performance.now();
+                            renderView();
+                            renderNotice();
+                        } else {
+                            scheduleStreamRender(sequence);
+                        }
                         return true;
                     } else if (event.type === "done") {
                         applyPage(event);
@@ -3904,6 +3919,20 @@
                 }
             });
 
+            function applyDiscoveryData(payload, libraryView) {
+                if (libraryView) {
+                    // Unreadable ZIMs stay visible so the card can explain why
+                    // they cannot be opened. Readable archives without a
+                    // homepage are also kept; the card can offer a random
+                    // article when the source is searchable.
+                    librarySources = sortLibrarySources(payload);
+                    renderLibrary();
+                } else {
+                    sources = payload;
+                    renderSourceSelectionSummary();
+                }
+            }
+
             async function initialize() {
                 normalizePageParam();
                 const libraryView = location.pathname === appPath("/library");
@@ -3918,11 +3947,32 @@
                         ? "Zimantic: switch to search"
                         : "Zimantic: clear or restore search",
                 );
+                // Render the requested view and focus the search box before
+                // waiting on discovery. The data below is an enhancement, not
+                // a prerequisite for the page to look ready.
+                $("searchView").hidden = libraryView;
+                $("libraryView").hidden = !libraryView;
+                document.body.classList.toggle("library-active", libraryView);
+                for (const link of document.querySelectorAll(".view-nav a")) {
+                    const isLibraryLink = link.getAttribute("href") === "library";
+                    if (isLibraryLink === libraryView) {
+                        link.setAttribute("aria-current", "page");
+                    } else {
+                        link.removeAttribute("aria-current");
+                    }
+                }
+                if (!libraryView && !state.question && !state.modal) {
+                    $("question").focus();
+                }
+                // Source discovery is read-only; refreshing the index/catalog set is an
+                // admin action done only via `zimantic reload` or SIGHUP.
+                const dataPath = libraryView ? appPath("/library.json") : appPath("/sources");
+                const dataCacheKey = libraryView ? LIBRARY_CACHE_KEY : SOURCE_CACHE_KEY;
+                // Paint the last known library immediately, then revalidate it
+                // in the background. First visits still wait for the request.
+                const cachedData = readJsonCache(dataCacheKey);
+                if (cachedData) applyDiscoveryData(cachedData, libraryView);
                 try {
-                    // Source discovery is read-only; refreshing the index/catalog set is an
-                    // admin action done only via `zimantic reload` or SIGHUP.
-                    const dataPath = libraryView ? appPath("/library.json") : appPath("/sources");
-                    const dataCacheKey = libraryView ? LIBRARY_CACHE_KEY : SOURCE_CACHE_KEY;
                     const [configResponse, data] = await Promise.all([
                         fetch(appPath("/config"), { cache: "no-cache" }),
                         fetchCachedJson(dataPath, dataCacheKey),
@@ -3952,16 +4002,7 @@
                             $("question").maxLength = MAX_QUERY_LENGTH;
                         }
                     }
-                    if (libraryView) {
-                        // Unreadable ZIMs stay visible so the card can explain
-                        // why they cannot be opened. Readable archives without a
-                        // homepage are also kept; the card can offer a random
-                        // article when the source is searchable.
-                        librarySources = sortLibrarySources(data.payload);
-                        renderLibrary();
-                    } else {
-                        sources = data.payload;
-                    }
+                    applyDiscoveryData(data.payload, libraryView);
                     if (data.stale) {
                         $("status").textContent =
                             `Using cached ${libraryView ? "library" : "source"} data; refresh failed: ${data.error.message}`;
@@ -3969,17 +4010,6 @@
                 } catch (error) {
                     $("status").textContent =
                         `Could not load ${libraryView ? "library" : "sources"}: ${error.message}`;
-                }
-                $("searchView").hidden = libraryView;
-                $("libraryView").hidden = !libraryView;
-                document.body.classList.toggle("library-active", libraryView);
-                for (const link of document.querySelectorAll(".view-nav a")) {
-                    const isLibraryLink = link.getAttribute("href") === "library";
-                    if (isLibraryLink === libraryView) {
-                        link.setAttribute("aria-current", "page");
-                    } else {
-                        link.removeAttribute("aria-current");
-                    }
                 }
                 syncArticleModal(state.modal);
                 if (!$("articleModal").hidden) {

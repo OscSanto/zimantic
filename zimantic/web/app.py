@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import json
 import logging
@@ -67,6 +68,142 @@ ARTICLE_CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
 # Both HTML flavors receive the article bridge, mobile fallback, and head
 # metadata handling.
 HTML_MIMETYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+# Static assets are immutable for a given content version. The page links to
+# app.css, app.js and i18n.js with a content-derived query string, so those can
+# be cached for a year. Assets that the page or an article loads without a
+# version (shims, icons, manifest) get a short cache instead.
+STATIC_IMMUTABLE_SECONDS = 31536000
+STATIC_SHORT_SECONDS = 3600
+_COMPRESSIBLE_MIME_PREFIXES = (
+    "text/",
+    "application/javascript",
+    "application/json",
+    "application/xml",
+    "image/svg",
+)
+
+# Precompress static files once per process. GZipMiddleware otherwise re-runs
+# level-9 compression for every cold request; app.js is ~190 KB and costs
+# around 20 ms on a Raspberry Pi, once per page load.
+_STATIC_CACHE: dict[str, tuple[bytes, bytes | None, str]] = {}
+_STATIC_CACHE_LOCK = threading.Lock()
+
+
+def _compressible(media_type: str) -> bool:
+    return media_type.startswith(_COMPRESSIBLE_MIME_PREFIXES)
+
+
+def _cached_asset(
+    key: str,
+    loader,
+    media_type: str,
+) -> tuple[bytes, bytes | None, str]:
+    cached = _STATIC_CACHE.get(key)
+    if cached is not None:
+        return cached
+    data = loader()
+    compressed = (
+        gzip.compress(data, compresslevel=9)
+        if _compressible(media_type) and len(data) >= GZIP_MIN_SIZE
+        else None
+    )
+    etag = '"' + hashlib.sha1(data).hexdigest() + '"'
+    cached = (data, compressed, etag)
+    with _STATIC_CACHE_LOCK:
+        cached = _STATIC_CACHE.setdefault(key, cached)
+    return cached
+
+
+def _cached_response(
+    request: Request,
+    key: str,
+    loader,
+    media_type: str,
+    cache_control: str,
+) -> Response:
+    data, compressed, etag = _cached_asset(key, loader, media_type)
+    headers = {
+        "ETag": etag,
+        "Cache-Control": cache_control,
+        "Vary": "Accept-Encoding",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    if compressed is not None and "gzip" in request.headers.get(
+        "accept-encoding", ""
+    ).lower():
+        headers["Content-Encoding"] = "gzip"
+        return Response(content=compressed, media_type=media_type, headers=headers)
+    return Response(content=data, media_type=media_type, headers=headers)
+
+
+def _static_version() -> str:
+    """Version for the assets referenced by the page.
+
+    Uses file metadata rather than file contents: this runs on each static
+    request, and mtime plus size is enough to change the URL when an asset is
+    deployed. The asset's own ETag still hashes its bytes.
+    """
+    digest = hashlib.sha1()
+    for path in (APP_CSS, APP_JS, I18N):
+        stat = path.stat()
+        digest.update(f"{path}:{stat.st_mtime_ns}:{stat.st_size}".encode())
+    return digest.hexdigest()[:12]
+
+
+def _static_key(path: Path) -> str:
+    """Cache key that changes when the file changes, even without a restart."""
+    stat = path.stat()
+    return f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _versioned_page() -> bytes:
+    document = PAGE.read_text(encoding="utf-8")
+    version = _static_version()
+    document = document.replace(
+        'href="app.css"', f'href="app.css?v={version}"'
+    )
+    document = document.replace('src="app.js"', f'src="app.js?v={version}"')
+    document = document.replace('src="i18n.js"', f'src="i18n.js?v={version}"')
+    return document.encode("utf-8")
+
+
+def page_response(request: Request, debug: bool = False) -> Response:
+    """Serve the app shell with versioned asset URLs."""
+    cache_control = "no-store" if debug else "no-cache"
+    return _cached_response(request, "page", _versioned_page, "text/html", cache_control)
+
+
+def static_response(
+    request: Request,
+    path: Path,
+    media_type: str,
+    *,
+    versioned: bool = False,
+    debug: bool = False,
+) -> Response:
+    """Serve one static asset with cached compression and a cache policy.
+
+    Versioned assets are addressed with the current content version in the
+    query string, so only that exact URL is immutable. A stale or unversioned
+    URL falls back to revalidation instead of pinning old bytes in the browser.
+    """
+    if debug:
+        cache_control = "no-store"
+    elif versioned and request.query_params.get("v") == _static_version():
+        cache_control = f"public, max-age={STATIC_IMMUTABLE_SECONDS}, immutable"
+    elif versioned:
+        cache_control = "no-cache"
+    else:
+        cache_control = f"public, max-age={STATIC_SHORT_SECONDS}"
+    return _cached_response(
+        request,
+        _static_key(path),
+        path.read_bytes,
+        media_type,
+        cache_control,
+    )
 
 # Some JavaScript applications read ``document.cookie`` even when they do not
 # use cookies. The browser throws for that getter in the opaque-origin article
@@ -792,6 +929,22 @@ def _json_response(request: Request, memo_key: str, version, payload_factory, me
     return Response(content=body, media_type="application/json", headers=headers)
 
 
+def warm_static_cache() -> None:
+    """Precompress the page shell and its assets before the first request.
+
+    Without this, the first visitor after a restart pays the level-9 gzip cost
+    for app.js (about 20 ms on a Raspberry Pi).
+    """
+    for path, media_type in (
+        (APP_CSS, "text/css"),
+        (APP_JS, "application/javascript"),
+        (I18N, "application/javascript"),
+        (INDEXEDDB_SHIM, "application/javascript"),
+    ):
+        _cached_asset(_static_key(path), path.read_bytes, media_type)
+    _cached_asset("page", _versioned_page, "text/html")
+
+
 def create_app(searchClass, debug: bool = False) -> FastAPI:
     app = FastAPI(title="Zimantic")
     app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
@@ -837,6 +990,7 @@ def _handle_restart_request(_signum, _frame) -> None:
 
 def serve(searchClass, port: int, debug: bool = False) -> None:
     app = create_app(searchClass, debug=debug)
+    warm_static_cache()
     try:
         PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as error:
