@@ -58,11 +58,25 @@ class EntryProducer(Protocol):
     def validate_snapshot(self) -> bool: ...
 ```
 
-- `EntryRecord.id` is the stable row id written to `docs.rowid`. Providers must
-  keep it stable for the duration of a source snapshot and across unchanged
-  rebuilds. `count` is the length of the bounded build manifest, not necessarily
-  the total source size. Non-indexable entries return `None` and are reported as
-  skipped rather than changing row-id assignment.
+- `EntryRecord.id` is the canonical positive 63-bit SQLite row id written to
+  `docs.rowid`, `vecs.id`, FAISS, and `EntryRecord.target_id`. It is not an
+  arbitrary provider-native id. Providers must keep it stable for the duration
+  of a source snapshot and across unchanged rebuilds; path is not an identity
+  because duplicate paths are permitted.
+- Providers own the deterministic mapping from their native identity to this
+  row-id space. The ZIM producer maps an archive entry's raw `_index` to
+  `_index + 1` (so raw id `0` is valid and sparse ids remain distinct), and
+  maps redirect targets with the same rule. Files use one-based manifest
+  position; Kolibri uses its deterministic positive 63-bit `(channel_id,
+  node_id)` mapping. A provider must reject overflow or mapping collisions
+  rather than merge rows. The core never remaps ids after receiving an
+  `EntryRecord`.
+- `EntryRecord.target_id` is the nullable canonical row id of the final
+  redirect target; non-redirect rows use `None`. The field is named
+  `target_id` everywhere, including provider plans and the SQLite `docs.target`
+  column. `count` is the length of the bounded build manifest, not necessarily
+  the total source size. Non-indexable entries return `None` and are reported
+  as skipped rather than changing row-id assignment.
 - `entry_at` returns `None` for non-indexable items; the producer is
   responsible for harmless skips.
 - `validate_snapshot()` independently checks the live source and build inputs
@@ -251,6 +265,42 @@ The locator must:
 - expose one `paths(source)` function;
 - be shared by `serve`, `build`, `reload`, cleanup, and health.
 
+### Index metadata encoding
+
+New indexes use a type-stable metadata table:
+
+```sql
+CREATE TABLE meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+```
+
+`meta.value` is always UTF-8 text. The schema is a rebuild-only change; old
+indexes with SQLite INTEGER or BLOB values are ignored rather than migrated.
+Readers and writers use one codec and reject malformed values instead of
+silently coercing them:
+
+| Key(s) | Meaning | Canonical encoding |
+|---|---|---|
+| `done` | publication mode | enum `"fast"` or `"full"` |
+| `next`, `filesize`, `build_filesize`, `indexed_count` | non-negative counts/offsets | decimal ASCII integer |
+| `truncated` | bounded index coverage | `"0"` or `"1"` |
+| `build_mode` | in-progress mode | enum `"fast"` or `"full"` |
+| `provider`, `source_key`, `source_fingerprint`, `model_fingerprint` | identity/fingerprint | non-empty UTF-8 string; fingerprints are lower-case hex |
+| `model_probe_texts` | probe inputs | canonical UTF-8 JSON array |
+| `model_probe_shape` | probe matrix shape | canonical UTF-8 JSON two-integer array |
+| `model_probe_vectors` | probe matrix bytes | base64 of the documented little-endian float16 bytes |
+| `faiss_digest` | published FAISS bytes | lower-case SHA-256 hex |
+| `build_generation` | SQLite/FAISS publication generation | lower-case UUID string |
+| `derived_text` | operation availability/provenance | canonical UTF-8 JSON object |
+
+Absent keys mean not known/not applicable; no key stores SQL `NULL`. Boolean,
+enum, integer, JSON, fingerprint, and binary-probe values must not use another
+representation in a new index. `done = "full"` is the only completed full
+build marker, and `indexed_count`/`truncated` describe the published rows,
+not the provider's source totals.
+
 ### Generic build
 
 `pipeline.py` keeps the current semantics:
@@ -309,6 +359,8 @@ Move `_search_local_locked` and its helpers out of `Search` into
   deterministically; their native and BM25 scores are not comparable. Do not
   introduce a fifth `SourceResult` channel. A provider with no native searcher
   is not partial solely because it lacks one.
+- Build local result `id` values from `source_key` plus the canonical row id,
+  not from the content path; duplicate paths must remain distinct results.
 - One `docs` FTS5 schema and rowid model for every local indexed provider. Add an optional
   `body` FTS5 table keyed by the same rowids, populated from
   `EntryRecord.excerpt`. There are no legacy index variants or schema
@@ -364,7 +416,8 @@ borrows it and must never close it independently.
 - [ ] Move the schema and meta-key constants from `build.py` into
       `indexing/schema.py`; add the separate optional `body` FTS5 table for
       provider excerpts, plus `provider`, `source_key`, and
-      `source_fingerprint` meta keys.
+      `source_fingerprint` meta keys. Implement the canonical text codec and
+      metadata table above; old mixed-type metadata is rebuild-only.
 - [ ] Split `build.py`: replace the ZIM-only `build()` with
       `build_index(producer, ...)`. Do not keep a compatibility wrapper.
 - [ ] Move `_index_entries`, `_save`, `_finish_build`, `_write_faiss`, and
@@ -372,7 +425,8 @@ borrows it and must never close it independently.
       imports.
 - [ ] Reuse the phase-01 `indexing/locator.py` for every local indexed provider.
 - [ ] Create `providers/zim/entries.py` with `ArchiveEntryProducer`, wrapping
-      `read_entry` and preserving ids, progress, and fast mode.
+      `read_entry`, applying the canonical row-id/`target_id` mapping, and
+      preserving progress and fast mode.
 - [ ] Split `content/reader.py` into pure extractors and a ZIM adapter only if
       it reduces coupling; keep `read_entry` behavior and tests.
 - [ ] Move `_search_local_locked` into `indexing/search.py`; make it take an

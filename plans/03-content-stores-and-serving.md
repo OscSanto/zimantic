@@ -75,11 +75,16 @@ Behavior:
 
 - `resolve` follows redirects and returns the final path; the HTTP layer
   redirects if the requested path differs.
-- `read` enforces `max_article_bytes`; `head_only` is a bounded prefix read
-  for internal extraction, not the implementation of an HTTP HEAD response.
-- `read_range` reads only the requested inclusive byte range when the backing
-  store supports seeking. A provider that cannot seek may fall back to a
-  bounded full read, but must never exceed `max_bytes`.
+- `read` enforces `max_article_bytes` for a complete representation.
+  `head_only` is a bounded prefix read for internal extraction, not the
+  implementation of an HTTP HEAD response. Every `ArticleData` reports
+  `total` when known and sets `truncated` whenever the returned bytes are not
+  the complete representation; callers never infer completeness from
+  `len(content)`.
+- `read_range` uses inclusive `start`/`end` offsets and reports the full
+  representation length in `ContentRange.total`. It reads only the requested
+  range when the backing store supports seeking. A provider that cannot seek
+  may fall back to a bounded full read, but must never exceed `max_bytes`.
 - `icon` may return an archive illustration, a discovered favicon, or `None`.
 - `random_path` is best-effort and bounded; do not scan an entire tree.
 - Implementations must be read-only and thread-safe or documented otherwise.

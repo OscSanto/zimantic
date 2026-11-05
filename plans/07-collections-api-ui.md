@@ -210,8 +210,9 @@ Keep `indexes`, `sources`, and `cache` counters.
 
 ## Work items
 
-- [ ] Reuse `CollectionInfo.to_dict()` and `Search.collection_dicts()` from
-      phase 00.
+- [ ] Reuse `CollectionSnapshot.to_dict()` and `Search.collection_dicts()`
+      from phase 00; nested source payloads use the immutable collection
+      descriptor rather than a stale runtime snapshot.
 - [ ] Add `Search.collection_version()` and invalidate it with the source set.
 - [ ] Add `/collections.json` to `zimantic/web/routes.py` using the existing
       paged response helper.

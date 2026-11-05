@@ -89,6 +89,15 @@ The generic catalog schema replaces the ZIM-specific `zims` table outright.
 Bump `SCHEMA_VERSION`. An older or unrecognized catalog is deleted and rebuilt
 by a full provider scan; do not inspect, migrate, or alias old tables.
 
+The catalog count columns are nullable source totals, not index statistics:
+`document_count` is the total article/document-like content items reported by
+the provider, `media_count` is the total media items, and `item_count` is the
+total archive items (`documents + media` where the archive can classify them).
+`NULL` means the provider cannot know the total without an unbounded or
+incomplete scan; zero is a known empty total. `indexed_count` and `truncated`
+belong to the published index metadata and `SourceInfo`, and never change the
+meaning of these catalog totals.
+
 The target table has generic columns and a single logical key:
 
 ```sql
@@ -110,9 +119,9 @@ CREATE TABLE sources (
     tags TEXT NOT NULL DEFAULT '',
     public_tags TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL DEFAULT '',
-    document_count INTEGER NOT NULL DEFAULT 0,
-    media_count INTEGER NOT NULL DEFAULT 0,
-    item_count INTEGER NOT NULL DEFAULT 0,
+    document_count INTEGER,
+    media_count INTEGER,
+    item_count INTEGER,
     license TEXT NOT NULL DEFAULT '',
     origin TEXT NOT NULL DEFAULT '',
     attribution TEXT NOT NULL DEFAULT '',
@@ -140,6 +149,12 @@ provider-neutral typed column; its contents are interpreted only by that
 provider's adapter. For ZIM rows, `provider_id` stores the archive UUID when
 available; phase 10 requires matching path and size and the same nonempty UUID
 in the row and live archive before reusing a catalog identity.
+
+For ZIM, populate `document_count` from the archive article count,
+`media_count` from its media count, and `item_count` from its entry count when
+those values are reliable; preserve `NULL` when a binding cannot distinguish a
+known zero from an unavailable count. These catalog totals are independent of
+the bounded generic index manifest.
 
 ### Catalog schema rebuild
 
@@ -217,6 +232,9 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       `_model_probes_compatible` into the ZIM runtime.
 - [ ] Introduce the shared phase-04 index locator and use it in both ZIM build
       and serve; do not discover or write old stem-based paths.
+- [ ] Add the ZIM `EntryProducer` mapping: archive `_index + 1` is the canonical
+      positive row id, and redirect targets use the same mapping. Preserve
+      duplicate paths as distinct rows and reject integer overflow/collisions.
 - [ ] Move the local-source branch of `_rebuild_sources` and
       `_source_from_catalog` into `providers/zim/metadata.py`.
 - [ ] Move `refresh_local_sources` / local half of `refresh_sources` into the

@@ -202,9 +202,9 @@ zimantic sources --provider files
 
 Uses the same runtime discovery as `serve` but does not start the web server or
 load the model. Useful for IIAB/systemd diagnostics.
-The JSON command reuses the same `CollectionInfo` and `SourceInfo` records and
-nullability rules as the HTTP APIs, but its top-level document contains both
-`collections` and `sources`; it is not identical to `/collections.json`.
+The JSON command reuses the same `CollectionSnapshot` and `SourceInfo` records
+and nullability rules as the HTTP APIs, but its top-level document contains
+both `collections` and `sources`; it is not identical to `/collections.json`.
 
 ### `prune`
 

@@ -62,7 +62,7 @@ only in `content/store.py`, then re-exported by `providers/base.py`.
 ```python
 @dataclass(frozen=True)
 class ProviderContext:
-    cfg: Mapping[str, Any]
+    config: RuntimeConfig
     index_dir: Path
     web_base_path: str
     logger: logging.Logger
@@ -70,16 +70,22 @@ class ProviderContext:
 @dataclass(frozen=True)
 class CollectionInfo:
     key: str                 # stable, opaque; safe in URLs and payloads
-    provider: str            # "zim" | "kiwix" | "files" | "kolibri"
+    provider: ProviderKind
     label: str               # short display name
     title: str | None = None
     description: str | None = None
     icon_url: str | None = None
-    source_count: int = 0
-    media_types: tuple[str, ...] | None = None
-    available: bool = True
-    error: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class CollectionSnapshot:
+    collection: CollectionInfo
+    source_count: int
+    media_types: tuple[str, ...] | None
+    available: bool
+    error: str | None
+    discovery_state: Literal["loading", "ready", "error", "closed"]
+    snapshot_version: int
 
 @dataclass(frozen=True)
 class SourceQuery:
@@ -104,6 +110,8 @@ class ArticleData:
     title: str
     mimetype: str
     content: bytes
+    total: int | None
+    truncated: bool
 
 @dataclass(frozen=True)
 class ContentRange:
@@ -131,6 +139,8 @@ from zimantic.content.store import (
 class CollectionRuntime(Protocol):
     collection: CollectionInfo
     @property
+    def snapshot(self) -> CollectionSnapshot: ...
+    @property
     def sources(self) -> Sequence[SourceInfo]: ...
     def library_sources(self) -> Sequence[SourceInfo]: ...
     def search(self, source: SourceInfo, request: SourceQuery) -> SourceResult: ...
@@ -145,12 +155,12 @@ class CollectionRuntime(Protocol):
     def close(self) -> None: ...
 
 class SourceProvider(Protocol):
-    kind: str
+    kind: ProviderKind
     def discover(
-        self, entry: Mapping[str, Any], ctx: ProviderContext
+        self, config: ProviderConfig, ctx: ProviderContext
     ) -> Iterable[CollectionInfo]: ...
     def open(
-        self, entry: Mapping[str, Any], collection: CollectionInfo, ctx: ProviderContext
+        self, config: ProviderConfig, collection: CollectionInfo, ctx: ProviderContext
     ) -> CollectionRuntime: ...
 ```
 
@@ -171,10 +181,16 @@ class ContentStore(Protocol):
 ```
 
 `head_only` is a bounded content-prefix read for internal preview/metadata
-extraction, not an HTTP HEAD response. HTTP HEAD returns no body; it uses
+extraction, not an HTTP HEAD response. `ArticleData.total` is the original
+representation length when the store can determine it; `truncated` is true
+whenever the returned bytes are a prefix rather than the complete
+representation, including a bounded read with an unknown total. A complete
+representation has `truncated = false`. HTTP HEAD returns no body; it uses
 `resolve` metadata for unchanged content and bounded representation processing
-when HTML decoration changes the response. Phase 03 specifies the remaining
-error, range, redirect, and ownership rules.
+when HTML decoration changes the response. `ContentRange.start` and `.end` are
+inclusive byte offsets, and `total` is always the full representation length
+for a successful range response. Phase 03 specifies the remaining error,
+range, redirect, and ownership rules.
 
 Notes:
 
@@ -194,15 +210,16 @@ Notes:
   include unreadable archives. `sources` includes readable but unsearchable
   sources; search scheduling filters on both `available` and `searchable`.
   Content lookup also resolves unsearchable library sources, and
-  `CollectionInfo.source_count` counts `library_sources`, not just searchable
-  sources.
+  `CollectionSnapshot.source_count` counts `library_sources`, not just
+  searchable sources.
 - `max_sources_per_search()` returns `None` for providers without a special
   fan-out cap. Refreshes publish an immutable source/collection snapshot
   atomically and increment `snapshot_version`; non-blocking refreshes expose
   `loading` until the new snapshot is published.
 - `CollectionInfo` is a descriptor and remains frozen. Dynamic source counts,
-  availability, errors, and discovery state come from the current runtime
-  snapshot; serializers must not mutate a previously published descriptor.
+  availability, errors, and discovery state come from the current
+  `CollectionSnapshot`; serializers must not mutate a previously published
+  descriptor or snapshot.
 - Provider-private `metadata` and config must not be serialized wholesale;
   expose only explicitly approved fields and never filesystem locators.
 - `media_types` is the union of observed source media families in the
@@ -217,8 +234,69 @@ Notes:
 - A `sources` sequence is a snapshot, not an item-level manifest. API paging
   limits response size, not necessarily snapshot memory; the roadmap's 512
   sources is an advisory target, not a promise of lazy source storage.
-- `SourceResult` and its four ranking channels (`semantic`, `keyword`,
-  `fulltext`, `items`) stay unchanged.
+- `CollectionInfo` contains only immutable identity and configured/display
+  metadata. `CollectionSnapshot` contains the current source count,
+  classification, availability, error, discovery state, and version.
+  `CollectionInfo.to_dict()` serializes only the descriptor; the API, CLI, and
+  SSE serializers call `CollectionSnapshot.to_dict()` to combine the descriptor
+  with its current runtime fields. A previously published descriptor or
+  snapshot is never mutated.
+- `SourceResult` keeps its four channels (`semantic`, `keyword`, `fulltext`,
+  `items`), but their document and status types are frozen below.
+
+### Result documents and source status
+
+`SourceInfo` is source metadata; it is not a result document. The provider
+boundary uses these independent types:
+
+```python
+SourceStatus = Literal["ok", "partial", "error", "cancelled"]
+
+class ResultDocument(TypedDict):
+    id: str
+    source_key: str
+    source: str                 # source display title, never a filesystem path
+    source_icon: str | None
+    title: str
+    lead: str
+    path: str
+    url: str
+    mimetype: str | None
+
+class SourceResultDocument(ResultDocument, total=False):
+    source_rank: int            # 1-based position within one source
+
+class RankedResultDocument(SourceResultDocument, total=False):
+    score: float
+    rank: int                   # 1-based position after merged ranking
+    explain: str
+    ranking: Mapping[str, Any]
+
+@dataclass
+class SourceResult:
+    source: SourceInfo
+    items: list[SourceResultDocument]
+    semantic: list[tuple[float, ResultDocument]]
+    keyword: list[tuple[float, ResultDocument]]
+    fulltext: list[tuple[int, ResultDocument]]
+    error: str | None
+    status: SourceStatus
+```
+
+Semantic and keyword scores are finite floats; full-text values are
+1-based integer ranks and are not comparable to those scores. The public
+merged result score is a finite float. `ok` means the source completed with no
+channel errors; `partial` means at least one usable channel/result exists but
+`error` describes one or more unavailable channels; `error` means the source
+could not produce usable results; and `cancelled` means scheduling stopped the
+source before completion. `error` is non-null for `partial`, `error`, and
+`cancelled`, and null for `ok`. Empty successful results are `ok`, not
+`error`. `id` is the stable document identity used for deduplication: local
+indexed providers use `source_key` plus the canonical row id, while remote or
+native providers use an equivalent provider-stable identifier. It must never
+be only `source_key` plus `path`, because duplicate paths are valid. Providers
+must not put `SourceInfo` fields into result documents or silently replace an
+error with an empty successful result.
 
 ### `SourceInfo` shape
 
@@ -231,6 +309,9 @@ title: str | None = None       # display name
 collection_key: str = ""
 collection_label: str | None = None
 media_types: tuple[str, ...] | None = None
+document_count: int | None = None
+media_count: int | None = None
+item_count: int | None = None
 indexed_count: int | None = None
 truncated: bool | None = None
 index_freshness: str | None = None  # current | stale | unknown; None if no index
@@ -247,6 +328,16 @@ index_freshness: str | None = None  # current | stale | unknown; None if no inde
 - `indexed_count` and `truncated` describe the published index; both are
   unknown (`null`) before one exists. Freshness is `unknown` until validated.
   Later phases populate these fields without introducing alternate payloads.
+- `document_count` is the provider's total document-like content-item count,
+  `media_count` is its total media-item count, and `item_count` is its total
+  permitted source-item count (documents plus media where the provider can
+  classify them). These are source totals, never bounded-manifest lengths or
+  published-row counts; each is `null` when the provider cannot know it without
+  an unbounded or incomplete scan. `indexed_count` is the number of published
+  index rows, including title-only rows, and `truncated` is true only when the
+  published index intentionally covers a bounded prefix. `truncated` is false
+  after exhaustive indexing and null before an index exists or when no
+  published index state is available.
 - `media_types is None` means no usable classification was observed for the
   source. A non-null tuple lists observed families and may be partial;
   incidental web assets need not count as separate content items.
@@ -296,7 +387,7 @@ paths.
 `zimantic/providers/registry.py`:
 
 - `builtin_providers() -> list[SourceProvider]`
-- `get_provider(kind: str) -> SourceProvider`
+- `get_provider(kind: ProviderKind) -> SourceProvider`
 - `register(provider)` for tests only.
 - Registry lookup raises a clear config-validation error rather than silently
   selecting a fallback provider. The config layer reports an invalid entry
@@ -315,11 +406,79 @@ provider validators that follow. It must not depend on provider modules that
 are introduced later. Flat `zim_dir` and `kiwix_server` shorthands are not
 accepted.
 
+The normalized seam is typed rather than an arbitrary mapping:
+
+```python
+ProviderKind = Literal["zim", "kiwix", "files", "kolibri"]
+Granularity = Literal["collection", "children"]
+DerivedOperation = Literal["off", "index", "tesseract", "whisper"]
+WorkerCount = Literal["auto"] | int  # int must be positive
+
+@dataclass(frozen=True)
+class ZimConfig:
+    name: str
+    path: str
+    label: str | None = None
+
+@dataclass(frozen=True)
+class KiwixConfig:
+    name: str
+    server: str
+    label: str | None = None
+    catalog_path: str | None = None
+    catalog_limit: int | None = None
+    max_response_bytes: int | None = None
+    max_remote_sources: int | None = None
+
+@dataclass(frozen=True)
+class FilesConfig:
+    name: str
+    path: str
+    label: str | None = None
+    granularity: Granularity = "collection"
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+    max_sources: int | None = None
+    max_entries: int | None = None
+    max_file_bytes: int | None = None
+
+@dataclass(frozen=True)
+class KolibriConfig:
+    name: str
+    path: str
+    label: str | None = None
+    granularity: Granularity = "children"
+    database_dir: str | None = None
+    storage: str | None = None
+    max_sources: int | None = None
+    max_entries: int | None = None
+
+ProviderConfig = ZimConfig | KiwixConfig | FilesConfig | KolibriConfig
+```
+
+`RuntimeConfig` contains the global typed settings and the normalized
+`ProviderConfig` values. It replaces `Mapping[str, Any]` in
+`ProviderContext`; provider protocols accept the appropriate member of the
+`ProviderConfig` union, not a provider-specific unvalidated mapping. `label`,
+paths, servers, and optional counts are nullable only where shown. All limits
+and byte/time budgets are positive integers when present; `name` and provider
+strings are non-empty and names use the phase-00 safe-name pattern. Include,
+exclude, language, and operation lists are immutable tuples.
+
+The global `[derived_text]` schema is also typed: caps are positive integers,
+`ocr_languages` is a tuple of non-empty strings, `cache` is a boolean, and
+`workers` is `"auto"` or a positive integer. Per-source overrides use an exact
+source key and `captions ∈ {"off", "index"}`, `ocr ∈ {"off", "tesseract"}`,
+and `asr ∈ {"off", "whisper"}`. Unknown keys, wrong scalar types, zero or
+negative limits, and invalid operation values are diagnostics; they are never
+silently coerced to a default.
+
 Invalid TOML is fatal. Other invalid entries produce config diagnostics without
 blocking valid entries; disable every entry sharing a duplicate name rather
 than choosing one. Entries without a valid name/type have no invented
-collection key. Provider-specific validation belongs to the provider. Phase 05
-adds files validation, and phase 08 completes the loader without another parser.
+collection key. Provider-specific validation returns the typed config above.
+Phase 05 adds files validation, and phase 08 completes the loader without
+another parser.
 
 ### `Search` integration skeleton
 
@@ -362,9 +521,10 @@ keep a `mode` fallback.
 - [ ] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
       public import path).
 - [ ] Add provider/collection state and `resolve_source` to `Search`.
-- [ ] Add `CollectionInfo.to_dict()`, `collection_dicts()`, and make
-      `source_dicts()` include the new fields using the frozen nullability/schema
-      rules above.
+- [ ] Add `CollectionInfo.to_dict()` for descriptor fields,
+      `CollectionSnapshot.to_dict()` for descriptor-plus-runtime fields,
+      `collection_dicts()`, and make `source_dicts()` include the new fields
+      using the frozen nullability/schema rules above.
 - [ ] Update route resolution internals to use the canonical `key` and exact
       source lookup; leave the public `{zim}` to `{source}` parameter rename
       to phase 03.
@@ -379,8 +539,9 @@ keep a `mode` fallback.
   `content_kind`, `name`, `book`, or `local_name`, and leaks no absolute path.
 - Absolute configured roots are accepted without changing logical source
   identity; private catalog locators never appear in source serialization.
-- `CollectionInfo.to_dict()` snapshots use the same fields and nullability in
-  API, CLI, and SSE serialization.
+- `CollectionSnapshot.to_dict()` snapshots use the same fields and nullability
+  in API, CLI, and SSE serialization; a descriptor alone never claims current
+  availability or source counts.
 - `resolve_source` matches exact `key` values only.
 - Registry returns the two built-ins and rejects unknown kinds; configured
   ZIM and Kiwix searches both continue working in this phase.

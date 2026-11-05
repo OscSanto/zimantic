@@ -196,7 +196,8 @@ Measure and record:
 
 ### Unit and contract
 
-- [ ] `SourceInfo`/`CollectionInfo` serialization and exact source-key resolution.
+- [ ] `SourceInfo`/`CollectionSnapshot` serialization and exact source-key
+      resolution.
 - [ ] Provider contract suite run against ZIM, files, Kolibri (and Kiwix for
       search-only).
 - [ ] Content-store contract suite: read, resolve, redirect, exists, icon,

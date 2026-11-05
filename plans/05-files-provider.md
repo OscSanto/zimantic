@@ -151,8 +151,12 @@ that overlaps a child source's content root.
 - `searchable` = a usable, not detectably stale index exists for this source;
   files have no native full-text fallback.
 - `available` = the root/directory is readable.
-- `article_count` = total indexable count only when known; otherwise `None`
-  (including a truncated scan; do not walk the tree at startup).
+- `document_count` = total permitted document-like items only when known;
+  otherwise `None` (including a truncated scan; do not walk the tree at
+  startup).
+- `media_count` = total permitted media items only when known; otherwise
+  `None`. `item_count` = total permitted source items only when known; it is
+  never the bounded manifest length.
 - `indexed_count` = documents actually present in the index when known;
   `truncated` is true when the manifest exceeds `max_entries`.
 - `size` = optional cheap sum from discovery only if already available; skip
@@ -198,8 +202,9 @@ Reuse the phase-04 extraction layer:
   subject to exclusions and the global, provider, and operation byte caps. An
   image-only PDF remains eligible for OCR even if native extraction is empty.
   A sidecar caption file belongs to its media item, not to a separate item.
-- `EntryRecord.path` = relative path within the source root (POSIX
-  separators). `target` = `None`.
+- `EntryRecord.id` = one-based position in the deterministic manifest,
+  yielding a positive canonical row id. `EntryRecord.path` = relative path
+  within the source root (POSIX separators). `target_id` = `None`.
 - Title fallback order: HTML `<title>`, PDF metadata title, first heading,
   filename stem.
 
@@ -279,7 +284,8 @@ setting still applies; document that untrusted file trees should enable it.
 - [ ] Wire build and index discovery into the runtime, including the
       `zimantic build` entry point for configured files collections.
 - [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
-      `homepage`, `article_count`, `indexed_count`, `truncated`, and
+      `homepage`, `document_count`, `media_count`, `item_count`,
+      `indexed_count`, `truncated`, and
       nullable `media_types`.
 - [ ] Document a recommended `/library/www/html/modules` configuration and the
       `granularity` trade-off in `README.md`.

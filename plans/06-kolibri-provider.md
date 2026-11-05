@@ -152,8 +152,11 @@ fixture.
   proving truncation fails explicitly and retains the last published index.
 - `available` = database + storage readable; `searchable` = a usable, not
   detectably stale index exists.
-- `article_count` = local indexable-node count only when known without an
-  unbounded count; otherwise `None`.
+- `document_count` = local indexable document/exercise-node count only when
+  known without an unbounded count; otherwise `None`.
+- `media_count` = local media-item count only when known; otherwise `None`.
+- `item_count` = total permitted local content-node items only when known; it
+  is never the bounded manifest length.
 - `indexed_count` = nodes actually present in the index; `truncated` is true
   when the source exceeds `max_entries`, and the reduced search coverage is
   reported in health/API metadata.
@@ -180,11 +183,11 @@ fixture.
   only when its public, normalized description is non-empty; serve a generated
   plain-text metadata page for that node. Never index coach-only/private text.
 - Node IDs are opaque strings and are always mapped to a deterministic
-  positive 63-bit row id derived from `(channel_id, node_id)`. Keep a reverse
-  mapping in the producer and fail the build clearly if two distinct nodes
-  produce the same row id; never silently merge their documents.
+  positive 63-bit canonical row id derived from `(channel_id, node_id)`. Keep a
+  reverse mapping in the producer and fail the build clearly if two distinct
+  nodes produce the same row id; never silently merge their documents.
 - `EntryRecord.title` = node title; `path` = synthetic stable path
-  `node/<node_id>`; `target = None`.
+  `node/<node_id>`; `target_id = None`.
 - Excerpt sources, in order:
   1. public node description;
   2. document text (HTML/PDF/plain) when the file is a readable document;
@@ -318,7 +321,8 @@ Handling:
       media ranges.
 - [ ] Wire configured Kolibri sources into the build command in this phase.
 - [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
-      `available`, `article_count`, `indexed_count`, `truncated`, and nullable
+      `available`, `document_count`, `media_count`, `item_count`,
+      `indexed_count`, `truncated`, and nullable
       `media_types`.
 - [ ] Document supported Kolibri versions and the read-only guarantee.
 - [ ] Add a annotated example config for IIAB's `/library/kolibri` layout.
