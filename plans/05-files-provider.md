@@ -11,7 +11,7 @@ directory of files into a directory of sources.
 ## Locked model
 
 - **One configured directory = one collection.**
-- **A source is the searchable unit and content root inside that collection.**
+- **A source is the searchable and library unit inside that collection.**
 - **Items are never sources.** A source may contain any number of files/pages.
 
 Default granularity is `collection`: the whole root is one source. This keeps
@@ -114,12 +114,14 @@ For `granularity = "collection"`:
 For `granularity = "children"`, the loose-files source uses the reserved
 root-relative identifier `__loose__`, so its key is
 `files:<name>:__loose__`. The `dir-` namespace keeps an actual child named
-`__loose__` distinct. Its producer and store cover only loose root files.
-Source membership is also the serving boundary: a child source may serve its
-own descendants and assets, but cannot address a sibling or the collection
-root through its key. HTML links that cross a source boundary must use the
-other source's generated URL. Confinement, hidden-path, and exclusion rules
-apply identically to every source request.
+`__loose__` distinct. Its producer indexes only loose root files; its store
+uses the collection root so root-page assets and links can resolve, even when
+that overlaps a child source's content root. This overlap is intentional:
+source membership scopes discovery, indexing, search, and library grouping,
+not serving authorization. Any source in the same files collection may
+directly serve a permitted descendant under the collection root, including
+shared assets and files belonging to another source. Confinement, hidden-path,
+and exclusion rules apply identically to every such request.
 
 ### Caps
 
@@ -273,6 +275,10 @@ setting still applies; document that untrusted file trees should enable it.
   silently.
 - Results: `source` = source display title, `source_key` = source key,
   `path` = relative path, `url` = `/content/<key>/<path>`.
+- Serving is broader than search membership: a content URL may use any source
+  key in the same files collection to resolve a permitted collection-relative
+  path, while search results and library/source listings remain attributed to
+  the source that discovered or indexed the item.
 - Previews: read through the content store; never open files without the root
   confinement check.
 
@@ -346,6 +352,9 @@ modules/
 - [ ] Range requests for `video.mp4` return 206 and correct bytes.
 - [ ] Traversal, symlink-swap, hidden, and excluded-path requests return 404,
       never outside or excluded bytes; allowed CSS and other assets still load.
+- [ ] A page may load a permitted shared or cross-source asset through its
+      source key; the asset is not thereby added to that source's search or
+      library membership.
 - [ ] Unknown extension is an attachment and cannot be sniffed as HTML.
 - [ ] Library/API payloads expose collection + source grouping without absolute
       paths.

@@ -100,8 +100,9 @@ zimantic open zims/a.zim --debug
 |---|---|
 | `--port PORT` | Bind a fixed local port. Default `0` (OS-assigned). |
 | `--no-browser` | Start the server and print the URL without launching a browser. |
-| `--fast` | Like `serve --fast`: title/native full-text only; never load model or
-FAISS and disable semantic search for the entire process. |
+| `--fast` | Like `serve --fast`: keep title, SQLite lexical/body, and native
+full-text search available when the corresponding index exists; never load the
+model or FAISS, and disable semantic search for the entire process. |
 | `--debug` | Like `serve --debug`: ranking details in API responses. No restart-on-SIGHUP. |
 | `--device DEVICE` | Same accepted values and precedence as `serve`. |
 | `--max-sources N` | Safety cap for folder expansion. Default `64`. |
