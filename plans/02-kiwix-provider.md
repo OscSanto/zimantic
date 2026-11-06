@@ -58,6 +58,9 @@ zimantic/providers/kiwix/
 
 ### Runtime behavior
 
+Phase 00 implements these discovery, state, and recovery guarantees in the
+existing Kiwix code; this phase moves them behind the completed provider.
+
 - Entry discovery creates the configured server collection without waiting for
   the network. Its runtime exposes the last complete in-memory catalog, if
   any, while a background refresh runs and atomically publishes a complete
@@ -79,10 +82,24 @@ zimantic/providers/kiwix/
   their strings cannot collide.
 - Validate result URLs and redirects: only HTTP(S) links on the configured
   Kiwix origin are accepted, with no embedded credentials. Resolve relative
-  links against that origin; reject `javascript:`, `data:`, scheme-relative
-  foreign hosts, and cross-origin redirects rather than exposing or fetching
-  them.
+  links against the configured server base; root-relative links resolve at its
+  origin. Reject `javascript:`, `data:`, scheme-relative foreign hosts, and
+  cross-origin redirects rather than exposing or fetching them. Phase 00
+  already enforces this boundary; retain it during the move.
+- Validate the configured server as an absolute HTTP(S) URL without embedded
+  credentials, query, or fragment. Preserve a server path prefix: append the
+  catalog path and `/kiwix/search` to the configured base, as the existing
+  client does. A configured catalog path may start with `/` and include a
+  query, but must not supply a scheme, authority, or fragment. Disable
+  automatic HTTP redirects for catalog and search requests; validate each
+  `Location` against the normalized origin *before* following it, with a
+  bounded hop count and the original deadline. Checking only the final
+  response URL is too late to prevent a foreign fetch.
 - The runtime owns retry/backoff, response-size limits, and XML hardening.
+  Reject DTDs and entity declarations for every XML encoding accepted by the
+  parser, and disable external entities. The existing byte-pattern check alone
+  misses UTF-16 declarations; use a parser-level guard rather than assuming
+  the response is UTF-8. Phase 00 fixes this before shipping the new runtime.
 - `refresh()` is non-blocking for the server startup path and keeps the last good
   catalog on failure.
 - A known outage must have a recovery path even though unavailable sources are
@@ -99,7 +116,8 @@ zimantic/providers/kiwix/
 ### Fan-out budget
 
 Remote sources are unbounded in a large Kiwix catalog, so keep the policy in the
-provider:
+provider. Phase 00 introduces the per-entry cap, fair scheduling, deadline, and
+scope reporting below; this phase moves and retains them:
 
 - `CollectionRuntime.max_sources_per_search()` returns
   `max_remote_sources` for Kiwix (default 100; `0` disables unscoped remote
@@ -109,15 +127,15 @@ provider:
 - The core applies the budget only to unscoped searches and still honors an
   explicit selection that names a source outside the budget.
 - `source_timeout` bounds each remote source search.
-- Introduce the global positive `search_timeout_seconds` setting (default 30)
-  when adding fair admission here. It bounds a request's source scheduling,
-  ranking, and bounded preview work after acquiring the global search slot;
+- The global positive `search_timeout_seconds` setting (default 30) introduced
+  in phase 00 bounds a request's source scheduling, ranking, and bounded
+  preview work after acquiring the global search slot;
   `slot_wait_seconds` separately bounds admission to that slot. Pass the
   monotonic deadline through `SourceQuery`, cap each source's I/O by the
   remaining time, stop admitting work at expiry, and detach late results without
   releasing worker/provider slots before their calls actually exit. Phase 07
-  exposes the common scope summary; phase 08 documents the existing setting.
-- The per-provider task cap and fair scheduling apply here first. With more
+  extends the existing scope summary; phase 08 documents the setting.
+- The per-provider task cap and fair scheduling already apply. With more
   than one worker and competing providers, reserve capacity for other providers.
   With one worker, fairness requires the active call to actually terminate;
   returning a timeout alone does not free its slot. Use bounded I/O or killable
@@ -166,14 +184,21 @@ source/library APIs.
 
 - [ ] Catalog parse, retry/backoff, non-retryable 4xx, DTD rejection, and
       response-size limits (existing tests, relocated).
+- [ ] UTF-8 and UTF-16 DTD/entity declarations are rejected before expansion;
+      ordinary documents in supported encodings remain parseable.
 - [ ] Catalog failure keeps the last good source set and logs once.
 - [ ] An unavailable source/server recovers after a successful background
       refresh without requiring an otherwise-ineligible search task.
 - [ ] Multiple catalog pages are discovered; a budget-exhausted or unpageable
       catalog is reported as incomplete rather than silently truncated.
 - [ ] Remote search returns the expected documents/links/ordering.
+- [ ] A server configured under a URL path prefix keeps that prefix for catalog
+      and search requests; ordinary relative and root-relative result links
+      resolve against the server base and origin, respectively.
 - [ ] Unsafe or cross-origin result links and redirects are rejected without
-      exposing credentials or interrupting other providers.
+      exposing credentials or interrupting other providers. A second local
+      server confirms that a foreign redirect is rejected before any request
+      reaches it; same-origin redirect chains remain bounded.
 - [ ] `max_remote_sources = 0` suppresses unscoped remote search; an explicit
       selection still searches.
 - [ ] A slow remote source times out as `status="error"` without failing the

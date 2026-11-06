@@ -4,17 +4,21 @@ Status: proposed.
 
 ## Goal
 
-Introduce the internal seam that every later phase depends on. This phase is
-structural: it defines the provider, collection, source, and content contracts
-and the registry. Existing ZIM and Kiwix search continue working through real
-runtimes. The old `mode`/`content_kind` shape is replaced, not carried forward.
+Introduce the internal seam that every later phase depends on. Define the
+provider, collection, source, and content contracts and registry, and make the
+config, catalog, and index transition safe for those contracts. Existing ZIM
+and Kiwix search continue working through real runtimes. The old
+`mode`/`content_kind` shape is replaced, not carried forward.
 
 ## Non-goals
 
 - Do not complete provider-specific discovery/lifecycle moves here; phase 01
   moves the remaining ZIM parts and phase 02 the remaining Kiwix parts. Move
   the per-source dispatch and search code needed for real runtimes now.
-- Do not change `SourceResult`, ranking, fan-out, caching, or streaming.
+- Do not change ranking or source-selection/fan-out eligibility beyond the
+  bounded fair scheduling and partial reporting required below. Migrate
+  `SourceResult` documents, IDs, and statuses without changing the scoring
+  algorithm; do not cache deadline-truncated pools as complete.
 - Do not publish a third-party plugin API.
 - Do not rename the public `{zim}` route parameters yet. Phase 03 owns the
   route migration after the source-key contract is in place.
@@ -210,7 +214,7 @@ to the same final item. If distinct permitted final items within one source
 have the same canonical path, do not emit a guessed result or serve an
 ambiguous path: report affected search hits as partial/error and fail the
 content request closed. A path addresses the current source, not a pinned
-version of its contents. Phase 01 proves the required bounded ZIM lookup;
+version of its contents. Phase 00 proves the required bounded ZIM lookup;
 phase 03 applies the same path contract to every local store.
 
 Notes:
@@ -234,6 +238,10 @@ Notes:
   without touching the last published batch. Close is idempotent, including for
   an empty batch. This handles new/removed Kolibri channels without provider
   branches in `Search`.
+- A normal server reload rediscovers the entries loaded at startup, but does
+  not reread config. Added, removed, or edited collection entries take effect
+  after a server restart. Changes inside an already configured entry, such as a
+  newly installed channel or archive, are discovered on reload.
 - `CollectionRuntime.search()` is one source's work. Providers whose native
   query scope is broader than one source map that source to the appropriate
   subtree or content-node filter. Indexed providers still use the generic
@@ -296,9 +304,12 @@ Notes:
   snapshot is never mutated.
 - `available` is current runtime state and is never persisted in a catalog,
   manifest, or index. Persisted provider source records establish that a source
-  was discovered/addressable; absence of such a record means it was not
-  discovered. Providers without a persistent source catalog (including Kiwix)
-  expose discovery state through their runtime snapshot.
+  was discovered/addressable; absence means undiscovered only when the catalog
+  is authoritative and complete. When it is unavailable or incomplete, use
+  the last complete runtime snapshot or independently completed in-memory
+  discovery instead of inferring absence. Providers without a persistent source
+  catalog (including Kiwix) expose discovery state through their runtime
+  snapshot.
 - `CollectionSnapshot.available` describes the collection-level discovery or
   backend being operational; it does not assert that every member source is
   available. `SourceInfo.available` is the per-source operational state.
@@ -361,7 +372,9 @@ provider-stable item reference for remote providers. Redirect rows share their
 final target's identity. SQLite/FAISS row ids remain internal index keys and may
 include zero; they are not content URL selectors. Providers must not put
 `SourceInfo` fields into result documents or silently replace an error with an
-empty successful result.
+empty successful result. Normalize both existing ZIM and Kiwix full-text
+results from their current zero-based ranks to this 1-based contract in this
+phase; preserve their relative order and the existing merged scoring.
 
 ### `SourceInfo` shape
 
@@ -500,13 +513,105 @@ paths.
   retain the canonical absolute path as a private runtime or catalog locator;
   it is not part of `SourceInfo`, `key`, or any serialized payload.
 - The persistent `catalog.sqlite` is the ZIM archive metadata cache. It uses a
-  provider-neutral `sources` table keyed by `key`; other providers are not
-  required to write it. Store a canonical absolute path in a separate indexed
-  `path` locator column; it is not part of the key.
+  provider-neutral `sources` table keyed by `key`; the other built-in providers
+  use their own manifests or runtime snapshots and do not write it. Store a
+  canonical absolute path in a separate indexed `path` locator column; it is
+  not part of the key.
 - Relocating a configured root without changing its root-relative layout updates
   locators, not keys. Renaming or moving an item within that root may change
   its key; providers document that boundary. Keep filesystem path
   normalization out of per-query identity resolution.
+- Generate the phase-01 ZIM and phase-02 Kiwix keys now, even while their
+  remaining discovery code still lives in `Search`. Later moves must not rename
+  an unchanged source. For a ZIM collection whose root is one archive, its
+  root-relative identity is its basename; for a directory root it is the
+  archive's path relative to that directory.
+
+### Catalog and build transition
+
+The current `zims` catalog persists `available`, and the current build command
+requires the removed `zim_dir` key. Neither can remain as-is until phase 01 or
+08 while this phase claims the new contracts work. Implement the generic
+`SourceCatalog` schema, coordinated rebuild, and catalog lease specified in
+[phase 01](01-zim-provider.md#catalog-schema-rebuild) here. Keep the existing
+ZIM scan orchestration where it is until phase 01 moves it; do not rebuild the
+catalog a second time merely for that move. Require SQLite 3.37 before
+creating the `STRICT` schema, and never persist runtime availability.
+
+The current builder names index files by archive stem and discovery guesses a
+same-stem archive by size. That is incompatible with distinct canonical
+sources: two archives can share both stem and size. Introduce the shared
+[generation locator and lifecycle](04-generic-index-pipeline.md#index-locator)
+now and use each canonical source key in both ZIM build and runtime lookup.
+Keep the existing ZIM extraction algorithm but refactor its destination,
+metadata, staging, publication, and reader ownership. Record the schema
+revision, provider, collection/source keys, build generation, source
+fingerprint, archive UUID when available, and size/mtime signature in newly
+built generations. Validate each artifact's identity and integrity before using
+it, and source fingerprint before resuming a build. A detectably stale index
+is not searched; a pending source-freshness check is reported as unknown as in
+phase 04. The same-generation SQLite/FAISS pairing, digest checks, sidecar-free
+sealing, cross-process leases, and supported-platform publication rules must
+work now; phase 01 moves their ownership without changing the layout. Runtime
+`--fast` does not load or hash FAISS. Validate large artifacts off the startup
+path; until required artifact checks complete, expose index readiness and use
+native full-text or readable-only fallback rather than searching an unchecked
+artifact.
+
+Do not open or overwrite old stem-based indexes as normal readers/builders.
+Leave them untouched for phase 04's validated one-time importer, and explain
+that users must rebuild under the new locator to restore indexed search before
+then. Use native full-text when available; otherwise expose the archive as
+readable but unsearchable until rebuilt. A legacy filename or size match alone
+is never source provenance.
+
+Update the existing ZIM build entry point here as well. With no paths it builds
+the configured ZIM collections; positional files/folders build only the
+selected paths. Match a configured root or atomically append an unmatched ZIM
+collection using the [phase-08 ad-hoc rules](08-cli-config-ops.md#build) so the
+result remains discoverable by `serve`. If the active config does not exist,
+create it safely with that entry. A failed config update prevents the build.
+When appending an entry, report that an already-running normal server must be
+restarted to load the changed config; a SIGHUP reload alone is insufficient.
+Acquire the global build lock before the config-write lock, including on
+concurrent ad-hoc builds. The generic multi-provider build capability and the
+new selectors still arrive in phases 04 and 08.
+
+Use a bounded, namespace-aware ZIM resolver for libzim 3 and 4 and old/new
+namespaces. It must preserve ordinary native-only search without relying on a
+complete local index, distinguish redirect aliases from genuinely ambiguous
+final paths, and fail closed when identity cannot be verified.
+
+Before the working Kiwix runtime fetches or exposes remote data, enforce
+[phase 02's](02-kiwix-provider.md#runtime-behavior) origin validation,
+pre-follow redirect checks, response bounds, and parser-level DTD/entity
+rejection across supported encodings. Phase 02 moves and extends this code; it
+must not be the first phase to fix the existing UTF-16 parser bypass.
+Also implement its paged, bounded complete-catalog discovery and runtime
+outage/recovery rules now. A failed or incomplete refresh retains the last
+complete snapshot but reports current unavailability; bounded background
+retry restores it without requiring an ineligible source to be searched.
+Keep each configured Kiwix entry's cache and health independent.
+
+ZIM and Kiwix are both live in this phase, so implement
+[phase 02's fair admission and deadline](02-kiwix-provider.md#fan-out-budget)
+now rather than letting slow remote work monopolize the shared worker pool.
+Apply the unscoped remote cap independently per configured Kiwix entry and
+preserve the existing explicit-source override. Add the positive global
+`search_timeout_seconds` setting, default 30, and pass the admitted request's
+monotonic deadline to providers and bounded ranking/preview work. A detached
+call retains its worker/provider slot and runtime resources until it actually
+exits; use bounded I/O or killable isolation where needed, including DNS and
+the single-worker case.
+
+Report scheduler caps/deadlines from this phase using
+[phase 07's scope summary](07-collections-api-ui.md#collection-scoped-search):
+include it in `Search.search_page()`, the `/search` `X-Search-Scope` header,
+and the stream's terminal `done` event. Counts describe the actual eligible
+scope resolved by this phase's selection rules before admission limits; phase
+07 later adds collection selectors and their explicit cap. Show a partial
+scope in the existing UI, and never cache a deadline-truncated pool as
+complete. Per-source errors remain separate from scheduler status.
 
 ### Registry
 
@@ -618,6 +723,12 @@ normalize into `traversal`; they bound remote catalog entry visits as well as
 local traversal. The 10-second startup budget is per provider kind across its
 configured entries, not a fresh synchronous wait for every entry.
 
+Resolve configured relative provider filesystem paths against the resolved
+active config file's directory from this phase onward, including when the
+config path is a symlink. Positional CLI paths resolve against the invocation's
+working directory; when persisted, they must still resolve to the same selected
+files or folders from the config directory.
+
 Raw TOML tables are a private parser intermediate, never the runtime seam.
 Phase 00 validates the required ZIM path and Kiwix server fields for its working
 runtimes. Files/Kolibri entries remain disabled with an explicit not-yet-supported
@@ -698,6 +809,24 @@ keep a `mode` fallback.
       `[[collections]]` TOML parser described above; providers consume normalized
       entries and later phases add provider-specific validation. Do not keep
       flat shorthands.
+- [ ] Implement the phase-01 generic catalog schema, coordinated rebuild, and
+      cross-process lease now; leave only the ZIM-specific scan ownership move
+      for phase 01.
+- [ ] Update ZIM build path selection and atomic ad-hoc config persistence now.
+      Adapt the existing builder and runtime to the canonical generation
+      locator, immutable publication, and reader leases before phase 01 moves
+      them or phase 04 generalizes the pipeline.
+- [ ] Implement the bounded, namespace-aware ZIM path resolver for
+      canonical-path identities in the working ZIM runtime.
+- [ ] Harden the existing Kiwix XML and redirect/result-link validation now;
+      implement bounded complete-catalog discovery and outage recovery, and
+      retain those checks when phase 02 moves the remote code.
+- [ ] Implement fair per-provider admission, bounded search deadlines, and
+      scheduler partial-scope reporting before exposing both working runtimes;
+      phase 02 retains these mechanisms while moving Kiwix.
+- [ ] Make the Windows catalog/generation/FAISS safety tests a blocking release
+      dependency. The existing Windows CI job is non-blocking and the publish
+      job currently depends only on Linux; a targeted blocking job is enough.
 - [ ] Migrate the shipped config, deployment examples, and documentation that
       use flat provider keys in this phase. Keep global TOML keys before the
       first `[[collections]]` table so they do not become collection fields.
@@ -739,6 +868,50 @@ keep a `mode` fallback.
 - `resolve_source` matches exact `key` values only.
 - Registry returns the two built-ins and rejects unknown kinds; configured
   ZIM and Kiwix searches both continue working in this phase.
+- Configured relative roots resolve from the config directory even when the
+  process starts elsewhere. No-argument and positional ZIM builds work without
+  `zim_dir`; unmatched selections are persisted atomically and become
+  discoverable by `serve`, including escaped paths and a config without a
+  trailing newline. Config symlinks retain their target and use the same lock
+  and relative-path base as direct access. Preserve existing config access
+  controls; failed config writes start no build.
+- A normal reload discovers changes inside startup-configured entries but does
+  not load a newly appended entry until the server restarts; the ad-hoc build
+  reports that restart requirement.
+- A running server's scoped catalog refresh cannot erase a newly appended
+  collection's rows, and a config change during a staged catalog rebuild
+  prevents replacement.
+- The incompatible catalog is rebuilt under its cross-process lease before
+  publication, including interruption and corrupt-database recovery. Existing
+  Windows x86-64 installations can acquire equivalent shared/exclusive leases.
+- Two different ZIMs with the same stem and size build and reopen as distinct
+  canonical sources; rebuilding one never overwrites or reuses the other's
+  index. A legacy size-only stem index is left untouched and not served;
+  native/readable fallback and the rebuild diagnostic work.
+- New generations publish SQLite/FAISS together and respect cross-process
+  leases on POSIX and supported Windows; interrupted or failed replacement
+  preserves a validated prior generation.
+- Slow required-artifact verification does not block startup or expose an
+  unchecked artifact; native/readable fallback remains available until it
+  finishes. A separately pending source-freshness check reports `unknown`.
+- Replacing a FAISS pathname after validation cannot change the bytes loaded,
+  including the production mmap mode on supported platforms. Runtime fast mode
+  neither opens nor hashes FAISS.
+- Windows x86-64 indexed build/search and the new cross-process safety tests
+  pass in a blocking release job rather than being hidden by a non-blocking
+  Windows CI result.
+- UTF-8/UTF-16 DTD declarations and cross-origin redirects are rejected before
+  expansion or a foreign fetch; valid Kiwix catalogs and results still work.
+- Multiple Kiwix pages form a complete snapshot; incomplete scans retain the
+  prior snapshot, and an unavailable server recovers via bounded background
+  retry. Two configured servers keep independent caches and health.
+- A blocked remote source cannot starve local work, including with one worker;
+  timed-out calls retain their slots until terminated or finished. Cap/deadline
+  truncation is visible in both search transports and is not cached as complete.
+- Exercise bounded native path resolution, redirect deduplication, and safe
+  ambiguous-hit handling with libzim 3/4 and old/new namespace fixtures.
+- Existing ZIM and Kiwix full-text ranks are converted to 1-based values
+  without changing fixed-query merged ordering or scores.
 - Constructing a source without an explicit provider fails rather than silently
   treating it as ZIM.
 - `provider` is the only discriminator; no serializer emits a derived kind or

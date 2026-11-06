@@ -4,7 +4,7 @@ Status: proposed.
 
 ## Goal
 
-Prove the provider seam is safe, bounded, and observable before the mixed-library
+Harden the provider seam for a safe, bounded, and observable mixed-library
 release. Each earlier phase must already meet its own safety tests and can ship
 independently; this phase is the final cross-provider release gate, not permission
 to ship unsafe earlier work. Compatibility is explicitly out of scope: release
@@ -64,8 +64,11 @@ return a path it should not.
 ### HTML and browser isolation
 
 - Keep the existing content-shell sandbox and `secure_browsing` switch.
-- Document that file trees and Kolibri HTML5 apps are untrusted and should use
-  `secure_browsing = true` where persistence is less important than isolation.
+- Document that file trees and Kolibri HTML5 apps can be untrusted.
+  `secure_browsing = true` isolates the shell iframe, but a raw article opened
+  directly or in a permitted popup remains unsandboxed and can use the app
+  origin and persistent storage. Do not describe this switch as a complete
+  boundary against untrusted content.
 - Do not inject provider content into the trusted shell without the existing
   bridge/sandbox rules.
 
@@ -78,7 +81,8 @@ return a path it should not.
 - All SQL uses parameters; schema/table names are hard-coded per supported
   version.
 - Local providers perform no network I/O. Kiwix is the only remote provider and
-  keeps its hardened XML/response handling.
+  rejects DTDs/entities across supported XML encodings and checks redirect
+  origins before making the next request.
 
 ## Resource limits
 
@@ -198,6 +202,9 @@ Required:
   accumulate duplicate generations. Successful publication switches the
   SQLite and any FAISS artifact atomically; reclaim prior generations after
   reader release.
+- Repeat phase 04's contentless-versus-stored body/preview benchmark using the
+  actual ZIM, Files, and Kolibri providers, with the measurements specified
+  there. The phase-04 synthetic comparison does not replace this release gate.
 - A derived-text worker's model memory is counted once per pool worker, not once
   per source; auto resolution uses one worker on a low-memory host when one
   fits, reports unavailable otherwise, and scales by memory, not just core count.
@@ -221,7 +228,7 @@ Also measure and record:
 - [ ] Discovery batches retain shared resources until all readers retire and
       clean up after failed, empty, and replaced discoveries.
 - [ ] Content-store contract suite: read, resolve, redirect, exists, icon,
-      random, errors, ranges, and item-selector authorization.
+      random, errors, ranges, source authorization, and ambiguous-path handling.
 - [ ] Entry-producer contract: stable ids, fingerprint change, resume,
       truncation, optional buildable-runtime capability, and cleanup on every
       success/failure/cancellation path.
@@ -265,9 +272,11 @@ Also measure and record:
 - [ ] MIME confusion and `nosniff`.
 - [ ] Opaque-origin article preflights allow the documented range/conditional
       headers without granting unrelated methods or headers.
+- [ ] UTF-16 as well as UTF-8 XML DTD/entity declarations are rejected, and
+      cross-origin redirects are blocked before contacting the other origin.
 - [ ] Oversized files, PDFs, caption files, ranges, and XML.
 - [ ] Derived text off by default: no caption, image, or media bytes are read;
-      fake engines prove each operation is independently opt-in.
+      fake engines verify each operation is independently opt-in.
 - [ ] Enabled embedded captions use bounded local-only demuxing, including a
       media container larger than the caption-text cap; no audio/video decode
       or implicit OCR occurs.
@@ -282,12 +291,13 @@ Also measure and record:
       engine is safely isolated; inputs use bounded spooled files, not
       arbitrary paths.
 - [ ] Malicious/unsupported Kolibri DB schema and duplicate ids.
-- [ ] Untrusted HTML in sandbox/secure mode.
+- [ ] Secure browsing sandboxes the shell iframe; direct raw HTML and permitted
+      popups retain their documented unsandboxed behavior.
 - [ ] No writes to Kolibri's installed DB, SQLite sidecars, or configured
       content roots, including with a live WAL; private snapshots and queries
       never expose unrelated user data. Closed databases without sidecars and
-      live WALs meet phase 06's proof gate, with prompt, bounded writer delays.
-- [ ] Provider refresh/close tests prove that background discovery is
+      live WALs remain readable with prompt, bounded writer delays.
+- [ ] Provider refresh/close tests verify that background discovery is
       cancelled or joined and stores/database handles are closed exactly once.
 - [ ] `open` rejects index reuse when a sidecar-free read-only SQLite handle
       cannot be created, binds only loopback, and its toolbar cannot navigate
@@ -295,6 +305,9 @@ Also measure and record:
 - [ ] Cross-process reader leases survive concurrent build/prune; no read-only
       reader creates a lease, and uncertain/incomplete discovery never causes
       pruning of a configured entry's indexes.
+- [ ] `sources`, `build --list`, and `prune --dry-run` do not modify persistent
+      state; `prune --yes` revalidates config/discovery under the documented
+      lock order.
 - [ ] Cache-disabled/pruned derived previews do not remove search hits or run
       caption/OCR/ASR extraction at request time.
 - [ ] Read-only index reuse is verified on every officially supported
@@ -304,6 +317,11 @@ Also measure and record:
 ### Platform
 
 - [ ] Python 3.11–3.14 in CI.
+- [ ] Existing Windows x86-64 indexed build/search works with cross-process
+      catalog and generation leases; verify publication/recovery on its
+      supported local filesystem. The blocking release dependency introduced
+      in phase 00 must pass; the existing non-blocking Windows job alone does
+      not gate publishing.
 - [ ] No libzim/FAISS installed: core/provider contracts and files provider
       still import and pass where expected.
 - [ ] Pi Zero 2 W smoke test (or the existing low-memory CI target).
@@ -383,6 +401,8 @@ For a cautious rollout, ship with:
 - [ ] `README.md`, `CONTRIBUTING.md`, `config.toml`, `deploy/` updated.
 - [ ] Mixed-library smoke test on a low-resource profile.
 - [ ] Security review of path/zip/MIME/range handling.
+- [ ] Supported Windows x86-64 indexed builds/searches and reader leases pass;
+      do not silently replace this existing support with native-only fallback.
 - [ ] Major version bump. Release notes list the new providers, the
       `[[collections]]` config requirement, the catalog/index rebuild, and the
       removed compatibility paths.
@@ -396,7 +416,7 @@ For a cautious rollout, ship with:
 | Source explosion | unusable filters, slow fan-out | collection model + source caps + collapse |
 | Path escape | data disclosure | real-root confinement + adversarial tests |
 | Zip-slip | data disclosure/code execution | manifest validation, no extraction outside root |
-| MIME confusion | XSS/drive-by | extension-first MIME, nosniff, attachment policy, sandbox |
+| MIME confusion | XSS/drive-by | extension-first MIME, nosniff, attachment policy, documented shell sandbox boundary |
 | Schema drift | Kolibri breaks | version detection, fail closed, isolated schema module |
 | Index resume drift | wrong/missing results | fingerprint-based rebuild |
 | Provider starvation | slow searches | per-provider task budgets |

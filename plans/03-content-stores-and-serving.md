@@ -166,6 +166,12 @@ private locator or exception text.
   There is no `zim` parameter on `/random` or `/suggest`.
 - `_decorate_article_bridge` and `_content_shell` remain source-agnostic; only
   the source key and base path change.
+- Preserve the existing `secure_browsing` boundary: it sandboxes the shell's
+  article iframe, not a raw HTML document opened directly or in a permitted
+  popup. Such a document can run with the app's origin and persistent storage.
+  Do not add a raw-HTML CSP sandbox in this redesign; document this limitation
+  rather than describing the setting as complete isolation from untrusted
+  content. The default remains unchanged.
 - A shell for large seekable media uses `resolve` metadata and must not reject
   the item merely because a full-body read would exceed `max_article_bytes`.
 
@@ -268,6 +274,8 @@ This can ship unused in this phase; files and Kolibri media need it.
       above, including large seekable media.
 - [ ] Support bounded `/article` CORS preflights for range and conditional
       requests from opaque-origin sandboxes.
+- [ ] Update the secure-browsing documentation to explain the unsandboxed raw
+      direct-navigation and popup limitation.
 - [ ] Delete any remaining old `read_archive_*` functions after moving their
       logic into the ZIM store; do not leave deprecated shims.
 - [ ] Add content-store contract tests that every local provider with a
@@ -296,6 +304,9 @@ This can ship unused in this phase; files and Kolibri media need it.
 - [ ] A preflight with `Origin: null` and `If-Range`/`Range` succeeds with the
       documented allowlist; disallowed methods/headers are not granted, and
       scripts can read the exposed range/validator response headers.
+- [ ] With secure browsing enabled, the shell iframe remains sandboxed, while
+      a raw HTML response opened directly retains the existing unsandboxed
+      behavior documented above.
 - [ ] A source with no content store returns the documented 404/error shape.
 - [ ] Traversal tests: `..`, encoded separators, double encoding, backslashes,
       NUL, absolute paths, literal percent filenames, and symlink replacement
@@ -308,8 +319,9 @@ This can ship unused in this phase; files and Kolibri media need it.
 - `python -m pytest` passes, including the new content-store contract suite.
 - No route contains ZIM-specific lookup logic.
 - No provider-specific URL prefix exists.
-- Every local provider's articles, redirects, assets, and homepages are served
-  through the canonical source key.
+- Every local provider implemented at this phase serves articles, redirects,
+  assets, and homepages through the canonical source key; later providers pass
+  the same contract suite when they land.
 - The raw response supports byte ranges without changing full-response
   caching or compression semantics.
 

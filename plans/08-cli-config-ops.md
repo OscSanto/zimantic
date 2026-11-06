@@ -20,7 +20,7 @@ array-of-tables, so it needs explicit handling.
 # Global search bound for an explicitly selected large remote collection.
 # A request reports partial completion when this count or its deadline is hit.
 max_explicit_collection_sources = 500
-search_timeout_seconds = 30       # total admitted search work; phase 02
+search_timeout_seconds = 30       # total admitted search work; phase 00
 max_body_text_bytes = 1048576     # per-item lexical body, independent of previews
 
 # Collections. Multiple entries are allowed. There are no flat provider keys.
@@ -91,19 +91,21 @@ name.
   checks `type`, `name`, and duplicate names.
 - Kolibri validates and documents phase 06's snapshot byte, disk, and time
   budgets, including their per-process scope and fail-closed behavior.
-- Configured relative provider paths resolve against the active config file's
-  directory; CLI path operands resolve against the invocation's working
-  directory. Normalize once and preserve that resolved selection when saving
-  an ad-hoc collection. Document this base explicitly; do not make a saved
-  relative operand point somewhere else on the next invocation.
+- Phase 00 resolves configured relative provider paths against the resolved
+  active config file's directory, including for a symlinked config; CLI path
+  operands resolve against the invocation's working directory. Normalize once
+  and preserve that resolved selection when saving an ad-hoc collection.
+  Document this base explicitly; do not make a saved relative operand point
+  somewhere else on the next invocation.
 - `max_explicit_collection_sources` is a positive global request-work cap for
   an explicitly selected Kiwix collection. It defaults to `500`; it does not
   affect a single explicit source or local collection discovery. Reaching it is
   reported as a partial search, never silently broadened or treated as complete.
-- `search_timeout_seconds` is the phase-02 positive global deadline, default
+- `search_timeout_seconds` is the phase-00 positive global deadline, default
   `30`, for admitted search work across every provider/scope. It is distinct
   from per-source `source_timeout` and slot admission's `slot_wait_seconds`.
-  Expiry is reported using phase 07's partial-scope contract.
+  Expiry is reported using the partial-scope contract introduced in phase 00
+  and extended in phase 07.
 - `max_body_text_bytes` is the phase-04 positive global per-item lexical body
   cap, default 1 MiB. It is independent of the short embedding/preview limit.
   Expose `body_truncated_count` separately from item-count truncation.
@@ -175,10 +177,10 @@ zimantic build zims/              # ad-hoc folder; matches config or saves a col
 zimantic build --provider files    # only files collections
 zimantic build --collection modules
 zimantic build --source files:modules:root
-zimantic build --list              # show what would be built; no work
+zimantic build --list              # read-only preview; do not build
 ```
 
-- Positional paths preserve the ad-hoc ZIM build workflow: each argument is a
+- Phase 00 already preserves the ad-hoc ZIM build workflow: each argument is a
   ZIM file or a folder expanded with the normal bounded ZIM traversal. With no
   positional paths, build configured collections as before. Positional paths
   and `--provider`/`--collection`/`--source` selectors are separate modes and
@@ -191,15 +193,27 @@ zimantic build --list              # show what would be built; no work
   never widen the build to the rest of the matched collection.
 - If an ad-hoc path has no matching configured collection, append a new
   `[[collections]] type = "zim"` entry to the active config before building.
+  If the config is absent, create it safely with that entry.
   Save a path that resolves to the same selected file/folder relative to the
   active config directory (or an absolute private locator). Generate a unique
-  safe name from its final component plus the first available numeric suffix; do not
-  derive the name or source key from an absolute path. Report the entry and
-  config file changed. Under a config-write lock, reread and recheck matches,
-  append without rewriting existing TOML content, and atomically replace the
-  config. Preserve the original file on write failure and do not build if the
-  persistent config update fails. Duplicate resolved arguments are built once.
-  `--list` previews generated entries but never writes config or starts a build.
+  safe name from its final component plus the first available numeric suffix;
+  never encode the absolute path prefix in the name or source key. Report the
+  entry and config file changed. Under a config-write lock, reread and recheck
+  matches, append without rewriting existing TOML content, and atomically
+  replace the config. Escape TOML values correctly, insert a separator when
+  the original has no trailing newline, and parse the result and validate the
+  new entry before replacement; unrelated invalid entries retain their normal
+  diagnostics without blocking it. Use the same target-based config lock
+  through symlink and direct access, and update the resolved target without
+  replacing the symlink. Refuse an update that would silently detach a
+  hard-linked config. Preserve an existing config's access permissions/ACL;
+  fail rather than broaden access. Preserve the original file on write
+  failure and do not build if the persistent config update fails. Acquire the
+  global build lock before the config-write lock, as in phase 00. Duplicate
+  resolved arguments are built once. Tell users to restart an already-running
+  normal server to load the new entry. `--list` previews generated entries but
+  never writes config or starts a build; generated names are tentative until a
+  real build rechecks them.
 - `--provider`, `--collection`, and `--source` are repeatable: values within
   one selector are ORed, and different selector types are intersected.
 - `--collection` accepts an exact collection key or a configured entry name.
@@ -236,8 +250,16 @@ zimantic sources --json          # collections + sources, no absolute paths
 zimantic sources --provider files
 ```
 
-Uses the same runtime discovery as `serve` but does not start the web server or
-load the model. Useful for IIAB/systemd diagnostics.
+Uses the same provider discovery logic as `serve` but does not start the web
+server, load the model or FAISS, or modify persistent state. Use an in-memory
+catalog or safely read existing state through already-created read-only leases;
+do not create or alter the persistent catalog, SQLite sidecars, indexes,
+config, PID/build/lease files, or caches, and do not run cleanup. A bounded
+private Kolibri snapshot may be created temporarily and must be cleaned up.
+If safe read-only index inspection is unavailable, report it rather than
+opening an index writable. `build --list` follows the same read-only discovery
+rules. Both commands may perform configured Kiwix GETs.
+Useful for IIAB/systemd diagnostics.
 The JSON command reuses the same `CollectionSnapshot` and `SourceInfo` records
 and nullability rules as the HTTP APIs, but its top-level document contains
 both `collections` and `sources`; it is not identical to `/collections.json`.
@@ -261,29 +283,56 @@ Scope:
   or filename alone;
 - hold the global build lock for deletion and honor generation leases; skip
   active readers rather than unlink their files;
+- acquire the build lock before taking the config-write lock, as ad-hoc builds
+  do. Re-read config and revalidate the affected discovery snapshot under those
+  locks immediately before deletion; abort or retain uncertain namespaces if
+  configuration or discovery changed. Hold both locks through deletion; do
+  not delete from a stale dry-run inventory. Document that uncooperative manual
+  config edits must not race `prune`;
 - never infer an orphan from an unavailable, invalid, loading, or incompletely
   discovered configured entry. Require a complete validated snapshot for the
   affected namespace, or report its retention/uncertainty without deleting;
+- a missing or malformed active config is not an empty configuration: abort
+  deletion and report uncertainty. If an invalid entry cannot be assigned a
+  namespace, retain all potentially affected namespaces rather than assuming
+  it configured nothing. An existing, valid config with no collections is an
+  explicit empty configuration;
 - derived-text cache pruning is optional preview/cache reclamation under its
   recognized private namespace, never deletion of body postings or execution
   of an extractor to refill a miss;
 - report reclaimed bytes.
 
+`--dry-run` is an advisory, read-only inventory with the same persistent-state
+guarantees as `sources`; it never reserves or authorizes a later deletion.
+After changing config, restart running servers before building changed
+collection roots or pruning: a stale server can still refer to a removed or
+changed entry, and leases protect open generations but cannot identify an
+index it has not yet opened. An ad-hoc append with a new collection name is
+safe while a server runs; its scoped catalog refresh cannot remove that entry.
+
 ### `serve` and `reload`
 
 - `serve` warns "no searchable sources" while mentioning the configured
   providers.
-- `reload` rescans all providers, not only ZIM.
-- Keep SIGHUP and PID-file behavior.
+- A normal `reload` rescans all startup-configured providers, not only ZIM,
+  but does not reread config. Restart after adding, removing, or editing
+  collection entries or other settings.
+- Keep SIGHUP and PID-file behavior. The CLI reports that the signal was sent,
+  not that discovery completed. A normal server performs the bounded refresh
+  in the background, exposes its state/errors through health, and ignores a
+  second signal while a refresh is already running. A `serve --debug` server
+  instead restarts on SIGHUP and reads config again, as today. On Windows,
+  where SIGHUP is unavailable, restart the server as today.
 
 ## Index layout and catalog rebuild
 
-- Every local indexed provider uses the phase-04 locator's
+- Every local indexed provider uses the phase-00 locator's
   source directory with a `current` generation manifest and immutable
   `generations/<uuid>/index.sqlite` and, when vectors exist, `index.faiss`.
   There is no ZIM-only path exception.
-- The phase-04 locator is the only code that computes index paths.
-- Document and retain phase 01's SQLite 3.37 minimum and early version check;
+- The phase-00 locator, generalized in phase 04, is the only code that
+  computes index paths.
+- Document and retain phase 00's SQLite 3.37 minimum and early version check;
   do not defer it here or silently create a non-STRICT schema. Phase 04 also
   probes for FTS5, which a sufficiently new SQLite build can still lack.
 - `index_dir` may itself be configured as an absolute path. Do not incorporate
@@ -293,7 +342,7 @@ Scope:
   Keep the resolved absolute `path` as a private indexed locator, separate from
   the logical primary key `key`. Canonicalize paths at discovery/update time,
   not repeatedly during search.
-- Phase 01 bumps the catalog schema version and rebuilds a mismatched catalog
+- Phase 00 bumps the catalog schema version and rebuilds a mismatched catalog
   by a full ZIM scan. Do not detect, migrate, or alias old tables. Before the
   initial upgrade, stop all old-version catalog users; only upgraded processes
   participate in the new cross-process catalog lease.
@@ -317,8 +366,10 @@ Scope:
 - Kiwix discovery stays cached-first with a background refresh.
 - If a provider is slow, start it in the background and publish its sources
   when ready; local ZIM search must never wait for it. `serve` may expose a
-  `loading` collection, but `build`, `sources`, and `reload` wait for the
-  requested discovery snapshot or report a bounded timeout.
+  `loading` collection, but `build` and `sources` wait for the requested
+  discovery snapshot or report a bounded timeout. A normal SIGHUP-triggered
+  reload performs that bounded coordination inside the server; the CLI does
+  not wait for or claim completion. Debug-mode SIGHUP restarts instead.
 - Reuse phase 00's configured-entry discovery coordinator on reload so channel
   additions/removals change the collection set, not just existing sources.
   Runtime refreshes publish source/collection snapshots atomically and expose
@@ -346,7 +397,8 @@ Scope:
   - config examples for ZIM, files, Kolibri, and Kiwix;
   - collection/source explanation and the bounded-source rule;
   - index layout and catalog-rebuild note;
-  - security note for untrusted file trees (`secure_browsing`);
+  - security note for untrusted file trees, including that `secure_browsing`
+    does not sandbox direct raw-article views or permitted popups;
   - derived-text section: the three independent opt-ins, local-only engines,
     optional dependencies (including local `ffmpeg`/`ffprobe` for embedded
     text captions with supported descriptor-only input), build-time-only
@@ -379,21 +431,19 @@ Scope:
       explicit override in CLI/config diagnostics; do not add a second resolver.
 - [ ] Refactor `__main__.py`:
       - `_run_build` into a provider-aware orchestrator;
-      - preserve positional ZIM file/folder arguments and ad-hoc indexing;
+      - retain phase 00's positional ZIM file/folder arguments and ad-hoc
+        config persistence;
       - add `--provider`, `--collection`, `--source`, `--list`;
       - add `sources` and `prune` commands;
       - generalize the "no sources" warning.
-- [ ] Resolve ad-hoc paths against configured ZIM roots by most-specific
-      ancestor; reject tied matches. Append an unmatched path as a new
-      configured ZIM collection using a safe unique name independent of the
-      absolute path and an atomic, non-rewriting config append; lock and recheck
-      config before writing, preserve config contents and report failure.
+- [ ] Reuse phase 00's ad-hoc path matching, safe naming, locked config append,
+      and failure handling; add a non-writing `--list` preview.
 - [ ] Complete CLI/config wiring to phase 00's existing entry discovery and
       background snapshot publication; do not postpone provider lifecycle
       correctness until this phase.
-- [ ] Make build/source inspection/reload commands wait for discovery rather
-      than operating on a partial background snapshot.
-- [ ] Add per-provider search budgets.
+- [ ] Make build/source inspection wait for discovery rather than operating on
+      a partial background snapshot; keep signal-based reload asynchronous.
+- [ ] Expose the existing per-provider search budgets.
 - [ ] Add unit tests for config validation and CLI argument handling.
 - [ ] Update `config.toml`, `README.md`, `CONTRIBUTING.md`, and `deploy/`.
 - [ ] Add migration tests showing that old config is rejected, an old catalog
@@ -420,6 +470,12 @@ Scope:
       path data or use reserved `open`; concurrent appends cannot lose an
       intervening config update. CLI-relative paths and a config in a different
       directory still resolve to the original selected files after saving.
+- [ ] Appending to a config without a trailing newline and paths requiring TOML
+      escaping produces valid config, preserves existing content and access
+      permissions, and starts no build if safe replacement fails.
+- [ ] A symlinked config and its target use one lock and relative-path base;
+      appending preserves the symlink. A hard-linked config is not silently
+      detached by an automatic update.
 - [ ] A generated configuration entry for a single-file ZIM remains a
       single-file collection; a generated entry for a folder remains scoped to
       that folder. Serving either entry does not discover sibling archives.
@@ -437,11 +493,22 @@ Scope:
 - [ ] `sources --json` has no absolute paths, uses the same collection/source
       record schemas as the HTTP APIs, and clearly documents its combined
       top-level shape.
+- [ ] `sources`, `build --list`, and `prune --dry-run` leave fresh and
+      existing config, catalog, SQLite sidecars, indexes, caches, PID, and lock
+      files unchanged; private temporary snapshots are removed. A missing
+      read-only lease is reported without creating one.
 - [ ] `prune --dry-run` reports only Zimantic-created orphan indexes; `--yes`
       deletes only those, skipping pinned generations and uncertain configured
       namespaces. An offline/failed discovery is not evidence of orphanhood.
+- [ ] A missing/malformed config or an invalid entry with unknown scope never
+      causes potentially configured indexes to be pruned.
+- [ ] Concurrent ad-hoc builds and `prune` follow one lock order, and a config
+      or discovery change invalidates a stale deletion inventory.
 - [ ] `reload` picks up a new files directory, a new Kolibri channel, and a new
-      ZIM.
+      ZIM; the CLI reports signal delivery without claiming the background
+      refresh has already completed.
+- [ ] A normal reload does not reread an appended or changed collection entry;
+      restarting loads it. Debug-mode SIGHUP retains restart semantics.
 - [ ] `captions`, `ocr`, and `asr` are independently off by default; setting
       one does not enable the others; a missing engine marks only that operation
       unavailable and never crashes or blocks other builds.

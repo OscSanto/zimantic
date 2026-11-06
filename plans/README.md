@@ -1,8 +1,6 @@
 # Source extensibility plans
 
-Status: reviewed for implementation. Phase 01's ZIM path resolver and phase
-06's sidecar-free Kolibri snapshot backend still require the proofs specified
-in those phases. Implementation has not started.
+Status: reviewed for implementation. Implementation has not started.
 
 This directory turns Zimantic from a ZIM search engine with a Kiwix remote
 special case into a search engine whose core is source-agnostic, with in-tree
@@ -75,6 +73,14 @@ re-litigation inside the phase plans:
     SQLite sidecars. Brief, bounded writer delays are allowed during a safe
     snapshot; abort a closed-database snapshot when a writer starts. Unsupported
     cases fail closed.
+14. **Secure browsing is shell-scoped.** Keep the existing iframe sandbox, but
+    do not sandbox a raw `/article` document opened directly or in a permitted
+    popup. Document that such a document can run with the app's origin and
+    persistent storage even when secure browsing is enabled.
+15. **Config changes require restart.** A normal `reload` rescans the
+    configured entries loaded at server startup; it does not reread config.
+    Restart a running server after adding an ad-hoc collection or changing
+    provider settings. Debug-mode SIGHUP retains its existing restart behavior.
 
 ## Vocabulary
 
@@ -100,7 +106,7 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 
 | Phase | Plan | Depends on | Primary outcome |
 |---|---|---|---|
-| 00 | [Contracts and registry](00-contracts-and-registry.md) | — | Freeze provider/collection/source/content contracts |
+| 00 | [Contracts and registry](00-contracts-and-registry.md) | — | Freeze contracts, migrate config/catalog/index locators, and preserve ZIM builds |
 | 01 | [ZIM provider](01-zim-provider.md) | 00 | Local ZIM discovery/search behind the provider seam |
 | 02 | [Kiwix provider](02-kiwix-provider.md) | 00, 01 | Remote Kiwix is a first-class provider, not a `mode` special case |
 | 03 | [Content stores and serving](03-content-stores-and-serving.md) | 00, 01 | One `/content/{source}/{path}` route for every local content provider |
@@ -108,22 +114,29 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 05 | [Files provider](05-files-provider.md) | 03, 04 | Configured directories as collections with bounded sources |
 | 06 | [Kolibri provider](06-kolibri-provider.md) | 03, 04, 05 | Channels as collections; content nodes as items; opt-in captions/OCR/ASR |
 | 07 | [Collections, API, and UI](07-collections-api-ui.md) | 01–06 | Grouped library and source filters that do not explode |
-| 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers; catalog rebuild and docs |
+| 08 | [CLI, config, and operations](08-cli-config-ops.md) | 01–07 | Build/serve/reload support for multiple providers and operations docs |
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | 00–08, 10 | Security, limits, contract tests, performance, staged release |
 
 Phase 00 introduces the minimal `[[collections]]` parser, freezes the complete
 `SourceInfo`/`CollectionSnapshot`/`ContentStore` contracts and discovery-batch
 ownership (including the common media family taxonomy), and preserves both
-existing search backends through real runtimes. Phase 01 introduces the shared
-generation-based index locator for ZIM
-build and serve; phase 04 extends the index schema and validation and adds a
-one-time validated importer that adopts recognized pre-redesign and phase-01 ZIM
-indexes without re-extracting every article when compatible. Phase 05 adds
-files-provider validation; phase 08 completes the full settings loader. There is
-one parser and one normalized entry shape, not a temporary parser per provider.
-Phase 00 owns entry-set refresh and aggregate snapshot publication; phase 01
-already owns sidecar-free immutable generations and cross-process reader leases.
+existing search backends through real runtimes. It also implements the stable
+provider keys, the coordinated catalog rebuild, the generation-based ZIM
+index locator, and the positional build config transition needed as soon as
+the old fields disappear. It also hardens the Kiwix XML/redirect boundary.
+Because ZIM and Kiwix are already live here, it also completes bounded remote
+catalog discovery/recovery and introduces fair provider admission, a bounded
+search deadline, and partial-scope reporting. Phase 01 moves the remaining ZIM
+lifecycle behind its runtime; phase 04 extends the index schema and validation
+and adds a one-time validated importer that adopts recognized pre-redesign and
+phase-00/01 ZIM indexes without re-extracting every article when compatible.
+Before that importer exists, old stem-based indexes are left untouched but not
+served; rebuild to restore indexed search. Phase 05 adds files-provider
+validation; phase 08 completes the full settings loader. There is one parser
+and one normalized entry shape, not a temporary parser per provider.
+Phase 00 owns entry-set refresh, aggregate snapshot publication, sidecar-free
+immutable generations, and cross-process reader leases; phase 01 retains them.
 Phase 04 adds the optional buildable-runtime capability, rather than teaching
 the CLI how to build each provider. Phase 08 exposes those existing mechanisms;
 it must not defer correctness needed by an earlier shipping phase.
@@ -145,10 +158,12 @@ Every phase must hold these:
 - **One index layout.** Every local indexed provider uses the same locator and
   index schema. Kiwix is remote/search-only. A one-time importer may adopt only
   recognized, validated old ZIM indexes; normal readers support only the new
-  layout. Preserve usable old indexes while building replacements, atomically
-  switch a complete SQLite generation and any FAISS artifact on success, and reclaim superseded
-  files as soon as no reader pins them. Unrecognized or incompatible indexes
-  are rebuilt, not served through a legacy compatibility path.
+  layout. Keep unverified legacy artifacts untouched but do not serve them;
+  preserve a validated current generation while building its replacement.
+  Atomically switch a complete SQLite generation and any FAISS artifact on
+  success, and reclaim superseded files as soon as no reader pins them.
+  Unrecognized or incompatible indexes are rebuilt, not served through a
+  legacy compatibility path.
 - **One config schema.** Collections are declared only with `[[collections]]`.
   There are no flat provider shorthands. Removed provider keys are fatal schema
   errors, not ignored settings that leave an accidentally empty library.
@@ -217,7 +232,8 @@ and exclusion rules.
   layout, while Kiwix remains external-only. There are no provider-specific
   branches or compatibility shims in the core.
 - The full test suite passes on Python 3.11–3.14, including provider contract
-  tests, traversal/security tests, and catalog/rebuild tests.
+  tests, traversal/security tests, and catalog/rebuild tests. Existing
+  Windows x86-64 build and indexed-search support is preserved.
 - `config.toml`, `README.md`, `CONTRIBUTING.md`, and deployment examples
   document the `[[collections]]` schema and the uniform index layout.
 - A mixed-library release benchmark on Raspberry Pi 4 meets phase 09's

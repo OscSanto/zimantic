@@ -83,12 +83,12 @@ Rules:
 - The installed SQLite database is opened read-only; never write, migrate,
   vacuum, or checkpoint it or create/modify SQLite sidecars in the
   installation. SQLite `mode=ro` and `query_only` alone do not guarantee this
-  for a live WAL. Use a demonstrably read-only VFS/filesystem or a consistent
+  for a live WAL. Use a read-only VFS/filesystem or a consistent
   private snapshot that includes committed WAL data; fail closed when no safe
   backend is available. Do not use `immutable=1` on a live DB and silently
   ignore WAL.
 - Create private snapshots outside the Kolibri installation and storage roots,
-  using a proven SQLite-consistent mechanism that incorporates committed WAL
+  using a SQLite-consistent mechanism that incorporates committed WAL
   data. An online SQLite backup copies the logical database, not the source
   SHM file. One entry-level discovery batch owns and shares the successful
   snapshot across all of that installation's channel runtimes, including
@@ -111,31 +111,31 @@ Rules:
   Retry discovery on the next reload; never prune the retained batch's indexes
   merely because refresh failed.
 - The main database may contain unrelated user and activity data. Keep any
-  private snapshot in an owner-only directory with owner-only files, query
-  only the allowlisted content and migration tables, and never expose, log,
-  index, or network-transfer unrelated rows. Create a lifetime lease before
+  private snapshot in an owner-only directory with owner-only files, including
+  restricted ACLs on Windows rather than relying on POSIX mode bits. Fail
+  closed if that privacy cannot be established. Query only the allowlisted
+  content and migration tables, and never expose, log, index, or
+  network-transfer unrelated rows. Create a lifetime lease before
   writing a snapshot and hold it shared while its creator or readers use it.
   Cleanup may remove only recognized owned stale snapshots after acquiring the
   lease exclusively; an absent or uncertain lease is not proof of staleness.
   Never delete another process's active snapshot.
-- Prove the snapshot backend before implementing the query layer. The supported
-  baseline must cover a closed WAL-mode database with no sidecars and a live
-  WAL with committed data and existing sidecars, using installed databases from
-  the pinned release. Test read-only or missing sidecars separately; unsupported
-  cases/platforms fail closed. A blanket unavailable result is not sufficient
-  to ship the provider. A private backup destination does not make its source
-  connection sidecar-free: SQLite can reuse writable SHM mappings within one
-  process, and a closed WAL database with no sidecars may not open with
-  `mode=ro` at all.
-- A candidate live-WAL backend is a freshly exec'd helper process with
-  filesystem write denial for the resolved source database and its sidecars,
-  including overridden paths, and no inherited writable source handles or
-  mappings. Apply restrictions before opening the source, then use SQLite's
-  online backup into the private directory. Prove that the actual platform
-  sandbox and SQLite build prevent source and sidecar writes; ordinary
-  `mode=ro` alone is not that proof. Use bounded backup steps and terminate
-  and reap the helper on timeout.
-- A candidate for the closed, sidecar-free case on Linux is a read lease on an
+- The snapshot backend supports a closed WAL-mode database with no sidecars
+  and a live WAL with committed data and existing sidecars, using installed
+  databases from the pinned release. Test read-only or missing sidecars
+  separately; unsupported cases/platforms fail closed. A blanket unavailable
+  result is not sufficient to ship the provider. A private backup destination
+  does not make its source connection sidecar-free: SQLite can reuse writable
+  SHM mappings within one process, and a closed WAL database with no sidecars
+  may not open with `mode=ro` at all.
+- A live-WAL backend can use a freshly exec'd helper process with filesystem
+  write denial for the resolved source database and its sidecars, including
+  overridden paths, and no inherited writable source handles or mappings. Apply
+  restrictions before opening the source, then use SQLite's online backup into
+  the private directory. The platform sandbox and SQLite build must prevent
+  source and sidecar writes; ordinary `mode=ro` alone is insufficient. Use
+  bounded backup steps and terminate and reap the helper on timeout.
+- A Linux backend for the closed, sidecar-free case can use a read lease on an
   `O_RDONLY` main-database descriptor, held by a separately supervised
   guardian. With the lease held, verify there is no WAL, SHM, or rollback
   journal and copy the main file to the private directory; check the same
@@ -143,9 +143,9 @@ Rules:
   on the private copy. If a writer attempts to open the source, the guardian
   releases the lease immediately and the copy is discarded, without waiting
   for the copy worker. A deadline also releases the lease and terminates the
-  attempt. Lease support, owner permissions, source-path replacement, writer
-  races, and prompt release must all be proven; otherwise fail closed. Never
-  chmod source files to simulate read-only access.
+  attempt. Handle lease support, owner permissions, source-path replacement,
+  writer races, and prompt release; fail closed if the required safety cannot
+  be maintained. Never chmod source files to simulate read-only access.
 - Brief writer waits caused by SQLite read locks or the closed-database lease
   are permitted, but no lock may be held for the lifetime of a runtime or
   content request. Cap writer delay at 250 ms per attempt under normal
@@ -406,7 +406,8 @@ Handling:
   Do not copy the whole installation DB per channel or per asset request.
 - External/on-device resources: only local files are served; external URLs are
   not proxied. Untrusted app HTML may still ask the user's browser to contact
-  external URLs; explain the secure-browsing and offline implications.
+  external URLs; explain the secure-browsing and offline implications,
+  including phase 03's unsandboxed direct raw-article and popup limitation.
 - Range and size limits follow phase 03.
 - HTML is rendered through the existing content shell and secure browsing
   switch.
@@ -462,10 +463,8 @@ bytes, total declared uncompressed bytes, and per-operation wall time.
 - [ ] Add provider-level validation for normalized Kolibri configuration;
       accept only `granularity = "collection"` or `"children"` and validate
       the snapshot limits and their ordering.
-- [ ] Prove the read-only access/snapshot backend with release-derived
-      installed closed-WAL-without-sidecars and live-WAL fixtures, including
-      writer races and bounded release, then implement main-DB schema detection
-      and queries.
+- [ ] Implement the read-only access/snapshot backend and main-DB schema
+      detection and queries.
 - [ ] Share one pinned installation snapshot through the discovery batch and
       retire it only after its channel runtimes and readers close.
 - [ ] Implement channel discovery, granularity mapping, cap collapse, and icons.

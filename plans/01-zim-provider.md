@@ -5,9 +5,9 @@ Status: proposed.
 ## Goal
 
 Move the remaining ZIM-specific discovery and index lifecycle behind the
-phase-00 provider seam. ZIM becomes the reference implementation. Source
-keys, catalog rows, index paths, and content IDs move to the provider-neutral
-scheme; there is no ZIM compatibility layer.
+phase-00 provider seam. ZIM becomes the reference implementation. Retain the
+provider-neutral source keys, catalog rows, index paths, and content IDs
+introduced in phase 00; there is no ZIM compatibility layer.
 
 ## Current state
 
@@ -57,7 +57,9 @@ metadata rather than writing this catalog.
   limits. Collection key is `zim:<name>`.
 - **Source** = one ZIM archive. Its key is
   `zim:<name>:<safe-stem>-<digest>`, where the digest always derives from its
-  root-relative archive path, not just when a collision is discovered. Check
+  root-relative archive path, not just when a collision is discovered. For a
+  single-file collection, use the archive's basename as that relative path;
+  for a directory collection, use its path relative to the configured root. Check
   for digest collisions and report them rather than overwrite a source. Adding
   or removing a same-stem archive cannot rename an existing source. There are no `book`,
   `local_name`, dated, or flavour alias keys; the display `title` comes from
@@ -75,40 +77,50 @@ metadata rather than writing this catalog.
 
 ### ZIM catalog paths
 
-- Store ZIM records in the shared `sources` table with `provider = "zim"`,
+- Phase 00 already stores ZIM records in the shared `sources` table with `provider = "zim"`,
   `collection_key`, and the canonical `key`.
 - `key` is the row identity. Keep the canonical absolute archive path in the
   separate indexed `path` locator column; it is private and is not serialized
   or logged.
 - Normalize a path when scanning/upserting, then reuse that normalized value
   for catalog point lookups; avoid repeated filesystem resolution on hot paths.
-- A relocated root updates its `path` locators during catalog refresh. Introduce
-  the shared generic index locator (including its `current` manifest and
-  `generations/<build-generation>/` directory layout) here for both build and
-  serve; there is no stem-based special case. Phase 04 extends the index SQLite
-  schema and validation and includes a one-time importer that migrates
-  recognized pre-redesign and phase-01 ZIM indexes into a new generation when
-  compatible, falling back to a clean rebuild otherwise.
+- Incremental scans update or remove rows only within the completely scanned
+  collection; they never delete namespaces absent from this process's loaded
+  config. This matters when an ad-hoc build adds an entry while an older
+  server is still running. Incomplete scans do not delete unseen rows.
+- Filter catalog-backed runtime sources to the process's loaded collections
+  and their discovered paths. If a row's locator conflicts with that
+  runtime's resolved root, do not open it as that source; treat its metadata
+  as stale and revalidate the path discovered by that runtime. Processes
+  temporarily using different configs must not serve each other's archive.
+- A relocated root updates its `path` locators during catalog refresh. Retain
+  phase 00's shared generic index locator (including its `current` manifest
+  and `generations/<build-generation>/` layout) for build and serve; there is
+  no stem-based special case. Phase 04 extends the index SQLite schema and
+  validation and includes a one-time importer for recognized pre-redesign and
+  phase-00/01 ZIM indexes when compatible, falling back to a clean rebuild.
 
-The generic catalog schema replaces the ZIM-specific `zims` table outright.
-Bump `SCHEMA_VERSION`. An older or unrecognized catalog is replaced by a
-complete staged provider scan under the coordination rules below; do not
-inspect, migrate, or alias old tables.
+Phase 00 replaces the ZIM-specific `zims` table with the generic catalog schema
+outright and bumps `SCHEMA_VERSION`. An older or unrecognized catalog is
+replaced by a complete staged provider scan under the coordination rules below;
+do not inspect, migrate, or alias old tables. Phase 01 moves the existing scan
+and catalog ownership without repeating the schema rebuild.
 
-Require SQLite 3.37 or newer here, before creating the first `STRICT` catalog,
-and report an actionable startup/build error on an older runtime. Phase 08
-documents this requirement; it does not introduce it after earlier schemas
-already depend on it.
+Phase 00 requires SQLite 3.37 or newer before creating the first `STRICT`
+catalog and reports an actionable startup/build error on an older runtime.
+Phase 08 documents this requirement; it does not introduce it after earlier
+schemas already depend on it.
 
-The shared locator introduced here already seals each published SQLite
+The shared locator introduced in phase 00 already seals each published SQLite
 database: checkpoint and close the staging database, leave no WAL/journal/SHM
-dependency, fsync artifacts and the replaced manifest's parent directory, and
-never modify a published generation. Include a schema revision, provider,
-collection/source identity, archive UUID, size/mtime signature, and build
-generation in its recognized metadata. Phase 04's importer needs build-time
-identity evidence, not just freshly rescanned catalog metadata.
-Implement the read-only generation lease described in phase 04 at the same
-time as the locator; safe replacement cannot wait until phase 04 or `open`.
+dependency, durably flush artifacts and the replaced manifest's parent
+directory using the platform's supported mechanism, and never modify a
+published generation. Include a schema revision, provider,
+collection/source identity, source fingerprint, size/mtime signature, build
+generation, and archive UUID when available in its recognized metadata.
+Phase 04's importer needs build-time identity evidence, not just freshly
+rescanned catalog metadata. Retain the read-only generation lease introduced
+with the locator; safe replacement cannot wait until phase 04 or `open`.
 
 The catalog count columns are nullable source totals, not index statistics:
 `document_count` is the total article/document-like content items reported by
@@ -149,7 +161,7 @@ CREATE TABLE sources (
     relation TEXT NOT NULL DEFAULT '',
     mime_counts TEXT NOT NULL DEFAULT '',
     homepage TEXT NOT NULL DEFAULT '',
-    native_fulltext_available INTEGER NOT NULL DEFAULT 0,
+    native_fulltext_available INTEGER,
     icon_data BLOB,
     icon_mime_type TEXT NOT NULL DEFAULT '',
     icon_path TEXT NOT NULL DEFAULT '',
@@ -157,7 +169,7 @@ CREATE TABLE sources (
     scanned_at REAL NOT NULL,
     provider_metadata TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (key),
-    CHECK (native_fulltext_available IN (0, 1)),
+    CHECK (native_fulltext_available IS NULL OR native_fulltext_available IN (0, 1)),
     CHECK (size IS NULL OR size >= 0),
     CHECK (mtime IS NULL OR mtime >= 0),
     CHECK (document_count IS NULL OR document_count >= 0),
@@ -181,7 +193,8 @@ It is a practical change detector, not proof of identical content.
 display/diagnostics rather than freshness comparisons. For ZIM rows,
 `provider_id` stores the archive UUID when available; phase 10 requires
 matching path and size and the same nonempty UUID in the row and live archive
-before reusing a catalog identity.
+before reusing a catalog identity. `native_fulltext_available` is `NULL` when
+the provider cannot determine it, rather than incorrectly recording false.
 
 The presence of a row in `sources` means the archive was discovered and is
 addressable by its canonical key. Do not persist `SourceInfo.available` or use
@@ -201,33 +214,58 @@ the bounded generic index manifest.
 ### Catalog schema rebuild
 
 The catalog is a disposable cache: it can always be recreated from the
-archives, so this phase deliberately rebuilds instead of migrating. This
-forced catalog rebuild is independent of index reuse; do not throw away a
-usable search index just because the catalog schema changed.
+archives, so phase 00 implements the following rebuild instead of migrating.
+Phase 01 retains it unchanged while moving provider ownership. This forced
+catalog rebuild is independent of index reuse; do not throw away a usable
+search index just because the catalog schema changed.
 
 - Bump the catalog `SCHEMA_VERSION` and stage a replacement for any catalog
   whose version does not match. Recreate `sources` and complete a bounded
   provider scan before coordinated replacement. Do not inspect the old tables,
-  copy rows, or write a migration.
+  copy rows, or write a migration. ZIM is the only persistent provider in this
+  redesign; any future provider that stores records in this catalog must also
+  participate in its complete staged rebuild.
 - Rebuilding re-opens every archive once, which also refreshes icons,
   availability, and provider metadata.
 - On a corrupt or unsupported catalog, use the same staged rebuild. Do not leave a
   `zims` view, compatibility table, or old index name in the new schema.
 - If catalog creation or repopulation fails, log a warning with a public
   diagnostic code and sanitized cause, leave the prior catalog intact, and
-  report that source metadata is unavailable. Private paths and raw exception
-  text are debug-only. An incomplete scan must not delete unseen rows or
-  publish a prefix as the replacement.
+  report that persistent catalog metadata is unavailable. Discover each
+  independently complete valid entry into an in-memory catalog so it can
+  still serve/search; a failed or incomplete entry never publishes its prefix
+  as complete.
+  Private paths and raw exception text are debug-only. An incomplete scan
+  must not delete unseen rows or publish a prefix as the replacement.
+- Do not replace an existing catalog from an implicitly empty or incomplete
+  scan when the active config is missing, malformed, or has invalid entries
+  that could affect a catalog-backed provider. Keep it intact and report
+  uncertainty; an existing, valid config with intentionally no catalog-backed
+  entries is distinct. An ad-hoc build may first create valid config.
 - Coordinate rebuilds across processes and close existing connections before
   replacing catalog contents; never unlink a live catalog while another
   process can keep using or writing the old inode. If exclusive coordination
   cannot be obtained, report the failure and retry later.
+- Capture the active config snapshot used for a staged full scan. Before
+  replacement, close this process's catalog connections, take the config-write
+  lock, verify the config has not changed, then take the exclusive catalog
+  lease and hold both through replacement. If it changed, discard the staged
+  rebuild, preserve the prior catalog, and report that the server needs a
+  restart; do not apply new settings during normal reload. Cooperating callers
+  acquire the build lock first when needed, then config lock, then catalog
+  lease; never wait for the config lock while holding a catalog lease.
 - Use a stable, separately owned catalog lease file beside the catalog.
   Writable processes create it before catalog access and never replace or
   unlink it. Every participating process holds a shared OS lock from before
   opening a catalog connection until after closing it; replacement takes the
   exclusive lock after closing its own connections. Phase 10 may acquire an
   existing lease read-only but must never create it.
+- Preserve existing Windows x86-64 support as well as POSIX. Implement and
+  test equivalent shared/exclusive cross-process catalog leases on a read-only
+  reader handle there; Windows `LockFileEx` is a candidate. The existing
+  exclusive-only `msvcrt.locking` build lock is not by itself a shared reader
+  lease. Unsupported filesystems fail safely, but the normal supported Windows
+  filesystem must not silently lose indexed search.
 - Pre-redesign processes do not know this lease. The initial upgrade therefore
   requires the operator to stop all older Zimantic servers/builders and other
   catalog users before starting the rebuild; the new lock alone cannot prove
@@ -244,10 +282,11 @@ usable search index just because the catalog schema changed.
   database is absent but old sidecars remain, use a durable recovery marker
   and an owned quarantine beside the catalog under the exclusive lease. Move
   the old main file and recognized sidecars out of the way before atomically
-  installing a validated, sidecar-free staged main file; fsync the files and
-  directory. A crash at any step is recovered under the exclusive lease before
-  catalog access resumes. Do not follow symlinks or delete unknown files; if
-  recovery cannot be completed safely, leave the catalog unavailable.
+  installing a validated, sidecar-free staged main file; durably flush the
+  files and directory using the platform's supported mechanism. A crash at
+  any step is recovered under the exclusive lease before catalog access
+  resumes. Do not follow symlinks or delete unknown files; if recovery cannot
+  be completed safely, leave the catalog unavailable.
   Readers, including phase 10, must not open it while a recovery marker exists.
 - This is a breaking change: release notes state that old catalogs are
   discarded and rebuilt. Index files follow phase 04's separate validated
@@ -297,20 +336,16 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Move `_ensure_catalog`, `_scan_catalog`, `_catalog_entries`, and catalog
       scanning into the ZIM provider; keep generic SQLite schema/access in
       `SourceCatalog`.
-- [ ] Replace the `zims` table with the generic `sources` schema in
-      `SourceCatalog`; use `key` as the primary key and a separately indexed
-      canonical `path` locator.
-- [ ] Bump the catalog `SCHEMA_VERSION`; stage and atomically replace a
-      mismatched catalog with the generic `sources` schema. Remove `zims`-named
-      tables/indexes/columns without keeping aliases.
+- [ ] Retain phase 00's generic `sources` schema, coordinated rebuild, and
+      catalog lease while moving ZIM-specific scanning into the provider.
 - [ ] Move `_scan_zim_paths`, `_find_zim_path`, `_match_zim_path`, `_scan_catalog`
       calls, and `_discover_local_indexes` into `providers/zim/discovery.py`.
 - [ ] Move `_open_index`, `_open_zim_index`, `_read_index_meta`,
       `_read_index_state`, `_stale_zim_archive`, and
       `_model_probes_compatible` into the ZIM runtime.
-- [ ] Create the shared index-locator module and use it in both ZIM build
-      and serve; the phase-04 one-time importer may adopt only catalog-matched,
-      validated old stem-based paths.
+- [ ] Move and retain the phase-00 shared index locator in both ZIM build and
+      serve; the phase-04 one-time importer may adopt only uniquely
+      catalog-matched, validated old stem-based paths.
 - [ ] Pin the ZIM row-id mapping for phase 04: preserve the archive `_index` and
       redirect target id, including zero, as the canonical non-negative row id.
       Preserve redirect rows and reject integer overflow/collisions.
@@ -320,13 +355,10 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       a final path. If distinct permitted final entries share that path, or
       their identity cannot be verified, omit the affected hits with a
       partial/error status and fail ambiguous content requests closed.
-- [ ] Keep the isolated native helper's path/title protocol. Resolve each hit to
-      a canonical final path with a bounded, namespace-aware lookup, not an
-      archive-wide per-hit scan. If the path cannot be verified, omit that hit
-      and report partial/error rather than guessing. Unique native-only archives
-      must remain searchable without a local index, and a capped index alone
-      cannot prove uniqueness. Verify the resolver against supported libzim
-      3/4 bindings and old/new namespace fixtures before implementing it.
+- [ ] Move and retain phase 00's bounded, namespace-aware resolver and
+      isolated native helper path/title protocol. Unverifiable hits remain
+      partial/error; native-only archives still work without a local index,
+      and a capped index alone cannot prove uniqueness.
 - [ ] Move the local-source branch of `_rebuild_sources` and
       `_source_from_catalog` into `providers/zim/metadata.py`.
 - [ ] Move `refresh_local_sources` / local half of `refresh_sources` into the
@@ -404,7 +436,7 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       removing one does not change the other's key.
 - [ ] A configured ZIM path naming one archive and one naming a directory
       both discover only the intended archive set; ad-hoc single-file builds
-      persisted by phase 08 remain usable by `serve`.
+      persisted since phase 00 remain usable by `serve`.
 - [ ] A duplicate-stem collision logs one warning identifying both archives with
       paths relative to the configured root; paths outside that root use a
       basename or `<unknown>`, never an absolute path.
@@ -413,6 +445,9 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] A mismatched catalog is replaced with `sources` only after a complete
       scan; corrupt/unsupported catalogs rebuild the same way. An incomplete
       or failed replacement leaves the original artifact untouched.
+- [ ] A missing/invalid config cannot replace an existing catalog with an
+      accidental empty scan; independently valid collections remain usable via
+      bounded in-memory discovery when persistent catalog recovery fails.
 - [ ] Published index generations are sidecar-free, immutable, and protected
       by read-only cross-process leases before an old generation is reclaimed.
 - [ ] Redirect rows, including a target with row id zero, resolve to one final
@@ -424,6 +459,12 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       until its connection closes; a timed-out rebuild leaves the old catalog
       and sidecars untouched. Migration instructions require older processes to
       be stopped before the first upgrade.
+- [ ] An older running server's scoped refresh cannot delete a new ad-hoc
+      collection's catalog rows. A config change during full catalog staging
+      aborts replacement, and mismatched root locators are never served.
+- [ ] The catalog lease and generation lease work across processes on supported
+      Windows x86-64 as well as POSIX; a reader can pin without writing the
+      lease file.
 - [ ] An interrupted SQLite backup preserves the old logical catalog, including
       with a live WAL. Crash at each corrupt-catalog quarantine/install step;
       the next process recovers or fails closed without pairing a new main DB

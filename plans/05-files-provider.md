@@ -311,7 +311,8 @@ Create `providers/files/store.py` implementing `ContentStore`.
 
 HTML pages are rendered through the article shell. Relative links and
 assets resolve under the same source key. The global `secure_browsing`
-setting still applies; document that untrusted file trees should enable it.
+setting still applies. Document its phase-03 limitation: a raw article opened
+directly or in a permitted popup is not sandboxed even when the shell is.
 
 ## Library and search behavior
 
@@ -401,6 +402,8 @@ modules/
 - [ ] Derived text is absent by default and no image/media bytes are decoded;
       enabling `ocr` or `asr` indexes fake-engine output with the default
       document-only `include` and records provenance.
+- [ ] An image-only or mixed PDF remains eligible for OCR, with only its
+      image-only pages processed and all OCR limits applied.
 - [ ] A same-directory sidecar and an embedded text track attach to the
       intended media item; ambiguous sidecars are reported. Adding, editing, or
       removing a sidecar invalidates a captions-enabled index, while a disabled
@@ -441,7 +444,8 @@ modules/
 
 - **Source explosion.** The cap-collapse rule is mandatory and tested.
 - **Untrusted HTML.** Keep the content-shell sandbox, `nosniff`, and attachment
-  policy; recommend `secure_browsing = true` for file trees.
+  policy; explain that `secure_browsing = true` does not sandbox direct raw
+  article views or popups.
 - **Indexing cost.** Bound entries, bytes, and file types; do not index
   non-media assets or decode media by default. Media filenames are
   title-searchable; captions,

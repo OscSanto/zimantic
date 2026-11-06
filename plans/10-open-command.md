@@ -42,7 +42,7 @@ PID files, or locks behind.
    search-result and parent-page navigation controls. ZIM switching gets its
    own arrow group so search navigation remains independent.
 6. **No build step, one identity.** A selected archive uses its canonical
-   phase-01 source key when exactly one read-only catalog row matches its
+   phase-00 source key when exactly one read-only catalog row matches its
    path, size, and live nonempty UUID. The same key locates a finished
    phase-04 index under `index_dir`, subject to the provider, size, and
    fingerprint checks; it never becomes a second locator. `open` never builds,
@@ -148,7 +148,7 @@ class ZimOpenScope:
     keys: tuple[str, ...]         # canonical where known, else fallback, same order
 ```
 
-The scope reuses the phase-01 canonical source key only when exactly one
+The scope reuses the phase-00 canonical source key only when exactly one
 catalog row matches the resolved path and size and its stored UUID equals the
 live archive's nonempty UUID. Overlapping configured roots can produce multiple
 rows for one path; do not arbitrarily choose one. An unmatched, ambiguous, or
@@ -159,11 +159,11 @@ expanded list. Check for collisions. Fallback keys are scoped to this command
 line and never locate a persistent index.
 
 The persistent catalog lookup must not initialize, migrate, repair, or create
-the database or its SQLite sidecars. Acquire the phase-01 catalog lease through
+the database or its SQLite sidecars. Acquire the phase-00 catalog lease through
 an existing read-only descriptor before opening the catalog and hold it until
 the lookup connection closes; never create or replace the lease. A live WAL
-must be read consistently by a proven side-effect-free opener, not ignored via
-`immutable=1`. If a phase-01 recovery marker exists, or the catalog or lease
+must be read consistently by a side-effect-free opener, not ignored via
+`immutable=1`. If a phase-00 recovery marker exists, or the catalog or lease
 is absent, incompatible, corrupt, or cannot be opened consistently without
 writes, log the reason and use fallback keys.
 Configured collection metadata may be read from config for matched keys, but
@@ -178,9 +178,9 @@ When present:
   and extracts metadata from those paths and uses the generic catalog upsert;
   it never walks configured collections or deletes persistent rows.
 - `providers/zim/discovery.py` considers only `keys` when locating local
-  indexes through the phase-04 locator. It applies the finished/size/staleness
-  checks, opens the reused `IndexHandle` under that same key, and never opens
-  or validates indexes for other sources.
+  indexes through the phase-00 locator as extended in phase 04. It applies the
+  finished/size/staleness checks, opens the reused `IndexHandle` under that
+  same key, and never opens or validates indexes for other sources.
 - `ZimRuntime.refresh`, its scoped discovery helpers, library rows,
   `source_dicts`, and random-source selection resolve only scoped archives.
   Collection metadata is emitted only for collections represented in the
@@ -376,7 +376,7 @@ order.
       opposite order; normal `serve` remains title-sorted.
 - [ ] The configured collections are never scanned; no Kiwix collection is
       contacted.
-- [ ] A uniquely matched archive uses its phase-01 canonical key in
+- [ ] A uniquely matched archive uses its phase-00 canonical key in
       `/sources`, `/library.json`, search
       results, and `/content/<key>/`, and reuses its matching finished index
       through the same locator; the key and URL match a normal `serve` process.

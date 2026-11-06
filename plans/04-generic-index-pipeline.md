@@ -166,12 +166,13 @@ can change in place. Call `validate_snapshot()` immediately before publication;
 if the selected manifest or observed signatures changed during the build,
 discard or retry rather than publish it. Never resume a `meta.next` against a
 changed item list. A change after the final check can still race publication.
-On reload, perform a bounded
-signature check or report index freshness as unknown until one can finish;
-never treat an unchecked index as verified current. A detectably stale index is
-not searched until rebuilt; native full-text and content serving remain
-available. An unchecked index may still be searched, but its unknown freshness
-is exposed.
+On reload, perform a bounded signature check or report index freshness as
+unknown until one can finish; never treat an unchecked index as verified
+current. A detectably stale index is not searched until rebuilt; native
+full-text and content serving remain available. A generation whose required
+artifacts have validated identity and integrity but whose source-freshness
+check is pending may still be searched, with freshness reported as unknown. Do
+not search an artifact whose identity or integrity has not yet been verified.
 
 ### Derived text enrichment
 
@@ -218,6 +219,10 @@ class DerivedTextProducer(Protocol):
   text, then enabled captions, then OCR/ASR: skip ASR when enabled caption
   parsing produced usable text, and skip OCR for each page with a text layer.
   When captions are off, never read them to decide whether ASR should run.
+- Represent a PDF eligible for page OCR as an `image` input with PDF MIME.
+  The isolated OCR worker checks pages for native text and rasterizes only
+  image-only pages, enforcing the page/pixel limits before rasterization.
+  This also handles mixed text/image PDFs without OCRing their text pages.
 - Extractors run only during build. Search, previews, and serving never decode
   media or run a model.
 - OCR and ASR are optional dependency extras. A configured but missing engine or
@@ -314,12 +319,13 @@ unknown. Overrides carry no budgets. Phase 08 exposes the same schema.
   `forkserver`, not just `fork`. Engine and model objects are created inside
   the worker, never pickled across the boundary.
 - Spool each enabled worker input from its confined stream into a bounded,
-  private `0600` temp file; remove it after completion, cancellation, or
-  failure. Enforce an aggregate temp-space budget across concurrent workers,
-  check storage availability, and report failures. Clean up only recognized
-  stale private spools after an uncatchable process exit. Never send an
-  unbounded blob or a provider path that could be swapped after validation to a
-  worker.
+  owner-only private temp file (`0600` on POSIX, a restricted ACL on Windows);
+  fail closed if that privacy cannot be established. Remove it after
+  completion, cancellation, or failure. Enforce an aggregate temp-space budget
+  across concurrent workers, check storage availability, and report failures.
+  Clean up only recognized stale private spools after an uncatchable process
+  exit. Never send an unbounded blob or a provider path that could be swapped
+  after validation to a worker.
 - The pool is shared for the whole build run, not created per source, so
   `build_workers` cannot multiply model memory.
 - Engine-internal thread counts are set explicitly (normally 1) so process
@@ -349,7 +355,7 @@ unknown. Overrides carry no budgets. Phase 08 exposes the same schema.
 
 ### Index locator
 
-The shared locator module introduced in phase 01 uses one layout for every local
+The shared locator module introduced in phase 00 uses one layout for every local
 indexed provider:
 
 ```
@@ -369,28 +375,32 @@ rebuilt; a successfully adopted index is thereafter read only through the
 canonical layout.
 
 Store each source's artifacts as immutable generations. Build and validate
-SQLite and any required FAISS artifact in a new generation directory, fsync its files, then
-atomically replace a small `current` manifest naming that generation and its
-digests. Readers resolve that manifest once and pin the generation, so they
-cannot combine files from different builds. Keep the prior generation until
-all local and cross-process readers release it, then remove it; if release
-cannot be established, warn and defer cleanup rather than deleting a live
-generation. A successful replacement must not leave the old and new copies
-indefinitely.
+SQLite and any required FAISS artifact in a new generation directory, durably
+flush its files, then atomically replace a small `current` manifest naming that
+generation and its digests. Readers resolve that manifest once and pin the
+generation, so they cannot combine files from different builds. Keep the
+prior generation until all local and cross-process readers release it, then
+remove it; if release cannot be established, warn and defer cleanup rather
+than deleting a live generation. A successful replacement must not leave the
+old and new copies indefinitely.
 
-The phase-01 locator must already implement this lifecycle:
+The phase-00 locator must already implement this lifecycle:
 
 - The publisher creates the generation's `lease` file before publication.
   Readers open that existing file read-only and hold an OS-backed shared lock
   for the lifetime of every SQLite/FAISS handle and in-flight read. A POSIX
-  shared `flock` on a read-only descriptor is the baseline; another platform
-  must demonstrate equivalent cross-process behavior. PID files and in-memory
-  reference counts alone are not reader leases.
+  shared `flock` on a read-only descriptor is the baseline. Supported Windows
+  x86-64 must also provide and test equivalent shared/exclusive leases; for
+  example, `LockFileEx` can lock a range on a read-only handle. The existing
+  exclusive-only build lock, PID files, and in-memory reference counts alone
+  are not reader leases.
 - `paths(source)` returns an owned `GenerationLease` containing the generation,
-  validated artifact paths/digests, and an idempotent `close()`, not bare paths
-  whose pin can disappear. Acquire the shared lock and recheck `current` before
-  opening artifacts; if publication/cleanup won the race, release and retry.
-  Transfer that ownership to the phase-01 `_LocalIndex`, then `IndexHandle`
+  validated artifact paths, declared digests, and an idempotent `close()`, not
+  bare paths whose pin can disappear. Acquire the shared lock and recheck
+  `current` before opening artifacts; if publication/cleanup won the race,
+  release and retry. Validate SQLite before use and FAISS bytes before loading
+  them; fast mode does not read FAISS.
+  Transfer that ownership to `_LocalIndex`, then `IndexHandle`
   after generalization, until its last reader closes.
 - Never reuse a generation ID or repoint `current` to a retired generation;
   publishing a rollback creates a fresh generation. This makes the
@@ -399,7 +409,10 @@ The phase-01 locator must already implement this lifecycle:
   that the generation is not current before deleting only its recognized
   artifacts. Unsupported locking defers cleanup and fails read-only reuse
   closed where pinning cannot be guaranteed; never manufacture a lease from
-  an `open` process or unlink a lease while it has active readers.
+  an `open` process or unlink a lease while it has active readers. Account
+  for Windows file-sharing and deletion semantics; preserve normal indexed
+  builds and searches on its supported local filesystem rather than treating
+  the platform itself as an unsupported fallback.
 - Retry deferred cleanup during normal build/reload/maintenance and reader
   release, with bounded background retries while a writable server remains
   active. A read-only `open` process releases leases but never performs cleanup.
@@ -407,8 +420,10 @@ The phase-01 locator must already implement this lifecycle:
   WAL/SHM/journal files, and seal the generation against subsequent mutation.
   Read it with a sidecar-free immutable connection only after those invariants
   are validated. `immutable=1` is not a shortcut for opening a live database.
-  Fsync completed artifacts and generation directories before replacing the
-  fsynced manifest; fsync the manifest's parent directory afterward.
+  Durably flush completed artifacts and generation directories before
+  replacing the flushed manifest, then flush its parent directory using the
+  supported platform mechanism. Use Windows-supported publication and recovery
+  mechanisms rather than assuming POSIX directory `fsync` works there.
 
 The versioned `current` manifest contains provider/collection/source identity,
 a validated generation UUID, and SQLite plus optional FAISS digests. Its
@@ -446,7 +461,7 @@ CREATE TABLE meta (
 ```
 
 `meta.value` is always UTF-8 text. New ordinary tables use SQLite `STRICT`
-under phase 01's SQLite 3.37 minimum; this enforces storage classes,
+under phase 00's SQLite 3.37 minimum; this enforces storage classes,
 not faster queries. FTS5 virtual tables cannot be declared `STRICT`. The
 one-time importer may convert recognized legacy metadata values through the
 canonical codec below; it must reject unknown or malformed values rather than
@@ -502,6 +517,9 @@ Runtime fast mode is separate from fast build mode. When `serve --fast` or
 disable semantic search for its entire lifetime, even when a finished semantic
 index is available. Do not open or hash FAISS artifacts in this mode. SQLite
 lexical/title/body search and native full-text search remain usable.
+Intentionally disabled or unbuilt optional channels, including semantic search
+in runtime fast mode and body search after a fast build, are not channel
+failures and do not by themselves make a source result partial.
 
 Every generation has the same table schema, including an empty `body` table
 after a fast build; `indexed_channels` records built channels, including valid
@@ -531,10 +549,11 @@ available staging space; if the known minimum cannot fit, fail before modifying
 the published generation. A fatal traversal, extraction, validation, or build
 failure removes only its incomplete staging generation, logs a warning naming
 the source and failure, and leaves the prior successful generation published.
-Continue using that generation only if its source identity and required
-channels still validate. If the source or build inputs changed, keep the old
-generation for recovery but mark it stale and do not present its results as
-current (notably, do not hydrate old rowids against changed content). Requested
+Continue using that generation only if its identity and required artifacts
+validate and it is not detectably stale; a pending source-freshness check
+follows the unknown-freshness rule above. If the source or build inputs changed,
+keep the old generation for recovery but mark it stale and do not search it
+(notably, do not hydrate old rowids against changed content). Requested
 derived-text failures instead publish the available channels as partial, as
 specified above, with the partial state visible and a non-zero build result.
 An interrupted but resumable build may retain at most one recognized staging
@@ -551,7 +570,7 @@ def build_index(producer, locator, embedder, cfg, fast=False, force=False): ...
 The ZIM provider calls it with `ArchiveEntryProducer`; files and Kolibri call
 the same function with their producers. Phase 04 changes the index SQLite
 schema. Migrate recognized pre-redesign `<stem>.sqlite`/`.faiss` pairs and
-phase-01 generation databases where possible rather than requiring a full
+phase-00/01 generation databases where possible rather than requiring a full
 article re-extraction; the locator identity remains stable, and migrated
 artifacts are published as a new generation under the canonical locator.
 The per-source item cap applies to ZIM too, so very large ZIMs can have
@@ -570,6 +589,19 @@ report the mismatch, and never pair vectors with the wrong document rows. Fast
 indexes have no FAISS digest and must not load a leftover FAISS file. Cache
 verification on the loaded handle so searches do not repeatedly hash vectors;
 verify again when reopening a pair rather than trusting file signatures alone.
+For example, Linux may load through a pinned descriptor; Windows needs an
+equivalent handle/identity mechanism. Test the actual FAISS loading
+mode, including mmap where used, rather than relying on a check of a pathname.
+The pin prevents pathname replacement, not in-place writes by a party that can
+modify the published inode. Published generations must remain immutable and
+the index directory must be protected from untrusted writers; use a private
+sealed copy if that assumption cannot be maintained.
+
+A Linux probe using FAISS 1.15.1 loaded an `IVF32,SQ8` index
+through `/proc/self/fd` after its pathname was replaced. With `IO_FLAG_MMAP`,
+the original inode was mapped as `OnDiskInvertedLists` and returned the
+original index IDs. The current `IO_FLAG_MMAP_IFC` returned `ArrayInvertedLists`
+in the same setup, so its flag name alone does not establish mmap.
 
 ### Recognized index migration
 
@@ -595,8 +627,11 @@ records size but not archive UUID, so those artifacts require a clean rebuild
 unless independent recognized build-time provenance exists. Never invent
 provenance from a matching filename, size, or the new catalog.
 If provenance cannot be established, leave the old artifacts untouched and
-report why adoption was refused. Phase-01 generations carry the required
-identity evidence. The importer can rebuild the `docs` FTS table from recognized
+report why adoption was refused. Phase-00/01 generations carry the build-time
+identity evidence specified there. If a legacy stem and provenance match more
+than one catalog source, do not choose arbitrarily; require a unique match or
+rebuild. A compatible current generation always takes precedence over an older
+stem-based artifact. The importer can rebuild the `docs` FTS table from recognized
 stored columns and normalize known metadata values in a staged copy.
 Preserve semantic search only when FAISS IDs, dimensions, and model identity
 are verified against the migrated rowids and current model; otherwise retain
@@ -654,8 +689,11 @@ space but supports direct snippets/highlighting and avoids a separate native
 text hydration path. Choose it only if those latency/UX benefits survive the
 same release benchmark.
 
-The preliminary result does not replace a representative benchmark. Compare on
-identical representative ZIM, Files, and Kolibri fixtures:
+The preliminary result does not replace a representative benchmark. In phase
+04, compare real ZIM data and synthetic producer fixtures without depending on
+providers that do not exist yet. After phases 05–06, repeat the comparison on
+identical representative ZIM, Files, and Kolibri fixtures as a phase-09 release
+gate:
 
 - body FTS5 with stored content versus contentless FTS5 postings plus
   `ContentStore` hydration for result previews;
@@ -691,8 +729,10 @@ to the ZIM runtime in phase 01, into `indexing/search.py`:
 - Merge body lexical and native hits into the existing `fulltext` result
   channel by reciprocal ranks, deduplicating by document ID and breaking ties
   deterministically; their native and BM25 scores are not comparable. Do not
-  introduce a fifth `SourceResult` channel. A provider with no native searcher
-  is not partial solely because it lacks one.
+  introduce a fifth `SourceResult` channel. Sort the fused candidates by their
+  reciprocal-rank scores, then assign contiguous 1-based integer full-text
+  ranks; do not pass the fusion scores as ranks. A provider with no native
+  searcher is not partial solely because it lacks one.
 - Build local result `id` values from phase 00's encoding of
   `(source_key, canonical final path)`. This matches indexed and native hits
   without requiring native search to expose a row id. The runtime URL builder
@@ -790,7 +830,7 @@ access. Phase 10 uses this mode for reused indexes.
 - [ ] Move `_index_entries`, `_save`, `_finish_build`, `_write_faiss`, and
       staging/upgrade helpers into `indexing/pipeline.py` with no libzim
       imports.
-- [ ] Reuse the phase-01 `indexing/locator.py` for every local indexed provider.
+- [ ] Reuse the phase-00 `indexing/locator.py` for every local indexed provider.
 - [ ] Create `providers/zim/entries.py` with `ArchiveEntryProducer`, wrapping
       `read_entry`, applying the canonical row-id/`target_id` mapping, and
       preserving progress and fast mode.
@@ -823,7 +863,7 @@ access. Phase 10 uses this mode for reused indexes.
 - [ ] Validate the SQLite/FAISS digest on open, including interrupted
       publication and per-thread connections opened during a rebuild; do not
       serve mismatched vectors and document rows.
-- [ ] Add a synthetic in-memory producer in tests to prove the pipeline has no
+- [ ] Add a synthetic in-memory producer in tests to verify the pipeline has no
       libzim dependency.
 - [ ] Add `BuildableRuntime.entry_producer` and producer cleanup; exercise the
       same CLI orchestration with ZIM and a synthetic buildable runtime, and
@@ -849,11 +889,14 @@ access. Phase 10 uses this mode for reused indexes.
       its contentless FTS posting.
 - [ ] A detectable manifest/signature change during a build prevents
       publication; a later detectable change marks the index stale on reload.
+- [ ] A validated generation is searchable while source freshness is unknown;
+      it stops being searched if the check proves it stale. An unvalidated
+      required artifact is never used, and fast mode does not inspect FAISS.
 - [ ] Interrupted publication or concurrent opening cannot pair a SQLite index
       with a different FAISS generation.
-- [ ] A failed forced rebuild warns with the cause, leaves the previous
-      successful generation in place, and continues using it only if its
-      source and required channels still validate.
+- [ ] A failed forced rebuild warns with the cause and preserves the previous
+      generation; reuse follows the same artifact-validation and freshness
+      rules, including the unknown-freshness state.
 - [ ] Successful publication atomically switches a complete SQLite/FAISS
       generation; after readers release old generations, cleanup removes them.
 - [ ] Insufficient staging space is reported before publication is touched;
@@ -862,9 +905,14 @@ access. Phase 10 uses this mode for reused indexes.
       schemas remain untouched and fall back to a clean staged build.
 - [ ] A recognized size-only legacy index cannot acquire provenance from a
       freshly rebuilt catalog; an unrelated same-size archive is never adopted.
+- [ ] Ambiguous same-stem legacy candidates are not arbitrarily adopted, and
+      an older stem artifact cannot replace a compatible current generation.
 - [ ] A separate reader process, including read-only `open`, pins an old
       generation across publication; cleanup waits for release/process exit
       and never creates/modifies a reader's lease or SQLite sidecars.
+- [ ] POSIX and supported Windows readers can hold concurrent shared leases;
+      a publisher/pruner respects them and the indexed build/search workflow
+      remains functional on both platforms.
 - [ ] Fast build, force rebuild, staged upgrade, and a corrupt staging file
       all work.
 - [ ] Model fingerprint/probe mismatch falls back to lexical search.
@@ -885,9 +933,9 @@ access. Phase 10 uses this mode for reused indexes.
       native, and suggestion channels when the final path is unambiguous,
       including a target outside a truncated manifest. An ambiguous native hit
       is partial/error, not falsely merged with either row.
-- [ ] The storage benchmark records the contentless baseline and stored-content
-      alternative, including storage, build, RSS, query, hydration, and
-      engine-invocation measurements.
+- [ ] The phase-04 storage benchmark records the contentless baseline and
+      stored-content alternative using available ZIM and synthetic fixtures;
+      the real mixed-provider comparison is a phase-09 gate.
 - [ ] A non-ZIM body-term query returns a lexical result without embeddings or
       a `NativeSearcher`; a fast build is explicitly title/path-only.
 - [ ] An empty or title-only-media full build publishes successfully without
@@ -926,6 +974,13 @@ access. Phase 10 uses this mode for reused indexes.
       terminated on timeout on Python 3.11 as well as newer versions.
 - [ ] An absent optional native searcher is not an error; failure of an expected
       isolated native search retains the documented partial/error status.
+- [ ] Fast mode and a fast-built title-only index do not report deliberately
+      disabled semantic/body channels as failures; fused body/native hits have
+      deterministic 1-based integer full-text ranks.
+- [ ] Replacing a FAISS pathname after validation cannot cause different bytes
+      to be loaded, including with the production mmap mode where applicable.
+- [ ] An OCR-enabled mixed PDF rasterizes only image-only pages and respects
+      page/pixel caps; with OCR off those pages are not rasterized for indexing.
 - [ ] Concurrent builds and `build_workers` still work under the global lock.
 
 ## Acceptance criteria
@@ -937,8 +992,9 @@ access. Phase 10 uses this mode for reused indexes.
 - `build.py` no longer imports provider-specific discovery.
 - `indexing/` imports no libzim, FAISS, or web modules at module scope except
   inside the FAISS loaders.
-- Files and Kolibri use `EntryProducer` + `ContentStore` for FTS, semantic
-  search, previews, resume, and publication, alongside their provider runtimes.
+- ZIM and a synthetic non-ZIM producer use the generic pipeline in this phase.
+  Files and Kolibri adopt the same `EntryProducer` + `ContentStore` path in
+  phases 05 and 06, respectively.
 
 ## Risks and mitigations
 

@@ -174,26 +174,33 @@ Add an optional `collection` query parameter (matching exact canonical
   it returns a `scope` summary, for example:
   `{"status":"partial","requested":700,"scheduled":500,"completed":500,"limit_reason":"source_cap"}`.
   The `limit_reason` enum is `source_cap`, `deadline`, or `null`. On an
-  unbounded successful request, `status` is `complete`. `requested` counts the resolved eligible source
-  scope after selector intersection; `scheduled` counts admitted source tasks;
+  unbounded successful request, `status` is `complete`. `requested` counts the
+  resolved eligible source scope after selector intersection; `scheduled`
+  counts admitted source tasks;
   `completed` counts tasks that returned an `ok`, `partial`, or `error` result,
   including per-source timeouts, but not tasks cancelled/detached at the request
-  deadline. `Search.search_page()` includes `"scope"` in its returned
-  dict, `/search` serializes it in the `X-Search-Scope` response header
-  (preserving the JSON array body alongside `X-Total-Count` and `X-Matched-By`),
-  and `/search/stream` includes `"scope"` on its terminal `"done"` event.
+  deadline. Reuse phase 00's `"scope"` in `Search.search_page()`, the
+  `X-Search-Scope` response header on `/search` (preserving the JSON array body
+  alongside `X-Total-Count` and `X-Matched-By`), and the terminal `"done"`
+  event on `/search/stream`.
   A per-source provider error is carried by that source's `SourceResult` and
   does not imply the scheduler hit a cap. An explicit individual source
   remains one task. Do not claim every selected book completed when the
   collection cap or deadline wins.
 
-The phase-02 `search_timeout_seconds` deadline applies to every scope, not only
+The phase-00 `search_timeout_seconds` deadline applies to every scope, not only
 explicit remote collections. Use the same `scope` summary for unscoped fan-out
 caps and local/mixed deadline exhaustion too. If admitted work is unfinished at
 the deadline, `limit_reason` is `deadline` even when a source cap also applied;
 otherwise a source cap takes precedence over `null`. A valid empty scope is
-complete. Do not cache a deadline-truncated pool as a complete result for later
-requests, or present a partial candidate pool as an exhaustive hit count.
+complete. Ranking and preview work count as admitted work: expiry there is
+still `partial` with reason `deadline`, even if all scheduled source tasks have
+already completed. Do not cache a deadline-truncated pool as a complete result
+for later requests, or present a partial candidate pool as an exhaustive hit
+count.
+The scope status describes scheduling of eligible sources only; it does not
+claim that unavailable or unsearchable sources, or truncated indexes, were
+searched exhaustively. Their state remains visible in source/library metadata.
 
 Use `source` as the canonical source-selection query parameter across `/search`,
 `/search/stream`, `/suggest`, and `/random`. There is no `zim` parameter and no
@@ -292,9 +299,9 @@ Keep `indexes`, `sources`, and `cache` counters.
       `source` in `Search._search_scope`.
 - [ ] Key/invalidate cached pools using the expanded source keys and relevant
       source/index generations.
-- [ ] Apply the documented Kiwix explicit-collection cap, deadline, canonical
-      ordering, and partial-result metadata (`X-Search-Scope` on `/search` and
-      `"scope"` on the terminal `"done"` stream event).
+- [ ] Apply the documented Kiwix explicit-collection cap and canonical ordering
+      using phase 00's deadline and partial-result metadata (`X-Search-Scope`
+      on `/search` and `"scope"` on the terminal `"done"` stream event).
 - [ ] Add `collection` filtering to `/sources` and `/library.json` using the
       standard pagination so opening a collection can fetch all its sources
       without an unbounded payload.
@@ -333,6 +340,11 @@ Keep `indexes`, `sources`, and `cache` counters.
 - [ ] Collection search response and terminal stream summary use the same
       `scope` status/count fields; provider errors remain per-source results and
       are not confused with scheduler cap/deadline partial status.
+- [ ] A deadline during ranking or preview reports partial scope even when
+      `scheduled` and `completed` source-task counts are equal.
+- [ ] A known but unavailable explicit source resolves to an empty eligible
+      scope without broadening the search; its unavailable state remains
+      visible in source metadata.
 - [ ] Library grouping: one-source collections, multi-source collections,
       empty collections, unavailable collections.
 - [ ] Content-type classification and filtering for ZIM MIME counters and
