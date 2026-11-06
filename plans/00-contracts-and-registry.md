@@ -318,6 +318,7 @@ collection_key: str = ""
 collection_label: str | None = None
 available: bool = False        # the provider can currently read/search the source
 searchable: bool = False       # a supported search path is currently usable
+error: str | None = None       # current discovery/index/search diagnostic
 homepage: str | None = None    # source-relative path, never a filesystem locator
 icon_url: str | None = None    # generated public URL, never a provider locator
 size: int | None = None        # known content size in bytes; never a locator
@@ -329,6 +330,23 @@ item_count: int | None = None
 indexed_count: int | None = None
 truncated: bool | None = None
 index_freshness: str | None = None  # current | stale | unknown; None if no index
+derived_text: Mapping[str, str] | None = None  # per-op state from index meta (phase 04)
+# Optional descriptive metadata included when to_dict(include_metadata=True):
+description: str | None = None
+long_description: str | None = None
+creator: str | None = None
+publisher: str | None = None
+language: str | None = None
+date: str | None = None
+tags: tuple[str, ...] = ()
+category: str | None = None
+license: str | None = None
+origin: str | None = None
+attribution: str | None = None
+relation: str | None = None
+mime_counts: str | None = None
+native_fulltext_available: bool | None = None
+provider_id: str | None = None
 ```
 
 - `provider` is the canonical discriminator. There is no `content_kind`, no
@@ -336,9 +354,20 @@ index_freshness: str | None = None  # current | stale | unknown; None if no inde
 - `key` is globally unique, stable, and URL-safe. It is also the URL identity
   used by `/content/{key}/...` and `/article/{key}/...`; there is no separate
   `content_id` field.
-- `title` is the display name. Remove `name`, `book`, `local_name`, and their
-  alias precedence. Provider-specific identifiers such as a Kiwix book slug or a
-  ZIM archive stem live in provider metadata or in the canonical `key`.
+- `title` is the display name. Remove `name`, `book`, `local_name`, `icon_path`,
+  and ZIM-only metadata field names (`article_count`, `entry_count`, `counter`,
+  `has_fulltext_index`, `source`, `uuid`, `perma_ref`, `flavour`, `scraper`)
+  along with their alias precedence. Provider-specific identifiers such as a
+  Kiwix book slug or a ZIM archive stem live in private runtime/provider
+  metadata or in the canonical `key`.
+- `to_dict(include_metadata: bool = False)` remains the single source
+  serializer: `/sources` and SSE `source` events call `to_dict()`, while
+  `/library.json` and `zimantic sources --json` call
+  `to_dict(include_metadata=True)`. Both include `key`, `provider`,
+  `collection`, `title`, `available`, `searchable`, `error`, `homepage`,
+  `icon_url`, `size`, `intent_phrases`, `media_types`, `document_count`,
+  `media_count`, `item_count`, `indexed_count`, `truncated`,
+  `index_freshness`, and `derived_text`.
 - `indexed_count` and `truncated` describe the published index; both are
   unknown (`null`) before one exists. Freshness is `unknown` until validated.
   Later phases populate these fields without introducing alternate payloads.
@@ -557,9 +586,13 @@ keep a `mode` fallback.
       `CollectionSnapshot.to_dict()` for descriptor-plus-runtime fields,
       `collection_dicts()`, and make `source_dicts()` include the new fields
       using the frozen nullability/schema rules above.
-- [ ] Update route resolution internals to use the canonical `key` and exact
-      source lookup; leave the public `{zim}` to `{source}` parameter rename
-      to phase 03.
+- [ ] Update route resolution internals, `search.py`, `searching/kiwix.py`,
+      `web/routes.py`, `web/app.py`, and `web/static/app.js` to use the
+      canonical `key`, `provider`, `title`, and provider-neutral metadata fields
+      (`document_count`, `mime_counts`, `native_fulltext_available`, `origin`,
+      `provider_id`) instead of `mode`, `local_name`, `book`, `name`, or
+      ZIM-only field names; leave the public `{zim}` to `{source}` route
+      parameter rename to phase 03.
 - [ ] Add `tests/providers/test_contracts.py` and
       `tests/providers/test_registry.py`.
 - [ ] Add a short "Provider contracts" section to `CONTRIBUTING.md`.

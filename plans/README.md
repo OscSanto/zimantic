@@ -91,14 +91,17 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 10 | [Ephemeral open command](10-open-command.md) | 01, 03, 08 | Open named ZIMs in a read-only local server; switch between them in the toolbar |
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | 00–08, 10 | Security, limits, contract tests, performance, staged release |
 
-Phase 00 introduces the minimal `[[collections]]` parser and preserves both
-existing search backends through real runtimes. It also freezes the common media
-family taxonomy; phase 07 only presents that taxonomy in the UI. Phase 01
-introduces the shared index locator; phase 04 extends its schema and validation,
-requiring a rebuild at that phase as well. Phase 05 adds files-provider
-validation; phase 08 completes the full settings loader. There is one parser
-and one normalized entry shape, not a temporary parser per provider. Execute
-phase 10 after phase 08 and before phase 09, which is the final release gate.
+Phase 00 introduces the minimal `[[collections]]` parser, freezes the complete
+`SourceInfo`/`CollectionSnapshot`/`ContentStore` contracts (including the common
+media family taxonomy), and preserves both existing search backends through real
+runtimes. Phase 01 introduces the shared generation-based index locator for ZIM
+build and serve; phase 04 extends the index schema and validation and adds a
+one-time validated importer that adopts recognized pre-redesign and phase-01 ZIM
+indexes without re-extracting every article when compatible. Phase 05 adds
+files-provider validation; phase 08 completes the full settings loader. There is
+one parser and one normalized entry shape, not a temporary parser per provider.
+Execute phase 10 after phase 08 and before phase 09, which is the final release
+gate.
 
 ## Design invariants
 

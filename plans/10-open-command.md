@@ -351,9 +351,9 @@ order.
 
 ### Scope and read-only behavior
 
-- [ ] `/sources`, `/library.json`, `/search`, `/search/stream`, and
-      `/random?source=` see only the selected ZIMs even when `index_dir` contains
-      indexes for other archives.
+- [ ] `/sources`, `/collections.json`, `/library.json`, `/search`,
+      `/search/stream`, `/suggest`, and `/random?source=` see only the selected
+      ZIMs even when `index_dir` contains indexes for other archives.
 - [ ] The configured collections are never scanned; no Kiwix collection is
       contacted.
 - [ ] A uniquely matched archive uses its phase-01 canonical key in

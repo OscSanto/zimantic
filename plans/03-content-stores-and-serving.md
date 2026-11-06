@@ -136,13 +136,17 @@ private locator or exception text.
   Raw HTML is decorated with the existing bridge, so its response bytes may
   differ from the stored item.
 - Rename `_referer_article_zim` to `_referer_source_key` and resolve any source
-  key, not only ZIM.
+  key, not only ZIM. Decode the extracted path segment once with `unquote` so
+  percent-encoded colons in `/content/<key>/...` and `/article/<key>/...`
+  referrers match the canonical source key, and route `capture_asset_fallback`
+  through `read_article(source_key, candidate)`.
 - Rename `zim_icon_url` to `source_icon_url` and `zim_search_available` to
   `source_search_available`; both resolve by exact `key`.
 - `random_local_source` selects any available local source with a homepage.
   `/random` redirects using that source key, including Files and Kolibri
   sources.
-- `/random` accepts a `source` query parameter. There is no `zim` parameter.
+- `/random` and `/suggest` accept a `source` query parameter instead of `zim`.
+  There is no `zim` parameter on `/random` or `/suggest`.
 - `_decorate_article_bridge` and `_content_shell` remain source-agnostic; only
   the source key and base path change.
 - A shell for large seekable media uses `resolve` metadata and must not reject

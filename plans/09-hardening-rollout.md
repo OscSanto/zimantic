@@ -325,8 +325,10 @@ For a cautious rollout, ship with:
 
 - [ ] Verify flat `zim_dir`/`kiwix_server` keys are absent and explicit
       `[[collections]]` entries are required. There is no shorthand fallback.
-- [ ] Delete or ignore old `<stem>.sqlite`/`.faiss` files and rebuild every
-      configured collection with the new locator.
+- [ ] Adopt recognized, validated old `<stem>.sqlite`/`.faiss` pairs once
+      through the phase-04 importer, rebuild any unrecognized or incompatible
+      indexes under the new locator, and use `zimantic prune` to reclaim
+      superseded owned files.
 - [ ] Allow the disposable catalog to be rebuilt by a full scan under the
       catalog's coordination rules; do not delete a live SQLite database.
 - [ ] Update bookmarks and API clients to canonical source keys, the `source`

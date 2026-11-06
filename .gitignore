@@ -224,3 +224,4 @@ evaluation.zims/
 evaluation.indexes/
 evaluation/results/
 /.build.lock
+/modules

@@ -83,9 +83,12 @@ metadata rather than writing this catalog.
 - Normalize a path when scanning/upserting, then reuse that normalized value
   for catalog point lookups; avoid repeated filesystem resolution on hot paths.
 - A relocated root updates its `path` locators during catalog refresh. Introduce
-  the shared generic index locator here for both build and serve; there is no
-  stem-based special case. Phase 04 extends its index schema and validation and
-  requires another rebuild rather than trying to read phase-01 indexes.
+  the shared generic index locator (including its `current` manifest and
+  `generations/<build-generation>/` directory layout) here for both build and
+  serve; there is no stem-based special case. Phase 04 extends the index SQLite
+  schema and validation and includes a one-time importer that migrates
+  recognized pre-redesign and phase-01 ZIM indexes into a new generation when
+  compatible, falling back to a clean rebuild otherwise.
 
 The generic catalog schema replaces the ZIM-specific `zims` table outright.
 Bump `SCHEMA_VERSION`. An older or unrecognized catalog is deleted and rebuilt

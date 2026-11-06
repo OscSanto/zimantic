@@ -376,10 +376,11 @@ def build_index(producer, locator, embedder, cfg, fast=False, force=False): ...
 ```
 
 The ZIM provider calls it with `ArchiveEntryProducer`; files and Kolibri call
-the same function with their producers. Phase 04 changes the index schema.
-Migrate recognized phase-01 indexes where possible rather than requiring a
-full article re-extraction; the locator identity remains stable, while the old
-flat paths are adopted once into the generation layout.
+the same function with their producers. Phase 04 changes the index SQLite
+schema. Migrate recognized pre-redesign `<stem>.sqlite`/`.faiss` pairs and
+phase-01 generation databases where possible rather than requiring a full
+article re-extraction; the locator identity remains stable, and migrated
+artifacts are published as a new generation under the canonical locator.
 The per-source item cap applies to ZIM too, so very large ZIMs can have
 truncated semantic/title coverage after rebuilding; native full-text may still
 cover the archive. Report `truncated` and `indexed_count` and call out this

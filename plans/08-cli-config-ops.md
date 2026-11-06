@@ -420,7 +420,8 @@ Scope:
 - `zimantic build`, `serve`, `reload`, `sources`, and `prune` work with a mixed
   library.
 - Every ZIM-only install is migrated by adding a `[[collections]]` entry and
-  rebuilding its indexes.
+  importing recognized old indexes via the phase-04 importer (or rebuilding
+  incompatible indexes).
 - Documentation contains a copy-pasteable IIAB example for each local provider.
 - `python -m pytest` passes.
 
