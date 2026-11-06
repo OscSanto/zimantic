@@ -28,7 +28,83 @@ except ImportError:  # pragma: no cover - Windows
 BUILD_BUSY_EXIT = 75
 
 LOCK_FILENAME = ".build.lock"
+CATALOG_LOCK_FILENAME = ".catalog.lock"
 POLL_SECONDS = 0.2
+
+
+def catalog_lease_path(catalog: Path | str) -> Path:
+    """Return the stable shared/exclusive catalog lease beside a catalog file."""
+    return Path(catalog).parent / CATALOG_LOCK_FILENAME
+
+
+class FileLease:
+    """An exclusively created file supporting shared or exclusive locks."""
+
+    def __init__(self, path: Path | str, *, create: bool = True) -> None:
+        self.path = Path(path)
+        self.create = create
+        self._fd: int | None = None
+        self._mode: str | None = None
+
+    def acquire(self, *, shared: bool = False, blocking: bool = True) -> bool:
+        if self._fd is not None:
+            return self._mode == ("shared" if shared else "exclusive")
+        flags = os.O_RDWR | os.O_CREAT if self.create else os.O_RDONLY
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, flags, 0o644)
+        except OSError as error:
+            raise BuildLockError(
+                f"zimantic: cannot open the catalog lease {self.path}: "
+                f"{error.strerror or error}"
+            ) from error
+        while True:
+            locked = self._lock(fd, shared=shared)
+            if locked:
+                self._fd = fd
+                self._mode = "shared" if shared else "exclusive"
+                return True
+            if not blocking:
+                os.close(fd)
+                return False
+            time.sleep(POLL_SECONDS)
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fd, self._fd = self._fd, None
+        self._mode = None
+        try:
+            self._unlock(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _lock(fd: int, *, shared: bool) -> bool:
+        try:
+            if fcntl is not None:
+                mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            else:  # pragma: no cover - Windows
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                return False
+            raise
+
+    @staticmethod
+    def _unlock(fd: int) -> None:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            else:  # pragma: no cover - Windows
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
 
 
 def build_lock_path(index_dir: Path | str) -> Path:

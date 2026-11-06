@@ -53,6 +53,9 @@ _COMMON = {
     "preview_limit": 10,
     "min_cosine_similarity": 0.85,
     "source_timeout": 12,
+    # Monotonic deadline for one admitted search: source scheduling, ranking,
+    # and bounded preview work all share it.
+    "search_timeout_seconds": 30.0,
     # Seconds a search waits for one of max_concurrent_searches before the
     # server reports busy. Keep this above a typical cold-search duration on
     # slow hardware so two overlapping requests queue instead of failing.
@@ -262,7 +265,8 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
 
     XDG config is preferred on Unix; an existing config.toml in the current
     directory remains a compatibility fallback. A missing or unreadable config
-    is a warning, not an error.
+    is a warning, not an error.  Removed flat provider keys and malformed
+    ``[[collections]]`` values are fatal schema errors.
     """
     if warn is None:
         def warn_to_stderr(message):
@@ -291,7 +295,13 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         loaded = True
     except FileNotFoundError:
         warn(f"zimantic: warning: {config_path} not found; using {profile} defaults")
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except tomllib.TOMLDecodeError as error:
+        from .providers.config import ConfigValidationError
+
+        raise ConfigValidationError(
+            f"invalid TOML in {config_path}: {error}"
+        ) from error
+    except OSError as error:
         warn(
             f"zimantic: warning: could not read {config_path} ({error}); "
             f"using {profile} defaults"
@@ -301,7 +311,16 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # afterwards contradicts that message.
     if loaded and not user:
         warn(f"zimantic: warning: {config_path} is empty; using {profile} defaults")
-    for key in sorted(set(user) - KNOWN_KEYS):
+    from .providers.config import RuntimeConfig, ZimConfig, parse_collections
+
+    config_dir = Path(config_path).resolve().parent
+    parsed = (
+        parse_collections(user, config_dir=config_dir, warn=warn)
+        if loaded
+        else None
+    )
+    provider_keys = {"collections", "derived_text"}
+    for key in sorted(set(user) - KNOWN_KEYS - provider_keys):
         warn(f"zimantic: warning: unknown config key {key!r} in {config_path} (ignored)")
     cfg.update(_typed_user_values(user, cfg, config_path, warn))
     if data_dir is not None:
@@ -348,4 +367,31 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
             build_workers=build_workers if isinstance(build_workers, int) else None,
             embed_threads=embed_threads if isinstance(embed_threads, int) else None,
         )
+    collections = parsed.collections if parsed is not None else ()
+    if not collections and cfg.get("zim_dir"):
+        # A missing/empty config keeps the historical local ZIM root as one
+        # implicit collection. Explicit config uses [[collections]] only.
+        default_root = Path(cfg["zim_dir"]).expanduser()
+        if not default_root.is_absolute():
+            default_root = config_dir / default_root
+        collections = (ZimConfig(name="library", path=str(default_root)),)
+    envelope = dict(parsed.envelope) if parsed is not None else {}
+    if envelope.get("derived_text"):
+        warn(
+            "zimantic: warning: [derived_text] is recognized but this phase does "
+            "not run derived-text operations; the values are preserved"
+        )
+    cfg["collections"] = tuple(collections)
+    cfg["config_dir"] = str(config_dir)
+    settings = dict(cfg)
+    settings["envelope"] = envelope
+    cfg["runtime_config"] = RuntimeConfig(
+        settings=settings,
+        collections=tuple(collections),
+        config_path=Path(config_path),
+        config_dir=config_dir,
+        search_timeout_seconds=float(cfg.get("search_timeout_seconds", 30.0)),
+        page_size=int(cfg.get("page_size", 10)),
+        envelope=envelope,
+    )
     return cfg

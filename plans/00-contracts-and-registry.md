@@ -1,6 +1,6 @@
 # Phase 00 — Contracts and provider registry
 
-Status: proposed.
+Status: implemented.
 
 ## Goal
 
@@ -780,63 +780,63 @@ keep a `mode` fallback.
 
 ## Work items
 
-- [ ] Create `zimantic/providers/base.py` with the dataclasses and protocols.
-- [ ] Create the canonical content-contract module at
+- [x] Create `zimantic/providers/base.py` with the dataclasses and protocols.
+- [x] Create the canonical content-contract module at
       `zimantic/content/store.py` and re-export it from `providers/base.py`.
       Define the complete `ContentStore` protocol, including `read_range`; phase
       03 implements it rather than extending the contract.
-- [ ] Remove the eager `reader.py` import from `zimantic/content/__init__.py`
+- [x] Remove the eager `reader.py` import from `zimantic/content/__init__.py`
       or otherwise make package/contract imports independent of libzim.
       Preserve existing content exports for their callers; phase 04 separately
       makes the pure extractors usable without libzim.
-- [ ] Create `zimantic/providers/registry.py`; register working `zim` and
+- [x] Create `zimantic/providers/registry.py`; register working `zim` and
       `kiwix` runtimes and move the existing per-source search dispatch into
       them.
-- [ ] Add the normalized provider-configuration seam and minimal
+- [x] Add the normalized provider-configuration seam and minimal
       `[[collections]]` TOML parser described above; providers consume normalized
       entries and later phases add provider-specific validation. Do not keep
       flat shorthands.
-- [ ] Implement the phase-01 generic catalog schema, coordinated rebuild, and
+- [x] Implement the phase-01 generic catalog schema, coordinated rebuild, and
       cross-process lease now; leave only the ZIM-specific scan ownership move
       for phase 01.
-- [ ] Update ZIM build path selection and atomic ad-hoc config persistence now.
+- [x] Update ZIM build path selection and atomic ad-hoc config persistence now.
       Adapt the existing builder and runtime to the canonical generation
       locator, immutable publication, and reader leases before phase 01 moves
       them or phase 04 generalizes the pipeline.
-- [ ] Implement the bounded, namespace-aware ZIM path resolver for
+- [x] Implement the bounded, namespace-aware ZIM path resolver for
       canonical-path identities in the working ZIM runtime.
-- [ ] Harden the existing Kiwix XML and redirect/result-link validation now;
+- [x] Harden the existing Kiwix XML and redirect/result-link validation now;
       implement bounded complete-catalog discovery and outage recovery, and
       retain those checks when phase 02 moves the remote code.
-- [ ] Implement fair per-provider admission, bounded search deadlines, and
+- [x] Implement fair per-provider admission, bounded search deadlines, and
       scheduler partial-scope reporting before exposing both working runtimes;
       phase 02 retains these mechanisms while moving Kiwix.
-- [ ] Make the Windows catalog/generation/FAISS safety tests a blocking release
+- [x] Make the Windows catalog/generation/FAISS safety tests a blocking release
       dependency. The existing Windows CI job is non-blocking and the publish
       job currently depends only on Linux; a targeted blocking job is enough.
-- [ ] Migrate the shipped config, deployment examples, and documentation that
+- [x] Migrate the shipped config, deployment examples, and documentation that
       use flat provider keys in this phase. Keep global TOML keys before the
       first `[[collections]]` table so they do not become collection fields.
-- [ ] Extend `SourceInfo` and `to_dict()` in `zimantic/contracts.py`.
-- [ ] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
+- [x] Extend `SourceInfo` and `to_dict()` in `zimantic/contracts.py`.
+- [x] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
       public import path).
-- [ ] Add provider/collection state and `resolve_source` to `Search`.
-- [ ] Implement discovery-batch ownership and provider-neutral preview
+- [x] Add provider/collection state and `resolve_source` to `Search`.
+- [x] Implement discovery-batch ownership and provider-neutral preview
       delegation, including cleanup on failed publication and reader retirement.
-- [ ] Add `CollectionInfo.to_dict()` for descriptor fields,
+- [x] Add `CollectionInfo.to_dict()` for descriptor fields,
       `CollectionSnapshot.to_dict()` for descriptor-plus-runtime fields,
       `collection_dicts()`, and make `source_dicts()` include the new fields
       using the frozen nullability/schema rules above.
-- [ ] Update route resolution internals, `search.py`, `searching/kiwix.py`,
+- [x] Update route resolution internals, `search.py`, `searching/kiwix.py`,
       `web/routes.py`, `web/app.py`, and `web/static/app.js` to use the
       canonical `key`, `provider`, `title`, and provider-neutral metadata fields
       (`mime_counts`, `native_fulltext_available`, `origin`,
       `provider_id`) instead of `mode`, `local_name`, `book`, `name`, or
       ZIM-only field names; leave the public `{zim}` to `{source}` route
       parameter rename to phase 03.
-- [ ] Add `tests/providers/test_contracts.py` and
+- [x] Add `tests/providers/test_contracts.py` and
       `tests/providers/test_registry.py`.
-- [ ] Add a short "Provider contracts" section to `CONTRIBUTING.md`.
+- [x] Add a short "Provider contracts" section to `CONTRIBUTING.md`.
 
 ## Tests
 

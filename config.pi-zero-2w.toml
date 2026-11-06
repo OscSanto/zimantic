@@ -1,7 +1,6 @@
 # Settings tuned for a Raspberry Pi Zero 2 W (4 cores, 512 MB RAM).
 # Copy this file to config.toml to use them. Build indexes elsewhere or use `build --fast`.
 
-zim_dir = "./zims"
 # Matches `zimantic model` (int8 default). Use ./model/fp16 with a GPU.
 model_dir = "./model/int8"
 index_dir = "./indexes"
@@ -9,10 +8,6 @@ index_dir = "./indexes"
 port = 8090
 # Optional URL of a running kiwix-serve HTTP API for catalog discovery and
 # remote full-text fallback; leave blank to use only local Zimantic indexes.
-kiwix_server = ""
-kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=50000"
-kiwix_catalog_limit = 50000
-max_kiwix_response_bytes = 67108864
 
 page_size = 10
 # Smaller pool to reduce cache and ranking work.
@@ -45,3 +40,18 @@ source_timeout = 12
 
 cache_size = 64
 cache_bytes = 8_388_608  # 8 MiB per cache
+
+[[collections]]
+type = "zim"
+name = "library"
+path = "./zims"
+
+# [[collections]]
+# type = "kiwix"
+# name = "kiwix"
+# server = "http://localhost:8085"
+# catalog_path = "/kiwix/catalog/v2/entries?count=50000"
+# catalog_limit = 1000
+# max_catalog_entries = 50000
+# max_response_bytes = 67108864
+# max_remote_sources = 100

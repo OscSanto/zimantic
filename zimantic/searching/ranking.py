@@ -60,21 +60,21 @@ def _collect_ranked_candidates(source_results: list[SourceResult]):
     semantic.sort(
         key=lambda item: (
             -item[0],
-            source_by_key[item[1]].name.casefold(),
+            (source_by_key[item[1]].title or source_by_key[item[1]].key).casefold(),
             item[2]["path"],
         )
     )
     keyword.sort(
         key=lambda item: (
             item[0],
-            source_by_key[item[1]].name.casefold(),
+            (source_by_key[item[1]].title or source_by_key[item[1]].key).casefold(),
             item[2]["path"],
         )
     )
     fulltext.sort(
         key=lambda item: (
             item[0],
-            source_by_key[item[1]].name.casefold(),
+            (source_by_key[item[1]].title or source_by_key[item[1]].key).casefold(),
             item[2]["path"],
         )
     )

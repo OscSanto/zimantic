@@ -49,8 +49,11 @@ from .content.serving import (
     read_archive_icon,
     resolve_article_entry,
 )
-from .contracts import SourceInfo, SourceResult
+from .contracts import SourceInfo, SourceResult, encode_document_id
+from .media_types import classify_mime_counts
 from .libzim_compat import get_entry_by_id, search_paths
+from .providers.base import CollectionInfo, CollectionSnapshot, SourceQuery
+from .providers.config import ProviderConfig, RuntimeConfig, ZimConfig, KiwixConfig
 from .model_meta import (
     MODEL_PROBE_SHAPE_KEY,
     MODEL_PROBE_TEXTS_KEY,
@@ -228,36 +231,39 @@ def _source_info_from_metadata(
     metadata: dict[str, Any],
     *,
     key: str,
-    local_name: str,
-    available: bool,
+    provider: str,
+    collection_key: str = "",
+    collection_label: str | None = None,
     searchable: bool,
     icon_url: str | None,
-    error: str | None = None,
+    title: str | None = None,
+    homepage: str | None = None,
+    media_types: tuple[str, ...] = (),
+    item_count: int | None = None,
+    provider_id: str | None = None,
 ) -> SourceInfo:
-    """Build one local ``SourceInfo`` from canonical catalog/archive metadata.
-
-    Keeping this mapping in one place prevents the catalog-backed and
-    archive-scan fallback paths from drifting apart (for example, one returning
-    a bool ``has_fulltext_index`` and the other returning ``0``/``1``).
-    """
+    """Build one canonical ``SourceInfo`` from catalog/archive metadata."""
     raw_size = metadata.get("size")
-    raw_articles = metadata.get("article_count")
+    raw_items = metadata.get("item_count", metadata.get("entry_count"))
     raw_media = metadata.get("media_count")
-    raw_fulltext = metadata.get("has_fulltext_index")
+    raw_fulltext = metadata.get("native_fulltext_available")
+    if raw_fulltext is None:
+        raw_fulltext = metadata.get("has_fulltext_index")
     return SourceInfo(
         key=key,
-        name=local_name,
-        book=local_name,
-        mode="local",
-        local_name=local_name,
-        available=available,
-        searchable=bool(searchable) and available,
-        error=error,
-        homepage=metadata.get("homepage") if available else None,
-        icon_path=metadata.get("icon_path") or None,
+        provider=provider,
+        title=title or metadata.get("title") or metadata.get("name") or key,
+        collection_key=collection_key,
+        collection_label=collection_label,
+        searchable=searchable,
+        homepage=homepage if homepage is not None else metadata.get("homepage") or None,
         icon_url=icon_url,
-        intent_phrases=_intent_phrases(local_name),
-        title=metadata.get("title") or metadata.get("name") or None,
+        size=int(raw_size) if raw_size is not None else None,
+        intent_phrases=_intent_phrases(metadata.get("name") or title or key),
+        media_types=tuple(media_types),
+        item_count=(
+            int(raw_items) if raw_items is not None else None
+        ),
         description=metadata.get("description") or None,
         long_description=metadata.get("long_description") or None,
         creator=metadata.get("creator") or None,
@@ -265,22 +271,16 @@ def _source_info_from_metadata(
         language=metadata.get("language") or None,
         date=metadata.get("date") or None,
         tags=_source_tags(metadata),
-        size=int(raw_size) if raw_size is not None else None,
-        article_count=int(raw_articles) if raw_articles is not None else None,
-        uuid=metadata.get("uuid") or None,
-        perma_ref=perma_ref(local_name),
-        flavour=metadata.get("flavour") or None,
         category=metadata.get("category") or None,
-        media_count=int(raw_media) if raw_media is not None else None,
         license=metadata.get("license") or None,
-        scraper=metadata.get("scraper") or None,
-        source=metadata.get("source") or None,
+        origin=metadata.get("origin") or None,
         attribution=metadata.get("attribution") or None,
         relation=metadata.get("relation") or None,
-        counter=metadata.get("counter") or None,
-        has_fulltext_index=(
+        mime_counts=metadata.get("mime_counts") or metadata.get("counter") or None,
+        native_fulltext_available=(
             None if raw_fulltext is None else bool(raw_fulltext)
         ),
+        provider_id=provider_id or metadata.get("uuid") or None,
     )
 
 
@@ -372,30 +372,28 @@ class SearchBusyError(Exception):
     """Too many searches are already running; the client should retry."""
 
 
-def _local_source_rank(source: SourceInfo) -> tuple:
-    """Preference order for one copy of a local book.
+def _source_title(source: SourceInfo) -> str:
+    return source.title or source.key
 
-    Readability and searchability come first, then the larger archive. A bigger
-    copy is usually the more complete download and may contain larger artwork
-    or media, so it wins over a newer but smaller flavour of the same book.
-    """
+
+def _local_source_rank(source: SourceInfo) -> tuple:
+    """Preference order for one copy of a local book."""
     try:
-        article_count = int(source.article_count or 0)
+        item_count = int(source.item_count or 0)
     except (TypeError, ValueError):
-        article_count = 0
+        item_count = 0
     try:
         size = int(source.size or 0)
     except (TypeError, ValueError):
         size = 0
-    name = source.name or ""
+    title = _source_title(source)
     return (
-        bool(source.available),
         bool(source.searchable),
         size,
-        article_count,
+        item_count,
         str(source.date or ""),
-        -len(name),
-        name,
+        -len(title),
+        title,
     )
 
 
@@ -405,12 +403,49 @@ def _choose_sources(sources: list[SourceInfo], identity) -> list[SourceInfo]:
     for source in sources:
         key = identity(source)
         if not key:
-            key = f"name:{source.name or source.local_name or source.key}"
+            key = f"key:{source.key}"
         rank = _local_source_rank(source)
         current = chosen.get(key)
         if current is None or rank > current[0]:
             chosen[key] = (rank, source)
     return [source for _rank, source in chosen.values()]
+
+
+class _ProviderBackend:
+    """Adapter that lets a runtime call the core's working search paths.
+
+    Kept private: phase 01/02 move these implementations behind the providers
+    without teaching the core provider-specific operations.
+    """
+
+    def __init__(self, search: "Search") -> None:
+        self.search = search
+
+    def search_source(self, source: SourceInfo, request: SourceQuery) -> SourceResult:
+        return self.search._dispatch_source(source, request)
+
+    def suggest_source(self, source: SourceInfo, query: str, limit: int):
+        return self.search._suggest_source(source, query, limit)
+
+    def preview_source(
+        self,
+        source: SourceInfo,
+        document,
+        *,
+        max_chars: int,
+        max_bytes: int,
+        deadline: float | None,
+    ) -> tuple[str, str | None]:
+        return self.search._preview_source(
+            source,
+            document,
+            max_chars=max_chars,
+            max_bytes=max_bytes,
+            deadline=deadline,
+        )
+
+    def reload(self) -> None:
+        self.search.reload()
 
 
 class Search:
@@ -587,6 +622,32 @@ class Search:
         )
         self._library_scan_at = 0.0
         self._catalog_initialized = True
+        # Provider/collection state. Discovery ownership still partly lives in
+        # Search in phase 00; these are the seams later phases move behind.
+        from .providers.config import RuntimeConfig
+        from .providers.registry import get_provider
+
+        self.providers = {kind: get_provider(kind) for kind in ("zim", "kiwix")}
+        self.runtimes: dict[str, Any] = {}
+        self.collections: dict[str, CollectionInfo] = {}
+        self._discovery_batches: list[Any] = []
+        self._collection_snapshots: dict[str, CollectionSnapshot] = {}
+        self._source_index: dict[str, str] = {}
+        self._process_token = secrets.token_hex(8)
+        self._aggregate_revision = 0
+        runtime_config = cfg.get("runtime_config")
+        if not isinstance(runtime_config, RuntimeConfig):
+            runtime_config = RuntimeConfig(
+                settings=dict(cfg),
+                collections=tuple(cfg.get("collections") or ()),
+                config_dir=Path(cfg.get("config_dir") or Path.cwd()),
+                search_timeout_seconds=_float_config(
+                    cfg, "search_timeout_seconds", 30.0, 0.1, math.inf
+                ),
+                page_size=_int_config(cfg, "page_size", DEFAULT_PAGE_SIZE),
+            )
+        self.runtime_config = runtime_config
+        self.search_timeout_seconds = float(runtime_config.search_timeout_seconds)
         self.catalog = self._ensure_catalog()
         if self.catalog.zim_dir is not None and self.catalog.zim_dir.is_dir():
             try:
@@ -604,6 +665,7 @@ class Search:
         # refreshed in the background so an unreachable Kiwix server cannot
         # delay startup (see start_catalog_refresh).
         self.refresh_local_sources()
+        self.refresh_collections()
 
     @property
     def web_base_path(self) -> str:
@@ -1398,6 +1460,7 @@ class Search:
                 if preview_cache is not None:
                     preview_cache.clear()
             if refresh:
+                self.refresh_collections()
                 self.refresh_sources()
             if self.fulltext_pool is not None:
                 # A reload is the natural moment to retry an archive that was
@@ -1491,11 +1554,58 @@ class Search:
     def refresh_sources(self) -> list[dict[str, Any]]:
         """Refresh source metadata without making local indexes unavailable.
 
-        This includes the optional Kiwix catalog, so it performs a blocking HTTP
-        request when ``kiwix_server`` is configured. Startup calls
-        ``refresh_local_sources`` instead and refreshes the catalog in the
-        background via ``start_catalog_refresh``.
+        Configured Kiwix collections refresh their own runtime caches; the
+        legacy internal ``kiwix_server`` path remains for direct callers.
         """
+        from .providers.config import KiwixConfig, RuntimeConfig
+
+        runtime_config = getattr(self, "runtime_config", None)
+        configured = (
+            [
+                entry
+                for entry in runtime_config.collections
+                if isinstance(entry, KiwixConfig)
+            ]
+            if isinstance(runtime_config, RuntimeConfig)
+            else []
+        )
+        if configured:
+            entries: list[dict[str, str]] = []
+            for config in configured:
+                provider = self.providers.get("kiwix")
+                if provider is None:
+                    continue
+                context = None
+                try:
+                    from .providers.base import ProviderContext
+
+                    context = ProviderContext(
+                        config=runtime_config,
+                        index_dir=Path(self.cfg.get("index_dir") or "."),
+                        web_base_path=self.web_base_path,
+                        logger=logger,
+                    )
+                    batch = provider.discover(config, context)
+                    runtime = batch.open(batch.collections[0])
+                    runtime.refresh(wait=True)
+                    with self._state_lock:
+                        self.runtimes[runtime.collection.key] = runtime
+                        self.collections[runtime.collection.key] = runtime.collection
+                        self._collection_snapshots[runtime.collection.key] = (
+                            runtime.snapshot
+                        )
+                    for source in runtime.sources:
+                        book = getattr(source, "_kiwix_book", source.key)
+                        entries.append(
+                            {"name": source.title or book, "book": book}
+                        )
+                except Exception as error:
+                    logger.warning(
+                        "zimantic: Kiwix collection %s refresh failed (%s)",
+                        config.name,
+                        error,
+                    )
+            return self._rebuild_sources(entries)
         server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
         if not server:
             with self._state_lock:
@@ -1529,8 +1639,15 @@ class Search:
         Catalog sources are only needed for books without a local index, so the
         server must not wait (up to ``source_timeout``) for Kiwix to answer.
         """
+        from .providers.config import KiwixConfig, RuntimeConfig
+
+        runtime_config = getattr(self, "runtime_config", None)
+        has_configured = isinstance(runtime_config, RuntimeConfig) and any(
+            isinstance(entry, KiwixConfig)
+            for entry in runtime_config.collections
+        )
         server = str(self.cfg.get("kiwix_server") or "").strip()
-        if not server:
+        if not server and not has_configured:
             return
 
         def _refresh() -> None:
@@ -1543,6 +1660,69 @@ class Search:
 
         threading.Thread(target=_refresh, name="zimantic-catalog", daemon=True).start()
 
+    def _configured_collection(self, kind: str) -> tuple[str, str]:
+        """Return ``(collection_key, label)`` for the first configured kind."""
+        runtime_config = getattr(self, "runtime_config", None)
+        entries = getattr(runtime_config, "collections", ())
+        for entry in entries:
+            if entry.kind == kind:
+                if kind == "zim":
+                    from .providers.zim import zim_collection_key
+
+                    return zim_collection_key(entry.name), entry.label or entry.name
+                if kind == "kiwix":
+                    from .providers.kiwix import kiwix_collection_key
+
+                    return kiwix_collection_key(entry.name), entry.label or "Kiwix"
+        if kind == "zim":
+            return "zim:library", "Library"
+        return "kiwix:library", "Kiwix"
+
+    def _zim_source_key(self, local_name: str, path: str | Path | None = None) -> str:
+        from .providers.zim import zim_source_key
+
+        collection_key, _label = self._configured_collection("zim")
+        collection_name = collection_key.split(":", 1)[-1]
+        relative = local_name + ".zim"
+        root_entry = next(
+            (
+                entry
+                for entry in getattr(
+                    getattr(self, "runtime_config", None), "collections", ()
+                )
+                if getattr(entry, "kind", None) == "zim"
+            ),
+            None,
+        )
+        if path is not None and root_entry is not None:
+            root = Path(root_entry.path)
+            archive = Path(path)
+            if root.is_file():
+                relative = archive.name
+            else:
+                try:
+                    relative = archive.resolve().relative_to(root.resolve()).as_posix()
+                except (OSError, ValueError):
+                    relative = archive.name
+        # The digest derives from the logical root-relative archive identity,
+        # not the absolute path, so relocating a root preserves the key.
+        return zim_source_key(collection_name, relative)
+
+    def _index_name(self, source: SourceInfo) -> str | None:
+        """Resolve a source to its internal local index name, if any."""
+        mapped = getattr(self, "_source_index", {}).get(source.key)
+        if mapped is not None:
+            return mapped
+        # Legacy/manual test sources carry a local_name matching the index key.
+        legacy = getattr(source, "local_name", None)
+        if legacy and legacy in self.indexes:
+            return legacy
+        if source.key in self.indexes:
+            return source.key
+        if legacy:
+            return legacy
+        return None
+
     def _source_from_catalog(
         self,
         record,
@@ -1551,148 +1731,129 @@ class Search:
         local_name: str,
         searchable: bool | None = None,
     ) -> SourceInfo:
-        """Build one local ``SourceInfo`` from a catalog row.
-
-        Used by both the searchable-source rebuild and the installed-library
-        view so metadata, availability, icon, and perma-ref handling cannot
-        drift between the two.
-        """
+        """Build one canonical local ``SourceInfo`` from a catalog row."""
         meta = record.to_source_metadata()
-        available = bool(record.available)
-        error = None
-        if not available:
-            error = record.last_error or "ZIM archive is unavailable"
+        collection_key, collection_label = self._configured_collection("zim")
         if searchable is None:
-            searchable = available
-        searchable = bool(searchable) and available
+            searchable = True
         icon_url = _source_icon_url(
-            local_name,
-            bool(record.favicon or meta["icon_path"]),
+            key,
+            bool(record.favicon or meta.get("icon_path")),
             self.web_base_path,
         )
         return _source_info_from_metadata(
             meta,
             key=key,
-            local_name=local_name,
-            available=available,
-            searchable=searchable,
+            provider="zim",
+            collection_key=collection_key,
+            collection_label=collection_label,
+            searchable=bool(searchable),
             icon_url=icon_url,
-            error=error,
+            title=meta.get("title") or meta.get("name") or local_name,
+            homepage=meta.get("homepage"),
+            media_types=classify_mime_counts(meta.get("mime_counts")),
+            item_count=meta.get("entry_count") or meta.get("article_count"),
+            provider_id=meta.get("provider_id") or meta.get("uuid"),
         )
 
     def _rebuild_sources(self, entries: list[dict[str, str]]) -> list[dict[str, Any]]:
         with self._state_lock:
+            collection_key, collection_label = self._configured_collection("zim")
             local: dict[str, SourceInfo] = {}
+            index_by_key: dict[str, str] = {}
             for local_name in self.indexes:
                 index = self.indexes[local_name]
-                key = _zim_key(local_name)
-                if key in local:
-                    # Two local ZIMs can share a base name (a dated archive and
-                    # an undated one). Fall back to the unique index name, and
-                    # add a numeric suffix if even that is taken.
-                    key = local_name
-                    suffix = 2
-                    while key in local:
-                        key = f"{local_name}-{suffix}"
-                        suffix += 1
-                    logger.info(
-                        "zimantic: %s shares a base name with another local "
-                        "source; exposing the variant as %r",
-                        local_name,
-                        key,
-                    )
                 record = self._ensure_catalog().get_stem_size(
                     local_name, index.source_size
                 )
-                if record is not None:
-                    local[key] = self._source_from_catalog(
-                        record,
-                        key=key,
-                        local_name=local_name,
-                    )
-                    continue
-
-                # The catalog is authoritative for archive metadata. Keep a
-                # minimal searchable source if its row is unavailable.
-                local[key] = SourceInfo(
-                    key=key,
-                    name=local_name,
-                    book=local_name,
-                    mode="local",
-                    local_name=local_name,
-                    intent_phrases=_intent_phrases(local_name),
-                    size=index.source_size,
+                key = self._zim_source_key(
+                    local_name, record.path if record is not None else None
                 )
+                suffix = 2
+                while key in local:
+                    key = f"{self._zim_source_key(local_name)}-{suffix}"
+                    suffix += 1
+                if record is not None:
+                    source = self._source_from_catalog(
+                        record, key=key, local_name=local_name
+                    )
+                else:
+                    source = SourceInfo(
+                        key=key,
+                        provider="zim",
+                        title=local_name,
+                        collection_key=collection_key,
+                        collection_label=collection_label,
+                        searchable=True,
+                        intent_phrases=_intent_phrases(local_name),
+                        size=index.source_size,
+                    )
+                local[key] = source
+                index_by_key[key] = local_name
 
             if local:
+                initial_index = dict(index_by_key)
                 chosen = _choose_sources(
                     list(local.values()),
                     lambda source: _book_identity(
-                        source.local_name or source.name or source.key
+                        index_by_key.get(source.key, source.key)
                     ),
                 )
-                # Reassign keys after choosing a winner so the surviving
-                # version gets the canonical date-stripped key instead of a
-                # collision suffix assigned to a now-hidden sibling.
                 local = {}
+                index_by_key = {}
                 used_keys: set[str] = set()
                 for source in chosen:
-                    local_name = source.local_name or source.name or source.key
-                    key = _zim_key(local_name)
-                    if key in used_keys:
-                        key = source.key or local_name
+                    local_name = initial_index.get(source.key) or source.title or source.key
+                    key = source.key
                     suffix = 2
                     while key in used_keys:
-                        key = f"{local_name}-{suffix}"
+                        key = f"{source.key}-{suffix}"
                         suffix += 1
                     used_keys.add(key)
                     local[key] = replace(source, key=key)
+                    index_by_key[key] = local_name
 
             merged = dict(local)
             local_identities = {
-                _book_identity(
-                    source.local_name or source.name or source.key
-                )
+                _book_identity(index_by_key.get(source.key, source.key))
                 for source in local.values()
             }
             remote_identities: set[str] = set()
+            remote_collection_key, remote_label = self._configured_collection("kiwix")
+            remote_name = remote_collection_key.split(":", 1)[-1]
+            from .providers.kiwix import kiwix_source_key
+
             for entry in entries:
                 identity = _book_identity(entry["book"])
-                key = _zim_key(entry["book"])
-                if (
-                    identity in local_identities
-                    or identity in remote_identities
-                    or merged.get(key) is not None
-                ):
-                    # A local source is authoritative for its own identity.
-                    # Merging the remote catalog's display name here used to
-                    # overwrite the local name (and made "is this indexed?"
-                    # checks look at the wrong field); the local catalog and
-                    # archive already provide the title.
+                key = kiwix_source_key(remote_name, entry["book"])
+                if identity in local_identities or identity in remote_identities:
                     continue
                 remote_identities.add(identity)
                 merged[key] = SourceInfo(
                     key=key,
-                    name=entry["name"],
-                    book=entry["book"],
-                    mode="kiwix",
-                    available=True,
-                    intent_phrases=_intent_phrases(entry["book"]),
+                    provider="kiwix",
+                    title=entry.get("name") or entry["book"],
+                    collection_key=remote_collection_key,
+                    collection_label=remote_label,
+                    searchable=True,
                 )
 
             old_sources = self.sources
-            self.sources = dict(sorted(merged.items(), key=lambda pair: pair[1].name.casefold()))
+            self.sources = dict(
+                sorted(
+                    merged.items(),
+                    key=lambda pair: (_source_title(pair[1]).casefold(), pair[1].key),
+                )
+            )
+            self._source_index = index_by_key
             changed = self.sources != old_sources
             if changed:
-                # Bump the generation in the same critical section that swaps
-                # the source snapshot, so a concurrent search can never pair
-                # the old source list with the new generation.
                 self._cache_generation += 1
+                self._aggregate_revision = (
+                    getattr(self, "_aggregate_revision", 0) + 1
+                )
             sources = self.source_dicts()
         if changed:
-            # The set of searchable sources changed, so prior answers can be stale.
-            # Keeping the cache while the source set is unchanged lets repeated
-            # queries (for example, page reloads) be answered without recomputing.
             self._invalidate_library_cache()
             self._remote_limit_warned = False
             self.cache.clear()
@@ -1709,6 +1870,177 @@ class Search:
             urlopen_fn=urlopen,
             sleep_fn=time.sleep,
         )
+
+    def resolve_source(self, identifier: str) -> SourceInfo | None:
+        """Resolve an exact canonical source key; no aliases or fallbacks."""
+        with self._state_lock:
+            return getattr(self, "sources", {}).get(str(identifier))
+
+    def _configured_provider_entries(self) -> tuple[ProviderConfig, ...]:
+        runtime_config = getattr(self, "runtime_config", None)
+        entries = list(getattr(runtime_config, "collections", ()))
+        if entries:
+            return tuple(entries)
+        # Compatibility for direct Search callers/tests that still pass the
+        # internal zim_dir/kiwix_server settings. The TOML loader never accepts
+        # these flat keys from users.
+        computed: list[ProviderConfig] = []
+        zim_dir = self.cfg.get("zim_dir")
+        if zim_dir:
+            computed.append(ZimConfig(name="library", path=str(zim_dir)))
+        server = str(self.cfg.get("kiwix_server") or "").strip()
+        if server:
+            computed.append(
+                KiwixConfig(
+                    name="kiwix",
+                    server=server.rstrip("/"),
+                    catalog_path=self.cfg.get("kiwix_catalog_path"),
+                    catalog_limit=self.cfg.get("kiwix_catalog_limit"),
+                    max_catalog_entries=self.cfg.get("max_catalog_entries"),
+                    max_response_bytes=self.cfg.get("max_kiwix_response_bytes"),
+                    max_remote_sources=self.cfg.get("max_remote_sources"),
+                )
+            )
+        return tuple(computed)
+
+    def refresh_collections(self, *, wait: bool = False) -> list[dict[str, Any]]:
+        """Rerun provider discovery for configured entries and publish snapshots."""
+        from .providers.base import ProviderContext
+
+        runtime_config = getattr(self, "runtime_config", None)
+        if runtime_config is None:
+            # Lightweight test doubles intentionally skip __init__; there is no
+            # configured entry set to rediscover.
+            return self.source_dicts()
+        backend = _ProviderBackend(self)
+        ctx = ProviderContext(
+            config=runtime_config,
+            index_dir=Path(self.cfg.get("index_dir") or "."),
+            web_base_path=self.web_base_path,
+            logger=logger,
+        )
+        new_runtimes: dict[str, Any] = {}
+        new_collections: dict[str, CollectionInfo] = {}
+        new_batches: list[Any] = []
+        diagnostics: list[str] = []
+        for entry in self._configured_provider_entries():
+            provider = self.providers.get(entry.kind)
+            if provider is None:
+                diagnostics.append(f"no provider registered for {entry.kind!r}")
+                continue
+            try:
+                batch = provider.discover(entry, ctx)
+            except Exception as error:
+                diagnostics.append(f"{entry.name}: {entry.kind} discovery failed: {error}")
+                continue
+            try:
+                opened = []
+                for collection in batch.collections:
+                    runtime = batch.open(collection)
+                    if hasattr(runtime, "_backend"):
+                        runtime._backend = backend
+                    new_runtimes[collection.key] = runtime
+                    new_collections[collection.key] = collection
+                    opened.append(runtime)
+                new_batches.append(batch)
+            except Exception as error:
+                diagnostics.append(f"{entry.name}: {entry.kind} open failed: {error}")
+                for runtime in new_runtimes.values():
+                    try:
+                        runtime.close()
+                    except Exception:
+                        pass
+                batch.close()
+        with self._state_lock:
+            old_runtimes = self.runtimes
+            old_batches = getattr(self, "_discovery_batches", [])
+            self.runtimes = new_runtimes
+            self.collections = new_collections
+            self._discovery_batches = new_batches
+            self._collection_snapshots = {
+                key: runtime.snapshot for key, runtime in new_runtimes.items()
+            }
+            self._aggregate_revision = getattr(self, "_aggregate_revision", 0) + 1
+            sources = self.source_dicts()
+        for runtime in old_runtimes.values():
+            try:
+                runtime.close()
+            except Exception:
+                pass
+        for batch in old_batches:
+            try:
+                batch.close()
+            except Exception:
+                pass
+        if diagnostics:
+            for message in diagnostics:
+                logger.warning("zimantic: collection discovery: %s", message)
+        return sources
+
+    def collection_dicts(self) -> list[dict[str, Any]]:
+        """Serialize the current collection snapshots."""
+        with self._state_lock:
+            snapshots = dict(self._collection_snapshots)
+        return [
+            snapshot.to_dict()
+            for _key, snapshot in sorted(snapshots.items())
+        ]
+
+    def snapshot_token(self) -> tuple[str, int]:
+        """Process-instance identity plus aggregate publication revision."""
+        with self._state_lock:
+            return self._process_token, self._aggregate_revision
+
+    def _suggest_source(self, source: SourceInfo, query: str, limit: int):
+        # Reuse the core title-prefix path without recursing through the full
+        # suggestion merge.
+        if source.provider != "zim":
+            return []
+        index_name = self._index_name(source)
+        if not index_name:
+            return []
+        with self._state_lock:
+            index = self.indexes.get(index_name)
+        if index is None:
+            return []
+        try:
+            self._acquire_index(index)
+        except RuntimeError:
+            return []
+        try:
+            db = self._db_for(index)
+            if db is None:
+                return []
+            rows = db.execute(
+                "SELECT rowid FROM docs WHERE docs MATCH ? ORDER BY rank LIMIT ?",
+                (_title_prefix_query(query), max(1, limit)),
+            ).fetchall()
+            docs = self._fetch_docs(source, db, {int(row[0]) for row in rows})
+            return [docs[int(row[0])] for row in rows if int(row[0]) in docs]
+        except sqlite3.Error:
+            return []
+        finally:
+            self._release_index(index)
+
+    def _preview_source(
+        self,
+        source: SourceInfo,
+        document,
+        *,
+        max_chars: int,
+        max_bytes: int,
+        deadline: float | None,
+    ) -> tuple[str, str | None]:
+        path = str(document.get("path") or "")
+        if source.provider != "zim" or not path:
+            return str(document.get("lead") or ""), document.get("mimetype")
+        previews = self._extract_previews(
+            self._index_name(source) or "", [dict(document)]
+        )
+        lead = previews.get(document.get("id", ""), "")
+        if max_chars > 0:
+            lead = lead[:max_chars]
+        return lead, document.get("mimetype")
 
     def source_dicts(self) -> list[dict[str, Any]]:
         with self._state_lock:
@@ -1737,25 +2069,26 @@ class Search:
             self._library_scan_token = getattr(self, "_library_scan_token", 0) + 1
 
     def library_dicts(self) -> list[dict[str, Any]]:
-        """Return metadata for every local ZIM in the library.
+        """Return metadata for every local/document library source.
 
-        Unreadable archives are included with ``available: false`` so the UI can
-        explain why a ZIM cannot be opened. Readable archives without a
-        resolvable homepage are also included; the frontend can offer a random
-        article instead of a homepage link.
+        Includes readable-but-unsearchable archives and Kiwix books.  Discovery
+        failures are collection-level diagnostics, not per-source availability
+        state.
         """
         with self._state_lock:
             indexed = {
-                source.local_name: source
+                self._index_name(source): source
                 for source in self.sources.values()
-                if source.mode == "local" and source.local_name
+                if source.provider == "zim" and self._index_name(source)
             }
             searchable_names = set(self.indexes)
+            external = [
+                source
+                for source in self.sources.values()
+                if source.provider != "zim"
+            ]
         self._scan_catalog(force=False)
         catalog = self._ensure_catalog()
-        # One card per UUID, then one per book identity (dated and
-        # flavour variants of the same local book collapse together). Prefer a
-        # readable, searchable copy, then the newest, fuller archive.
         all_sources: list[SourceInfo] = []
         for zim_name, _zim_path in sorted(
             self._scan_zim_paths(refresh=False).items()
@@ -1764,7 +2097,9 @@ class Search:
             source = (
                 self._source_from_catalog(
                     record,
-                    key=_zim_key(zim_name),
+                    key=self._zim_source_key(
+                        zim_name, record.path if record is not None else None
+                    ),
                     local_name=zim_name,
                     searchable=zim_name in searchable_names,
                 )
@@ -1774,19 +2109,18 @@ class Search:
             if source is None:
                 continue
             all_sources.append(source)
+        all_sources.extend(external)
         chosen = _choose_sources(
             all_sources,
             lambda source: (
-                f"uuid:{source.uuid}"
-                if source.uuid
-                else f"name:{source.name or source.local_name or source.key}"
+                f"uuid:{source.provider_id or getattr(source, 'uuid', None)}"
+                if (source.provider_id or getattr(source, 'uuid', None))
+                else f"key:{source.key}"
             ),
         )
         chosen = _choose_sources(
             chosen,
-            lambda source: _book_identity(
-                source.local_name or source.name or source.key
-            ),
+            lambda source: _book_identity(source.title or source.key),
         )
         return [
             source.to_dict(include_metadata=True)
@@ -1847,8 +2181,24 @@ class Search:
         with self._state_lock:
             indexes = list(self.indexes.values())
             self.indexes.clear()
+            runtimes = list(getattr(self, "runtimes", {}).values())
+            batches = list(getattr(self, "_discovery_batches", []))
+            self.runtimes = {}
+            self.collections = {}
+            self._collection_snapshots = {}
+            self._discovery_batches = []
         for index in indexes:
             self._close_index(index)
+        for runtime in runtimes:
+            try:
+                runtime.close()
+            except Exception:
+                pass
+        for batch in batches:
+            try:
+                batch.close()
+            except Exception:
+                pass
         catalog = self.catalog
         if catalog is not None:
             catalog.close()
@@ -1881,6 +2231,29 @@ class Search:
             self.max_article_bytes,
         )
 
+    def _local_lookup(self, identifier: str) -> tuple[SourceInfo | None, str]:
+        """Resolve a route identifier to a source and internal index name."""
+        with self._state_lock:
+            source = self.resolve_source(identifier)
+        if source is not None and source.provider == "zim":
+            name = self._index_name(source)
+            if name:
+                return source, name
+        # Phase 03 renames the public route parameter; until then an index name
+        # (archive stem) remains accepted as the route identifier.
+        if identifier in self.indexes:
+            with self._state_lock:
+                source = next(
+                    (
+                        candidate
+                        for candidate in self.sources.values()
+                        if self._index_name(candidate) == identifier
+                    ),
+                    None,
+                )
+            return source, identifier
+        return None, identifier
+
     def read_article(
         self,
         zim_name: str,
@@ -1895,14 +2268,15 @@ class Search:
         loading the whole (possibly tens-of-MB) article for the shell would be
         a wasted read.
         """
+        _source, index_name = self._local_lookup(zim_name)
         with self._state_lock:
-            index = self.indexes.get(zim_name)
+            index = self.indexes.get(index_name)
         if index is None:
-            record = self._ensure_catalog().get_stem(zim_name)
+            record = self._ensure_catalog().get_stem(index_name)
             zim_path = (
                 Path(record.path)
-                if record is not None and record.available
-                else self._scan_zim_paths().get(zim_name)
+                if record is not None and getattr(record, "available", 1)
+                else self._scan_zim_paths().get(index_name)
             )
             if zim_path is None:
                 raise ArticleSourceNotFoundError("ZIM not found")
@@ -1910,7 +2284,7 @@ class Search:
                 archive = Archive(zim_path)
             except (OSError, RuntimeError, ValueError) as error:
                 raise ArticleUnavailableError("ZIM archive is unavailable") from error
-            return self._read_archive_article(archive, zim_name, path, head_only)
+            return self._read_archive_article(archive, index_name, path, head_only)
         archive = index.ensure_open()
         if archive is None:
             raise ArticleUnavailableError("ZIM archive is unavailable")
@@ -1925,7 +2299,7 @@ class Search:
             with index.read_lock:
                 return self._read_archive_article(
                     archive,
-                    zim_name,
+                    index_name,
                     path,
                     head_only,
                 )
@@ -1948,14 +2322,15 @@ class Search:
         """
         try:
             requested_path = self._article_path(path)
+            _source, index_name = self._local_lookup(zim_name)
             with self._state_lock:
-                index = self.indexes.get(zim_name)
+                index = self.indexes.get(index_name)
             if index is None:
-                record = self._ensure_catalog().get_stem(zim_name)
+                record = self._ensure_catalog().get_stem(index_name)
                 zim_path = (
                     Path(record.path)
-                    if record is not None and record.available
-                    else self._scan_zim_paths().get(zim_name)
+                    if record is not None and getattr(record, "available", 1)
+                    else self._scan_zim_paths().get(index_name)
                 )
                 if zim_path is None:
                     return False
@@ -2000,25 +2375,17 @@ class Search:
 
     def read_source_icon(self, zim_name: str) -> dict[str, Any]:
         """Read the illustration selected for a local ZIM."""
-        with self._state_lock:
-            source = next(
-                (
-                    source
-                    for source in self.sources.values()
-                    if source.local_name == zim_name
-                ),
-                None,
-            )
+        source, index_name = self._local_lookup(zim_name)
         # Consult the catalog even when the ZIM has no search source (for
         # example a library-only archive or a duplicate removed from search).
         # The favicon BLOB is the same illustration selected during discovery.
-        data, mime = self._ensure_catalog().favicon(zim_name)
+        data, mime = self._ensure_catalog().favicon(index_name)
         if data:
             return {
-                "zim": zim_name,
+                "zim": index_name,
                 "path": None,
                 "title": (
-                    source.title if source is not None and source.title else zim_name
+                    source.title if source is not None and source.title else index_name
                 ),
                 "mimetype": (mime or "application/octet-stream")
                 .split(";", 1)[0]
@@ -2026,10 +2393,16 @@ class Search:
                 .lower(),
                 "content": data,
             }
-        if source is not None and source.mode == "local" and source.icon_path:
-            return self.read_article(zim_name, source.icon_path)
+        record = self._ensure_catalog().get_stem(index_name)
+        icon_path = (
+            record.icon_path
+            if record is not None and getattr(record, "icon_path", "")
+            else None
+        )
+        if source is not None and source.provider == "zim" and icon_path:
+            return self.read_article(index_name, icon_path)
         if source is None:
-            zim_path = self._scan_zim_paths().get(zim_name)
+            zim_path = self._scan_zim_paths().get(index_name)
             if zim_path is None:
                 raise ArticleNotFoundError("source icon not found")
             try:
@@ -2041,11 +2414,11 @@ class Search:
             except (ArticleNotFoundError, ArticleUnavailableError, RuntimeError, ValueError):
                 homepage = None
             icon_path = _find_archive_icon_path(archive, homepage)
-            return self._read_archive_icon(archive, zim_name, icon_path)
-        if source.mode != "local":
+            return self._read_archive_icon(archive, index_name, icon_path)
+        if source.provider != "zim":
             raise ArticleNotFoundError("source icon not found")
         with self._state_lock:
-            index = self.indexes.get(zim_name)
+            index = self.indexes.get(index_name)
         if index is None:
             raise ArticleUnavailableError("source icon unavailable")
         archive = index.ensure_open()
@@ -2059,7 +2432,7 @@ class Search:
                 raise ArticleUnavailableError("ZIM is being reloaded") from error
             acquired = True
             with index.read_lock:
-                return self._read_archive_icon(archive, zim_name, None)
+                return self._read_archive_icon(archive, index_name, None)
         finally:
             if acquired:
                 self._release_index(index)
@@ -2093,10 +2466,10 @@ class Search:
             candidates = [
                 source
                 for source in self.sources.values()
-                if source.mode == "local"
-                and source.available
-                and source.local_name
+                if source.provider == "zim"
+                and source.searchable
                 and source.homepage
+                and self._index_name(source)
             ]
         if not candidates:
             raise ArticleNotFoundError("no local source has a homepage")
@@ -2104,8 +2477,9 @@ class Search:
 
     def random_article_path(self, zim_name: str) -> str:
         """Return a random indexed article path without changing search state."""
+        _source, index_name = self._local_lookup(zim_name)
         with self._state_lock:
-            index = self.indexes.get(zim_name)
+            index = self.indexes.get(index_name)
         if index is None:
             raise ArticleSourceNotFoundError("ZIM not found")
         if index.ensure_open() is None:
@@ -2298,8 +2672,8 @@ class Search:
     def _bounded_available_sources(
         self, available: list[SourceInfo]
     ) -> list[SourceInfo]:
-        """Limit remote catalog fan-out for an unscoped search."""
-        limit = getattr(
+        """Limit remote catalog fan-out for an unscoped search per collection."""
+        default_limit = getattr(
             self,
             "max_remote_sources",
             _int_config(
@@ -2309,45 +2683,53 @@ class Search:
                 minimum=0,
             ),
         )
-        remote = [source for source in available if source.mode == "kiwix"]
-        if len(remote) <= limit:
-            return available
-        kept = {source.key for source in remote[:limit]}
-        if not getattr(self, "_remote_limit_warned", False):
-            logger.warning(
-                "zimantic: %d remote Kiwix sources available; searching the first %d "
-                "(set max_remote_sources to change this)",
-                len(remote),
-                limit,
-            )
-            self._remote_limit_warned = True
+        by_collection: dict[str, list[SourceInfo]] = {}
+        for source in available:
+            if source.provider == "kiwix":
+                by_collection.setdefault(source.collection_key, []).append(source)
+        keep: set[str] = set()
+        for collection_key, remote in by_collection.items():
+            limit = default_limit
+            runtime = getattr(self, "runtimes", {}).get(collection_key)
+            if runtime is not None:
+                configured = runtime.max_sources_per_search()
+                if configured is not None:
+                    limit = configured
+            if len(remote) <= limit:
+                keep.update(source.key for source in remote)
+                continue
+            keep.update(source.key for source in remote[:limit])
+            if not getattr(self, "_remote_limit_warned", False):
+                logger.warning(
+                    "zimantic: %d remote Kiwix sources available in %s; "
+                    "searching the first %d (configure max_remote_sources to change this)",
+                    len(remote),
+                    collection_key,
+                    limit,
+                )
+                self._remote_limit_warned = True
         return [
             source
             for source in available
-            if source.mode != "kiwix" or source.key in kept
+            if source.provider != "kiwix" or source.key in keep
         ]
 
-    @staticmethod
     def _select_sources(
-        available: list[SourceInfo], zim: list[str]
+        self, available: list[SourceInfo], zim: list[str]
     ) -> list[SourceInfo]:
         wanted = set(zim)
-        # Match the same aliases that a Kiwix catalog link may use: a remote
-        # book slug carries a date suffix, while a local index is identified by
-        # its date-stripped key. Comparing base keys preserves those links
-        # without overwriting the local source's own name/book metadata.
-        wanted_keys = {_zim_key(value) for value in wanted}
-        wanted_books = {
-            _book_identity(value) for value in wanted if str(value or "").strip()
-        }
+        selected = [source for source in available if source.key in wanted]
+        if selected:
+            return selected
+        # Until phase 03 renames the route parameter, an archive-stem/index
+        # identifier remains accepted as an internal selection fallback.
+        by_index: dict[str, SourceInfo] = {}
+        for source in available:
+            index_name = self._index_name(source)
+            if index_name:
+                by_index[index_name] = source
         return [
-            source
-            for source in available
-            if wanted.intersection({source.key, source.name, source.book, source.local_name})
-            or source.key in wanted_keys
-            or _book_identity(
-                source.local_name or source.name or source.key
-            ) in wanted_books
+            by_index[name] for name in wanted if name in by_index
         ]
 
     def _search_scope(
@@ -2364,13 +2746,17 @@ class Search:
         explicit selection that includes a source outside that cap is honored.
         """
         with self._state_lock:
-            available = [source for source in self.sources.values() if source.available]
+            available = [source for source in self.sources.values() if source.searchable]
         bounded = self._bounded_available_sources(available)
+        self._scope_requested = len(available)
+        self._scope_source_cap = len(bounded) < len(available)
         if zim is None:
             return bounded, False, None
         if not zim:
             # An explicit empty list is a deliberately empty scope (the cache
             # key distinguishes it from None); it must not mean "all sources".
+            self._scope_requested = 0
+            self._scope_source_cap = False
             return [], True, ()
 
         selected = self._select_sources(available, zim)
@@ -2388,6 +2774,8 @@ class Search:
         if len(selected) <= limit and all(
             source.key in bounded_keys for source in selected
         ):
+            self._scope_requested = len(selected)
+            self._scope_source_cap = False
             return (
                 selected,
                 bool(selected),
@@ -2397,6 +2785,8 @@ class Search:
             # The user named a source that the unscoped remote cap would have
             # dropped. Honor the explicit selection instead of silently
             # searching a different set.
+            self._scope_requested = len(selected)
+            self._scope_source_cap = False
             return (
                 selected,
                 bool(selected),
@@ -2512,6 +2902,12 @@ class Search:
             # like an absent display filter instead of returning an empty page.
             with self._state_lock:
                 known = {item.key for item in self.sources.values()}
+                by_index = {
+                    self._index_name(item): item.key
+                    for item in self.sources.values()
+                    if self._index_name(item)
+                }
+            selected = {by_index.get(item, item) for item in selected}
             selected &= known
         scoped = pool if not selected else [
             doc for doc in pool if doc.get("source_key") in selected
@@ -2548,6 +2944,7 @@ class Search:
         limit: int,
         matched_by: dict[str, int] | None = None,
         include_results: bool = True,
+        scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """One streamed snapshot/done event shaped from a page state.
 
@@ -2574,6 +2971,8 @@ class Search:
         }
         if matched_by is not None:
             event["matched_by"] = matched_by
+        if scope is not None:
+            event["scope"] = scope
         return event
 
     @staticmethod
@@ -2600,9 +2999,9 @@ class Search:
         with self._state_lock:
             indexes = dict(self.indexes)
         wants_semantic = any(
-            source.mode == "local"
-            and source.local_name in indexes
-            and indexes[source.local_name].semantic
+            source.provider == "zim"
+            and self._index_name(source) in indexes
+            and indexes[self._index_name(source)].semantic
             for source in sources
         )
         if not wants_semantic:
@@ -2640,7 +3039,7 @@ class Search:
             return []
         with self._state_lock:
             available = [
-                source for source in self.sources.values() if source.available
+                source for source in self.sources.values() if source.searchable
             ]
         # Honor the requested ZIM scope directly instead of going through
         # `_search_scope`, which promotes small-library selections to every
@@ -2653,10 +3052,13 @@ class Search:
             remaining = limit - len(suggestions)
             if remaining <= 0:
                 break
-            if source.mode != "local" or not source.local_name:
+            if source.provider != "zim":
+                continue
+            index_name = self._index_name(source)
+            if not index_name:
                 continue
             with self._state_lock:
-                index = self.indexes.get(source.local_name)
+                index = self.indexes.get(index_name)
             if index is None:
                 continue
             try:
@@ -2706,7 +3108,7 @@ class Search:
             except sqlite3.Error as error:
                 logger.warning(
                     "zimantic: title suggestions unavailable for %s: %s",
-                    source.local_name,
+                    index_name,
                     error,
                 )
             finally:
@@ -2740,6 +3142,16 @@ class Search:
             "page_count": final.get("page_count", 1),
             "counts": final.get("counts", {}),
             "matched_by": final.get("matched_by"),
+            "scope": final.get(
+                "scope",
+                {
+                    "status": "complete",
+                    "requested": 0,
+                    "scheduled": 0,
+                    "completed": 0,
+                    "limit_reason": None,
+                },
+            ),
         }
 
     def _cached_events(
@@ -2778,7 +3190,20 @@ class Search:
             }
         matched_by = self._matched_by(pool) if debug else None
         yield self._event(
-            "done", state, total_sources, total_sources, offset, page_size, matched_by
+            "done",
+            state,
+            total_sources,
+            total_sources,
+            offset,
+            page_size,
+            matched_by,
+            scope={
+                "status": "complete",
+                "requested": total_sources,
+                "scheduled": total_sources,
+                "completed": total_sources,
+                "limit_reason": None,
+            },
         )
 
     def _finish_inflight(self, key: Any, pending: Future, value: Any) -> None:
@@ -2913,6 +3338,8 @@ class Search:
         generation: int,
         cache_key: Any,
         pool: list[dict[str, Any]] | None = None,
+        cacheable: bool = True,
+        deadline: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Rank, enrich, hydrate and cache one finished search.
 
@@ -2945,7 +3372,12 @@ class Search:
         }
         with self._state_lock:
             current_generation = self._cache_generation
-        if not selective and current_generation == generation:
+        if (
+            not selective
+            and cacheable
+            and current_generation == generation
+            and (deadline is None or time.monotonic() < deadline)
+        ):
             self.cache.put(cache_key, cache_value)
         return state, cache_value
 
@@ -3022,6 +3454,13 @@ class Search:
                     offset,
                     page_size,
                     {} if debug else None,
+                    scope={
+                        "status": "complete",
+                        "requested": 0,
+                        "scheduled": 0,
+                        "completed": 0,
+                        "limit_reason": None,
+                    },
                 )
                 return
 
@@ -3036,6 +3475,10 @@ class Search:
             source_limit = self._source_limit(total_sources)
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
+            started_at = time.monotonic()
+            deadline = started_at + max(
+                1.0, getattr(self, "search_timeout_seconds", 30.0)
+            )
             for src in sources:
                 futures.append(
                     self._executor.submit(
@@ -3047,11 +3490,11 @@ class Search:
                         fulltext_query,
                         query_vector,
                         source_limit,
+                        deadline,
                     )
                 )
 
             future_sources = dict(zip(futures, sources))
-            started_at = time.monotonic()
             last_rank_at = started_at
             rank_passes = 0
             unranked = 0
@@ -3060,11 +3503,17 @@ class Search:
             last_page_signature: tuple[str, ...] | None = None
             remaining = set(futures)
             while remaining:
+                if time.monotonic() >= deadline:
+                    break
                 timed_out = False
                 try:
                     for future in as_completed(
                         remaining,
-                        timeout=update_interval if update_interval > 0 else None,
+                        timeout=(
+                            max(0.0, min(update_interval, deadline - time.monotonic()))
+                            if update_interval > 0
+                            else max(0.0, deadline - time.monotonic())
+                        ),
                     ):
                         remaining.discard(future)
                         src = future_sources[future]
@@ -3171,6 +3620,26 @@ class Search:
                         "elapsed": round(now - started_at, 1),
                     }
 
+            deadline_hit = bool(remaining) or time.monotonic() >= deadline
+            if deadline_hit:
+                stop.set()
+                for future in remaining:
+                    future.cancel()
+            scope = {
+                "status": "partial" if deadline_hit else "complete",
+                "requested": getattr(self, "_scope_requested", total_sources),
+                "scheduled": len(futures),
+                "completed": len(completed),
+                "limit_reason": (
+                    "deadline"
+                    if deadline_hit
+                    else "source_cap"
+                    if getattr(self, "_scope_source_cap", False)
+                    else None
+                ),
+            }
+            if scope["limit_reason"] == "source_cap":
+                scope["status"] = "partial"
             state, cache_value = self._finalize_search(
                 query,
                 completed,
@@ -3184,7 +3653,12 @@ class Search:
                 generation,
                 cache_key,
                 pool=None if unranked else pool,
+                cacheable=not deadline_hit,
+                deadline=deadline,
             )
+            if time.monotonic() >= deadline and not deadline_hit:
+                scope["status"] = "partial"
+                scope["limit_reason"] = "deadline"
             # Ranking and hydration are done. Release admission before the
             # final event so a slow or abandoned reader cannot occupy a search
             # slot that another user could use.
@@ -3199,6 +3673,7 @@ class Search:
                 offset,
                 page_size,
                 self._matched_by(cache_value["pool"]) if debug else None,
+                scope=scope,
             )
         finally:
             # Skip any queued source work from an interrupted or finished
@@ -3242,8 +3717,16 @@ class Search:
         *args,
     ) -> SourceResult:
         if stop.is_set():
-            return SourceResult(source=source, status="cancelled")
-        return self._search_source(source, *args)
+            return SourceResult(
+                source=source,
+                error="search was cancelled",
+                status="cancelled",
+            )
+        target = self._search_source
+        if getattr(target, "__func__", None) is Search._search_source:
+            return target(source, *args)
+        # Lightweight test doubles still expose the pre-deadline signature.
+        return target(source, *args[:-1])
 
     def _search_source(
         self,
@@ -3253,16 +3736,52 @@ class Search:
         fulltext_query: str,
         query_vector,
         limit: int,
+        deadline: float | None = None,
     ) -> SourceResult:
-        if source.mode == "kiwix":
-            return self._search_kiwix(source, fulltext_query, limit)
-        if not source.local_name:
-            return SourceResult(
-                source=replace(source, available=False),
-                error="source is not indexed",
-                status="error",
+        request = SourceQuery(
+            query=query,
+            title_query=title_query,
+            fulltext_query=fulltext_query,
+            query_vector=query_vector,
+            limit=limit,
+            deadline=deadline,
+        )
+        runtime = getattr(self, "runtimes", {}).get(source.collection_key)
+        if runtime is not None:
+            try:
+                return runtime.search(source, request)
+            except Exception as error:  # provider failure is source-scoped
+                return SourceResult(
+                    source=source,
+                    error=f"search failed: {error}",
+                    status="error",
+                )
+        return self._dispatch_source(source, request)
+
+    def _dispatch_source(self, source: SourceInfo, request: SourceQuery) -> SourceResult:
+        """Provider-neutral dispatch used by the runtime adapter."""
+        if source.provider == "zim":
+            return self._search_local(
+                source,
+                request.query,
+                request.title_query,
+                request.fulltext_query,
+                request.query_vector,
+                request.limit,
+                request.deadline,
             )
-        return self._search_local(source, query, title_query, fulltext_query, query_vector, limit)
+        if source.provider == "kiwix":
+            return self._search_kiwix(
+                source,
+                request.fulltext_query or request.query,
+                request.limit,
+                request.deadline,
+            )
+        return SourceResult(
+            source=source,
+            error=f"unsupported provider {source.provider!r}",
+            status="error",
+        )
 
     def _search_local(
         self,
@@ -3272,16 +3791,27 @@ class Search:
         fulltext_query: str,
         query_vector,
         limit: int,
+        deadline: float | None = None,
     ) -> SourceResult:
+        if deadline is not None and time.monotonic() >= deadline:
+            return SourceResult(
+                source=source, error="search deadline expired", status="cancelled"
+            )
+        index_name = self._index_name(source)
         with self._state_lock:
-            index = self.indexes.get(source.local_name)
+            index = self.indexes.get(index_name) if index_name else None
             if index is None:
                 return SourceResult(
-                    source=replace(source, available=False),
+                    source=source,
                     error="source is not indexed",
                     status="error",
                 )
-            self._acquire_index(index)
+            try:
+                self._acquire_index(index)
+            except RuntimeError as error:
+                return SourceResult(
+                    source=source, error=str(error), status="cancelled"
+                )
         try:
             return self._search_local_locked(
                 source,
@@ -3377,7 +3907,7 @@ class Search:
             # full-text searcher and no vectors. Report an error instead of a
             # successful empty result so a missing/corrupt archive is visible.
             return SourceResult(
-                source=replace(source, available=False),
+                source=source,
                 error=index.error or "ZIM archive is unavailable",
                 status="error",
             )
@@ -3395,7 +3925,7 @@ class Search:
                 if native_results is None:
                     errors.append("full-text search unavailable")
                 else:
-                    for rank, result in enumerate(native_results):
+                    for rank, result in enumerate(native_results, 1):
                         if not isinstance(result, dict):
                             continue
                         path = str(result.get("path") or "")
@@ -3435,7 +3965,7 @@ class Search:
                     except (RuntimeError, ValueError) as error:
                         errors.append(f"full-text search unavailable: {error}")
             if archive is not None:
-                for rank, path in enumerate(paths):
+                for rank, path in enumerate(paths, 1):
                     try:
                         entry = archive.get_entry_by_path(path)
                         rowid = entry._index
@@ -3494,9 +4024,9 @@ class Search:
     ) -> dict[str, Any]:
         """One local result document shared by indexed and archive fallbacks."""
         return {
-            "id": f"{source.key}:{path}",
+            "id": encode_document_id(source.key, path),
             "source_key": source.key,
-            "source": source.name,
+            "source": _source_title(source),
             "source_icon": source.icon_url,
             "title": title or path,
             "lead": "",
@@ -3504,7 +4034,7 @@ class Search:
             "mimetype": None,
             "url": (
                 f"{self.web_base_path}/content/"
-                f"{quote(source.local_name or source.book, safe='')}/"
+                f"{quote(source.key, safe='')}/"
                 f"{quote(path, safe='/')}"
             ),
         }
@@ -3685,7 +4215,10 @@ class Search:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for doc in docs:
             source = sources.get(doc.get("source_key"))
-            if source is None or source.mode != "local" or not source.local_name:
+            if source is None or source.provider != "zim":
+                continue
+            index_name = self._index_name(source)
+            if not index_name:
                 continue
             key = (source.key, doc["path"])
             cached = preview_cache.get(key)
@@ -3694,7 +4227,7 @@ class Search:
                 continue
             if doc.get("lead"):
                 continue
-            grouped.setdefault(source.local_name, []).append(doc)
+            grouped.setdefault(index_name, []).append(doc)
 
         futures = {
             self._executor.submit(
@@ -3749,13 +4282,16 @@ class Search:
                 if len(phrase_ids) >= MAX_PHRASE_CANDIDATES:
                     break
                 source = source_by_key.get(result.get("source_key"))
-                if source is None or not source.local_name:
+                if source is None:
+                    continue
+                index_name = self._index_name(source)
+                if not index_name:
                     continue
                 if _phrase(query_terms, _content_terms(result["title"])):
                     # The title already carries the phrase; that signal is
                     # already in the ranking, so skip the content read.
                     continue
-                index = indexes.get(source.local_name)
+                index = indexes.get(index_name)
                 if index is None:
                     continue
                 if index.ensure_open() is None:
@@ -3765,9 +4301,12 @@ class Search:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for result in pool:
             source = source_by_key.get(result.get("source_key"))
-            if source is None or not source.local_name:
+            if source is None:
                 continue
-            grouped.setdefault(source.local_name, []).append(result)
+            index_name = self._index_name(source)
+            if not index_name:
+                continue
+            grouped.setdefault(index_name, []).append(result)
 
         def enrich_source(local_name: str, result_docs: list[dict[str, Any]]) -> bool:
             index = indexes.get(local_name)
@@ -3848,7 +4387,9 @@ class Search:
     ) -> list[dict[str, Any]]:
         return source_items(semantic, keyword, fulltext)
 
-    def _search_kiwix(self, source: SourceInfo, query: str, limit: int) -> SourceResult:
+    def _search_kiwix(
+        self, source: SourceInfo, query: str, limit: int, deadline: float | None = None
+    ) -> SourceResult:
         return search_kiwix(
             source,
             query,
@@ -3858,6 +4399,7 @@ class Search:
             self.source_timeout,
             self._preview,
             urlopen_fn=urlopen,
+            deadline=deadline,
         )
 
     def _rank_results(

@@ -48,17 +48,15 @@ def normalize_article_path(path: str) -> str:
 
 
 def resolve_article_entry(archive: Any, requested_path: str | None = None):
+    from .zim_paths import AmbiguousZimPathError, ZimPathError, ZimPathNotFoundError, resolve_zim_path
+
     try:
-        entry = (
-            archive.main_entry
-            if requested_path is None
-            else archive.get_entry_by_path(requested_path)
-        )
-    except (KeyError, RuntimeError, ValueError) as error:
+        return resolve_zim_path(archive, requested_path)
+    except AmbiguousZimPathError as error:
+        raise ArticleUnavailableError(str(error)) from error
+    except ZimPathNotFoundError as error:
         raise ArticleNotFoundError("article not found") from error
-    try:
-        return resolve_redirect_entry(entry)
-    except RedirectError as error:
+    except ZimPathError as error:
         raise ArticleUnavailableError(str(error)) from error
 
 

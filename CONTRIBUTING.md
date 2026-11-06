@@ -65,6 +65,36 @@ uv sync
 Match the surrounding code: plain, readable Python, comments that explain *why*. Keep dependencies few;
 anything that must run on the Pi should be checked for memory use.
 
+## Provider contracts
+
+The core does not branch on a source's kind. Every in-tree provider implements
+the seam in `zimantic/providers/`:
+
+- `SourceProvider.discover(config, context)` returns a `DiscoveryBatch`; one
+  configured entry may yield zero or several collections.
+- A `CollectionRuntime` exposes immutable `CollectionInfo` descriptor values and
+  a published `CollectionSnapshot`, its sources, one-source `search`/`suggest`/
+  `preview`, an optional `ContentStore`, and a per-search source cap.
+- `provider` is the only discriminator and `SourceInfo.key` the only identity.
+  Do not add `mode`, `content_kind`, `name`, `book`, or `local_name` fields or
+  aliases. Keys are stable, URL-safe, and never derived from an absolute path.
+- `SourceResult` keeps four channels. Status is `ok`, `partial`, `error`, or
+  `cancelled`; errors are operation-scoped and are never cached or persisted as
+  source availability.
+- Content contracts live in `zimantic/content/store.py`. `providers.base`
+  re-exports them. `ContentStore` is frozen in phase 00, including
+  `read_range`, even when a runtime returns `None` until its store lands.
+- Provider-private metadata and filesystem locators must not be serialized.
+  Only the approved `SourceInfo.to_dict(include_metadata=...)` fields and the
+  collection descriptor/snapshot payloads reach clients.
+- A provider failure or timeout is isolated to its source result and must not
+  starve or crash other providers. No provider may turn a failed operation into
+  an empty successful result.
+
+Changes to these contracts require updating the contract tests in
+`tests/providers/`, the collection/source serializers, and the migration notes
+in `plans/`.
+
 ## Release and deploy
 
 The Makefile can increment the patch version, update `uv.lock`, commit and publish an

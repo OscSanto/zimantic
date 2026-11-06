@@ -1,4 +1,4 @@
-# Watch zim_dir and trigger a fast index + reload whenever a ZIM is added.
+# Watch the configured ZIM collection path and trigger a fast index + reload whenever a ZIM is added.
 # The nightly full build (deploy/zimantic-indexing.timer) is constrained to
 # its configured time window.
 #

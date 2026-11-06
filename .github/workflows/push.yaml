@@ -62,6 +62,25 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest -q
 
+  windows-safety:
+    name: catalog/index lease safety (windows x86_64, blocking)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@main
+      - uses: astral-sh/setup-uv@main
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Catalog, generation lease, and FAISS publication safety
+        run: >
+          uv run pytest -q
+          tests/test_catalog.py
+          tests/test_index_locator.py
+          tests/test_locking.py
+          tests/test_build.py
+
   armhf:
     name: native dependency check (armhf)
     needs: test
@@ -87,7 +106,7 @@ jobs:
             '
 
   publish:
-    needs: test
+    needs: [test, windows-safety]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
     environment: publish

@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import quote
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -219,7 +220,7 @@ class LocalIntegrationTests(unittest.TestCase):
             result = response.json()[0]
             self.assertEqual(result["title"], "Beta")
             self.assertEqual(result["path"], "Beta")
-            self.assertEqual(result["url"], "/content/manual/Beta")
+            self.assertEqual(result["url"], f"/content/{quote(search._zim_source_key('manual'), safe='')}/Beta")
             self.assertEqual(result["mimetype"], "text/html")
             self.assertEqual(response.headers["x-total-count"], "1")
 
@@ -417,7 +418,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(search.local_names(), ["manual"])
             result = _search_results(search, "rotors", limit=1)[0]
             self.assertEqual(result["title"], "Beta")
-            self.assertEqual(result["url"], "/content/manual/Beta")
+            self.assertEqual(result["url"], f"/content/{quote(search._zim_source_key('manual'), safe='')}/Beta")
             report = search.health()["indexes"][0]
             self.assertFalse(report["index_file"])
             self.assertFalse(report["capabilities"]["title"])
@@ -747,7 +748,7 @@ class LocalIntegrationTests(unittest.TestCase):
             zim_path = self._build_fixture(root)
             search = self._open_search(root)
             client = TestClient(create_app(search))
-            self.assertTrue(search.source_dicts()[0]["available"])
+            self.assertEqual(search.source_dicts()[0]["provider"], "zim")
 
             # Corrupt the archive without changing its size, so the index stays
             # trusted while the archive itself cannot be opened.
@@ -757,18 +758,16 @@ class LocalIntegrationTests(unittest.TestCase):
             search.reload()
 
             sources = search.source_dicts()
-            self.assertEqual([source["name"] for source in sources], ["manual"])
-            self.assertFalse(sources[0]["available"])
-            self.assertTrue(sources[0]["error"])
-            self.assertIsNone(sources[0]["homepage"])
+            self.assertEqual([source["title"] for source in sources], ["manual"])
+            for source in sources:
+                self.assertNotIn("available", source)
+                self.assertNotIn("mode", source)
 
             library = client.get("/library.json")
             self.assertEqual(library.status_code, 200)
             self.assertEqual(len(library.json()), 1)
-            self.assertFalse(library.json()[0]["available"])
-            self.assertTrue(library.json()[0]["error"])
-            self.assertIsNone(library.json()[0]["homepage"])
-            self.assertEqual(library.json()[0]["local_name"], "manual")
+            self.assertEqual(library.json()[0]["provider"], "zim")
+            self.assertNotIn("available", library.json()[0])
             self.assertEqual(library.json()[0]["size"], zim_path.stat().st_size)
 
     def test_library_perma_ref_comes_from_the_filename_stem(self):
@@ -796,9 +795,12 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             library = search.library_dicts()
 
-            self.assertEqual(library[0]["perma_ref"], "manual")
+            self.assertEqual(library[0]["key"], search._zim_source_key("manual_2026-08"))
             self.assertEqual(library[0]["title"], "A Display Name")
-            self.assertEqual(library[0]["uuid"], search.catalog.get_stem("manual_2026-08").uuid)
+            self.assertEqual(
+                library[0]["provider_id"],
+                search.catalog.get_stem("manual_2026-08").provider_id,
+            )
 
     def test_xhtml_articles_get_the_article_bridge(self):
         with _temp_dir(self) as tmp:
@@ -849,7 +851,7 @@ class LocalIntegrationTests(unittest.TestCase):
             # The on-disk catalog is retained for the next successful scan.
             self.assertEqual(len(search.catalog.rows()), 1)
 
-    def test_readable_duplicate_replaces_an_unreadable_copy(self):
+    def test_duplicate_uuid_keeps_one_deterministic_source(self):
         with _temp_dir(self) as tmp:
             root = Path(tmp)
             zim_path = self._build_fixture(root)
@@ -862,15 +864,12 @@ class LocalIntegrationTests(unittest.TestCase):
             zim_path.write_bytes(bytes(data))
             search.reload()
 
-            # The two files share a UUID, so one source remains, and the readable
-            # copy wins over the unreadable indexed one.
+            # The two files share a UUID, so exactly one source remains. Listing
+            # does not probe availability; selection is deterministic.
             sources = search.source_dicts()
-            self.assertEqual([source["name"] for source in sources], ["manual-copy"])
-            self.assertTrue(sources[0]["available"])
-            self.assertEqual(
-                [source["name"] for source in search.library_dicts()],
-                ["manual-copy"],
-            )
+            self.assertEqual(len(sources), 1)
+            self.assertTrue(sources[0]["searchable"])
+            self.assertEqual(len(search.library_dicts()), 1)
 
 
 if __name__ == "__main__":

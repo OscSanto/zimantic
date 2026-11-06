@@ -39,14 +39,13 @@ class FakeSearch:
     def source_dicts(self):
         return [{
             "key": "manual",
-            "name": "Manual",
-            "mode": "local",
-            "local_name": "manual",
-            "available": True,
+            "provider": "zim",
+            "title": "Manual",
+            "collection": {"key": "zim:library", "label": "Library", "provider": "zim"},
             "searchable": True,
             "homepage": "Main_Page",
             "description": "Manual description",
-            "uuid": "00000000-0000-0000-0000-000000000001",
+            "provider_id": "00000000-0000-0000-0000-000000000001",
         }]
 
     def refresh_sources(self):
@@ -121,7 +120,7 @@ class ServerTests(unittest.TestCase):
         sources = self.client.get("/sources").json()
         self.assertEqual(sources[0]["key"], "manual")
         self.assertEqual(sources[0]["description"], "Manual description")
-        self.assertEqual(self.client.get("/library.json").json()[0]["name"], "Manual")
+        self.assertEqual(self.client.get("/library.json").json()[0]["title"], "Manual")
         response = self.client.get("/search?q=page")
         self.assertEqual(response.json()[0]["title"], "Page")
         # Totals travel as headers so the body stays a plain list.
@@ -251,7 +250,7 @@ class ServerTests(unittest.TestCase):
             "content": b"<html><head><title>Page</title></head><body></body></html>",
         }
         search.source_dicts = lambda: [
-            {"local_name": "manual", "icon_url": "/zimantic/source-icon/manual"}
+            {"key": "manual", "provider": "zim", "icon_url": "/zimantic/source-icon/manual"}
         ]
         client = TestClient(create_app(search))
         response = client.get("/content/manual/page")
@@ -409,7 +408,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn('data-zimantic-zim="manual"', shell.text)
         self.assertNotIn("id=\"zimanticZimSuggestions\"", shell.text)
 
-    def test_content_shell_shows_zim_search_for_resolvable_alias(self):
+    def test_content_shell_shows_zim_search_for_resolvable_key(self):
         body = b"<html><head></head><body>Page</body></html>"
         with patch.object(
             self.search,
@@ -426,11 +425,9 @@ class ServerTests(unittest.TestCase):
             "source_dicts",
             lambda: [{
                 "key": "manual",
-                "name": "manual_2025-10",
-                "book": "manual_2025-10",
-                "local_name": "manual_2025-10",
-                "mode": "local",
-                "available": True,
+                "provider": "zim",
+                "title": "manual_2025-10",
+                "searchable": True,
             }],
         ):
             shell = self.client.get("/content/manual/page")
@@ -769,7 +766,7 @@ class ServerTests(unittest.TestCase):
         ), patch.object(
             self.search,
             "source_dicts",
-            lambda: [{"local_name": "manual", "icon_url": "/source-icon/manual"}],
+            lambda: [{"key": "manual", "provider": "zim", "icon_url": "/source-icon/manual"}],
         ):
             shell = self.client.get("/content/manual/page")
 

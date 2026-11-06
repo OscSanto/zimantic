@@ -100,8 +100,8 @@
             const SOURCE_FILTER_QUERY_LIMIT = 30;
             let sourceFilterShowAll = false;
             let sourceFilterShowOther = false;
-            const SOURCE_CACHE_KEY = "zimantic.sources.v2";
-            const LIBRARY_CACHE_KEY = "zimantic.library.v5";
+            const SOURCE_CACHE_KEY = "zimantic.sources.v3";
+            const LIBRARY_CACHE_KEY = "zimantic.library.v6";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let librarySources = [];
@@ -227,7 +227,7 @@
             }
 
             function libraryTitle(source) {
-                return String(source.title || source.name || source.book || "Untitled source").trim();
+                return String(source.title || source.key || "Untitled source").trim();
             }
 
             function sourceRecord(keyOrSource) {
@@ -235,9 +235,7 @@
                 const wanted = String(keyOrSource || "").trim();
                 if (!wanted) return null;
                 const matches = (source) =>
-                    [source.key, source.local_name, source.book, source.name].some(
-                        (value) => String(value || "") === wanted,
-                    );
+                    String(source.key || "") === wanted;
                 return sources.find(matches) || librarySources.find(matches) || null;
             }
 
@@ -253,19 +251,15 @@
                 if (!source) {
                     return typeof keyOrSource === "string" ? keyOrSource : "";
                 }
-                return String(
-                    source.local_name || source.book || source.name || source.key || "",
-                ).trim();
+                return String(source.key || "").trim();
             }
 
             function librarySearchText(source) {
                 const tags = Array.isArray(source.tags) ? source.tags : [];
                 return [
                     source.title,
-                    source.name,
-                    source.local_name,
-                    source.book,
                     source.key,
+                    source.provider,
                     source.description,
                     source.long_description,
                     source.creator,
@@ -273,23 +267,13 @@
                     source.language,
                     source.date,
                     source.category,
-                    source.flavour,
                     source.license,
-                    source.scraper,
-                    source.source,
-                    source.attribution,
-                    source.relation,
-                    source.perma_ref,
-                    source.uuid,
                     source.homepage,
-                    source.has_fulltext_index,
+                    source.native_fulltext_available,
                     source.searchable,
                     source.icon_url,
-                    source.mode,
-                    source.error,
-                    source.counter,
-                    source.article_count,
-                    source.media_count,
+                    source.mime_counts,
+                    source.item_count,
                     formatLibrarySize(source.size),
                     ...tags,
                 ]
@@ -299,7 +283,7 @@
             }
 
             function libraryHomepageUrl(source) {
-                const zim = source.local_name || source.book || source.name;
+                const zim = source.key;
                 if (!zim) return "";
                 if (source.homepage) return contentUrl(zim, source.homepage);
                 // A readable archive can lack a resolvable main entry. If it is
@@ -374,7 +358,7 @@
                 // The search page replaces this document, so do not try to pop
                 // a history entry for the details modal on the way out.
                 closeLibraryInfo({ navigateHistory: false });
-                const key = source.key || source.local_name || source.book || source.name;
+                const key = source.key;
                 if (!key) return;
                 const target = new URL(makeStateUrl("", [key], 0), location.href);
                 target.pathname = appPath("/");
@@ -384,9 +368,7 @@
             }
 
             function libraryInfoSourceKey(source) {
-                return String(
-                    source.key || source.local_name || source.book || source.name || "",
-                );
+                return String(source.key || "");
             }
 
             function closeLibraryInfo({ navigateHistory = true } = {}) {
@@ -453,7 +435,6 @@
                 libraryInfoPreviousFocus = document.activeElement;
                 const title = libraryTitle(source);
                 const homepage = libraryHomepageUrl(source);
-                const available = source.available !== false;
                 content.replaceChildren();
 
                 const header = document.createElement("div");
@@ -501,7 +482,7 @@
                 }
 
                 const searchable = source.searchable !== false;
-                if (available && (homepage || searchable)) {
+                if (homepage || searchable) {
                     const actions = document.createElement("div");
                     actions.className = "library-info-actions";
                     if (homepage) {
@@ -523,12 +504,6 @@
                         actions.append(search);
                     }
                     content.appendChild(actions);
-                } else if (!available) {
-                    const unavailable = document.createElement("p");
-                    unavailable.className = "library-info-unavailable";
-                    unavailable.textContent =
-                        source.error || "This source is currently unavailable.";
-                    content.appendChild(unavailable);
                 } else {
                     const unavailable = document.createElement("p");
                     unavailable.className = "library-info-unavailable";
@@ -544,28 +519,27 @@
                 appendInfoRow(list, "Language", libraryLanguage(source, true));
                 appendInfoRow(list, "Date", source.date);
                 appendInfoRow(list, "Size", formatLibrarySize(source.size));
-                if (Number(source.article_count) > 0) {
-                    appendInfoRow(list, "Articles", Number(source.article_count).toLocaleString());
+                if (Number(source.item_count) > 0) {
+                    appendInfoRow(list, "Items", Number(source.item_count).toLocaleString());
                 }
-                if (Number(source.media_count) > 0) {
-                    appendInfoRow(list, "Media", Number(source.media_count).toLocaleString());
+                if (Number(source.indexed_count) > 0) {
+                    appendInfoRow(list, "Indexed", Number(source.indexed_count).toLocaleString());
                 }
                 appendInfoRow(list, "Category", source.category);
-                appendInfoRow(list, "Flavour", source.flavour);
+                appendInfoRow(list, "Provider", source.provider);
                 appendInfoRow(
                     list,
                     "Tags",
                     Array.isArray(source.tags) ? source.tags.filter(Boolean).join(" · ") : "",
                 );
                 appendInfoRow(list, "License", source.license);
-                appendInfoRow(list, "Scraper", source.scraper);
-                appendInfoRow(list, "Source", source.source);
+                appendInfoRow(list, "Origin", source.origin);
                 appendInfoRow(list, "Attribution", source.attribution, { href: false });
                 appendInfoRow(list, "Relation", source.relation);
-                appendInfoRow(list, "Source name", source.perma_ref);
+                appendInfoRow(list, "Provider ID", source.provider_id);
                 if (list.children.length) content.appendChild(list);
 
-                const counter = counterSummary(source.counter);
+                const counter = counterSummary(source.mime_counts);
                 if (counter.length) {
                     const details = document.createElement("details");
                     details.className = "library-info-counter";
@@ -627,13 +601,55 @@
                 }
             }
 
-            async function fetchCachedJson(path, key) {
+            function isCanonicalSourceRecord(source) {
+                return Boolean(
+                    source &&
+                    typeof source === "object" &&
+                    typeof source.key === "string" &&
+                    source.key &&
+                    typeof source.provider === "string" &&
+                    source.provider &&
+                    !("mode" in source) &&
+                    !("content_kind" in source) &&
+                    !("local_name" in source) &&
+                    !("book" in source) &&
+                    !("name" in source),
+                );
+            }
+
+            function readCanonicalCache(key) {
                 const cached = readJsonCache(key);
-                try {
-                    const response = await fetch(path, { cache: "no-cache" });
+                if (!cached || !cached.every(isCanonicalSourceRecord)) return null;
+                return cached;
+            }
+
+            async function fetchPagedJson(path) {
+                const limit = Math.max(1, PAGE_SIZE);
+                const items = [];
+                let offset = 0;
+                for (let page = 0; page < 1000; page++) {
+                    const url = new URL(path, location.href);
+                    url.searchParams.set("limit", String(limit));
+                    url.searchParams.set("offset", String(offset));
+                    const response = await fetch(url, { cache: "no-cache" });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const payload = await response.json();
                     if (!Array.isArray(payload)) throw new Error("invalid JSON payload");
+                    items.push(...payload);
+                    const hasMore = response.headers.get("X-Has-More") === "true";
+                    if (!payload.length || !hasMore) return items;
+                    offset += payload.length;
+                }
+                throw new Error("source page count exceeded its bound");
+            }
+
+            async function fetchCachedJson(path, key) {
+                const cached = readCanonicalCache(key);
+                try {
+                    const payload = await fetchPagedJson(path);
+                    if (!payload.every(isCanonicalSourceRecord)) {
+                        throw new Error("invalid source payload");
+                    }
                     writeJsonCache(key, payload);
                     return { payload, stale: false, error: null };
                 } catch (error) {
@@ -661,9 +677,9 @@
                     );
                     if (byTitle) return byTitle;
                     return String(
-                        left.key || left.local_name || left.name || "",
+                        left.key || "",
                     ).localeCompare(
-                        String(right.key || right.local_name || right.name || ""),
+                        String(right.key || ""),
                     );
                 });
             }
@@ -720,8 +736,7 @@
                     const stem = sourceStemName(source);
                     const card = document.createElement("article");
                     card.className = "library-card";
-                    const available = source.available !== false;
-                    const linkable = available && Boolean(openUrl);
+                    const linkable = Boolean(openUrl);
 
                     const preview = document.createElement(linkable ? "a" : "div");
                     preview.className = "library-card-preview";
@@ -730,12 +745,6 @@
                         preview.href = openUrl;
                         preview.dataset.libraryArticle = "true";
                         preview.setAttribute("aria-label", `Open ${title}`);
-                    } else if (!available) {
-                        // The card explains the problem next to an "Unavailable"
-                        // badge, so dim the artwork instead of replacing it with
-                        // text (an unreadable ZIM usually still has a favicon).
-                        preview.classList.add("library-card-unavailable");
-                        preview.setAttribute("aria-hidden", "true");
                     }
                     if (source.icon_url) {
                         const image = document.createElement("img");
@@ -771,11 +780,9 @@
                     const description =
                         source.long_description ||
                         source.description ||
-                        (available
-                            ? linkable
-                                ? ""
-                                : "This source has no homepage and cannot be searched yet."
-                            : source.error || "This source cannot be opened.");
+                        (linkable
+                            ? ""
+                            : "This source has no homepage and cannot be searched yet.");
                     if (description) {
                         const text = document.createElement("p");
                         text.className = "library-card-description";
@@ -787,11 +794,11 @@
                     const detailValues = [
                         libraryLanguage(source),
                         formatLibrarySize(source.size),
-                        Number(source.article_count) > 0
-                            ? `${Number(source.article_count).toLocaleString()} ${
-                                  Number(source.article_count) === 1
-                                      ? "article"
-                                      : "articles"
+                        Number(source.item_count) > 0
+                            ? `${Number(source.item_count).toLocaleString()} ${
+                                  Number(source.item_count) === 1
+                                      ? "item"
+                                      : "items"
                               }`
                             : "",
                         source.date || "",
@@ -807,13 +814,6 @@
                     }
                     const actions = document.createElement("div");
                     actions.className = "library-card-actions";
-                    if (!available) {
-                        const status = document.createElement("span");
-                        status.className = "secondary library-card-action";
-                        status.textContent = "Unavailable";
-                        status.dataset.i18n = "Unavailable";
-                        actions.appendChild(status);
-                    }
                     const detailsButton = document.createElement("button");
                     detailsButton.type = "button";
                     detailsButton.className = "library-button library-card-action";
@@ -920,7 +920,7 @@
             }
 
             function activeSources() {
-                return sources.filter((source) => source.available);
+                return sources;
             }
 
             function selectionValues(values) {
@@ -2902,7 +2902,19 @@
                         current.streaming = false;
                         cancelStreamRender();
                         renderView();
-                        $("status").textContent = searchStatusText();
+                        const scope = event.scope;
+                        if (scope && scope.status === "partial") {
+                            const reason = scope.limit_reason === "deadline"
+                                ? "search deadline reached"
+                                : scope.limit_reason === "source_cap"
+                                    ? "source limit reached"
+                                    : "partial scope";
+                            $("status").textContent =
+                                `${searchStatusText()} · ${reason} ` +
+                                `(${scope.completed}/${scope.requested})`;
+                        } else {
+                            $("status").textContent = searchStatusText();
+                        }
                         announceSearchStatus();
                         renderNotice();
                     } else if (event.type === "error") {
@@ -3920,6 +3932,7 @@
             });
 
             function applyDiscoveryData(payload, libraryView) {
+                if (!Array.isArray(payload) || !payload.every(isCanonicalSourceRecord)) return;
                 if (libraryView) {
                     // Unreadable ZIMs stay visible so the card can explain why
                     // they cannot be opened. Readable archives without a
@@ -3970,7 +3983,7 @@
                 const dataCacheKey = libraryView ? LIBRARY_CACHE_KEY : SOURCE_CACHE_KEY;
                 // Paint the last known library immediately, then revalidate it
                 // in the background. First visits still wait for the request.
-                const cachedData = readJsonCache(dataCacheKey);
+                const cachedData = readCanonicalCache(dataCacheKey);
                 if (cachedData) applyDiscoveryData(cachedData, libraryView);
                 try {
                     const [configResponse, data] = await Promise.all([

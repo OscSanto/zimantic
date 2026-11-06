@@ -73,7 +73,6 @@ class CatalogTests(unittest.TestCase):
             record = catalog.get_stem("manual")
             self.assertIsNotNone(record)
             self.assertEqual(catalog.find_path("manual", record.size), zims / "manual.zim")
-            self.assertEqual(record.available, 1)
             self.assertEqual(record.article_count, 1)
             self.assertGreaterEqual(record.entry_count, 1)
             self.assertIn(record.homepage, {"Alpha", "mainPage"})
@@ -86,7 +85,8 @@ class CatalogTests(unittest.TestCase):
             self.assertIsNone(record.favicon)
 
             catalog.db.execute(
-                "UPDATE zims SET favicon = ?, favicon_mime = 'image/png' WHERE stem = 'manual'",
+                "UPDATE sources SET icon_data = ?, icon_mime_type = 'image/png' "
+                "WHERE path LIKE '%/manual.zim'",
                 (b"x" * 2048,),
             )
             catalog.db.commit()
@@ -134,7 +134,8 @@ class CatalogTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     )
                 }
-                self.assertEqual(tables, {"zims"})
+                self.assertIn("sources", tables)
+                self.assertNotIn("zims", tables)
             finally:
                 catalog.close()
 
@@ -177,12 +178,13 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(stats["invalid"], 1)
             broken = catalog.get_stem("broken")
             self.assertIsNotNone(broken)
-            self.assertEqual(broken.available, 0)
-            self.assertTrue(broken.last_error)
+            self.assertIsNone(broken.item_count)
+            self.assertIsNone(broken.native_fulltext_available)
 
-            # Failing archives are retried on every scan, not skipped forever.
+            # Routine refreshes stat paths and do not reopen an unchanged
+            # archive; the failure is reported by the operation that hits it.
             again = catalog.scan()
-            self.assertEqual(again["invalid"], 1)
+            self.assertEqual(again["skipped"], 2)
             catalog.close()
 
     def test_upsert_from_archive(self):
@@ -196,8 +198,7 @@ class CatalogTests(unittest.TestCase):
                 record = catalog.upsert_from_archive(Archive(zim_path), zim_path)
                 self.assertEqual(record.stem, "manual")
                 self.assertEqual(record.article_count, 1)
-                self.assertEqual(record.available, 1)
-                self.assertEqual(record.last_error, "")
+                self.assertIsNotNone(record)
                 self.assertEqual(len(catalog.rows()), 1)
 
     def test_placeholder_creator_is_stored_as_missing(self):
@@ -274,7 +275,7 @@ class CatalogTests(unittest.TestCase):
                 self.assertEqual(catalog.rows(), [])
                 columns = {
                     row["name"]
-                    for row in catalog.db.execute("PRAGMA table_info(zims)")
+                    for row in catalog.db.execute("PRAGMA table_info(sources)")
                 }
             self.assertEqual(columns, set(_SCHEMA_COLUMNS))
 

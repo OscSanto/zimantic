@@ -26,7 +26,7 @@ Meaning search performs best in widely spoken languages. Coverage varies by lang
 - **Graceful degradation.** Title-word and full-text search work as soon as an index exists. Vectors are optional, and a ZIM with no index remains searchable through its native full-text index. A missing model, a missing FAISS file, or a different model whose probe embeddings do not match falls back to lexical search instead of failing the server. Native full-text searches run in helper processes, so an archive with an inconsistent full-text index cannot take the server down; only that archive loses native full-text results, and the server logs why.
 - **Concurrent searches.** `max_concurrent_searches` bounds simultaneous searches. A request waits up to `slot_wait_seconds` for a free slot before reporting busy, so overlapping searches queue on slow hardware instead of failing immediately; abandoned browser streams skip queued source work and return their slot. Identical in-flight queries share one computation, and repeated queries are answered from an in-memory cache bounded by `cache_size` and `cache_bytes`. Small one-off source selections are intentionally not cached; see [Source selection](#source-selection).
 - **Built-in article serving.** Result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
-- **Web interface and JSON API.** Search from any browser on the network or from custom programs. Routes use short paths such as `/search`, `/suggest`, `/library`, `/content/<zim>/<path>`, `/article/<zim>/<path>`, and `/health`.
+- **Web interface and JSON API.** Search from any browser on the network or from custom programs. Routes use short paths such as `/search`, `/suggest`, `/library`, `/content/<source-key>/<path>`, `/article/<source-key>/<path>`, and `/health`.
 
 Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. `zimantic build` adds meaning vectors and a SQLite title-word index, but it is not a prerequisite for `zimantic serve`: an unbuilt ZIM is still searched through the archive's own full-text index, and articles, assets, and homepages are served directly from the archive. An optional [kiwix-serve](https://kiwix.org/en/applications/) instance is useful only for sources available through a Kiwix server, which Zimantic can search with kiwix-serve's full-text API.
 
@@ -36,7 +36,9 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
 - 32-bit Linux platforms (armhf/armv7) have no prebuilt wheels for the native dependencies. They work when the dependencies are installed as distribution packages. Debian 13 (trixie) or newer provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic can use them.
 - About 120 MB for the default embedding model, plus the ZIM files. The English-only `e5-small-v2` model is about 35 MB on disk.
 - Wikipedia-style ZIM files. Zimantic relies on their predictable HTML structure to locate useful content blocks.
-- No `kiwix-serve` for local sources: Zimantic serves local results and articles directly. When `kiwix_server` is set, remote-only results open through the links returned by kiwix-serve's search API.
+- **One provider seam.** ZIM and remote Kiwix are working in-tree providers. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator. There is no `mode`, `content_kind`, `book`, or `local_name` field.
+- **Configured collections.** Collections are declared with `[[collections]]` entries (ZIM roots and Kiwix servers). Removed flat keys such as `zim_dir` and `kiwix_server` are fatal configuration errors with a migration message.
+- No `kiwix-serve` for local sources: Zimantic serves local results and articles directly. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links returned by kiwix-serve's search API.
 
 ## Install
 
@@ -92,7 +94,7 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
 
 4. **Put ZIM files in `$XDG_DATA_HOME/zimantic/zims/`.** Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. **Check the XDG config.** Relative `zim_dir`, `model_dir`, and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`. Omit them to use the defaults. Set `kiwix_server` only when remote Kiwix sources are also needed.
+5. **Check the XDG config.** Relative `model_dir` and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`. A ZIM collection's `path` resolves from the config file's directory. Omit them to use the defaults. Add a Kiwix `[[collections]]` entry only when remote Kiwix sources are also needed.
 
 6. **Verify the installation.**
 
@@ -139,8 +141,8 @@ The installed CLI is separate from configuration and runtime data. On XDG platfo
 ```
 ~/.local/share/zimantic/
 ├── model/               ← downloaded models; model/int8/ is model_dir         (you download)
-├── zims/                ← zim_dir:   your .zim files                          (you download)
-├── indexes/             ← index_dir: <name>.sqlite (+ <name>.faiss for full indexes)
+├── zims/                ← ZIM collection path: your .zim files                (you download)
+├── indexes/             ← index_dir: immutable generations under provider/collection/source
 └── catalog.sqlite       ← shared ZIM metadata cache (metadata only, no vectors)
 ```
 
@@ -149,13 +151,13 @@ The installed CLI is separate from configuration and runtime data. On XDG platfo
 $XDG_RUNTIME_DIR/zimantic/zimantic.pid ← PID file while serving
 ```
 
-If the files are on a USB drive or another disk, point `zim_dir`, `model_dir`, or `index_dir` in the XDG config at them.
+If the files are on a USB drive or another disk, point a ZIM collection's `path`, `model_dir`, or `index_dir` in the XDG config at them.
 
 ### Copying finished indexes to another machine
 
 Embeddings live only in `<name>.faiss`. Its row IDs refer to `docs.rowid` in the matching `<name>.sqlite`, which holds titles, paths, the title full-text index, and build metadata. Copy the two files as a pair. A `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and full-text search only. A full index whose `.faiss` is missing still serves title and full-text results, but a later full build requires `--force` to replace it.
 
-Copying a subset is safe: each ZIM's pair is independent, and the index identity is the ZIM filename stem plus the source byte size recorded in `meta.filesize`, not the path. Keep the same filename stem and the same ZIM bytes on the target. Moving a ZIM between subfolders of `zim_dir` does not invalidate its index; renaming it does. The target must use the same embedding model, or an export whose probe embeddings match it (for example FP32 and int8 exports of the same encoder); otherwise `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
+Copying a subset is safe: each source generation is independent. Keep the same canonical source key and the same ZIM bytes on the target, and copy the generation plus its `current` manifest. Moving a ZIM between subfolders of its collection changes its key and requires a rebuild; replacing content at the same relative path keeps the key but invalidates a stale index. The target must use the same embedding model, or an export whose probe embeddings match it (for example FP32 and int8 exports of the same encoder); otherwise `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
 
 To copy two completed indexes:
 
@@ -170,14 +172,14 @@ rsync -a --files-from=/tmp/index-pairs.txt indexes/ pi@rpi:~/.local/share/zimant
 
 `rsync -a` copies only files whose size or mtime changed. Do not copy `*.upgrade`, `*.tmp`, `*.sqlite-wal`, or `*.sqlite-shm`; the `.upgrade` files are unfinished fast-to-full staging files, not indexes. If a running server watches `indexes/`, copy into a staging directory first, then move the `.faiss` and finally the `.sqlite` into place, so a reload never opens a half-written pair. Run `zimantic reload` afterwards.
 
-`catalog.sqlite` is optional for the copy. It contains metadata and favicons, never vectors, and a missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute paths, so copying it only avoids the first scan when the target resolves `zim_dir` to the same absolute paths; otherwise those rows are treated as new and rescanned. The scan opens each ZIM once for metadata, illustration, and counts, not article bodies, so it costs I/O rather than embedding time. A catalog written by a different schema version is also rebuilt. Both `build` and `serve` can create it: `build` upserts metadata for each ZIM it actually indexes, while `serve` scans `zim_dir` and reconciles the complete catalog. If `build` skips an already-complete index, it does not need to open that ZIM just to update the catalog; starting `serve` or forcing a rebuild populates missing metadata.
+`catalog.sqlite` is optional for the copy. It contains metadata and icons, never vectors, and a missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute locators, so copying it only avoids the first scan when the target resolves a collection to the same absolute paths; otherwise those rows are treated as new and rescanned. The scan opens each ZIM once for metadata, illustration, and counts, not article bodies. A catalog written by a different schema version is discarded and rebuilt under the cross-process catalog lease. Both `build` and `serve` can create it.
 
 ## Usage
 
 ### Commands
 
 ```bash
-zimantic build                        # index every .zim in zim_dir (the default)
+zimantic build                        # index every configured ZIM collection
 zimantic -v build                     # show info-level logging
 zimantic build -vv                    # show debug-level logging
 zimantic build zims/x.zim             # index one file
@@ -205,7 +207,7 @@ zimantic model --dir ./models         # write models/<precision>/ instead of mod
 zimantic model --list                 # show supported models and precisions
 ```
 
-`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it uses `zim_dir`. Existing ZIM indexes are skipped; pass `--force` to rebuild selected indexes. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
+`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM collection. An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; restart a running server to load that config change. Existing complete generations are skipped; pass `--force` to rebuild selected indexes. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
 
 ### Build behavior and locking
 
@@ -317,10 +319,10 @@ The JSON API provides the following endpoints.
   - `GET /random?zim=<name>` redirects to a random indexed article's shell. `GET /random` without `zim` redirects to the homepage of a random available local source. The article toolbar's Random control uses the first form; Alt-clicking it uses the second.
   - Links from an offline article to an external `http` or `https` site show an in-modal notice identifying the destination as online and offer to open it in a new tab, avoiding failures from sites that disallow iframe embedding. A directly loaded `/content/` view tries the captured copy for same-site links before leaving for the live site, so only links that are missing from the ZIM go online.
 - `GET /sources`, `GET /config`, `GET /library.json`, and `GET /health` return source, configuration, local-library, and health information.
-  - `/sources` describes the searchable sources (local and remote) and includes catalog metadata when available. Source records include a `homepage` path when the local ZIM exposes one, plus `available`, `searchable`, and `error` flags.
-  - `/library.json` describes every distinct local book, including unreadable archives and archives that are not searchable yet. It exposes `uuid`, `publisher`, `perma_ref`, `flavour`, `category`, `media_count`, `license`, `scraper`, `source`, `attribution`, `relation`, `counter`, and `has_fulltext_index` from the catalog.
-  - The UUID is the book identity: exact duplicate copies of the same ZIM are collapsed to one source, preferring a readable copy. Dated or flavour variants of one local book (`medicine_mini_2025-10` and `medicine_nopic_2025-10`, for example) also collapse to the largest readable, searchable copy. The search source list uses the same collapse, so the UI does not show the same book twice.
-  - An unreadable archive stays in `/library.json` with `available: false` and an `error`, so the library page can explain why it cannot be opened.
+  - `/sources` describes searchable sources and carries the canonical `key`, `provider`, `title`, `collection`, `searchable`, `homepage`, `icon_url`, `size`, `intent_phrases`, `media_types`, `item_count`, `indexed_count`, `truncated`, `body_truncated_count`, `index_freshness`, and `derived_text` fields. It never exposes a filesystem locator or an `available`/`error` status.
+  - `/library.json` describes library sources from every provider, including unsearchable archives. Its records have the same canonical shape; metadata includes `provider_id`, `mime_counts`, and `native_fulltext_available`.
+  - Source and library responses are paged. Omitted `limit` uses the global `page_size`; explicit limits are positive and at most 200. `X-Total-Count`, `X-Offset`, `X-Has-More`, and `X-Snapshot-Version` describe the page. A first page is never presented as the whole library.
+  - Failures are operation-scoped: a search result carries its source error, and a content request reports its own failure. Listing does not probe sources and does not persist availability or last-error state.
   - `/health` is read-only and reports index and archive capabilities, entry counts, homepage resolution, embedding state, and search and preview cache statistics.
 
 To include ranking scores and explanations in both search endpoints, start the server with `zimantic serve --debug` (or its alias, `serve --dev`).
@@ -426,14 +428,14 @@ Each article's **excerpt** is extracted transiently for the embedding and discar
 
 **Embedding.** Titles and transient excerpts are embedded with [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB). The model receives a fixed budget of 256 tokens. See [Using a different embedding model](#using-a-different-embedding-model) for other e5 models, their tokenizers, and their memory and speed trade-offs. Entries with no body text (title-only pages, for example JavaScript loader shells) remain searchable through title and full-text retrieval; they simply have no meaning vector. Search previews are generated independently from the local ZIM only for the final displayed page.
 
-**Storage.** Each ZIM gets two files in `index_dir`, plus one shared catalog:
+**Storage.** Each ZIM gets an immutable generation under `index_dir/<provider>/<collection-slug>-<hash>/<source-slug>-<hash>/generations/<build-generation>/` (`index.sqlite`, optional `index.faiss`, and a `lease`), plus one shared catalog:
 
 - `<name>.sqlite`: titles, paths, redirect targets, and a full-text index of the titles (SQLite FTS5). Its `vecs` table exists only while a build is in progress and is dropped once the `.faiss` file is written, so a finished index stores no vectors here.
 - `<name>.faiss`: the vectors (the only place finished embeddings are stored), in one of two layouts depending on article count. A fast index has no `.faiss` file.
 - `<name>.sqlite.upgrade` and `<name>.faiss.upgrade` (when present): temporary staging files used while replacing a fast index with a full one. They are not finished indexes and should not be copied.
-- `catalog.sqlite` (beside `index_dir`, not inside it): one row per local ZIM with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, UUID, perma-ref, flavour, category, normalized tags, article/media/entry counts, license, scraper, source, attribution, relation, content-type counts, homepage, full-text capability, availability, and the favicon as a BLOB). It contains metadata and favicons only, never vectors. It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. A warm catalog lets `serve` list sources without opening every archive; the startup scan still opens each new, resized, or previously failing ZIM to refresh its row, and the first scan after deleting the catalog opens every archive. After that, archives and their libzim `Searcher` objects are opened lazily on first use. A missing or unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous catalog, rather than being mistaken for a library from which every ZIM disappeared. While the directory is unavailable, the served `/sources` and `/library.json` lists are empty; the catalog rows remain on disk for the next successful scan once the directory is back. An unreadable subdirectory is logged as an error and its sources are omitted, but the rest of the library stays available.
+- `catalog.sqlite` (beside `index_dir`, not inside it): a provider-neutral `sources` table keyed by canonical source key, with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, provider ID, category, normalized tags, item count, license, origin, attribution, relation, content-type counts, homepage, native full-text capability, and the icon as a BLOB). It stores the absolute archive path only as a private indexed locator, never as source identity. It contains metadata and icons only, never vectors. It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. A warm catalog lets `serve` list sources without opening every archive; the startup scan still opens each new, resized, or previously failing ZIM to refresh its row, and the first scan after deleting the catalog opens every archive. After that, archives and their libzim `Searcher` objects are opened lazily on first use. A missing or unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous catalog, rather than being mistaken for a library from which every ZIM disappeared. While the directory is unavailable, the served `/sources` and `/library.json` lists are empty; the catalog rows remain on disk for the next successful scan once the directory is back. An unreadable subdirectory is logged as an error and its sources are omitted, but the rest of the library stays available.
 
-The index lookup identity is `(ZIM filename stem, source byte size)`, not the source path. A ZIM can move between nested folders below `zim_dir` without rebuilding. There is still one index file per stem, so when files share a stem but have different sizes, build and serve discovery use the largest copy, log a warning, and the smaller copy is not searchable; the catalog keeps both rows and resolves the stem to its largest file. A truncated download beside a complete archive therefore does not hide the readable one. To copy a subset of finished indexes to another machine, see [Copying finished indexes to another machine](#copying-finished-indexes-to-another-machine).
+The logical source key is derived from the provider, collection, and root-relative archive path, never from an absolute filesystem path. Relocating a collection root without changing its relative layout preserves keys. Two archives can share a stem and size and still be distinct sources; every build writes a fresh immutable generation and atomically replaces the `current` manifest. Pre-redesign stem-based indexes are left untouched but are not served; rebuild under the new locator to restore indexed search. To copy a subset of finished indexes to another machine, see [Copying finished indexes to another machine](#copying-finished-indexes-to-another-machine).
 
 | ZIM size | Vector index | Why |
 |---|---|---|
@@ -450,13 +452,13 @@ Use `--force` when a completed index must be regenerated even though its ZIM sti
 
 ### 2. Starting the server
 
-At startup Zimantic reads the shared `catalog.sqlite` for source metadata, homepages, counts, and icons, then loads every **finished** index whose archive is still present and matches the size recorded at build time. A cold catalog (or one deleted to force a rebuild) is refreshed synchronously and opens each new or changed ZIM once; after that, archives and their libzim `Searcher` objects are opened lazily on the first search or article request. Zimantic also discovers ZIM files in `zim_dir` that lack a usable SQLite index and uses each archive's native full-text index as a graceful fallback.
+At startup Zimantic reads the shared `catalog.sqlite` for source metadata, homepages, counts, and icons, then resolves the `current` manifest of each **finished** index generation whose archive is still present and matches the build-time source fingerprint. A cold catalog (or one deleted to force a rebuild) is refreshed synchronously and opens each new or changed ZIM once; after that, archives and their libzim `Searcher` objects are opened lazily on the first search or article request. Zimantic also discovers ZIM files in `zim_dir` that lack a usable SQLite index and uses each archive's native full-text index as a graceful fallback.
 
 An index whose ZIM is missing is ignored. An index whose archive has changed size is set aside, and the archive is served unindexed instead (re-run `build` to restore the index), so a partial or stale index never masks the ZIM that is actually available. Each stem appears only once: a finished SQLite index takes precedence over the filesystem fallback, and an unfinished one leaves the stem to that fallback. FAISS and vector files load in the background during startup, so title-word and full-text searches are available while meaning search initializes.
 
-The page automatically lists local ZIM sources. With `kiwix_server`, it also discovers catalog sources and can search them with Kiwix full-text search. Kiwix catalog discovery is capped at 50,000 entries and remote XML responses are capped at 64 MiB by default; both limits are configurable. An unscoped search uses at most `max_remote_sources` (default 100) of the discovered remote sources; selecting a remote source explicitly always searches it.
+The page automatically lists sources from every configured collection. A Kiwix collection discovers catalog sources and searches them with Kiwix full-text search. Catalog discovery is paged and capped per entry at `max_catalog_entries` (default 50,000); remote XML responses are capped at `max_response_bytes` (default 64 MiB). An unscoped search uses at most each entry's `max_remote_sources` (default 100); selecting a remote source explicitly always searches it.
 
-**Graceful degradation.** `serve` works without running `build` first and without `catalog.sqlite`: startup scans `zim_dir`, rebuilds missing catalog metadata, and treats every usable archive as a search source. A finished index remains usable without FAISS: the server falls back to **title-word and ZIM full-text search**. A ZIM with no SQLite index is still searched through its native full-text index, but has no SQLite title-word ranking and no meaning search until it is built. Native full-text search usually matches titles too, but without the dedicated title-word ranking and title bonus. An unindexed ZIM that has no native full-text index has nothing to search, so it is skipped as a search source rather than advertised as an available but empty one; it still appears in `/library` with its catalog metadata, but `/sources` omits it and it cannot be selected for a search.
+**Graceful degradation.** `serve` works without running `build` first and without `catalog.sqlite`: startup scans the configured ZIM collections, rebuilds missing catalog metadata, and treats every usable archive as a search source. A finished index remains usable without FAISS: the server falls back to **title-word and ZIM full-text search**. A ZIM with no SQLite index is still searched through its native full-text index, but has no SQLite title-word ranking and no meaning search until it is built. Native full-text search usually matches titles too, but without the dedicated title-word ranking and title bonus. An unindexed ZIM that has no native full-text index has nothing to search, so it is skipped as a search source rather than advertised as an available but empty one; it still appears in `/library` with its catalog metadata, but `/sources` omits it and it cannot be selected for a search.
 
 | What exists for a local ZIM | Meaning (FAISS) | Title words (SQLite FTS5) | Native full-text (libzim) |
 |---|:---:|:---:|:---:|
@@ -465,7 +467,7 @@ The page automatically lists local ZIM sources. With `kiwix_server`, it also dis
 | No index, archive has a native full-text index | no | no | yes |
 | No index, no native full-text index | no | no | no — library only, not searchable |
 
-`serve --fast` skips the model and all vectors, leaving title-word and full-text search. A normal `serve` loads the model in the background; if `model_dir` is missing or unreadable it logs a warning and keeps serving lexical results. Vectors built with a different embedding model are ignored in the same way. `kiwix-serve` is not involved in any local row of the table: the ZIM archive is searched directly, and its embedded full-text index is not a separate Kiwix index file. With `kiwix_server` set, remote Kiwix catalog sources are searched through kiwix-serve's full-text API instead.
+`serve --fast` skips the model and all vectors, leaving title-word and full-text search. A normal `serve` loads the model in the background; if `model_dir` is missing or unreadable it logs a warning and keeps serving lexical results. Vectors built with a different embedding model are ignored in the same way. `kiwix-serve` is not involved in any local row of the table: the ZIM archive is searched directly, and its embedded full-text index is not a separate Kiwix index file. With a Kiwix `[[collections]]` entry configured, remote catalog sources are searched through kiwix-serve's full-text API instead.
 
 FastAPI serves a lightweight HTML page that is accessible from any browser at `http://<host>:8090` (the `port` in `config.toml`). To serve it under a path such as `/zimantic`, set `web_base_path = "/zimantic"` and point a reverse proxy at the server with that prefix stripped:
 

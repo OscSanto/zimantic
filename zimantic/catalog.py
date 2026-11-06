@@ -20,6 +20,7 @@ Why a separate catalog:
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import sqlite3
@@ -54,8 +55,9 @@ def catalog_path(index_dir: Path | str) -> Path:
 
 
 # Bump when the table layout or the metadata derivation changes. The catalog is
-# disposable, so a mismatch triggers a full rescan instead of a migration.
-SCHEMA_VERSION = 5
+# disposable, so a mismatch triggers a full staged rebuild instead of a migration.
+SCHEMA_VERSION = 6
+MIN_SQLITE_VERSION = (3, 37, 0)
 MAX_FAVICON_BYTES = 1 << 20
 # Library thumbnail size. libzim's default is also 48, but passing it keeps
 # the on-disk catalog identical to IIAB's iiab_zim_catalog.py.
@@ -123,27 +125,28 @@ def largest_zims_by_stem(zim_sizes: Mapping[Path, int]) -> dict[str, Path]:
 # callers are serialized by BEGIN IMMEDIATE below.
 _SCHEMA_LOCK = threading.Lock()
 
-# Columns of the zims table. Verified before trusting ``user_version``, so a
-# catalog written by a different schema (for example IIAB's iiab_zim_catalog.py,
-# which reuses the filename and SCHEMA_VERSION but not the layout) is rebuilt
-# instead of failing every query with "no such column".
-_SCHEMA_COLUMNS = (
-    "path", "stem", "uuid", "size", "mtime", "title", "description",
-    "long_description", "language", "creator", "publisher", "date", "tags",
-    "public_tags", "name", "flavour", "category", "article_count",
-    "media_count", "entry_count", "license", "scraper", "source",
-    "attribution", "relation", "counter", "homepage", "has_fulltext_index",
-    "favicon", "favicon_mime", "icon_path", "available",
-    "last_error", "scanned_at",
+# Columns of the generic sources table. Verified before trusting
+# ``user_version``, so an old ZIM-specific catalog or one written by a
+# different tool is rebuilt rather than queried with incompatible columns.
+_SOURCE_COLUMNS = (
+    "provider", "collection_key", "key", "path", "provider_id", "size",
+    "mtime", "title", "description", "long_description", "language",
+    "creator", "publisher", "date", "tags", "public_tags", "category",
+    "item_count", "license", "origin", "attribution", "relation",
+    "mime_counts", "homepage", "native_fulltext_available", "icon_data",
+    "icon_mime_type", "icon_path", "scanned_at", "provider_metadata",
 )
-# Read queries that only build SourceInfo or compare paths/sizes replace the
-# raw favicon BLOB with its byte length so SQLite does not allocate and copy
-# megabytes of icon bytes on every source/library listing.
+# Backwards-compatible private alias used by code that still speaks in terms of
+# the old ZIM cache while the public schema is generic.
+_SCHEMA_COLUMNS = _SOURCE_COLUMNS
+# Read queries replace the raw icon BLOB with a one-byte marker so listing does
+# not allocate and copy megabytes of icon bytes on every request.
 _METADATA_SELECT = ", ".join(
-    "CASE WHEN favicon IS NOT NULL AND length(favicon) > 0 THEN X'01' ELSE NULL END AS favicon"
-    if col == "favicon"
+    "CASE WHEN icon_data IS NOT NULL AND length(icon_data) > 0 "
+    "THEN X'01' ELSE NULL END AS icon_data"
+    if col == "icon_data"
     else col
-    for col in _SCHEMA_COLUMNS
+    for col in _SOURCE_COLUMNS
 )
 
 META_KEYS = (
@@ -415,11 +418,13 @@ def metadata_from_archive(archive: Any, zim_path: Path | str) -> dict[str, Any]:
 
 @dataclass(slots=True)
 class CatalogRecord:
-    path: str
-    stem: str
-    uuid: str
-    size: int
-    mtime: float
+    provider: str
+    collection_key: str
+    key: str
+    path: str | None
+    provider_id: str
+    size: int | None
+    mtime: float | None
     title: str
     description: str
     long_description: str
@@ -429,35 +434,80 @@ class CatalogRecord:
     date: str
     tags: str
     public_tags: str
-    name: str
-    flavour: str
     category: str
-    article_count: int
-    media_count: int
-    entry_count: int
+    item_count: int | None
     license: str
-    scraper: str
-    source: str
+    origin: str
     attribution: str
     relation: str
-    counter: str
+    mime_counts: str
     homepage: str
-    has_fulltext_index: int
-    favicon: bytes | None
-    favicon_mime: str
+    native_fulltext_available: int | None
+    icon_data: bytes | None
+    icon_mime_type: str
     icon_path: str
-    available: int
-    last_error: str
     scanned_at: float
+    provider_metadata: str
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> CatalogRecord:
         return cls(**{field: row[field] for field in cls.__dataclass_fields__})
 
+    # -- compatibility views used by the phase-00 ZIM runtime.  These derive
+    # from generic columns; they are never persisted as separate fields.
+    @property
+    def stem(self) -> str:
+        return Path(self.path).stem if self.path else ""
+
+    @property
+    def uuid(self) -> str:
+        return self.provider_id or ""
+
+    @property
+    def available(self) -> int:
+        return 1
+
+    @property
+    def last_error(self) -> str:
+        return ""
+
+    @property
+    def article_count(self) -> int:
+        return int(self.item_count or 0)
+
+    @property
+    def media_count(self) -> int:
+        return 0
+
+    @property
+    def entry_count(self) -> int:
+        return int(self.item_count or 0)
+
+    @property
+    def favicon(self) -> bytes | None:
+        return self.icon_data
+
+    @property
+    def favicon_mime(self) -> str:
+        return self.icon_mime_type
+
+    @property
+    def has_fulltext_index(self) -> int:
+        return int(bool(self.native_fulltext_available))
+
+    @property
+    def counter(self) -> str:
+        return self.mime_counts
+
+    @property
+    def name(self) -> str:
+        return self.title
+
     def to_source_metadata(self) -> dict[str, Any]:
-        """Fields used by ``SourceInfo`` and the JSON API."""
+        """Provider-neutral fields used to construct ``SourceInfo``."""
         return {
-            "uuid": self.uuid or None,
+            "provider": self.provider,
+            "collection_key": self.collection_key,
             "title": self.title or None,
             "description": self.description or None,
             "long_description": self.long_description or None,
@@ -467,20 +517,21 @@ class CatalogRecord:
             "date": self.date or None,
             "tags": tuple(tag for tag in self.public_tags.split(";") if tag),
             "size": self.size,
-            "article_count": self.article_count,
-            "media_count": self.media_count,
-            "name": self.name or None,
-            "flavour": self.flavour or None,
+            "item_count": self.item_count,
             "category": self.category or None,
             "license": self.license or None,
-            "scraper": self.scraper or None,
-            "source": self.source or None,
+            "origin": self.origin or None,
             "attribution": self.attribution or None,
             "relation": self.relation or None,
-            "counter": self.counter or None,
+            "mime_counts": self.mime_counts or None,
             "homepage": self.homepage or None,
-            "has_fulltext_index": bool(self.has_fulltext_index),
+            "native_fulltext_available": (
+                None
+                if self.native_fulltext_available is None
+                else bool(self.native_fulltext_available)
+            ),
             "icon_path": self.icon_path or None,
+            "provider_id": self.provider_id or None,
         }
 
 
@@ -492,15 +543,28 @@ class ZimCatalog:
         db_path: Path | str | None,
         zim_dir: Path | str | None = None,
         archive_factory: Any | None = None,
+        *,
+        collection_name: str = "library",
+        collection_root: Path | str | None = None,
     ):
         self.db_path = Path(db_path) if db_path is not None else Path(":memory:")
         self.zim_dir = _absolute_path(zim_dir) if zim_dir else None
+        self.collection_name = collection_name
+        self.collection_root = (
+            _absolute_path(collection_root) if collection_root else None
+        )
         self.archive_factory = archive_factory
         self._lock = threading.RLock()
         # Bumped on every local write; combined with SQLite's data_version in
         # version() so HTTP caches notice metadata-only changes.
         self._revision = 0
+        self._lease = None
         try:
+            if db_path is not None:
+                from .locking import FileLease, catalog_lease_path
+
+                self._lease = FileLease(catalog_lease_path(db_path))
+                self._lease.acquire(shared=True)
             self._initialize_database(db_path)
         except (OSError, sqlite3.Error) as error:
             if db_path is None or not _is_catalog_corruption(error):
@@ -527,6 +591,13 @@ class ZimCatalog:
 
     def _initialize_database(self, db_path: Path | str | None) -> None:
         self.db = self._open_database(db_path)
+        version = tuple(int(part) for part in sqlite3.sqlite_version.split(".")[:3])
+        if version < MIN_SQLITE_VERSION:
+            self.db.close()
+            raise RuntimeError(
+                "zimantic requires SQLite 3.37 or newer for its STRICT catalog "
+                f"schema (found {sqlite3.sqlite_version})"
+            )
         self._ensure_schema()
         self.db.execute("PRAGMA busy_timeout=0")
         try:
@@ -566,7 +637,7 @@ class ZimCatalog:
         """Read the schema state without taking a write lock."""
         version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
         columns = {
-            row["name"] for row in self.db.execute("PRAGMA table_info(zims)")
+            row["name"] for row in self.db.execute("PRAGMA table_info(sources)")
         }
         current = version == SCHEMA_VERSION and columns == set(_SCHEMA_COLUMNS)
         return current, version
@@ -581,18 +652,27 @@ class ZimCatalog:
             current, _version = self._schema_current()
             if current:
                 return
-            # Serialize the rebuild with other processes (for example, parallel
-            # ``zimantic build`` workers), then re-check: another process may
-            # have rebuilt the catalog while we waited for the lock.
-            self.db.execute("BEGIN IMMEDIATE")
+            lease = getattr(self, "_lease", None)
+            if lease is not None:
+                lease.release()
+                lease.acquire(shared=False)
             try:
-                current, version = self._schema_current()
-                if not current:
-                    self._rebuild_schema(version)
-                self.db.commit()
-            except BaseException:
-                self.db.rollback()
-                raise
+                # Serialize the rebuild with other processes (for example,
+                # parallel ``zimantic build`` workers), then re-check: another
+                # process may have rebuilt the catalog while we waited.
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    current, version = self._schema_current()
+                    if not current:
+                        self._rebuild_schema(version)
+                    self.db.commit()
+                except BaseException:
+                    self.db.rollback()
+                    raise
+            finally:
+                if lease is not None:
+                    lease.release()
+                    lease.acquire(shared=True)
 
     def _rebuild_schema(self, version: int) -> None:
         if version:
@@ -607,15 +687,20 @@ class ZimCatalog:
                 reason,
                 SCHEMA_VERSION,
             )
+        # The catalog is disposable: drop old provider-specific tables outright
+        # rather than migrating rows or leaving a compatibility view.
         self.db.execute("DROP TABLE IF EXISTS zims")
+        self.db.execute("DROP TABLE IF EXISTS sources")
         self.db.execute(
             """
-            CREATE TABLE zims (
-                path TEXT PRIMARY KEY,
-                stem TEXT NOT NULL,
-                uuid TEXT NOT NULL DEFAULT '',
-                size INTEGER NOT NULL,
-                mtime REAL NOT NULL,
+            CREATE TABLE sources (
+                provider TEXT NOT NULL,
+                collection_key TEXT NOT NULL,
+                key TEXT NOT NULL,
+                path TEXT,
+                provider_id TEXT NOT NULL DEFAULT '',
+                size INTEGER,
+                mtime REAL,
                 title TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 long_description TEXT NOT NULL DEFAULT '',
@@ -625,31 +710,36 @@ class ZimCatalog:
                 date TEXT NOT NULL DEFAULT '',
                 tags TEXT NOT NULL DEFAULT '',
                 public_tags TEXT NOT NULL DEFAULT '',
-                name TEXT NOT NULL DEFAULT '',
-                flavour TEXT NOT NULL DEFAULT '',
                 category TEXT NOT NULL DEFAULT '',
-                article_count INTEGER NOT NULL DEFAULT 0,
-                media_count INTEGER NOT NULL DEFAULT 0,
-                entry_count INTEGER NOT NULL DEFAULT 0,
+                item_count INTEGER,
                 license TEXT NOT NULL DEFAULT '',
-                scraper TEXT NOT NULL DEFAULT '',
-                source TEXT NOT NULL DEFAULT '',
+                origin TEXT NOT NULL DEFAULT '',
                 attribution TEXT NOT NULL DEFAULT '',
                 relation TEXT NOT NULL DEFAULT '',
-                counter TEXT NOT NULL DEFAULT '',
+                mime_counts TEXT NOT NULL DEFAULT '',
                 homepage TEXT NOT NULL DEFAULT '',
-                has_fulltext_index INTEGER NOT NULL DEFAULT 0,
-                favicon BLOB,
-                favicon_mime TEXT NOT NULL DEFAULT '',
+                native_fulltext_available INTEGER,
+                icon_data BLOB,
+                icon_mime_type TEXT NOT NULL DEFAULT '',
                 icon_path TEXT NOT NULL DEFAULT '',
-                available INTEGER NOT NULL DEFAULT 1,
-                last_error TEXT NOT NULL DEFAULT '',
-                scanned_at REAL NOT NULL
-            )
+                scanned_at REAL NOT NULL,
+                provider_metadata TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (key),
+                CHECK (native_fulltext_available IS NULL
+                       OR native_fulltext_available IN (0, 1)),
+                CHECK (size IS NULL OR size >= 0),
+                CHECK (mtime IS NULL OR mtime >= 0),
+                CHECK (item_count IS NULL OR item_count >= 0)
+            ) STRICT
             """
         )
-        self.db.execute("CREATE INDEX zims_stem ON zims(stem)")
-        self.db.execute("CREATE INDEX zims_uuid ON zims(uuid)")
+        self.db.execute("CREATE INDEX sources_path ON sources(path)")
+        self.db.execute(
+            "CREATE INDEX sources_collection ON sources(collection_key)"
+        )
+        self.db.execute(
+            "CREATE INDEX sources_provider_id ON sources(provider, provider_id)"
+        )
         self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def version(self) -> tuple[int, int]:
@@ -661,6 +751,10 @@ class ZimCatalog:
     def close(self) -> None:
         with self._lock:
             self.db.close()
+        lease = getattr(self, "_lease", None)
+        if lease is not None:
+            lease.release()
+            self._lease = None
 
     def __enter__(self) -> ZimCatalog:
         return self
@@ -670,26 +764,95 @@ class ZimCatalog:
 
     # ------------------------------------------------------------------ writes
 
+    def _source_row(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Map legacy metadata extraction into the generic sources row."""
+        path = Path(record["path"])
+        root = self.collection_root or self.zim_dir
+        try:
+            if root is not None and Path(root).is_file():
+                relative = path.name
+            elif root is not None:
+                relative = path.resolve().relative_to(Path(root).resolve()).as_posix()
+            else:
+                relative = path.name
+        except (OSError, ValueError):
+            relative = path.name
+        from .providers.zim import zim_source_key
+
+        key = record.get("key") or zim_source_key(
+            self.collection_name, relative or path.name
+        )
+        metadata = {
+            name: record.get(name, "")
+            for name in (
+                "name",
+                "flavour",
+                "scraper",
+                "source",
+                "counter",
+            )
+        }
+        return {
+            "provider": "zim",
+            "collection_key": f"zim:{self.collection_name}",
+            "key": key,
+            "path": record.get("path"),
+            "provider_id": record.get("uuid") or "",
+            "size": record.get("size"),
+            "mtime": (
+                round(float(record["mtime"]))
+                if record.get("mtime") is not None
+                else None
+            ),
+            "title": record.get("title") or record.get("name", ""),
+            "description": record.get("description", ""),
+            "long_description": record.get("long_description", ""),
+            "language": record.get("language", ""),
+            "creator": record.get("creator", ""),
+            "publisher": record.get("publisher", ""),
+            "date": record.get("date", ""),
+            "tags": record.get("tags", ""),
+            "public_tags": record.get("public_tags", ""),
+            "category": record.get("category", ""),
+            "item_count": record.get("item_count", record.get("entry_count")),
+            "license": record.get("license", ""),
+            "origin": record.get("origin", record.get("source", "")),
+            "attribution": record.get("attribution", ""),
+            "relation": record.get("relation", ""),
+            "mime_counts": record.get(
+                "mime_counts", record.get("counter", "")
+            ),
+            "homepage": record.get("homepage", ""),
+            "native_fulltext_available": (
+                record.get(
+                    "native_fulltext_available",
+                    record.get("has_fulltext_index"),
+                )
+            ),
+            "icon_data": record.get("icon_data", record.get("favicon")),
+            "icon_mime_type": record.get(
+                "icon_mime_type", record.get("favicon_mime", "")
+            ),
+            "icon_path": record.get("icon_path", ""),
+            "scanned_at": record.get("scanned_at", time.time()),
+            "provider_metadata": json.dumps(metadata, sort_keys=True),
+        }
+
     def _upsert(self, record: dict[str, Any]) -> None:
-        columns = [
-            "path", "stem", "uuid", "size", "mtime", "title", "description",
-            "long_description", "language", "creator", "publisher", "date",
-            "tags", "public_tags", "name", "flavour", "category",
-            "article_count", "media_count", "entry_count", "license", "scraper",
-            "source", "attribution", "relation", "counter",
-            "homepage", "has_fulltext_index", "favicon", "favicon_mime",
-            "icon_path", "available", "last_error",
-            "scanned_at",
-        ]
-        values = {key: record.get(key) for key in columns}
-        if values.get("favicon") is not None:
-            values["favicon"] = sqlite3.Binary(values["favicon"])
+        values = self._source_row(record)
+        columns = list(_SOURCE_COLUMNS)
+        if values.get("icon_data") is not None:
+            values["icon_data"] = sqlite3.Binary(values["icon_data"])
+        if values.get("native_fulltext_available") is not None:
+            values["native_fulltext_available"] = int(
+                bool(values["native_fulltext_available"])
+            )
         placeholders = ", ".join("?" for _ in columns)
         assignments = ", ".join(f"{key}=excluded.{key}" for key in columns[1:])
         self.db.execute(
-            f"INSERT INTO zims ({', '.join(columns)}) VALUES ({placeholders}) "
-            f"ON CONFLICT(path) DO UPDATE SET {assignments}",
-            [values[key] for key in columns],
+            f"INSERT INTO sources ({', '.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(key) DO UPDATE SET {assignments}",
+            [values.get(key) for key in columns],
         )
         self._revision += 1
 
@@ -710,7 +873,12 @@ class ZimCatalog:
         size: int | None = None,
         mtime: float | None = None,
     ) -> None:
-        """Record an unreadable archive without discarding earlier metadata."""
+        """Record an unreadable archive minimally.
+
+        Availability and error state are deliberately not persisted; the row
+        establishes discovery/addressability only. The failure is reported by
+        the operation that encounters it.
+        """
         path = str(_absolute_path(zim_path))
         try:
             stat = Path(zim_path).stat()
@@ -719,28 +887,14 @@ class ZimCatalog:
         except OSError:
             pass
         with self._lock:
-            self.db.execute(
-                """
-                INSERT INTO zims (
-                    path, stem, size, mtime, available, last_error, scanned_at
-                ) VALUES (?, ?, ?, ?, 0, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET
-                    size=excluded.size,
-                    mtime=excluded.mtime,
-                    available=0,
-                    last_error=excluded.last_error,
-                    scanned_at=excluded.scanned_at
-                """,
-                (
-                    path,
-                    Path(zim_path).stem,
-                    size or 0,
-                    mtime or 0.0,
-                    str(error),
-                    time.time(),
-                ),
+            self._upsert(
+                {
+                    "path": path,
+                    "size": size or 0,
+                    "mtime": mtime or 0.0,
+                    "scanned_at": time.time(),
+                }
             )
-            self._revision += 1
             self.db.commit()
 
     def scan(self) -> dict[str, int]:
@@ -803,7 +957,7 @@ class ZimCatalog:
             existing = {
                 row["path"]: row
                 for row in self.db.execute(
-                    "SELECT path, size, mtime, available FROM zims"
+                    "SELECT path, size, mtime FROM sources WHERE path IS NOT NULL"
                 )
             }
 
@@ -842,24 +996,19 @@ class ZimCatalog:
                 row = existing.get(path_str)
                 if (
                     row is not None
-                    and row["available"]
                     and row["size"] == stat.st_size
-                    and abs(float(row["mtime"]) - stat.st_mtime) < 1e-6
+                    and abs(float(row["mtime"]) - round(stat.st_mtime)) < 1e-6
                 ):
                     stats["skipped"] += 1
                     continue
                 metadata = {column: "" for column in _SCHEMA_COLUMNS}
                 metadata.update(
                     path=path_str,
-                    stem=Path(path_str).stem,
                     size=stat.st_size,
                     mtime=stat.st_mtime,
-                    article_count=0,
-                    media_count=0,
-                    entry_count=0,
-                    has_fulltext_index=0,
-                    favicon=None,
-                    available=1,
+                    item_count=0,
+                    native_fulltext_available=0,
+                    icon_data=None,
                     scanned_at=time.time(),
                 )
                 with self._lock:
@@ -867,7 +1016,7 @@ class ZimCatalog:
                 stats["updated" if path_str in existing else "added"] += 1
             with self._lock:
                 for path_str in stale:
-                    self.db.execute("DELETE FROM zims WHERE path = ?", (path_str,))
+                    self.db.execute("DELETE FROM sources WHERE path = ?", (path_str,))
                     stats["removed"] += 1
                     self._revision += 1
                 self.db.commit()
@@ -878,9 +1027,8 @@ class ZimCatalog:
             row = existing.get(path_str)
             if (
                 row is not None
-                and row["available"]
                 and row["size"] == stat.st_size
-                and abs(float(row["mtime"]) - stat.st_mtime) < 1e-6
+                and abs(float(row["mtime"]) - round(stat.st_mtime)) < 1e-6
             ):
                 stats["skipped"] += 1
                 continue
@@ -901,7 +1049,7 @@ class ZimCatalog:
 
         with self._lock:
             for path_str in stale:
-                self.db.execute("DELETE FROM zims WHERE path = ?", (path_str,))
+                self.db.execute("DELETE FROM sources WHERE path = ?", (path_str,))
                 stats["removed"] += 1
                 self._revision += 1
             self.db.commit()
@@ -912,21 +1060,40 @@ class ZimCatalog:
 
     def _get_path_locked(self, path: Path | str) -> sqlite3.Row | None:
         return self.db.execute(
-            "SELECT * FROM zims WHERE path = ?", (str(_absolute_path(path)),)
+            "SELECT * FROM sources WHERE path = ?", (str(_absolute_path(path)),)
         ).fetchone()
+
+    def get_path(self, path: Path | str) -> CatalogRecord | None:
+        """Return the record for one exact private path locator."""
+        with self._lock:
+            row = self._get_path_locked(path)
+        return CatalogRecord.from_row(row) if row else None
 
     def rows(self, *, include_favicon: bool = False) -> list[CatalogRecord]:
         cols = "*" if include_favicon else _METADATA_SELECT
-        query = f"SELECT {cols} FROM zims ORDER BY stem, size DESC, path ASC"
         with self._lock:
-            return [CatalogRecord.from_row(row) for row in self.db.execute(query)]
+            return [
+                CatalogRecord.from_row(row)
+                for row in self.db.execute(
+                    f"SELECT {cols} FROM sources ORDER BY path ASC"
+                )
+            ]
+
+    @staticmethod
+    def _stem_clause(stem: str) -> tuple[str, tuple[str, ...]]:
+        return (
+            "(path = ? OR lower(path) LIKE lower(?))",
+            (stem + ".zim", "%/" + stem + ".zim"),
+        )
 
     def get_stem(self, stem: str, *, include_favicon: bool = False) -> CatalogRecord | None:
         cols = "*" if include_favicon else _METADATA_SELECT
+        clause, params = self._stem_clause(stem)
         with self._lock:
             row = self.db.execute(
-                f"SELECT {cols} FROM zims WHERE stem = ? ORDER BY size DESC, path ASC LIMIT 1",
-                (stem,),
+                f"SELECT {cols} FROM sources WHERE {clause} "
+                "ORDER BY size DESC, path ASC LIMIT 1",
+                params,
             ).fetchone()
         return CatalogRecord.from_row(row) if row else None
 
@@ -937,11 +1104,12 @@ class ZimCatalog:
         if size is None:
             return self.get_stem(stem, include_favicon=include_favicon)
         cols = "*" if include_favicon else _METADATA_SELECT
+        clause, params = self._stem_clause(stem)
         with self._lock:
             row = self.db.execute(
-                f"SELECT {cols} FROM zims WHERE stem = ? AND size = ? "
+                f"SELECT {cols} FROM sources WHERE {clause} AND size = ? "
                 "ORDER BY path ASC LIMIT 1",
-                (stem, size),
+                (*params, size),
             ).fetchone()
         if row:
             return CatalogRecord.from_row(row)
@@ -950,15 +1118,22 @@ class ZimCatalog:
     def find_path(self, stem: str, size: int | None = None) -> Path | None:
         """Return the matching-size archive path, or the largest same-stem copy."""
         record = self.get_stem_size(stem, size)
-        return Path(record.path) if record is not None else None
+        return Path(record.path) if record is not None and record.path else None
 
     def favicon(self, stem: str) -> tuple[bytes | None, str]:
+        clause, params = self._stem_clause(stem)
         with self._lock:
             row = self.db.execute(
-                "SELECT favicon, favicon_mime FROM zims WHERE stem = ? "
+                f"SELECT icon_data, icon_mime_type FROM sources WHERE {clause} "
                 "ORDER BY size DESC LIMIT 1",
-                (stem,),
+                params,
             ).fetchone()
         if not row:
             return None, ""
-        return row["favicon"], row["favicon_mime"] or ""
+        return row["icon_data"], row["icon_mime_type"] or ""
+
+
+# Provider-neutral names for the storage layer. Phase 01 moves ZIM scan
+# ownership behind a provider; the storage contract is already generic.
+SourceCatalog = ZimCatalog
+SourceRecord = CatalogRecord

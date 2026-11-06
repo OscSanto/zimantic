@@ -93,6 +93,15 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     cfg = getattr(search_class, "cfg", {}) or {}
     secure_browsing = bool(cfg.get("secure_browsing", False))
 
+    def _snapshot_version() -> str:
+        token_of = getattr(search_class, "snapshot_token", None)
+        if callable(token_of):
+            token = token_of()
+            return f"{token[0]}:{token[1]}"
+        version_of = getattr(search_class, "source_version", None)
+        version = version_of() if callable(version_of) else 0
+        return str(version)
+
     def paged_json_response(
         request: Request,
         memo_key: str,
@@ -102,6 +111,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         limit: int | None,
         offset: int,
     ):
+        snapshot = _snapshot_version()
         if limit is None:
             response = web_app._json_response(
                 request,
@@ -110,6 +120,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 payload_factory,
                 memos,
             )
+            response.headers["X-Snapshot-Version"] = snapshot
             return response
 
         _, payload, _, full_etag = web_app._memoized_json(
@@ -142,6 +153,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             "Cache-Control": "no-cache",
             "X-Total-Count": str(total),
             "X-Offset": str(effective_offset),
+            "X-Snapshot-Version": snapshot,
             "X-Has-More": str(
                 effective_offset + len(page) < total
             ).lower(),
@@ -246,25 +258,26 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     @app.get("/sources")
     def sources(
         request: Request,
-        limit: int | None = Query(default=None, ge=1, le=1000),
+        limit: int | None = Query(default=None, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ):
         version_of = getattr(search_class, "source_version", None)
         version = version_of() if callable(version_of) else 0
+        default_page = int(getattr(search_class, "page_size", 10) or 10)
         return paged_json_response(
             request,
             "sources",
             version,
             search_class.source_dicts,
             memos,
-            limit,
+            min(limit or default_page, 200),
             offset,
         )
 
     @app.get("/library.json")
     def library(
         request: Request,
-        limit: int | None = Query(default=None, ge=1, le=1000),
+        limit: int | None = Query(default=None, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ):
         version_of = getattr(search_class, "library_version", None)
@@ -276,20 +289,18 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 return [
                     source
                     for source in search_class.source_dicts()
-                    if source.get("mode") == "local"
-                    and (
-                        not source.get("available", True)
-                        or source.get("homepage")
-                    )
+                    if source.get("provider") in {"zim", "files", "kolibri"}
+                    and (source.get("searchable") or source.get("homepage"))
                 ]
 
+        default_page = int(getattr(search_class, "page_size", 10) or 10)
         return paged_json_response(
             request,
             "library",
             version,
             library_of,
             memos,
-            limit,
+            min(limit or default_page, 200),
             offset,
         )
 
@@ -394,51 +405,42 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         }
 
     def zim_icon_url(zim: str) -> str | None:
-        """Return the ZIM favicon used when an article declares none."""
+        """Return the favicon used when an article declares none."""
         try:
+            source = (
+                search_class.resolve_source(zim)
+                if callable(getattr(search_class, "resolve_source", None))
+                else None
+            )
             sources = search_class.source_dicts()
         except Exception:
             return None
-        for source in sources:
-            if not isinstance(source, dict) or source.get("local_name") != zim:
+        for candidate in sources:
+            if not isinstance(candidate, dict):
                 continue
-            icon_url = source.get("icon_url")
+            if candidate.get("key") != zim and (
+                source is None or candidate.get("key") != source.key
+            ):
+                continue
+            icon_url = candidate.get("icon_url")
             if isinstance(icon_url, str) and icon_url:
                 return icon_url
         return None
 
     def zim_search_available(zim: str) -> bool:
-        """True when this ZIM resolves to an available local search scope.
-
-        Full search falls back to every source when a ZIM identifier does not
-        resolve, so the toolbar must not offer "Search this ZIM" for an
-        unknown, removed, or unavailable archive. Aliases are matched the same
-        way as `Search._select_sources`, so a date-stripped or flavour-suffixed
-        bookmark still gets the scoped search box.
-        """
+        """True when this identifier resolves to a searchable source."""
         try:
+            resolve = getattr(search_class, "resolve_source", None)
+            source = resolve(zim) if callable(resolve) else None
             sources = search_class.source_dicts()
         except Exception:
             return False
-        wanted_key = _zim_key(zim)
-        wanted_book = _book_identity(zim) if str(zim or "").strip() else None
-        for source in sources:
-            if not isinstance(source, dict):
+        if source is not None:
+            return bool(source.searchable)
+        for candidate in sources:
+            if not isinstance(candidate, dict):
                 continue
-            if source.get("mode") != "local" or not source.get("available"):
-                continue
-            if zim in {
-                source.get("key"),
-                source.get("name"),
-                source.get("book"),
-                source.get("local_name"),
-            }:
-                return True
-            if source.get("key") == wanted_key:
-                return True
-            if wanted_book is not None and _book_identity(
-                source.get("local_name") or source.get("name") or source.get("key")
-            ) == wanted_book:
+            if candidate.get("key") == zim and candidate.get("searchable"):
                 return True
         return False
 
@@ -553,7 +555,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 status_code=307,
                 headers={
                     "Location": web_app._content_url(
-                        source.local_name or source.book, base_path=base_path
+                        source.key, base_path=base_path
                     ),
                     "Cache-Control": "no-store",
                 },
@@ -630,6 +632,12 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         if debug and page.get("matched_by") is not None:
             headers["X-Matched-By"] = json.dumps(
                 page["matched_by"],
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        if page.get("scope") is not None:
+            headers["X-Search-Scope"] = json.dumps(
+                page["scope"],
                 separators=(",", ":"),
                 ensure_ascii=True,
             )

@@ -14,7 +14,7 @@ import numpy as np
 
 
 from zimantic.cache import QueryCache
-from zimantic.contracts import SourceInfo, SourceResult
+from zimantic.contracts import SourceInfo, SourceResult, encode_document_id
 from zimantic.search import (
     ArticleUnavailableError,
     PREVIEW_HTML_BYTES,
@@ -253,19 +253,17 @@ class SearchContractTests(unittest.TestCase):
         source = _source_info_from_metadata(
             {
                 "name": "Display Name",
-                "has_fulltext_index": 1,
+                "native_fulltext_available": 1,
                 "size": 10,
-                "article_count": 2,
-                "media_count": 3,
+                "item_count": 2,
             },
             key="manual",
-            local_name="manual",
-            available=True,
+            provider="zim",
             searchable=True,
             icon_url=None,
         )
         self.assertEqual(source.title, "Display Name")
-        self.assertIs(source.has_fulltext_index, True)
+        self.assertIs(source.native_fulltext_available, True)
         self.assertEqual(source.tags, ())
 
     def test_content_phrase_matching_keeps_stopwords_and_ignores_markup(self):
@@ -1281,7 +1279,7 @@ class SearchContractTests(unittest.TestCase):
         )
         by_title = {item["title"]: item for item in suggestions}
         self.assertEqual(by_title["Tire Changes"]["path"], "Tire_Changes")
-        self.assertEqual(by_title["Tire Changes"]["id"], "manual:Tire_Changes")
+        self.assertEqual(by_title["Tire Changes"]["id"], encode_document_id("manual", "Tire_Changes"))
         self.assertEqual(
             by_title["Tire Changes"]["url"], "/content/manual/Tire_Changes"
         )
@@ -1312,7 +1310,7 @@ class SearchContractTests(unittest.TestCase):
 
         suggestions = _title_suggest(rows, "tir", limit=8)
 
-        self.assertEqual([item["id"] for item in suggestions], ["manual:Tire"])
+        self.assertEqual([item["id"] for item in suggestions], [encode_document_id("manual", "Tire")])
 
     def test_suggest_fills_limit_when_redirects_collapse(self):
         rows = [
@@ -1329,7 +1327,11 @@ class SearchContractTests(unittest.TestCase):
 
         self.assertEqual(
             {item["id"] for item in suggestions},
-            {"manual:Tire", "manual:Tire_Changes", "manual:Tire_Repair"},
+            {
+                encode_document_id("manual", "Tire"),
+                encode_document_id("manual", "Tire_Changes"),
+                encode_document_id("manual", "Tire_Repair"),
+            },
         )
 
     def test_suggest_stays_scoped_on_two_source_library_and_unknown_zim(self):
@@ -1363,7 +1365,7 @@ class SearchContractTests(unittest.TestCase):
         }
         try:
             scoped = search.suggest("tire", ["manual"], limit=8)
-            self.assertEqual([item["id"] for item in scoped], ["manual:Tire_Changes"])
+            self.assertEqual([item["id"] for item in scoped], [encode_document_id("manual", "Tire_Changes")])
             self.assertEqual(search.suggest("tire", ["missing"], limit=8), [])
         finally:
             search.close()
@@ -1872,8 +1874,8 @@ class GracefulDegradationTests(unittest.TestCase):
         ):
             library = search.library_dicts()
 
-        self.assertEqual([source["name"] for source in library], ["Copy"])
-        self.assertTrue(library[0]["available"])
+        self.assertEqual([source["title"] for source in library], ["Working copy"])
+        self.assertTrue(library[0]["searchable"])
         search._executor.shutdown(wait=True)
 
     def test_failed_archive_open_is_not_retried(self):
@@ -2140,7 +2142,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual([event["type"] for event in cached_events], [
                 "started", "source", "done",
             ])
-            self.assertEqual(cached_events[1]["source"]["key"], "manual")
+            self.assertEqual(cached_events[1]["source"]["key"], search._zim_source_key("manual"))
             self.assertEqual(cached_events[1]["count"], 1)
             self.assertEqual(cached_events[-1]["results"], first_events[-1]["results"])
 
@@ -2434,8 +2436,8 @@ class CatalogRefreshTests(unittest.TestCase):
             first = search.refresh_sources()
             second = search.refresh_sources()
 
-        self.assertEqual(first[0]["name"], "Remote Manual")
-        self.assertEqual(second[0]["name"], "Remote Manual")
+        self.assertEqual(first[0]["title"], "Remote Manual")
+        self.assertEqual(second[0]["title"], "Remote Manual")
 
     def test_catalog_refresh_retries_with_bounded_backoff(self):
         class _Response:
@@ -2694,15 +2696,15 @@ class PaginationTests(unittest.TestCase):
 
             page = search.search_page("tire change", limit=10, source="beta")
 
-            self.assertEqual([doc["source_key"] for doc in page["results"]], ["beta"])
+            self.assertEqual([doc["source_key"] for doc in page["results"]], [search._zim_source_key("beta")])
             self.assertEqual(page["total"], 1)
-            self.assertEqual(page["counts"], {"alpha": 1, "beta": 1})
+            self.assertEqual(page["counts"], {search._zim_source_key("alpha"): 1, search._zim_source_key("beta"): 1})
 
             page = search.search_page("tire change", limit=10, source=["alpha", "beta"])
 
             self.assertEqual(
                 [doc["source_key"] for doc in page["results"]],
-                ["alpha", "beta"],
+                [search._zim_source_key("alpha"), search._zim_source_key("beta")],
             )
             self.assertEqual(page["total"], 2)
             search._executor.shutdown(wait=True)
@@ -3089,9 +3091,7 @@ class SourceScopeTests(unittest.TestCase):
             )
         }
         try:
-            sources, _selective, _scope = search._search_scope(
-                ["foo_2024-01"]
-            )
+            sources, _selective, _scope = search._search_scope(["foo"])
         finally:
             search._executor.shutdown(wait=True)
         self.assertEqual([source.key for source in sources], ["foo"])
@@ -3113,9 +3113,7 @@ class SourceScopeTests(unittest.TestCase):
                 key, key, key, "local", local_name=key
             )
         try:
-            sources, selective, _scope = search._search_scope(
-                ["medicine_mini_2025-10"]
-            )
+            sources, selective, _scope = search._search_scope(["medicine"])
         finally:
             search._executor.shutdown(wait=True)
         self.assertEqual([source.key for source in sources], ["medicine"])
@@ -3154,11 +3152,11 @@ class SourceScopeTests(unittest.TestCase):
             ]
         )
         self.assertEqual(
-            sorted(source["key"] for source in sources),
-            ["medicine_maxi", "other_mini"],
+            sorted(source["provider"] for source in sources),
+            ["kiwix", "zim"],
         )
         self.assertEqual(
-            [source["name"] for source in sources if source["key"].startswith("other")],
+            [source["title"] for source in sources if source["provider"] == "kiwix"],
             ["Other mini"],
         )
         search._executor.shutdown(wait=True)
@@ -3173,8 +3171,8 @@ class SourceScopeTests(unittest.TestCase):
         sources = search._rebuild_sources(
             [{"name": "Remote Manual", "book": "manual_2024-01"}]
         )
-        self.assertEqual([source["name"] for source in sources], ["manual"])
-        self.assertEqual(sources[0]["book"], "manual")
+        self.assertEqual([source["title"] for source in sources], ["manual"])
+        self.assertEqual(sources[0]["provider"], "zim")
         search._executor.shutdown(wait=True)
 
     def test_versioned_local_sources_collapse_to_one_book(self):
@@ -3185,8 +3183,8 @@ class SourceScopeTests(unittest.TestCase):
         # Dated and undated copies of one book are not two sources.
         search.indexes = {"foo_2024-01": index, "foo": index}
         sources = search._rebuild_sources([])
-        self.assertEqual([source["key"] for source in sources], ["foo"])
-        self.assertEqual([source["name"] for source in sources], ["foo"])
+        self.assertEqual([source["key"] for source in sources], [search._zim_source_key("foo")])
+        self.assertEqual([source["title"] for source in sources], ["foo"])
         search._executor.shutdown(wait=True)
 
     def test_language_variants_of_local_sources_stay_separate(self):
@@ -3197,7 +3195,7 @@ class SourceScopeTests(unittest.TestCase):
         search.indexes = {"foo_en_2024-01": index, "foo_mul_2024-01": index}
         sources = search._rebuild_sources([])
         self.assertEqual(
-            sorted(source["key"] for source in sources), ["foo_en", "foo_mul"]
+            sorted(source["title"] for source in sources), ["foo_en_2024-01", "foo_mul_2024-01"]
         )
         search._executor.shutdown(wait=True)
 
@@ -3250,7 +3248,7 @@ class SourceScopeTests(unittest.TestCase):
                 self.assertFalse(started["all_sources"])
                 self.assertEqual(started["total_sources"], 2)
                 self.assertEqual(
-                    {source["key"] for source in started["sources"]},
+                    {source["title"] for source in started["sources"]},
                     {"s1", "s2"},
                 )
                 self.assertIsNone(

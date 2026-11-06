@@ -156,11 +156,33 @@ def _read_limited_response(response, limit: int) -> bytes:
     return b"".join(chunks)
 
 
+def _decode_remote_xml(payload: bytes) -> str:
+    """Decode common XML encodings so declarations can be rejected first."""
+    if payload.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return payload.decode("utf-32")
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return payload.decode("utf-16")
+    if payload.startswith(b"\xef\xbb\xbf"):
+        return payload.decode("utf-8-sig")
+    # BOM-less UTF-16/32 declarations are detectable from the null-byte layout.
+    if payload[:4] in {b"<\x00?\x00", b"\x00<\x00?"}:
+        return payload.decode("utf-16")
+    if payload[:4] in {b"<\x00\x00\x00", b"\x00\x00\x00<"}:
+        return payload.decode("utf-32")
+    return payload.decode("utf-8")
+
+
 def _parse_remote_xml(payload: bytes) -> ET.Element:
-    """Parse trusted-shaped XML while rejecting DTD/entity expansion inputs."""
-    if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", payload, re.IGNORECASE):
+    """Parse trusted-shaped XML while rejecting DTD/entity expansion inputs.
+
+    The check runs on decoded text, so UTF-16 and UTF-32 declarations cannot
+    bypass the byte-pattern guard used by older callers.
+    """
+    text = _decode_remote_xml(payload)
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
         raise ValueError("DTD and entity declarations are not supported")
-    return ET.fromstring(payload)
+    return ET.fromstring(text)
+
 
 
 def _zim_key(book: str) -> str:

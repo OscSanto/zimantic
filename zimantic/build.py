@@ -448,6 +448,8 @@ def build(
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     force: bool = False,
     embedding_pipeline: EmbeddingPipeline | None = None,
+    collection_root: Path | str | None = None,
+    collection_name: str = "library",
 ) -> None:
     """Index a ZIM, optionally without article bodies or vectors."""
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
@@ -472,7 +474,11 @@ def build(
         # The archive is already open: store its catalog metadata now, so serve
         # can list sources without reopening every ZIM at startup.
         try:
-            with ZimCatalog(catalog_path(index_dir)) as catalog:
+            with ZimCatalog(
+                catalog_path(index_dir),
+                collection_name=collection_name,
+                collection_root=collection_root,
+            ) as catalog:
                 catalog.upsert_from_archive(zim, zim_path)
         except Exception as error:
             logger.warning(
@@ -517,6 +523,34 @@ def build(
             fingerprint,
             model_probes,
         )
+        # Publish an immutable generation under the shared locator. The legacy
+        # stem files remain untouched for compatibility with an explicit
+        # rebuild workflow, but runtime readers prefer the generation.
+        try:
+            from .indexes import IndexLocator
+
+            with ZimCatalog(catalog_path(index_dir)) as catalog:
+                record = catalog.get_path(zim_path)
+            if record is not None:
+                locator = IndexLocator(index_dir)
+                lease = locator.publish(
+                    record,
+                    db_path,
+                    None if fast else faiss_path,
+                    metadata={
+                        "schema_version": 1,
+                        "source_fingerprint": f"{state.filesize}:{int(zim_path.stat().st_mtime)}",
+                    },
+                )
+                lease.close()
+                locator.cleanup(record)
+        except Exception as error:
+            logger.warning(
+                "%s: could not publish an index generation (%s); the stem index "
+                "remains available for an explicit rebuild",
+                zim_path.stem,
+                error,
+            )
     except Exception as error:
         if state.publish_upgrade:
             logger.warning(

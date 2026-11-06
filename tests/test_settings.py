@@ -78,9 +78,12 @@ class LoadConfigTests(unittest.TestCase):
             config_file = config_home / "zimantic" / "config.toml"
             config_file.parent.mkdir(parents=True)
             config_file.write_text(
-                'zim_dir = "archives"\n'
                 'model_dir = "models/fp16"\n'
-                'index_dir = "indexes"\n',
+                'index_dir = "indexes"\n'
+                '[[collections]]\n'
+                'type = "zim"\n'
+                'name = "library"\n'
+                'path = "archives"\n',
                 encoding="utf-8",
             )
             data_home = root / "data"
@@ -98,7 +101,9 @@ class LoadConfigTests(unittest.TestCase):
                 cfg = load_config(warn=lambda _message: None)
 
         data_dir = data_home / "zimantic"
-        self.assertEqual(cfg["zim_dir"], str(data_dir / "archives"))
+        self.assertEqual(
+            cfg["collections"][0].path, str(config_file.parent / "archives")
+        )
         self.assertEqual(cfg["model_dir"], str(data_dir / "models/fp16"))
         self.assertEqual(cfg["index_dir"], str(data_dir / "indexes"))
 
@@ -190,17 +195,14 @@ class LoadConfigTests(unittest.TestCase):
             load_config(path, warn=warnings.append)
             self.assertTrue(any("empty" in message for message in warnings))
 
-    def test_malformed_file_warns_instead_of_failing(self):
+    def test_malformed_file_is_fatal(self):
+        from zimantic.providers.config import ConfigValidationError
+
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text("this is not = = valid toml", encoding="utf-8")
-            warnings = []
-            cfg = load_config(path, warn=warnings.append)
-            self.assertTrue(warnings)
-            self.assertEqual(cfg["index_dir"], "./indexes")
-            # A parse failure is not an empty file; the second warning used to
-            # contradict the "could not read" one.
-            self.assertFalse(any("empty" in message for message in warnings))
+            with self.assertRaises(ConfigValidationError):
+                load_config(path, warn=lambda _message: None)
 
     def test_unreadable_path_is_not_reported_as_empty(self):
         with tempfile.TemporaryDirectory() as tmp:

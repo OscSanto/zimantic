@@ -358,6 +358,137 @@ def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path
     return sorted(accepted, key=zim_sizes.__getitem__)
 
 
+def _configured_zim_roots(cfg: dict) -> list[Path]:
+    roots = [
+        Path(entry.path)
+        for entry in cfg.get("collections") or ()
+        if getattr(entry, "kind", None) == "zim"
+    ]
+    if not roots and cfg.get("zim_dir"):
+        roots = [Path(cfg["zim_dir"])]
+    return roots
+
+
+def _collect_zims_from_roots(
+    paths: list[Path], roots: list[Path]
+) -> list[Path]:
+    selected: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        for zim in _collect_zims([root], root):
+            resolved = zim.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                selected.append(zim)
+    if paths:
+        selected = _collect_zims(paths, roots[0] if roots else ".")
+    return selected
+
+
+def _slug_collection_name(path: Path) -> str:
+    import re
+
+    stem = path.stem if path.is_file() else path.name
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._") or "zim"
+    if not text[0].isalnum():
+        text = "zim-" + text
+    text = text[:64]
+    return "open-" + text if text == "open" else text
+
+
+def _append_collection_entry(config_path: Path, name: str, path: Path) -> None:
+    """Atomically append one ZIM collection entry, preserving a symlink target."""
+    import json
+    import os
+
+    from .locking import BuildLockError, FileLease
+
+    target = Path(config_path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = FileLease(target.with_name(target.name + ".lock"))
+    lock.acquire(shared=False)
+    try:
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        entry = (
+            ("\n" if existing and not existing.endswith("\n") else "")
+            + "[[collections]]\n"
+            + 'type = "zim"\n'
+            + f"name = {json.dumps(name)}\n"
+            + f"path = {json.dumps(str(path))}\n"
+        )
+        temporary = target.with_name("." + target.name + ".tmp")
+        temporary.write_text(existing + entry, encoding="utf-8")
+        try:
+            fd = os.open(temporary, os.O_RDONLY)
+        except OSError:
+            fd = None
+        if fd is not None:
+            try:
+                os.fsync(fd)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+        os.replace(temporary, target)
+        try:
+            directory = os.open(target.parent, os.O_RDONLY)
+        except OSError:
+            directory = None
+        if directory is not None:
+            try:
+                os.fsync(directory)
+            except OSError:
+                pass
+            finally:
+                os.close(directory)
+    except (OSError, BuildLockError) as error:
+        raise RuntimeError(f"could not update {target}: {error}") from error
+    finally:
+        lock.release()
+
+
+def _persist_unmatched_zim_paths(cfg: dict, paths: list[Path]) -> list[Path]:
+    """Append unmatched positional roots as discoverable ZIM collections."""
+    runtime_config = cfg.get("runtime_config")
+    config_path = getattr(runtime_config, "config_path", None)
+    if config_path is None or not paths:
+        return []
+    existing = [Path(entry.path).resolve() for entry in cfg.get("collections") or ()
+                if getattr(entry, "kind", None) == "zim"]
+
+    def covered(candidate: Path) -> bool:
+        resolved = candidate.resolve()
+        for root in existing:
+            try:
+                resolved.relative_to(root)
+                return True
+            except ValueError:
+                continue
+            if resolved == root:
+                return True
+        return False
+
+    appended: list[Path] = []
+    used_names = {
+        entry.name for entry in cfg.get("collections") or ()
+        if getattr(entry, "kind", None) == "zim"
+    }
+    for raw in paths:
+        candidate = Path(raw).expanduser()
+        if covered(candidate):
+            continue
+        base = _slug_collection_name(candidate)
+        name = base
+        suffix = 2
+        while name in used_names:
+            name = f"{base}-{suffix}"
+            suffix += 1
+        _append_collection_entry(config_path, name, candidate.resolve())
+        used_names.add(name)
+        appended.append(candidate)
+    return appended
+
+
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     from tqdm import tqdm
 
@@ -377,7 +508,20 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             "zimantic: --device is ignored with --fast (no embeddings are computed)"
         )
 
-    zims = _collect_zims(args.paths, cfg["zim_dir"])
+    zims = _collect_zims_from_roots(
+        [Path(path) for path in args.paths], _configured_zim_roots(cfg)
+    )
+    appended = _persist_unmatched_zim_paths(
+        cfg, [Path(path) for path in args.paths]
+    )
+    if appended:
+        logger.warning(
+            "zimantic: added %d ZIM collection entr%s to %s; restart a running "
+            "serve process to load the changed config (SIGHUP reload is not enough)",
+            len(appended),
+            "y" if len(appended) == 1 else "ies",
+            getattr(getattr(cfg.get("runtime_config"), "config_path", None), "__str__", lambda: "config"),
+        )
     if not zims:
         logger.info("zimantic: no .zim files to index")
         return
@@ -439,7 +583,24 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         )
     failures: list[tuple[Path, BaseException]] = []
 
+    def _collection_for(zim: Path):
+        for entry in cfg.get("collections") or ():
+            if getattr(entry, "kind", None) != "zim":
+                continue
+            root = Path(entry.path)
+            if root.is_file():
+                if root.resolve() == zim.resolve():
+                    return entry
+            else:
+                try:
+                    zim.resolve().relative_to(root.resolve())
+                    return entry
+                except ValueError:
+                    continue
+        return None
+
     def run_build(zim: Path) -> None:
+        entry = _collection_for(zim)
         build_zim(
             zim,
             cfg["index_dir"],
@@ -451,6 +612,8 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
             force=args.force,
             embedding_pipeline=embedding_pipeline,
+            collection_root=getattr(entry, "path", None),
+            collection_name=getattr(entry, "name", "library"),
         )
 
     try:

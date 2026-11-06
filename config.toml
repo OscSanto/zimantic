@@ -10,8 +10,14 @@
 # An existing config.toml in the current directory keeps its historical
 # current-directory-relative behavior.
 #
-# ZIM files, downloaded from https://library.kiwix.org:
-# zim_dir = "zims"
+# Collections are declared with [[collections]] at the end of this file. Each
+# configured root/server is one collection; each ZIM archive is one source.
+# Add a local ZIM collection (downloaded from https://library.kiwix.org):
+#
+# [[collections]]
+# type = "zim"
+# name = "library"
+# path = "zims"
 #
 # Must contain model.onnx and either sentencepiece.bpe.model (multilingual-e5)
 # or vocab.txt (English e5-v2). `zimantic model` writes model/int8 (the CPU
@@ -37,20 +43,9 @@ port = 8090
 # isolated inside it.
 # secure_browsing = false
 
-# Optional Kiwix HTTP base used for catalog discovery and full-text-only fallback
-# sources that do not have a local Zimantic index. Leave blank to use local
-# indexes only. Point this at a running kiwix-serve HTTP API (not a ZIM folder);
-# with the standard local setup this is often http://localhost:8085.
-#
-# Remote Kiwix result links come from kiwix-serve's own search response, so no
-# separate content URL is needed.
-kiwix_server = ""
-kiwix_catalog_path = "/kiwix/catalog/v2/entries?count=50000"
-kiwix_catalog_limit = 50000
-max_kiwix_response_bytes = 67108864
-# Maximum remote Kiwix sources searched by an unscoped query. Explicit source
-# selections are still honored; set 0 to keep full searches local by default.
-# max_remote_sources = 100
+# Optional Kiwix collections are declared with [[collections]] type = "kiwix".
+# Point server at a running kiwix-serve HTTP API (not a ZIM folder); with the
+# standard local setup this is often http://localhost:8085.
 
 # TUNING
 
@@ -145,6 +140,9 @@ max_kiwix_response_bytes = 67108864
 # max_stream_ranks = 16
 # Timeout for catalog and Kiwix fallback requests, in seconds.
 # source_timeout = 12
+# Monotonic deadline for one admitted search (scheduling, ranking and bounded
+# previews). Default 30; must be positive.
+# search_timeout_seconds = 30
 # Seconds a search waits for a free slot before reporting busy. Keep this at
 # least as long as a typical cold search on the host so overlapping requests
 # queue instead of returning 503.
@@ -155,3 +153,23 @@ max_kiwix_response_bytes = 67108864
 # The byte budget applies independently to the search and preview caches.
 # Desktop 32 MiB, mobile 8 MiB, supercomputer 256 MiB.
 # cache_bytes = 33_554_432
+
+# COLLECTIONS
+#
+# [[collections]]
+# type = "zim"
+# name = "library"
+# path = "zims"
+#
+# [[collections]]
+# type = "kiwix"
+# name = "kiwix"
+# label = "Kiwix"
+# server = "http://localhost:8085"
+# catalog_path = "/kiwix/catalog/v2/entries?count=50000"
+# catalog_limit = 1000
+# max_catalog_entries = 50000
+# max_response_bytes = 67108864
+# Maximum remote sources searched by an unscoped query for this server entry.
+# Explicit source selections are still honored; 0 keeps unscoped searches local.
+# max_remote_sources = 100
