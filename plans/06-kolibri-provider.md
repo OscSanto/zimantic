@@ -76,6 +76,12 @@ Rules:
   after the discovery/build attempt, and is never placed beside Kolibri files.
   Failure to make or validate that snapshot marks the channel unavailable and
   schedules discovery for the next reload.
+- Prove the selected read-only opener/snapshot backend against the pinned
+  release before implementing the query layer: a closed database, committed
+  live-WAL data, and missing/read-only sidecars. A backup destination being
+  private does not make its source connection sidecar-free. Record the backend,
+  byte/time caps, and supported filesystem/platform assumptions; fail closed
+  for an unproven case rather than claiming `mode=ro` alone meets this contract.
 - `path`/`database_dir`/`storage` must be local. No network access.
 - These configured paths may be absolute and may be retained as private
   runtime/catalog locators. They must not be used as collection/source keys or
@@ -234,8 +240,9 @@ discovery and mapping.
     (`*.vtt`, `*.srt`, and Kolibri's stored caption files) through the DB/file
     mapping, not a recursive storage walk;
   - parse to plain text with the shared phase-04 caption extractor: strip cue
-    numbers, timestamps, styling, and duplicate lines; cap by
-    `max_caption_bytes`;
+    numbers, timestamps, and styling; preserve repeated spoken lines within a
+    track. Phase 04 deduplicates equivalent whole contributions, not repetition
+    within one contribution. Cap by `max_caption_bytes`;
   - malformed tracks are reported as partial enrichment; skip them and keep
     building other items, with a non-zero overall build exit.
 - `ocr = "tesseract"`: OCR image nodes and image-only document pages for which
@@ -310,7 +317,9 @@ Handling:
 ## Build and reload behavior
 
 - Wire `zimantic build` to configured Kolibri sources in this phase using the
-  phase-04 pipeline; phase 08 adds the full selection/inspection CLI.
+  phase-04 `BuildableRuntime.entry_producer` capability and generic pipeline;
+  phase 08 adds the full selection/inspection CLI. Providers do not own a
+  separate build/publish orchestration.
 - `reload` re-reads channel/source metadata and picks up new indexes.
 - Adding/removing a channel changes the collection set and clears the relevant
   source caches.
@@ -324,7 +333,8 @@ Handling:
 - [ ] Create `zimantic/providers/kolibri/` with the modules above.
 - [ ] Add provider-level validation for normalized Kolibri configuration;
       accept only `granularity = "collection"` or `"children"`.
-- [ ] Implement read-only schema detection and a minimal query layer.
+- [ ] Prove the read-only access/snapshot backend with release-derived
+      closed/live-WAL fixtures, then implement schema detection and queries.
 - [ ] Implement channel discovery, granularity mapping, cap collapse, and icons.
 - [ ] Implement `KolibriEntryProducer` with stable ids and fingerprinting.
 - [ ] Detect row-id collisions while building the node-id mapping and fail with
@@ -373,7 +383,8 @@ Assertions:
 - [ ] Deterministic node-id mapping is stable across builds and a forced
       63-bit collision fails clearly instead of merging documents.
 - [ ] Captions absent by default; present and parsed with `captions = "index"`;
-      malformed files are skipped. OCR/ASR are never invoked unless enabled.
+      malformed files are skipped and intentional repeated lines survive.
+      OCR/ASR are never invoked unless enabled.
 - [ ] Missing local files do not break the build or serve another node's bytes.
 - [ ] Mismatched channel DB names, malicious storage filenames, and arbitrary
       thumbnail requests cannot expose another channel's data.

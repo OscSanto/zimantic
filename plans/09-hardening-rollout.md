@@ -47,6 +47,9 @@ return a path it should not.
 - Keep any catalog locator separate from provider/collection/source identity;
   protect the catalog with the same local filesystem permissions as the index
   directory, and never serialize its path column.
+- Sanitize exception-derived diagnostics too: normal logs use public keys,
+  stable codes, and safe causes, not an `OSError`/SQLite message that embeds a
+  private filename. Raw exception details belong at debug level only.
 
 ### MIME and response policy
 
@@ -99,6 +102,8 @@ Keep the roadmap defaults and make them configurable per provider:
 | traversal time | 300 s | hard bound on each traversal |
 | search tasks per provider | up to `min(4, search_workers)` | fair scheduler reserves capacity for competitors when possible |
 | remote sources per search | `max_remote_sources` | Kiwix runtime |
+| admitted search deadline | 30 s (`search_timeout_seconds`) | scheduling, ranking, bounded previews; partial scope on expiry |
+| listing page size | global `page_size`, maximum 200 | collection/source/library JSON; no unbounded default |
 
 Additional rules:
 
@@ -209,7 +214,8 @@ Also measure and record:
 - [ ] Content-store contract suite: read, resolve, redirect, exists, icon,
       random, errors, ranges.
 - [ ] Entry-producer contract: stable ids, fingerprint change, resume,
-      truncation.
+      truncation, optional buildable-runtime capability, and cleanup on every
+      success/failure/cancellation path.
 - [ ] Ephemeral-open contract: loopback-only binding, selected-source scope,
       read-only catalog/index access with no SQLite sidecars, and no persistent
       PID, lock, index, or cache writes.
@@ -227,6 +233,10 @@ Also measure and record:
     only recognized old indexes are imported by the validated phase-04
     importer; unknown indexes are rebuilt without deleting a usable index on
     failure.
+- [ ] A freshly rebuilt catalog cannot legitimize a size-only old index whose
+      build-time archive identity is unknown.
+- [ ] Composed listing filters match beyond first pages, capture one snapshot
+      token with records, and restart bounded loads on publication/server restart.
 
 ### Security/adversarial
 
@@ -234,6 +244,8 @@ Also measure and record:
 - [ ] Symlink escape and zip-slip.
 - [ ] Race-safe confinement under symlink replacement; hidden/excluded files are
       not directly servable, while allowed assets remain accessible.
+- [ ] Files child homepages, results, previews, and shared-asset links all use
+      collection-relative paths without ambiguous source-relative fallback.
 - [ ] Absolute configured roots and private catalog locators are accepted, but
       absent from APIs, errors, and logs; relocating a provider root preserves
       its logical source ID and index locator when its identity is unchanged.
@@ -260,6 +272,11 @@ Also measure and record:
 - [ ] `open` rejects index reuse when a sidecar-free read-only SQLite handle
       cannot be created, binds only loopback, and its toolbar cannot navigate
       outside the selected source scope.
+- [ ] Cross-process reader leases survive concurrent build/prune; no read-only
+      reader creates a lease, and uncertain/incomplete discovery never causes
+      pruning of a configured entry's indexes.
+- [ ] Cache-disabled/pruned derived previews do not remove search hits or run
+      caption/OCR/ASR extraction at request time.
 - [ ] Read-only index reuse is verified on every officially supported
       platform/filesystem combination; elsewhere it fails closed to native
       full-text or readable-but-unsearchable behavior.
@@ -380,6 +397,7 @@ The effort is complete when:
    captions/OCR/ASR.
 4. The library and source filters remain usable at scale because items never
    become sources.
-5. The core has no provider-specific branches outside serialization.
+5. The core has no provider-specific branches; source serializers use the common
+   contracts rather than provider aliases.
 6. The security, resource, and failure-isolation requirements above are tested
    and documented.

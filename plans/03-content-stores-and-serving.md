@@ -63,6 +63,11 @@ Rules:
   never introduce a second decode of `%3A` or content paths.
 - `SourceInfo.to_dict()` exposes `key`; the web UI continues to use `icon_url`
   and generated links only.
+- A store defines one unambiguous virtual path namespace. Files uses
+  collection-relative paths for every source in that collection, including
+  child-directory homepages and indexed paths. Source membership and serving
+  authorization are deliberately different there; no route guesses whether
+  a Files path is source-relative or collection-relative.
 
 ### `ContentStore`
 

@@ -52,7 +52,9 @@ zimantic/providers/kiwix/
   good catalog alone never claims the endpoint is operational.
   There is no `content_kind` or `mode`.
 - `SourceInfo.homepage`/`icon_url` remain absent unless the catalog provides
-  them. Do not fetch remote icons during discovery.
+  them. Any supplied URL follows the same origin/credential validation as
+  result links; an external homepage is an absolute HTTP(S) URL, not a local
+  store path. Do not fetch remote icons during discovery.
 
 ### Runtime behavior
 
@@ -79,6 +81,11 @@ zimantic/providers/kiwix/
 - The runtime owns retry/backoff, response-size limits, and XML hardening.
 - `refresh()` is non-blocking for the server startup path and keeps the last good
   catalog on failure.
+- A known outage must have a recovery path even though unavailable sources are
+  excluded from normal search scheduling: retry catalog refresh with bounded
+  background backoff, clearing current failures on success. Reload may trigger
+  an immediate retry. Closing the runtime cancels its retry timer/work; do not
+  depend on an unavailable source being searched to make it available again.
 - `catalog_limit` is a per-page request size, not a total-book cutoff. Fetch
   pages within explicit response-byte, total-entry, and time budgets. If the
   server cannot be paged or the refresh cannot finish consistently within
@@ -96,6 +103,14 @@ provider:
 - The core applies the budget only to unscoped searches and still honors an
   explicit selection that names a source outside the budget.
 - `source_timeout` bounds each remote source search.
+- Introduce the global positive `search_timeout_seconds` setting (default 30)
+  when adding fair admission here. It bounds a request's source scheduling,
+  ranking, and bounded preview work after acquiring the global search slot;
+  `slot_wait_seconds` separately bounds admission to that slot. Pass the
+  monotonic deadline through `SourceQuery`, cap each source's I/O by the
+  remaining time, stop admitting work at expiry, and detach late results without
+  releasing worker/provider slots before their calls actually exit. Phase 07
+  exposes the common scope summary; phase 08 documents the existing setting.
 - The per-provider task cap and fair scheduling apply here first. With more
   than one worker and competing providers, reserve capacity for other providers;
   with one worker, fairness is bounded by the in-flight task's deadline.
@@ -143,6 +158,8 @@ source/library APIs.
 - [ ] Catalog parse, retry/backoff, non-retryable 4xx, DTD rejection, and
       response-size limits (existing tests, relocated).
 - [ ] Catalog failure keeps the last good source set and logs once.
+- [ ] An unavailable source/server recovers after a successful background
+      refresh without requiring an otherwise-ineligible search task.
 - [ ] Multiple catalog pages are discovered; a budget-exhausted or unpageable
       catalog is reported as incomplete rather than silently truncated.
 - [ ] Remote search returns the expected documents/links/ordering.

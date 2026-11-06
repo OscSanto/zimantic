@@ -22,8 +22,8 @@ the library bounded even before the grouped collection UI (phase 07) lands.
 - each immediate child directory of the configured root becomes one source;
 - loose files directly in the root become one source labelled after the root;
 - all files inside a source are items and assets;
-- a source's content root is that child directory (or the collection root for
-  the loose-files source).
+- a source's membership root is that child directory (or loose root files),
+  while its content store's virtual namespace is the whole permitted collection.
 
 Use `granularity = "children"` when the tree has a handful of stable top-level
 units and the grouped library/source filters from phase 07 are available;
@@ -74,6 +74,8 @@ Rules:
   rules apply to discovery, indexing, and serving. `**/` matches zero or more
   directory components, so the example includes root-level files too. A
   directory exclusion also excludes that directory itself and its descendants.
+  Match both include/exclude patterns against collection-relative POSIX paths,
+  regardless of source granularity.
 - There is no flat `zim_dir` key; every collection, including ZIM, is declared
   with `[[collections]]`.
 - Absolute configured `path` values are allowed. Resolve the real root once
@@ -114,14 +116,24 @@ For `granularity = "collection"`:
 For `granularity = "children"`, the loose-files source uses the reserved
 root-relative identifier `__loose__`, so its key is
 `files:<name>:__loose__`. The `dir-` namespace keeps an actual child named
-`__loose__` distinct. Its producer indexes only loose root files; its store
-uses the collection root so root-page assets and links can resolve, even when
-that overlaps a child source's content root. This overlap is intentional:
+`__loose__` distinct. Its producer indexes only loose root files. Every store
+uses the collection root and the same collection-relative request namespace.
+This overlap is intentional:
 source membership scopes discovery, indexing, search, and library grouping,
 not serving authorization. Any source in the same files collection may
 directly serve a permitted descendant under the collection root, including
 shared assets and files belonging to another source. Confinement, hidden-path,
 and exclusion rules apply identically to every such request.
+
+For example, the `algebra` child source indexes `algebra/index.html`, publishes
+that path as its homepage, and links to
+`/content/<algebra-key>/algebra/index.html`. Its `../shared/style.css` link
+resolves naturally to `/article/<algebra-key>/shared/style.css`. Never strip or
+guess the child prefix, and never retry a missing path in a second namespace.
+An empty source URL resolves/redirects to that source's own homepage, not
+silently to the collection's root homepage. All source keys may explicitly
+request a permitted collection-relative path, but only membership assigns
+search results and counts to a source.
 
 ### Caps
 
@@ -168,7 +180,9 @@ and exclusion rules apply identically to every such request.
   `truncated` is true when the manifest exceeds `max_entries`.
 - `size` = optional cheap sum from discovery only if already available; skip
   otherwise.
-- `homepage` = relative `index.html`/`index.htm` when present, else `None`.
+- `homepage` = collection-relative `index.html`/`index.htm` within that source's
+  membership root when present, else `None`; for a child this includes its
+  directory prefix.
 - `media_types` = known content families (`text`, `video`, `audio`, `image`,
   `other`) from bounded discovery classification. `include` can omit
   permitted media that remains servable, so classification is independent of
@@ -218,28 +232,33 @@ Reuse the phase-04 extraction layer:
   A sidecar caption file belongs to its media item, not to a separate item.
 - `EntryRecord.id` = one-based position in the deterministic manifest,
   yielding a positive canonical row id. `EntryRecord.path` = relative path
-  within the source root (POSIX separators). `target_id` = `None`.
+  within the collection root (POSIX separators), including a child directory's
+  prefix. `target_id` = `None`.
 - Title fallback order: HTML `<title>`, PDF metadata title, first heading,
   filename stem.
 
 ### Build entry point
 
-`FilesProvider` exposes a `build(source, ...)` path, and phase 05 wires it into
-`zimantic build` so configured files collections can be built without waiting
-for phase 08. Phase 08 adds the `--provider`/`--collection`/`--source`/`--list`
-selection. Use the phase-04 locator and pipeline; do not write a
-files-specific index format.
+`FilesRuntime` implements phase 04's `BuildableRuntime.entry_producer` and
+returns a `FilesEntryProducer`. Phase 05 wires it into the existing generic
+`zimantic build` orchestration so configured files collections can be built
+without waiting for phase 08. Phase 08 adds the
+`--provider`/`--collection`/`--source`/`--list` selection. Use the phase-04
+locator and pipeline; do not write a files-specific build dispatcher or format.
 
 ## Content store
 
 Create `providers/files/store.py` implementing `ContentStore`.
 
-- Resolve the real root once and open descendants using the race-safe,
+- Resolve the real collection root once and open descendants using the race-safe,
   no-symlink policy in phase 03. Fail closed if confinement cannot be enforced.
 - Deny hidden paths and `exclude` matches for direct requests as well as
   discovery/indexing; `include` does not restrict serving assets.
 - Normalize and reject absolute paths, `..`, backslashes, NUL, and empty
-  interior path segments. An empty path denotes the source root.
+  interior path segments. Non-empty paths are always collection-relative.
+  `main_path()` and an empty request select the source's membership-root
+  homepage and return its fully prefixed collection-relative path; when absent,
+  use the standard missing-homepage response rather than a different root.
 - Directory requests:
   - serve `index.html` or `index.htm` when present;
   - otherwise 404; do not generate directory listings.
@@ -257,7 +276,8 @@ Create `providers/files/store.py` implementing `ContentStore`.
   - byte ranges for media (phase 03);
   - size limits from `max_article_bytes`.
 - Icons: `favicon.ico`, `favicon.png`, `apple-touch-icon.png` at the source
-  root, else `None`. Do not crawl pages for icons.
+  membership root, else `None`. Use collection-relative paths and do not crawl
+  pages for icons.
 - Random: choose from the indexed manifest when present; otherwise sample
   shallowly without walking a huge tree on every request.
 
@@ -274,7 +294,7 @@ setting still applies; document that untrusted file trees should enable it.
   cannot show them all, group under the collection rather than truncating
   silently.
 - Results: `source` = source display title, `source_key` = source key,
-  `path` = relative path, `url` = `/content/<key>/<path>`.
+  `path` = collection-relative path, `url` = `/content/<key>/<path>`.
 - Serving is broader than search membership: a content URL may use any source
   key in the same files collection to resolve a permitted collection-relative
   path, while search results and library/source listings remain attributed to
@@ -355,6 +375,10 @@ modules/
 - [ ] A page may load a permitted shared or cross-source asset through its
       source key; the asset is not thereby added to that source's search or
       library membership.
+- [ ] A child source's indexed paths, homepage, redirects, previews, and raw
+      asset URLs all retain the same collection-relative prefix. An ordinary
+      `../shared/style.css` link works without traversal parameters or fallback
+      path guessing, even when both child and collection have `index.html`.
 - [ ] Unknown extension is an attachment and cannot be sniffed as HTML.
 - [ ] Library/API payloads expose collection + source grouping without absolute
       paths.

@@ -100,9 +100,7 @@ zimantic open zims/a.zim --debug
 |---|---|
 | `--port PORT` | Bind a fixed local port. Default `0` (OS-assigned). |
 | `--no-browser` | Start the server and print the URL without launching a browser. |
-| `--fast` | Like `serve --fast`: keep title, SQLite lexical/body, and native
-full-text search available when the corresponding index exists; never load the
-model or FAISS, and disable semantic search for the entire process. |
+| `--fast` | Like `serve --fast`: retain indexed title/body lexical and native full-text search; never load the model or FAISS or enable semantic search in this process. |
 | `--debug` | Like `serve --debug`: ranking details in API responses. No restart-on-SIGHUP. |
 | `--device DEVICE` | Same accepted values and precedence as `serve`. |
 | `--max-sources N` | Safety cap for folder expansion. Default `64`. |
@@ -199,6 +197,13 @@ When present:
   index unavailable and use native full-text instead. Do not silently fall
   back to writable access; archive viewing remains available even when both
   index-reuse paths fail.
+- Reuse the publisher-created generation lease through a read-only descriptor,
+  as specified in phase 04. Never create a lock/lease file, update reader
+  records, repair a manifest, or reclaim generations. An OS advisory shared
+  lock changes no file contents and is distinct from taking the build lock.
+  Hold it until all scoped readers close so a concurrent build/prune cannot
+  remove the reused generation. If the lease cannot be safely obtained, use
+  native search/readable-only fallback rather than weakening read-only scope.
 - A missing, in-progress, stale, or size-mismatched index falls back to the
   archive's native full-text search, with the same warnings as `serve`.
 - Model and FAISS loading stay off the startup path. Without `--fast`, the
@@ -369,6 +374,9 @@ order.
       or modified, including SQLite sidecars and model caches.
 - [ ] `open` does not append or alter config, and a missing index remains
       missing after the session; existing indexes are only opened read-only.
+- [ ] A concurrent builder/pruner cannot remove an index generation pinned by
+      `open`; acquiring/releasing its shared OS lease creates or modifies no
+      files, and missing/unsupported leases cause safe fallback.
 - [ ] A normal `serve` startup with the same config is byte-for-byte unaffected
       in its public payloads and still uses the persistent catalog.
 

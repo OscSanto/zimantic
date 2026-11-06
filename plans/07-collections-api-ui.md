@@ -107,9 +107,39 @@ unsearchable sources; health exposes separate available/searchable counts.
 `media_types` is the snapshot-wide union of observed source families, not a
 summary of one page; it is `null` only when no usable classification was
 observed for any member. Unknown members do not erase known families from the
-union. `available` is current runtime state and is never persisted. Serialize
-families in the phase-00 taxonomy order. Add `collection_version()` to `Search`,
+union; if none were observed, use `null` when any member is unknown and `[]`
+only after complete known-empty classification. `available` is current runtime
+state and is never persisted. Serialize families in the phase-00 taxonomy order.
+Add `collection_version()` to `Search`,
 invalidated when collection membership, discovery state, or metadata changes.
+
+All three endpoints use phase 00's bounded pagination defaults and the same
+aggregate `Search` snapshot token (process-instance identity plus revision), not
+a collection's independent runtime counter. Capture records and token together,
+filter then sort by a stable display-title/key ordering, and only then slice.
+Include pagination and snapshot
+headers on `304` responses too. A revision change between pages makes the
+client discard/restart the affected load; retries are bounded, with a visible
+refresh-needed state if discovery keeps changing.
+
+### Listing filters
+
+`/collections.json`, `/sources`, and `/library.json` accept optional
+`provider`, `media_type`, and `q` filters; the source endpoints also accept the
+exact `collection` key. Validate enum/key values rather than treating an unknown
+value as unfiltered. `q` is case-insensitive substring matching on approved
+display fields (title, label, description, and associated collection fields),
+not a content search or filesystem walk. Compose all supplied filters before
+paging and calculate `X-Total-Count` for that filtered snapshot.
+
+Evaluate facets/text against the full in-memory snapshot, not just fetched
+preview cards. A nonempty collection matches when at least one member matches
+all the source predicates; collection display fields participate in each
+member's text match. Empty/error collections with no members may match their
+descriptor's provider/text, but not a specific media type. `source_count` and
+collection media summaries keep their full-snapshot meanings. Bound any
+filter-keyed server/browser memoization; arbitrary queries must not grow an
+unlimited cache.
 
 ### Collection-scoped search
 
@@ -137,12 +167,13 @@ Add an optional `collection` query parameter (matching exact canonical
   sources in canonical catalog order up to
   `max_explicit_collection_sources` (default 500) and the request deadline;
   it returns a `scope` summary, for example:
-  `{"status":"partial","requested":700,"scheduled":500,"completed":498,"limit_reason":"source_cap"}`.
+  `{"status":"partial","requested":700,"scheduled":500,"completed":500,"limit_reason":"source_cap"}`.
   The `limit_reason` enum is `source_cap`, `deadline`, or `null`. On an
   unbounded successful request, `status` is `complete`. `requested` counts the resolved eligible source
   scope after selector intersection; `scheduled` counts admitted source tasks;
-  `completed` counts tasks that reached a terminal result (including
-  per-source errors). `Search.search_page()` includes `"scope"` in its returned
+  `completed` counts tasks that returned an `ok`, `partial`, or `error` result,
+  including per-source timeouts, but not tasks cancelled/detached at the request
+  deadline. `Search.search_page()` includes `"scope"` in its returned
   dict, `/search` serializes it in the `X-Search-Scope` response header
   (preserving the JSON array body alongside `X-Total-Count` and `X-Matched-By`),
   and `/search/stream` includes `"scope"` on its terminal `"done"` event.
@@ -150,6 +181,14 @@ Add an optional `collection` query parameter (matching exact canonical
   does not imply the scheduler hit a cap. An explicit individual source
   remains one task. Do not claim every selected book completed when the
   collection cap or deadline wins.
+
+The phase-02 `search_timeout_seconds` deadline applies to every scope, not only
+explicit remote collections. Use the same `scope` summary for unscoped fan-out
+caps and local/mixed deadline exhaustion too. If admitted work is unfinished at
+the deadline, `limit_reason` is `deadline` even when a source cap also applied;
+otherwise a source cap takes precedence over `null`. A valid empty scope is
+complete. Do not cache a deadline-truncated pool as a complete result for later
+requests, or present a partial candidate pool as an exhaustive hit count.
 
 Use `source` as the canonical source-selection query parameter across `/search`,
 `/search/stream`, `/suggest`, and `/random`. There is no `zim` parameter and no
@@ -189,7 +228,8 @@ Keep `indexes`, `sources`, and `cache` counters.
   Never treat the first source page as the full collection. If page versions
   change while loading, refresh the group rather than silently mixing snapshots.
 - Add a provider filter (All / ZIM / Files / Kolibri / Kiwix) alongside the
-  existing text filter. Do not remove the text filter.
+  existing text filter. Do not remove the text filter. Send listing filters to
+  the API so matches beyond the currently fetched page are discoverable.
 - Add an independent content-type filter (All / Text / Video / Audio / Images /
   Other). A source matches a selected type only when `media_types` contains
   that type and `media_types` is not `null`. Unknown sources are hidden for
@@ -210,7 +250,8 @@ Keep `indexes`, `sources`, and `cache` counters.
 ### Source filters
 
 - Group options by collection. Keep the existing top-N + "Other" logic per
-  group so the panel stays bounded.
+  group so the panel stays bounded. "Other"/show-more pages additional options;
+  it never silently broadens scope or downloads all hidden sources at once.
 - At most one collection group is selected as a unit; selecting another
   replaces it. The UI sends the single `collection` parameter rather than
   hundreds of source keys. Selecting a group clears individual selections.
@@ -252,6 +293,9 @@ Keep `indexes`, `sources`, and `cache` counters.
 - [ ] Add `collection` filtering to `/sources` and `/library.json` using the
       standard pagination so opening a collection can fetch all its sources
       without an unbounded payload.
+- [ ] Implement composed listing filters before pagination, bounded
+      filter-keyed caches, and one captured snapshot token/payload pair per
+      response, including conditional responses.
 - [ ] Add `collection_source_limit` only if the UI cannot stay bounded with the
       existing limit; default to the global source limit.
 - [ ] Update `/config` with the new limit and provider list.
@@ -287,9 +331,9 @@ Keep `indexes`, `sources`, and `cache` counters.
 - [ ] Library grouping: one-source collections, multi-source collections,
       empty collections, unavailable collections.
 - [ ] Content-type classification and filtering for ZIM MIME counters and
-      mixed Files/Kolibri sources, including exclusion of a truncated source
-      with known types from specific filters; folder paths and absolute paths
-      stay hidden.
+      mixed Files/Kolibri sources: a truncated source still matches its known
+      families, while unknown classification does not match a specific type;
+      folder paths and absolute paths stay hidden.
 - [ ] Replacing an index without changing source keys invalidates cached
       results and previews.
 - [ ] Filter grouping: top-N + Other per collection; selected sources stay
@@ -299,6 +343,13 @@ Keep `indexes`, `sources`, and `cache` counters.
 - [ ] Opening a collection fetches its paged sources through the documented
       collection filter; collection media facets remain correct when members
       appear on later pages and page versions change.
+- [ ] Provider/media/text filters find matching members beyond the first page;
+      empty/error collections follow the same rules without a client-side
+      full-library fetch. Snapshot changes/restarts cause bounded page reloads,
+      not mixed-version records.
+- [ ] Local and mixed searches stop at the request deadline and expose the same
+      partial-scope semantics as remote collection searches; incomplete pools
+      are not reused as complete cached results.
 - [ ] Progressive results show the correct collection label.
 - [ ] Keyboard/focus behavior in the source filter panel is preserved.
 - [ ] No source explosion when a files collection has `max_sources` sources.
@@ -309,7 +360,8 @@ Keep `indexes`, `sources`, and `cache` counters.
   collection and provider.
 - Source filters remain bounded and usable with hundreds of underlying sources.
 - API clients use the canonical `source` query parameter.
-- Selecting a collection searches all of its sources without a huge URL.
+- Selecting a collection scopes search to its sources without a huge URL;
+  source/deadline limits are reported explicitly rather than claiming completion.
 - `python -m pytest` and the JS tests pass.
 
 ## Risks and mitigations

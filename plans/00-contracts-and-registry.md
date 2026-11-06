@@ -94,6 +94,7 @@ class SourceQuery:
     fulltext_query: str
     query_vector: Any | None
     limit: int
+    deadline: float | None = None  # monotonic; cap provider I/O to remaining time
 
 @dataclass(frozen=True)
 class ContentEntry:
@@ -144,6 +145,9 @@ class CollectionRuntime(Protocol):
     def sources(self) -> Sequence[SourceInfo]: ...
     def library_sources(self) -> Sequence[SourceInfo]: ...
     def search(self, source: SourceInfo, request: SourceQuery) -> SourceResult: ...
+    def suggest(
+        self, source: SourceInfo, query: str, limit: int
+    ) -> Sequence[ResultDocument]: ...
     def content_store(self, source: SourceInfo) -> ContentStore | None: ...
     def max_sources_per_search(self) -> int | None: ...
     def refresh(self, *, wait: bool = True) -> bool: ...
@@ -199,10 +203,22 @@ Notes:
   (Kolibri), or none. It is bounded; slow discovery runs in the background.
   Configured-entry diagnostics exist independently of collection descriptors,
   so a failed multi-collection discovery is still visible.
+- `Search` retains the configured-entry-to-collection mapping and reruns
+  `discover()` on reload, not just `refresh()` on existing runtimes. Buffer a
+  complete descriptor set before replacing an entry's collections; an
+  incomplete/error scan retains its last complete set. Publish additions,
+  removals, descriptor changes, and source snapshots atomically. Retired
+  runtimes close only after their active readers release them. This is how
+  new/removed Kolibri channels work without provider branches in `Search`.
 - `CollectionRuntime.search()` is one source's work. Providers whose native
   query scope is broader than one source map that source to the appropriate
   subtree or content-node filter. Indexed providers still use the generic
   entry/index pipeline.
+- `suggest()` is the existing bounded title-prefix operation, not a full search
+  or content read. ZIM moves its title-index query behind this method now;
+  Files/Kolibri reuse the phase-04 generic helper. A provider with no suggestion
+  backend, including Kiwix, returns an empty sequence. `Search.suggest()`
+  retains scope/merge orchestration without accessing private index handles.
 - `ContentStore` is defined in `content/store.py` during this phase. The ZIM
   store starts in phase 01 and is completed in phase 03; other local providers
   implement it later. Kiwix always returns `None`.
@@ -220,6 +236,8 @@ Notes:
   availability, errors, and discovery state come from the current
   `CollectionSnapshot`; serializers must not mutate a previously published
   descriptor or snapshot.
+  Copy/freeze nested mappings and sequences on publication as well; a frozen
+  dataclass containing a mutable dictionary is not an immutable snapshot.
 - Provider-private `metadata` and config must not be serialized wholesale;
   expose only explicitly approved fields and never filesystem locators.
 - `media_types` is the union of observed source media families in the
@@ -228,6 +246,10 @@ Notes:
   An empty tuple is published only after a complete classification finds no
   supported families. A collection with no observed families is rescanned once
   and emits a warning if the rescan is still empty.
+- For a collection union with no observed families, use `None` if any member
+  remains unknown; use `()` only when all members are known-empty and discovery
+  is complete, including a completely discovered empty collection. Unknown
+  members never erase families observed in another member.
 - A specific content-type filter is conservative: a source or collection with
   `media_types is None` does not match it. The unfiltered "All" view still
   includes both unknown (`None`) and known-empty (`()`) sources.
@@ -319,7 +341,7 @@ collection_label: str | None = None
 available: bool = False        # the provider can currently read/search the source
 searchable: bool = False       # a supported search path is currently usable
 error: str | None = None       # current discovery/index/search diagnostic
-homepage: str | None = None    # source-relative path, never a filesystem locator
+homepage: str | None = None    # local store path or validated external HTTP(S) URL
 icon_url: str | None = None    # generated public URL, never a provider locator
 size: int | None = None        # known content size in bytes; never a locator
 intent_phrases: tuple[str, ...] = ()
@@ -377,7 +399,8 @@ provider_id: str | None = None
   one currently usable search path; it may be false for an available source
   with no finished local index or native searcher. `homepage`, `icon_url`, and
   `intent_phrases` are nullable/empty when unavailable rather than inferred
-  from a private locator.
+  from a private locator. Local homepages use the store's path namespace;
+  external-only providers may supply an origin-validated HTTP(S) homepage.
 - `media_types` uses the phase-00 taxonomy `text`, `video`, `audio`, `image`,
   and `other`. Providers classify content into those values; phase 07 only
   chooses labels and filters for this frozen taxonomy. Serialize observed
@@ -476,10 +499,17 @@ DerivedOperation = Literal["off", "index", "tesseract", "whisper"]
 WorkerCount = Literal["auto"] | int  # int must be positive
 
 @dataclass(frozen=True)
+class TraversalLimits:
+    max_visited_entries: int = 1_000_000
+    traversal_timeout_seconds: int = 300
+
+@dataclass(frozen=True)
 class ZimConfig:
     name: str
     path: str
     label: str | None = None
+    traversal: TraversalLimits = field(default_factory=TraversalLimits)
+    kind: Literal["zim"] = field(default="zim", init=False)
 
 @dataclass(frozen=True)
 class KiwixConfig:
@@ -490,6 +520,8 @@ class KiwixConfig:
     catalog_limit: int | None = None
     max_response_bytes: int | None = None
     max_remote_sources: int | None = None
+    traversal: TraversalLimits = field(default_factory=TraversalLimits)
+    kind: Literal["kiwix"] = field(default="kiwix", init=False)
 
 @dataclass(frozen=True)
 class FilesConfig:
@@ -502,6 +534,8 @@ class FilesConfig:
     max_sources: int | None = None
     max_entries: int | None = None
     max_file_bytes: int | None = None
+    traversal: TraversalLimits = field(default_factory=TraversalLimits)
+    kind: Literal["files"] = field(default="files", init=False)
 
 @dataclass(frozen=True)
 class KolibriConfig:
@@ -513,6 +547,8 @@ class KolibriConfig:
     storage: str | None = None
     max_sources: int | None = None
     max_entries: int | None = None
+    traversal: TraversalLimits = field(default_factory=TraversalLimits)
+    kind: Literal["kolibri"] = field(default="kolibri", init=False)
 
 ProviderConfig = ZimConfig | KiwixConfig | FilesConfig | KolibriConfig
 ```
@@ -522,9 +558,21 @@ ProviderConfig = ZimConfig | KiwixConfig | FilesConfig | KolibriConfig
 `ProviderContext`; provider protocols accept the appropriate member of the
 `ProviderConfig` union, not a provider-specific unvalidated mapping. `label`,
 paths, servers, and optional counts are nullable only where shown. All limits
-and byte/time budgets are positive integers when present; `name` and provider
+and byte/time budgets are positive integers when present, except
+`max_remote_sources`, which also accepts zero to disable unscoped remote
+search. Reject booleans as integer limits. `name` and provider
 strings are non-empty and names use the phase-00 safe-name pattern. Include,
 exclude, language, and operation lists are immutable tuples.
+The flat entry keys `max_visited_entries` and `traversal_timeout_seconds`
+normalize into `traversal`; they bound remote catalog entry visits as well as
+local traversal. The 10-second startup budget is per provider kind across its
+configured entries, not a fresh synchronous wait for every entry.
+
+Raw TOML tables are a private parser intermediate, never the runtime seam.
+Phase 00 validates the required ZIM path and Kiwix server fields for its working
+runtimes. Files/Kolibri entries remain disabled with an explicit not-yet-supported
+diagnostic until their provider validators land in phases 05/06; do not pass
+unvalidated mappings to runtimes or introduce a second parser.
 
 The parser preserves `[derived_text]` and `[[collections.sources]]` values in
 the normalized settings envelope so phases 05 and 06 can consume discovered
@@ -534,7 +582,12 @@ Until that phase lands, an invalid derived-text value is reported as an
 unsupported optional setting and no derived operation runs; it is never
 silently coerced to a default.
 
-Invalid TOML is fatal. Other invalid entries produce config diagnostics without
+Invalid TOML and removed top-level provider keys are fatal. Reject `zim_dir`,
+`kiwix_server`, `kiwix_catalog_path`, `kiwix_catalog_limit`,
+`max_kiwix_response_bytes`, and the old global `max_remote_sources` with a
+migration message, even when valid collections are also present. The last four
+settings belong to Kiwix entries under the names in `KiwixConfig`.
+Other invalid entries produce config diagnostics without
 blocking valid entries; disable every entry sharing a duplicate name rather
 than choosing one. Entries without a valid name/type have no invented
 collection key. Provider-specific validation returns the typed config above.
@@ -557,6 +610,22 @@ Add:
 - `Search.refresh_collections(...)` — a thin loop over configured entries and
   their providers.
 - `Search.collection_dicts()` — serialization helper for later API work.
+
+Maintain one aggregate snapshot token (process-instance identity plus revision)
+for collection and source publication.
+Serializers capture the payload and its revision from the same immutable
+snapshot; they must not obtain a version, refresh, then serialize newer state
+under the old version. Emit `X-Snapshot-Version` with `/sources` and
+`/library.json` here; phase 07 adds `/collections.json` to the same transport.
+Bound `/sources` and `/library.json` responses here: omitted `limit` uses the
+global `page_size`, an explicit limit is positive and at most 200, and there is
+no unlimited sentinel. Add flat paging/load-more handling to their existing
+frontend consumers in this phase; a first page must never masquerade as the
+whole library. Phase 07 replaces the flat presentation with bounded grouping,
+not the first correct implementation of paging.
+Version the browser's persisted source/library cache namespace and validate the
+new record shape; do not reinterpret a cached legacy payload as canonical data
+when a request fails.
 
 `_search_source` dispatches by `source.provider` from this phase onward. Do not
 keep a `mode` fallback.
@@ -621,6 +690,12 @@ keep a `mode` fallback.
 - The frozen `ContentStore` method set is unchanged when phase 03 implements it.
 - One configured entry can discover multiple collections; invalid or duplicate
   entries produce diagnostics without disabling unrelated valid entries.
+- Reload reruns entry discovery, atomically adds/removes collections, and
+  retains the last complete set on an incomplete scan; retired runtimes stay
+  alive until active readers release them.
+- Removed flat provider keys fail with a migration message rather than silently
+  starting an empty library; `max_remote_sources = 0` inside a Kiwix entry is
+  valid.
 - Search and API tests are updated to the new payload in the same phase; there
   is no old-payload compatibility suite.
 

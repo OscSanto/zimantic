@@ -91,8 +91,24 @@ metadata rather than writing this catalog.
   compatible, falling back to a clean rebuild otherwise.
 
 The generic catalog schema replaces the ZIM-specific `zims` table outright.
-Bump `SCHEMA_VERSION`. An older or unrecognized catalog is deleted and rebuilt
-by a full provider scan; do not inspect, migrate, or alias old tables.
+Bump `SCHEMA_VERSION`. An older or unrecognized catalog is replaced by a
+complete staged provider scan under the coordination rules below; do not
+inspect, migrate, or alias old tables.
+
+Require SQLite 3.37 or newer here, before creating the first `STRICT` catalog,
+and report an actionable startup/build error on an older runtime. Phase 08
+documents this requirement; it does not introduce it after earlier schemas
+already depend on it.
+
+The shared locator introduced here already seals each published SQLite
+database: checkpoint and close the staging database, leave no WAL/journal/SHM
+dependency, fsync artifacts and the replaced manifest's parent directory, and
+never modify a published generation. Include a schema revision, provider,
+collection/source identity, archive UUID, size/mtime signature, and build
+generation in its recognized metadata. Phase 04's importer needs build-time
+identity evidence, not just freshly rescanned catalog metadata.
+Implement the read-only generation lease described in phase 04 at the same
+time as the locator; safe replacement cannot wait until phase 04 or `open`.
 
 The catalog count columns are nullable source totals, not index statistics:
 `document_count` is the total article/document-like content items reported by
@@ -189,16 +205,19 @@ archives, so this phase deliberately rebuilds instead of migrating. This
 forced catalog rebuild is independent of index reuse; do not throw away a
 usable search index just because the catalog schema changed.
 
-- Bump the catalog `SCHEMA_VERSION` and delete any catalog whose version does
-  not match. Recreate the `sources` table and let the normal provider scan
-  repopulate it. Do not inspect the old schema, copy rows, or write a migration.
+- Bump the catalog `SCHEMA_VERSION` and stage a replacement for any catalog
+  whose version does not match. Recreate `sources` and complete a bounded
+  provider scan before coordinated replacement. Do not inspect the old tables,
+  copy rows, or write a migration.
 - Rebuilding re-opens every archive once, which also refreshes icons,
   availability, and provider metadata.
-- On a corrupt or unsupported catalog, delete and recreate it. Do not leave a
+- On a corrupt or unsupported catalog, use the same staged rebuild. Do not leave a
   `zims` view, compatibility table, or old index name in the new schema.
-- If catalog creation or repopulation fails, log a warning with the database
-  path and cause, leave the prior catalog intact until the replacement is
-  complete where feasible, and report that source metadata is unavailable.
+- If catalog creation or repopulation fails, log a warning with a public
+  diagnostic code and sanitized cause, leave the prior catalog intact, and
+  report that source metadata is unavailable. Private paths and raw exception
+  text are debug-only. An incomplete scan must not delete unseen rows or
+  publish a prefix as the replacement.
 - Coordinate rebuilds across processes and close existing connections before
   replacing a database and its SQLite sidecars; never unlink a live catalog
   while another process can keep using or writing the old inode. If exclusive
@@ -254,8 +273,8 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Replace the `zims` table with the generic `sources` schema in
       `SourceCatalog`; use `key` as the primary key and a separately indexed
       canonical `path` locator.
-- [ ] Bump the catalog `SCHEMA_VERSION`; delete and rebuild a mismatched
-      catalog into the generic `sources` schema. Remove `zims`-named
+- [ ] Bump the catalog `SCHEMA_VERSION`; stage and atomically replace a
+      mismatched catalog with the generic `sources` schema. Remove `zims`-named
       tables/indexes/columns without keeping aliases.
 - [ ] Move `_scan_zim_paths`, `_find_zim_path`, `_match_zim_path`, `_scan_catalog`
       calls, and `_discover_local_indexes` into `providers/zim/discovery.py`.
@@ -265,7 +284,7 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Create the shared index-locator module and use it in both ZIM build
       and serve; the phase-04 one-time importer may adopt only catalog-matched,
       validated old stem-based paths.
-- [ ] Add the ZIM `EntryProducer` mapping: preserve the archive `_index` and
+- [ ] Pin the ZIM row-id mapping for phase 04: preserve the archive `_index` and
       redirect target id, including zero, as the canonical non-negative row id.
       Preserve duplicate paths as distinct rows and reject integer
       overflow/collisions.
@@ -300,6 +319,11 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       previews through the shared runtime contract. Move existing serving
       behavior into its final `ArchiveContentStore` now; `read_range` may
       explicitly report unsupported until phase 03 implements range handling.
+- [ ] Move all remaining core index/catalog access in the same phase:
+      `Search.suggest` delegates title-prefix queries to `runtime.suggest`, and
+      phrase/MIME/preview enrichment reads through `ContentStore`. Do not keep
+      `Search.indexes`/`Search.catalog` aliases until phase 04 to support these
+      callers; phase 04 generalizes the already-moved helpers.
 - [ ] Keep the four `SourceResult` channels (`semantic`, `keyword`, `fulltext`,
       `items`) identical. This is a move, not a ranking change.
 - [ ] Keep native full-text isolation and its partial/error statuses.
@@ -346,8 +370,11 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       basename or `<unknown>`, never an absolute path.
 - [ ] Catalog lookup uses canonical absolute paths only internally; serialized
       source/library records contain no filesystem locator.
-- [ ] A mismatched catalog is deleted and rebuilt into `sources` by a full scan;
-      corrupt/unsupported catalogs rebuild the same way.
+- [ ] A mismatched catalog is replaced with `sources` only after a complete
+      scan; corrupt/unsupported catalogs rebuild the same way. An incomplete
+      or failed replacement leaves the original artifact untouched.
+- [ ] Published index generations are sidecar-free, immutable, and protected
+      by read-only cross-process leases before an old generation is reclaimed.
 - [ ] `media_types` derives from the MIME counter and matches the phase-00
       classification (`text`/`video`/`audio`/`image`/`other`).
 - [ ] The database schema has no `zims` table or `zims_*` indexes.
@@ -358,9 +385,10 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - `zimantic serve` with a `[[collections]] type = "zim"` entry works after rebuilding
   indexes and the catalog.
 - `Search` has no fallback that treats every non-Kiwix source as a ZIM.
-- The only ZIM imports outside `providers/zim`, `build.py`, `catalog.py`, and
-  `content/` are the provider entry point. There are no compatibility shims or
-  temporary helpers.
+- Direct libzim use outside `providers/zim` remains only in the build/content
+  adapters not yet replaced by phase 04 and the crash-isolated native full-text
+  worker. Shared catalog storage and core search do not import libzim. There
+  are no compatibility shims or temporary aliases.
 - Search latency and memory for a ZIM-only library meet the documented target.
 
 ## Risks and mitigations

@@ -20,6 +20,7 @@ array-of-tables, so it needs explicit handling.
 # Global search bound for an explicitly selected large remote collection.
 # A request reports partial completion when this count or its deadline is hit.
 max_explicit_collection_sources = 500
+search_timeout_seconds = 30       # total admitted search work; phase 02
 
 # Collections. Multiple entries are allowed. There are no flat provider keys.
 [[collections]]
@@ -87,10 +88,19 @@ name.
   and reserve `open` for the ephemeral ZIM collection.
 - Provider-specific keys are validated by the provider. Generic validation only
   checks `type`, `name`, and duplicate names.
+- Configured relative provider paths resolve against the active config file's
+  directory; CLI path operands resolve against the invocation's working
+  directory. Normalize once and preserve that resolved selection when saving
+  an ad-hoc collection. Document this base explicitly; do not make a saved
+  relative operand point somewhere else on the next invocation.
 - `max_explicit_collection_sources` is a positive global request-work cap for
   an explicitly selected Kiwix collection. It defaults to `500`; it does not
   affect a single explicit source or local collection discovery. Reaching it is
   reported as a partial search, never silently broadened or treated as complete.
+- `search_timeout_seconds` is the phase-02 positive global deadline, default
+  `30`, for admitted search work across every provider/scope. It is distinct
+  from per-source `source_timeout` and slot admission's `slot_wait_seconds`.
+  Expiry is reported using phase 07's partial-scope contract.
 - Phase 00 defines the normalized provider-entry interface, minimal
   `[[collections]]` TOML parser, and public `RuntimeConfig.collections`
   discovery API. Phases 04–06 may use that API plus the phase-04
@@ -107,7 +117,10 @@ name.
   unavailable when a valid collection key can be formed; do not invent one for
   an entry missing a valid name/type. Disable all entries with a duplicate name.
   These errors do not prevent valid entries from working. Invalid TOML remains
-  fatal. Registry lookup errors remain explicit; there is no fallback provider.
+  fatal, as are the removed top-level provider keys enumerated in phase 00.
+  Reject those keys with a migration message even alongside valid collections;
+  never merely ignore old config and start an empty library. Registry lookup
+  errors remain explicit; there is no fallback provider.
 - Unknown keys inside a provider entry warn once and are ignored; do not turn a
   typo into a crash.
 - Keep `collections` as a known top-level key and bypass the flat type coercion for
@@ -171,8 +184,9 @@ zimantic build --list              # show what would be built; no work
   never widen the build to the rest of the matched collection.
 - If an ad-hoc path has no matching configured collection, append a new
   `[[collections]] type = "zim"` entry to the active config before building.
-  Use the path argument as that collection's path. Generate a unique safe name
-  from its final component plus the first available numeric suffix; do not
+  Save a path that resolves to the same selected file/folder relative to the
+  active config directory (or an absolute private locator). Generate a unique
+  safe name from its final component plus the first available numeric suffix; do not
   derive the name or source key from an absolute path. Report the entry and
   config file changed. Under a config-write lock, reread and recheck matches,
   append without rewriting existing TOML content, and atomically replace the
@@ -186,14 +200,17 @@ zimantic build --list              # show what would be built; no work
   name selects all of its collections; do not resolve this by an ambiguous
   string-prefix match.
 - Provider builds run under the global `BuildLock`; do not run one lock per
-  provider.
+  provider. Use phase 04's `BuildableRuntime.entry_producer` capability and
+  shared orchestration, not a provider-name switch or provider-owned publisher.
 - Kiwix is remote/search-only and is skipped with a clear report when building
   all collections. An explicit selection containing no buildable sources is
   a non-zero usage error, not a successful no-op.
 - `--workers`, `-j`, `--lock-timeout`, `--no-wait-lock`, `--fast`, `--force`,
   and `--device` apply to every provider where meaningful. `--fast` means
-  title/path-only indexing and disables model/FAISS loading and semantic search
-  for the entire serve process; `--force` rebuilds. These explicit command-line
+  title/path-only indexing with no body postings, embeddings, or enrichment.
+  Separately, runtime `serve --fast`/`open --fast` disable model/FAISS loading
+  and semantic search for that process's lifetime while retaining existing
+  lexical/body/native channels. `--force` rebuilds. These explicit command-line
   options override applicable configured defaults for both configured and
   ad-hoc builds.
 - The shared `EmbeddingPipeline` remains global; provider workers submit into
@@ -235,6 +252,14 @@ Scope:
   orphan and its associated artifacts. A legacy file whose ownership cannot be
   established is reported for manual inspection, never deleted by extension
   or filename alone;
+- hold the global build lock for deletion and honor generation leases; skip
+  active readers rather than unlink their files;
+- never infer an orphan from an unavailable, invalid, loading, or incompletely
+  discovered configured entry. Require a complete validated snapshot for the
+  affected namespace, or report its retention/uncertainty without deleting;
+- derived-text cache pruning is optional preview/cache reclamation under its
+  recognized private namespace, never deletion of body postings or execution
+  of an extractor to refill a miss;
 - report reclaimed bytes.
 
 ### `serve` and `reload`
@@ -251,9 +276,8 @@ Scope:
   `generations/<uuid>/index.sqlite` / `index.faiss` pair. There is no ZIM-only
   path exception.
 - The phase-04 locator is the only code that computes index paths.
-- Require SQLite 3.37 or newer for `STRICT` tables; check the runtime SQLite
-  version at startup and report an actionable error rather than silently
-  creating a non-STRICT schema.
+- Document and retain phase 01's SQLite 3.37 minimum and early version check;
+  do not defer it here or silently create a non-STRICT schema.
 - `index_dir` may itself be configured as an absolute path. Do not incorporate
   source-root absolute paths into logical IDs or generated index filenames.
 - `catalog.sqlite` is the private ZIM archive metadata cache beside `index_dir`.
@@ -285,7 +309,9 @@ Scope:
   when ready; local ZIM search must never wait for it. `serve` may expose a
   `loading` collection, but `build`, `sources`, and `reload` wait for the
   requested discovery snapshot or report a bounded timeout.
-- Runtime refreshes publish source/collection snapshots atomically and expose
+- Reuse phase 00's configured-entry discovery coordinator on reload so channel
+  additions/removals change the collection set, not just existing sources.
+  Runtime refreshes publish source/collection snapshots atomically and expose
   `loading`, `ready`, `error`, and `closed` states plus a monotonically
   increasing snapshot version. Close stops accepting work, cancels queued work,
   and waits for active work before releasing its handles. Use bounded I/O or
@@ -335,9 +361,8 @@ Scope:
 - [ ] Expose the phase-04 `[derived_text]` schema and validate per-source
       `captions`, `ocr`, and `asr`; all default off, unknown engines are
       explicit errors, and missing engines degrade only that operation.
-- [ ] Implement resource-derived `workers = "auto"` resolution (CPU and memory
-      limits, unavailable if none fits, no arbitrary low cap) and an explicit
-      integer override.
+- [ ] Expose phase 04's resource-derived `workers = "auto"` resolution and
+      explicit override in CLI/config diagnostics; do not add a second resolver.
 - [ ] Refactor `__main__.py`:
       - `_run_build` into a provider-aware orchestrator;
       - preserve positional ZIM file/folder arguments and ad-hoc indexing;
@@ -349,8 +374,9 @@ Scope:
       configured ZIM collection using a safe unique name independent of the
       absolute path and an atomic, non-rewriting config append; lock and recheck
       config before writing, preserve config contents and report failure.
-- [ ] Add `Search` discovery of configured collections at startup, with
-      background publication for slow providers.
+- [ ] Complete CLI/config wiring to phase 00's existing entry discovery and
+      background snapshot publication; do not postpone provider lifecycle
+      correctness until this phase.
 - [ ] Make build/source inspection/reload commands wait for discovery rather
       than operating on a partial background snapshot.
 - [ ] Add per-provider search budgets.
@@ -365,7 +391,8 @@ Scope:
 - [ ] Config: `[[collections]]` entries parse with global keys in the correct
       TOML scope; duplicate names, unknown types, bad
       types, and missing `path` produce clear warnings and do not crash. Flat
-      `zim_dir`/`kiwix_server` keys are unknown and never create collections.
+      provider keys fail with an actionable migration error, not an empty
+      successful startup. A Kiwix entry accepts `max_remote_sources = 0`.
 - [ ] `build` no-arg builds all configured providers; positional ZIM paths
       still expand files/folders and index ad hoc; a matching configured root
       supplies defaults, and an unmatched path is appended to config before
@@ -376,7 +403,9 @@ Scope:
       supplies settings without widening the selected input scope; `--list`
       previews pending config changes without writing them.
 - [ ] Generated collection names are safe, unique, and do not encode absolute
-      path data; concurrent appends cannot lose an intervening config update.
+      path data or use reserved `open`; concurrent appends cannot lose an
+      intervening config update. CLI-relative paths and a config in a different
+      directory still resolve to the original selected files after saving.
 - [ ] A generated configuration entry for a single-file ZIM remains a
       single-file collection; a generated entry for a folder remains scoped to
       that folder. Serving either entry does not discover sibling archives.
@@ -395,7 +424,8 @@ Scope:
       record schemas as the HTTP APIs, and clearly documents its combined
       top-level shape.
 - [ ] `prune --dry-run` reports only Zimantic-created orphan indexes; `--yes`
-      deletes only those.
+      deletes only those, skipping pinned generations and uncertain configured
+      namespaces. An offline/failed discovery is not evidence of orphanhood.
 - [ ] `reload` picks up a new files directory, a new Kolibri channel, and a new
       ZIM.
 - [ ] `captions`, `ocr`, and `asr` are independently off by default; setting

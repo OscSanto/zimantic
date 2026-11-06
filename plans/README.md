@@ -1,6 +1,6 @@
 # Source extensibility plans
 
-Status: proposed, 2026-11-05.
+Status: reviewed for implementation, 2026-11-05. Implementation has not started.
 
 This directory turns Zimantic from a ZIM search engine with a Kiwix remote
 special case into a search engine whose core is source-agnostic, with in-tree
@@ -11,6 +11,9 @@ The plans are ordered. Each phase is intended to ship on its own and leave
 URLs, API payloads, config keys, the catalog schema, and the index layout.
 Every breaking change ships with a migration note and a rebuild path. Do not
 build all phases on one long-lived branch.
+The "Current state" sections describe the pre-redesign baseline; later phases
+must build on earlier phases' completed moves, not repeat them or recreate
+deleted core aliases.
 
 ## Locked decisions
 
@@ -54,6 +57,12 @@ re-litigation inside the phase plans:
     migration. Recognized old ZIM index variants may be imported once after
     validation; unknown or incompatible indexes are rebuilt and never served
     through a legacy reader.
+11. **Files URLs are collection-relative.** All source keys in a Files
+    collection address the same permitted collection-relative paths. Child and
+    loose-file membership still scopes indexing and source attribution, not
+    serving authorization. A child source's homepage includes its directory
+    prefix, so ordinary relative shared-asset links work without a second URL
+    namespace.
 
 ## Vocabulary
 
@@ -61,7 +70,7 @@ re-litigation inside the phase plans:
 |---|---|---|
 | Provider | In-tree adapter for one kind of content: `zim`, `kiwix`, `files`, `kolibri`. The only source discriminator. | No |
 | Collection | A configured root, server, or channel. Groups sources; hierarchical providers bound their source count. | Yes, as grouping metadata |
-| Source | The searchable unit and content root. `SourceInfo.key` is its identity and `/content/{key}/{path}` address. | Yes |
+| Source | The searchable unit with a path-addressed content store. `SourceInfo.key` is its identity and `/content/{key}/{path}` address. Files membership can be narrower than its collection-rooted store. | Yes |
 | Item | An article, file, content node, video, or other result row. | Yes, as a result |
 | Content store | Path-addressed reader for one source (archive, filesystem tree, Kolibri storage tree). | No |
 | Derived text | Text produced from non-native media during a build: existing caption tracks (`captions`), images (`ocr`), or audio/video (`asr`). Each operation is an independent opt-in. | No |
@@ -100,6 +109,11 @@ one-time validated importer that adopts recognized pre-redesign and phase-01 ZIM
 indexes without re-extracting every article when compatible. Phase 05 adds
 files-provider validation; phase 08 completes the full settings loader. There is
 one parser and one normalized entry shape, not a temporary parser per provider.
+Phase 00 owns entry-set refresh and aggregate snapshot publication; phase 01
+already owns sidecar-free immutable generations and cross-process reader leases.
+Phase 04 adds the optional buildable-runtime capability, rather than teaching
+the CLI how to build each provider. Phase 08 exposes those existing mechanisms;
+it must not defer correctness needed by an earlier shipping phase.
 Execute phase 10 after phase 08 and before phase 09, which is the final release
 gate.
 
@@ -123,7 +137,8 @@ Every phase must hold these:
   files as soon as no reader pins them. Unrecognized or incompatible indexes
   are rebuilt, not served through a legacy compatibility path.
 - **One config schema.** Collections are declared only with `[[collections]]`.
-  There are no flat `zim_dir` or `kiwix_server` shorthands.
+  There are no flat provider shorthands. Removed provider keys are fatal schema
+  errors, not ignored settings that leave an accidentally empty library.
 - **The catalog is disposable.** `catalog.sqlite` is the ZIM archive metadata
   cache; Files and Kolibri do not write it, and Kiwix has no persistent local
   catalog. An incompatible catalog is rebuilt after checking its schema version;
@@ -159,6 +174,8 @@ These are defaults, not hard-coded promises. Each provider may tighten them.
 | Traversal time | 300 s | Hard work budget, distinct from the startup budget |
 | Search tasks per provider | up to `min(4, search_workers)` | Fair scheduling; reserve capacity for competitors when possible |
 | Remote sources per search | `max_remote_sources` | Bound remote fan-out |
+| Admitted search deadline | `search_timeout_seconds` (30 s) | Bound scheduling and result processing across every scope |
+| Listing page size | global `page_size`, maximum 200 | Bound each API response; clients page explicitly |
 
 When a hierarchical provider exceeds a discovery cap, it must collapse to a
 coarser source granularity (for example, the whole collection as one source)
@@ -211,7 +228,8 @@ and exclusion rules.
    contract directly; do not add old-payload parity tests.
 3. Move behavior directly and delete the replaced implementation in the same
    phase. Do not add a temporary adapter, dual config path, or alias layer.
-4. Update `plans/README.md` checkboxes and the phase document as work lands.
+4. Update the phase document's checkboxes and `plans/README.md` phase map/status
+   as work lands.
 5. Finish with `python -m pytest` and manual `/search` and `/library` smoke
    tests. Include a non-ZIM source once phase 05 makes one available locally.
 6. The roadmap makes no calendar-date commitment. Before a phase starts, its
