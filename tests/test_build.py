@@ -261,6 +261,41 @@ class BuildUpgradeTests(unittest.TestCase):
             self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1", "filesize": "0"})
             self.assertEqual(faiss_path.read_bytes(), b"new vectors")
 
+    def test_failed_force_rebuild_preserves_last_good_index_and_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "indexes"
+            directory.mkdir()
+            db_path = directory / "manual.sqlite"
+            faiss_path = directory / "manual.faiss"
+            _create_done_index(db_path)
+            faiss_path.write_bytes(b"last good vectors")
+
+            with (
+                patch.object(build_module, "Archive", _FakeArchive),
+                patch.object(
+                    build_module, "read_entry", side_effect=RuntimeError("parse failed")
+                ),
+                self.assertLogs("zimantic.build", level="WARNING") as logs,
+                self.assertRaisesRegex(RuntimeError, "parse failed"),
+            ):
+                build_module.build(
+                    directory / "manual.zim", directory, None, 1, force=True
+                )
+
+            self.assertTrue(
+                any("index rebuild failed" in message for message in logs.output)
+            )
+            self.assertEqual(_meta(db_path), {"done": "1"})
+            db = sqlite3.connect(db_path)
+            self.assertEqual(
+                db.execute("SELECT title FROM docs").fetchone()[0], "Old title"
+            )
+            db.close()
+            self.assertEqual(faiss_path.read_bytes(), b"last good vectors")
+            staging_db, staging_faiss = build_module._upgrade_paths(db_path, faiss_path)
+            self.assertFalse(staging_db.exists())
+            self.assertFalse(staging_faiss.exists())
+
     def test_changed_filesize_triggers_rebuild(self):
         class _OneEntryArchive(_FakeArchive):
             entry_count = 1

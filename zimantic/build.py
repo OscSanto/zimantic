@@ -137,21 +137,30 @@ def _prepare_build_state(
     fast: bool,
     force: bool,
 ) -> _BuildState | None:
-    if force:
-        _reset_index(db_path, faiss_path)
-
     filesize = _source_filesize(zim_path)
-    db = _open_database(db_path)
+    publish_upgrade = force
+    if force:
+        build_db_path, build_faiss_path = _upgrade_paths(db_path, faiss_path)
+        _clear_staging_index(build_db_path, build_faiss_path)
+        db = _open_database(build_db_path)
+        meta: dict[str, str] = {}
+        done = ""
+    else:
+        build_db_path = db_path
+        build_faiss_path = faiss_path
+        db = _open_database(db_path)
     try:
-        meta = dict(db.execute("SELECT key, value FROM meta"))
-        done = str(meta.get("done", ""))
+        if not force:
+            meta = dict(db.execute("SELECT key, value FROM meta"))
+            done = str(meta.get("done", ""))
         # A build interrupted before meta.filesize was written still needs to
         # notice a source that changed underneath it. build_filesize is written
         # as soon as the build starts, so resuming cannot mix rows from two
         # different versions of the source.
         recorded_build_size = meta.get("build_filesize")
         if (
-            done not in {"1", "fast"}
+            not force
+            and done not in {"1", "fast"}
             and recorded_build_size is not None
             and str(filesize) != recorded_build_size
         ):
@@ -197,7 +206,8 @@ def _prepare_build_state(
         # when the source file's size no longer matches the recorded size.
         recorded_size = meta.get("filesize")
         if (
-            done in {"1", "fast"}
+            not force
+            and done in {"1", "fast"}
             and recorded_size is not None
             and str(filesize) != recorded_size
         ):
@@ -208,10 +218,12 @@ def _prepare_build_state(
                 filesize,
             )
             db.close()
-            _reset_index(db_path, faiss_path)
-            db = _open_database(db_path)
+            build_db_path, build_faiss_path = _upgrade_paths(db_path, faiss_path)
+            _clear_staging_index(build_db_path, build_faiss_path)
+            db = _open_database(build_db_path)
             meta = {}
             done = ""
+            publish_upgrade = True
 
         if done == "1":
             if faiss_path.exists():
@@ -223,9 +235,6 @@ def _prepare_build_state(
                 "use --force to rebuild"
             )
 
-        publish_upgrade = False
-        build_db_path = db_path
-        build_faiss_path = faiss_path
         if done == "fast":
             if fast:
                 logger.info(
@@ -375,6 +384,15 @@ def _finish_build(
             db.execute("DELETE FROM meta WHERE key = ?", (MODEL_PROBE_SHAPE_KEY,))
             db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 'fast')")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', ?)", (str(state.filesize),))
+        if state.publish_upgrade:
+            db.close()
+            state.db = None
+            _publish_upgrade(
+                state.build_db_path,
+                state.build_faiss_path,
+                db_path,
+                faiss_path,
+            )
         logger.debug(f"{db_path.stem}: title + full-text index ready")
         return
 
@@ -435,7 +453,18 @@ def build(
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    state = _prepare_build_state(zim_path, db_path, faiss_path, fast, force)
+    try:
+        state = _prepare_build_state(zim_path, db_path, faiss_path, fast, force)
+    except Exception as error:
+        if force:
+            logger.warning(
+                "%s: forced index rebuild could not start (%s); the existing "
+                "published index was not removed",
+                zim_path.stem,
+                error,
+            )
+            _clear_staging_index(*_upgrade_paths(db_path, faiss_path))
+        raise
     if state is None:
         return
     try:
@@ -488,6 +517,20 @@ def build(
             fingerprint,
             model_probes,
         )
+    except Exception as error:
+        if state.publish_upgrade:
+            logger.warning(
+                "%s: index rebuild failed (%s); the previous published index "
+                "was not removed before staging (a failure during publication "
+                "may require index validation)",
+                zim_path.stem,
+                error,
+            )
+            if force and state.db is not None:
+                state.db.close()
+                state.db = None
+                _clear_staging_index(state.build_db_path, state.build_faiss_path)
+        raise
     finally:
         if state.db is not None:
             state.db.close()
@@ -532,10 +575,16 @@ def _upgrade_paths(db_path: Path, faiss_path: Path) -> tuple[Path, Path]:
 
 
 def _reset_index(db_path: Path, faiss_path: Path) -> None:
-    """Remove index state before a forced rebuild."""
+    """Remove incomplete in-place build state before restarting it."""
     staging_db_path, staging_faiss_path = _upgrade_paths(db_path, faiss_path)
     for path in (db_path, faiss_path, staging_db_path, staging_faiss_path):
         path.unlink(missing_ok=True)
+
+
+def _clear_staging_index(db_path: Path, faiss_path: Path) -> None:
+    """Remove only unpublished files before starting a replacement build."""
+    db_path.unlink(missing_ok=True)
+    faiss_path.unlink(missing_ok=True)
 
 
 def _publish_upgrade(
@@ -544,18 +593,31 @@ def _publish_upgrade(
     db_path: Path,
     faiss_path: Path,
 ) -> None:
-    """Publish a completed full index without exposing a partial replacement."""
+    """Publish replacement artifacts after the staged build completed."""
+    if staging_db_path.exists() and not staging_faiss_path.exists():
+        with sqlite3.connect(staging_db_path) as db:
+            done = db.execute(
+                "SELECT value FROM meta WHERE key = 'done'"
+            ).fetchone()
+        if done is not None and str(done[0]) == "fast":
+            # A forced fast build has no vectors. Publish its SQLite completion
+            # marker before removing the old FAISS file; readers ignore FAISS
+            # for fast indexes.
+            os.replace(staging_db_path, db_path)
+            faiss_path.unlink(missing_ok=True)
+            _fsync_path(db_path.parent)
+            return
+        if done is not None and str(done[0]) == "1" and faiss_path.exists():
+            # Recover a full build interrupted after publishing FAISS.
+            os.replace(staging_db_path, db_path)
+            _fsync_path(db_path.parent)
+            return
+        raise RuntimeError("replacement index is missing its completed FAISS file")
     if staging_db_path.exists() and staging_faiss_path.exists():
-        # Fast indexes ignore FAISS files, so publish vectors first and the
-        # done=1 SQLite file last. Readers see either the old fast index or
-        # the new one.
+        # Publish vectors first and the completed SQLite file last. Fast
+        # indexes ignore FAISS files, so upgrading one remains searchable
+        # until the SQLite completion marker is replaced.
         os.replace(staging_faiss_path, faiss_path)
-        os.replace(staging_db_path, db_path)
-        _fsync_path(db_path.parent)
-        return
-    if staging_db_path.exists() and faiss_path.exists():
-        # Recover if the process stopped after publishing FAISS but before
-        # publishing SQLite.
         os.replace(staging_db_path, db_path)
         _fsync_path(db_path.parent)
         return

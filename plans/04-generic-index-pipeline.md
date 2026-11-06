@@ -58,19 +58,18 @@ class EntryProducer(Protocol):
     def validate_snapshot(self) -> bool: ...
 ```
 
-- `EntryRecord.id` is the canonical positive 63-bit SQLite row id written to
+- `EntryRecord.id` is the canonical non-negative 63-bit SQLite row id written to
   `docs.rowid`, `vecs.id`, FAISS, and `EntryRecord.target_id`. It is not an
   arbitrary provider-native id. Providers must keep it stable for the duration
   of a source snapshot and across unchanged rebuilds; path is not an identity
   because duplicate paths are permitted.
 - Providers own the deterministic mapping from their native identity to this
-  row-id space. The ZIM producer maps an archive entry's raw `_index` to
-  `_index + 1` (so raw id `0` is valid and sparse ids remain distinct), and
-  maps redirect targets with the same rule. Files use one-based manifest
-  position; Kolibri uses its deterministic positive 63-bit `(channel_id,
-  node_id)` mapping. A provider must reject overflow or mapping collisions
-  rather than merge rows. The core never remaps ids after receiving an
-  `EntryRecord`.
+  row-id space. ZIM preserves the archive entry's raw `_index` and redirect
+  target id, including zero, so existing FTS rowids and FAISS ids do not need
+  to be renumbered. Files use one-based manifest position; Kolibri uses its
+  deterministic non-negative 63-bit `(channel_id, node_id)` mapping. A
+  provider must reject overflow or mapping collisions rather than merge rows.
+  The core never remaps ids after receiving an `EntryRecord`.
 - `EntryRecord.target_id` is the nullable canonical row id of the final
   redirect target; non-redirect rows use `None`. The field is named
   `target_id` everywhere, including provider plans and the SQLite `docs.target`
@@ -89,8 +88,9 @@ class EntryProducer(Protocol):
   finish; merely rereading the stored `fingerprint` is not validation.
 - `fingerprint` covers the ordered selected manifest, relevant source
   signatures, extraction settings, and enabled derived-text inputs. Use ZIM
-  UUID/size/mtime, a files manifest, and a consistent Kolibri DB snapshot plus
-  selected storage-file signatures as specified in the provider plans.
+  UUID/size/mtime rounded to whole seconds, a files manifest, and a consistent
+  Kolibri DB snapshot plus selected storage-file signatures as specified in
+  the provider plans.
 - Size/mtime signatures are a practical change detector, not a proof of
   identical bytes: same-size writes with restored timestamps can evade them.
   Document that limitation and require immutable content or an external
@@ -254,13 +254,29 @@ The shared locator module introduced in phase 01 uses one layout for every local
 indexed provider:
 
 ```
-<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.sqlite
-<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.faiss
+<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>/
+    current
+    generations/<build-generation>/index.sqlite
+    generations/<build-generation>/index.faiss
 ```
 
-There is no ZIM-specific index path, no discovery of old `<stem>.sqlite` /
-`<stem>.faiss` pairs, and no `legacy_paths()` branch. Existing indexes are
-ignored and must be rebuilt with the new layout.
+There is no ZIM-specific runtime index path or dual-format reader. During the
+one-time rollout only, the importer may locate the old `<stem>.sqlite` /
+`<stem>.faiss` pair for a ZIM already present in the catalog, validate it, and
+adopt it into the new layout. It must not search arbitrary filenames or trust
+unknown files. Unrecognized, corrupt, stale, or incompatible artifacts are
+rebuilt; a successfully adopted index is thereafter read only through the
+canonical layout.
+
+Store each source's artifacts as immutable generations. Build and validate a
+complete SQLite/FAISS pair in a new generation directory, fsync its files, then
+atomically replace a small `current` manifest naming that generation and its
+digests. Readers resolve that manifest once and pin the generation, so they
+cannot combine files from different builds. Keep the prior generation until
+all local and cross-process readers release it, then remove it; if release
+cannot be established, warn and defer cleanup rather than deleting a live
+generation. A successful replacement must not leave the old and new copies
+indefinitely.
 
 The locator must:
 
@@ -275,7 +291,8 @@ The locator must:
   `key`;
 - keep `source_fingerprint` out of the locator; content changes reuse the same
   path and are handled by the fingerprint/resume rules;
-- expose one `paths(source)` function;
+- expose one `paths(source)` function that resolves the current manifest once
+  and returns pinned generation paths;
 - be shared by `serve`, `build`, `reload`, cleanup, and health.
 
 ### Index metadata encoding
@@ -286,13 +303,16 @@ New indexes use a type-stable metadata table:
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
-);
+) STRICT;
 ```
 
-`meta.value` is always UTF-8 text. The schema is a rebuild-only change; old
-indexes with SQLite INTEGER or BLOB values are ignored rather than migrated.
-Readers and writers use one codec and reject malformed values instead of
-silently coercing them:
+`meta.value` is always UTF-8 text. New ordinary tables use SQLite `STRICT`
+where supported by the minimum SQLite version; this enforces storage classes,
+not faster queries. FTS5 virtual tables cannot be declared `STRICT`. The
+one-time importer may convert recognized legacy metadata values through the
+canonical codec below; it must reject unknown or malformed values rather than
+silently coerce them. Ordinary `vecs` staging tables use
+`CREATE TABLE vecs(id INTEGER PRIMARY KEY, v BLOB NOT NULL) STRICT`.
 
 | Key(s) | Meaning | Canonical encoding |
 |---|---|---|
@@ -318,18 +338,25 @@ not the provider's source totals.
 
 `pipeline.py` keeps the current semantics:
 
-- staging DB/FAISS and upgrade; publish each artifact atomically and verify the
-  SQLite/FAISS pair as described below;
+- staging DB/FAISS and upgrade; atomically publish a complete generation by
+  swapping its manifest and verify the SQLite/FAISS pair as described below;
 - progress, batching, embedding pipeline, fast mode;
 - model probes and fingerprint compatibility;
 - `meta.done`, `meta.next`, and crash resumability;
 - build locking remains global in `zimantic/locking.py`.
 
 Even a forced rebuild stages its replacement without deleting the last
-published index first. A fatal traversal, extraction, or build failure leaves
-that artifact in place; a detectably stale artifact is not searched. Requested
+published index first. Before starting, report current artifact bytes and
+available staging space; if the known minimum cannot fit, fail before modifying
+the published generation. A fatal traversal, extraction, validation, or build
+failure removes only its incomplete staging generation, logs a warning naming
+the source and failure, and leaves the prior successful generation published.
+Continue using that generation only if its source identity and required
+channels still validate. If the source or build inputs changed, keep the old
+generation for recovery but mark it stale and do not present its results as
+current (notably, do not hydrate old rowids against changed content). Requested
 derived-text failures instead publish the available channels as partial, as
-specified above.
+specified above, with the partial state visible and a non-zero build result.
 
 Only the entry source changes:
 
@@ -338,24 +365,84 @@ def build_index(producer, locator, embedder, cfg, fast=False, force=False): ...
 ```
 
 The ZIM provider calls it with `ArchiveEntryProducer`; files and Kolibri call
-the same function with their producers. Phase 04 changes the index schema and
-requires rebuilding phase-01 indexes; the locator itself does not change.
+the same function with their producers. Phase 04 changes the index schema.
+Migrate recognized phase-01 indexes where possible rather than requiring a
+full article re-extraction; the locator identity remains stable, while the old
+flat paths are adopted once into the generation layout.
 The per-source item cap applies to ZIM too, so very large ZIMs can have
 truncated semantic/title coverage after rebuilding; native full-text may still
 cover the archive. Report `truncated` and `indexed_count` and call out this
 change in the migration notes.
 
-Two file renames are not an atomic pair. Record a digest of the completed FAISS
-file and a unique build generation in staged SQLite metadata. Before enabling
-semantic search, verify the same opened bytes that FAISS loads, not a pathname
-that can be replaced between verification and loading. Pin each index handle to
-that generation; verify newly opened per-thread SQLite connections match it, or
-reopen/retry against the current generation. If publication is interrupted or a
-reader observes mismatched generations, retain safe lexical/native behavior and
-report the mismatch; never pair vectors with the wrong document rows. Fast
+Record a digest of the completed FAISS file and a unique build generation in
+staged SQLite metadata and the `current` manifest. Before enabling semantic
+search, verify the same opened bytes that FAISS loads, not a pathname that can
+be replaced between verification and loading. Pin each index handle to that
+generation; verify newly opened per-thread SQLite connections match it, or
+reopen/retry against the current generation. If publication is interrupted or
+a reader observes mismatched generations, retain safe lexical/native behavior,
+report the mismatch, and never pair vectors with the wrong document rows. Fast
 indexes have no FAISS digest and must not load a leftover FAISS file. Cache
 verification on the loaded handle so searches do not repeatedly hash vectors;
 verify again when reopening a pair rather than trusting file signatures alone.
+
+### Recognized index migration
+
+The schema differences are migration work, not a reason to discard every
+successful ZIM index. Current and previously written databases in the field
+include `docs` FTS5 layouts both with and without an unindexed `excerpt`
+column, while legacy `meta` values can be SQLite INTEGER, TEXT, or BLOB; the
+new schema adds provider/source identity, fingerprints, typed publication
+metadata, and optional body FTS. Some completed indexes have no `vecs` table
+because vectors live in the separate FAISS file. Migration must inspect the
+actual table/column definitions and storage classes rather than infer a format
+from a version integer alone.
+
+The importer may preserve the canonical non-negative rowids (including ZIM
+rowid zero), doc paths/titles/redirect targets, and compatible lexical index
+without reopening every article. For old indexes without a source fingerprint,
+require a catalog-matched archive path, unchanged size, and a matching
+non-empty archive UUID before adoption; otherwise freshness is unverified and
+the importer must not call the index current. It can rebuild the `docs` FTS
+table from recognized stored columns and normalize known metadata values in a
+staged copy.
+Preserve semantic search only when FAISS IDs, dimensions, and model identity
+are verified against the migrated rowids and current model; otherwise retain
+the compatible lexical index and rebuild or disable only the semantic channel.
+If source identity/freshness cannot be validated, if rowids/targets collide, or
+if any required field is irrecoverable, reject adoption and perform a clean
+build while keeping the old artifact untouched. Do not create a permanent
+legacy search path.
+
+The new `body` FTS index may be populated from a recognized stored excerpt.
+When no excerpt exists, body search can be added by a normal producer build;
+it must not force discarding compatible title/redirect data. Record which
+channels were migrated, rebuilt, unavailable, or stale in the report. Measure
+migration time, peak extra disk/RSS, rows reused, and fallback channel status
+on representative existing indexes before deciding which legacy variants to
+support.
+
+### Excerpt and derived-text storage experiment
+
+Do not add an excerpt or raw derived-text column to the new `docs` table by
+default. Compare on identical representative ZIM, Files, and Kolibri fixtures:
+
+- body FTS5 with stored content versus contentless FTS5 postings plus
+  `ContentStore` hydration for result previews;
+- ordinary preview extraction on result selection versus retaining compact
+  per-document preview text;
+- derived-text searchable postings with no retained raw output versus a
+  digest-keyed result cache and query-time re-extraction/streaming.
+
+For each mode record SQLite/FAISS/cache bytes, peak additional disk during
+rebuild, build time, peak RSS, query p50/p95, first-result latency, preview
+hydration latency, and derived-engine invocations. Use a fixed query/result
+set, warm and cold cache runs, and include long/large excerpts. Query-time
+derived processing must be bounded and must not scan or run models across the
+whole corpus per request; if streaming cannot meet the same search-result
+semantics and latency budget, keep derived output in the digest cache and
+persist only what the searchable index requires. Adopt the smallest-storage
+option only if it passes the phase-09 latency and memory gates.
 
 ### Generic local search
 
@@ -404,7 +491,7 @@ class IndexHandle:
     locks: IndexLocks
     read_only: bool = False
 
-# signatures = (db_size, db_mtime_ns, faiss_size, faiss_mtime_ns); a missing
+# signatures = (db_size, db_mtime_seconds, faiss_size, faiss_mtime_seconds); a missing
 # artifact uses the corresponding zero pair. IndexLocks contains the
 # lifecycle/ref-count lock, the SQLite read lock, and the close lock.
 ```
@@ -434,10 +521,13 @@ connection. Phase 10 uses this mode for reused indexes.
 - [ ] Add `zimantic/indexing/types.py`; re-export `EntryRecord` and define
       `EntryProducer`/`NativeSearcher`.
 - [ ] Move the schema and meta-key constants from `build.py` into
-      `indexing/schema.py`; add the separate optional `body` FTS5 table for
-      provider excerpts, plus `provider`, `source_key`, and
-      `source_fingerprint` meta keys. Implement the canonical text codec and
-      metadata table above; old mixed-type metadata is rebuild-only.
+      `indexing/schema.py`; use `STRICT` ordinary tables where the minimum
+      SQLite supports them, and add the optional `body` FTS5 table, identity
+      metadata, and canonical codec.
+- [ ] Add a one-time, allowlisted importer for recognized old ZIM index
+      variants. Preserve rowids and compatible FTS data; migrate metadata and
+      semantic channels only when each can be validated. Reject unknown
+      variants without modifying their files.
 - [ ] Split `build.py`: replace the ZIM-only `build()` with
       `build_index(producer, ...)`. Do not keep a compatibility wrapper.
 - [ ] Move `_index_entries`, `_save`, `_finish_build`, `_write_faiss`, and
@@ -454,8 +544,9 @@ connection. Phase 10 uses this mode for reused indexes.
 - [ ] Move `_fetch_docs`, `suggest`, and non-ZIM preview logic into
       `indexing/search.py`; `suggest` must use `IndexHandle`, not
       `Search.indexes`.
-- [ ] Persist provider excerpts in the `body` FTS5 table and query it as a
-      lexical channel; preserve title/path-only `--fast` behavior.
+- [ ] Benchmark the excerpt/derived-text storage alternatives above on fixed
+      fixtures before selecting the default body FTS content mode. Preserve
+      title/path-only `--fast` behavior.
 - [ ] Move `_enrich_pool` exact-phrase verification and MIME population behind
       `ContentStore` reads, retaining byte limits and error handling; it must
       not open a ZIM archive directly.
@@ -487,7 +578,15 @@ connection. Phase 10 uses this mode for reused indexes.
       publication; a later detectable change marks the index stale on reload.
 - [ ] Interrupted publication or concurrent opening cannot pair a SQLite index
       with a different FAISS generation.
-- [ ] A failed forced rebuild leaves the previous published index intact.
+- [ ] A failed forced rebuild warns with the cause, leaves the previous
+      successful generation in place, and continues using it only if its
+      source and required channels still validate.
+- [ ] Successful publication atomically switches a complete SQLite/FAISS
+      generation; after readers release old generations, cleanup removes them.
+- [ ] Insufficient staging space is reported before publication is touched;
+      failed staging files are cleaned without accumulating duplicate copies.
+- [ ] Recognized old index schemas migrate without rowid changes; unknown
+      schemas remain untouched and fall back to a clean staged build.
 - [ ] Fast build, force rebuild, upgrade-in-place, and a corrupt staging file
       all work.
 - [ ] Model fingerprint/probe mismatch falls back to lexical search.
@@ -496,6 +595,8 @@ connection. Phase 10 uses this mode for reused indexes.
       path in generated filenames or public metadata.
 - [ ] Generic local search over a synthetic producer returns semantic,
       title/body keyword, and preview results without importing libzim.
+- [ ] The excerpt/derived-text experiment records storage, build, RSS, query,
+      hydration, and engine-invocation measurements for all candidate modes.
 - [ ] A non-ZIM body-term query returns a lexical result without embeddings or
       a `NativeSearcher`; a fast build is explicitly title/path-only.
 - [ ] Derived text is off by default: caption/image/media inputs are never
@@ -526,7 +627,8 @@ connection. Phase 10 uses this mode for reused indexes.
 
 - `python -m pytest` passes.
 - Every local indexed provider uses the same index layout and schema; Kiwix
-  remains search-only. Old indexes are ignored and rebuilt.
+  remains search-only. Recognized ZIM indexes are migrated once where
+  validation permits; unknown or incompatible ones are rebuilt.
 - `build.py` no longer imports provider-specific discovery.
 - `indexing/` imports no libzim, FAISS, or web modules at module scope except
   inside the FAISS loaders.
@@ -535,8 +637,13 @@ connection. Phase 10 uses this mode for reused indexes.
 
 ## Risks and mitigations
 
-- **Index churn.** One schema means old indexes are discarded. Ship the rebuild
-  path and document it; do not add a legacy reader.
+- **Index migration.** Legacy FTS layouts, mixed-type metadata, and absent
+  fingerprints require a versioned importer with channel-level validation.
+  Unknown data must be left intact while a replacement is staged; never guess
+  FAISS/model compatibility or expose a permanent legacy reader.
+- **Staging disk use.** A safe rebuild temporarily needs space for old and new
+  generations. Estimate and report that headroom, preserve the old generation
+  on failure, and reclaim it after successful publication and reader release.
 - **Resume correctness.** Fingerprint checking is mandatory; a mismatch must
   rebuild rather than produce shifted row ids.
 - **Large mechanical move.** Move code before changing behavior; use contract

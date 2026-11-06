@@ -137,8 +137,14 @@ CREATE TABLE sources (
     last_error TEXT NOT NULL DEFAULT '',
     scanned_at REAL NOT NULL,
     provider_metadata TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (key)
-);
+    PRIMARY KEY (key),
+    CHECK (native_fulltext_available IN (0, 1)),
+    CHECK (size IS NULL OR size >= 0),
+    CHECK (mtime IS NULL OR mtime >= 0),
+    CHECK (document_count IS NULL OR document_count >= 0),
+    CHECK (media_count IS NULL OR media_count >= 0),
+    CHECK (item_count IS NULL OR item_count >= 0)
+) STRICT;
 CREATE INDEX sources_path ON sources(path);
 CREATE INDEX sources_collection ON sources(collection_key);
 CREATE INDEX sources_provider_id ON sources(provider, provider_id);
@@ -147,9 +153,16 @@ CREATE INDEX sources_provider_id ON sources(provider, provider_id);
 `path` is nullable for records without a local filesystem locator and is never
 the logical primary key. `provider_metadata` is JSON for metadata that has no
 provider-neutral typed column; its contents are interpreted only by that
-provider's adapter. For ZIM rows, `provider_id` stores the archive UUID when
-available; phase 10 requires matching path and size and the same nonempty UUID
-in the row and live archive before reusing a catalog identity.
+provider's adapter and is validated as canonical JSON at the provider boundary.
+`mtime` is the filesystem modification time in seconds, stored as a `REAL`.
+Derive it from `st_mtime_ns` by rounding to the nearest whole second before
+persistence and fingerprinting; subsecond changes are intentionally ignored.
+It is a practical change detector, not proof of identical content.
+`scanned_at` is Unix epoch seconds with fractional precision, for
+display/diagnostics rather than freshness comparisons. For ZIM rows,
+`provider_id` stores the archive UUID when available; phase 10 requires
+matching path and size and the same nonempty UUID in the row and live archive
+before reusing a catalog identity.
 
 The presence of a row in `sources` means the archive was discovered and is
 addressable by its canonical key. Do not persist `SourceInfo.available` or use
@@ -169,7 +182,9 @@ the bounded generic index manifest.
 ### Catalog schema rebuild
 
 The catalog is a disposable cache: it can always be recreated from the
-archives, so this phase rebuilds instead of migrating.
+archives, so this phase deliberately rebuilds instead of migrating. This
+forced catalog rebuild is independent of index reuse; do not throw away a
+usable search index just because the catalog schema changed.
 
 - Bump the catalog `SCHEMA_VERSION` and delete any catalog whose version does
   not match. Recreate the `sources` table and let the normal provider scan
@@ -178,12 +193,16 @@ archives, so this phase rebuilds instead of migrating.
   availability, and provider metadata.
 - On a corrupt or unsupported catalog, delete and recreate it. Do not leave a
   `zims` view, compatibility table, or old index name in the new schema.
+- If catalog creation or repopulation fails, log a warning with the database
+  path and cause, leave the prior catalog intact until the replacement is
+  complete where feasible, and report that source metadata is unavailable.
 - Coordinate rebuilds across processes and close existing connections before
   replacing a database and its SQLite sidecars; never unlink a live catalog
   while another process can keep using or writing the old inode. If exclusive
   coordination cannot be obtained, report the failure and retry later.
 - This is a breaking change: release notes state that old catalogs are
-  discarded and old index files must be rebuilt.
+  discarded and rebuilt. Index files follow phase 04's separate validated
+  adoption/rebuild policy.
 
 ### Runtime
 
@@ -241,10 +260,12 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       `_read_index_state`, `_stale_zim_archive`, and
       `_model_probes_compatible` into the ZIM runtime.
 - [ ] Create the shared index-locator module and use it in both ZIM build
-      and serve; do not discover or write old stem-based paths.
-- [ ] Add the ZIM `EntryProducer` mapping: archive `_index + 1` is the canonical
-      positive row id, and redirect targets use the same mapping. Preserve
-      duplicate paths as distinct rows and reject integer overflow/collisions.
+      and serve; the phase-04 one-time importer may adopt only catalog-matched,
+      validated old stem-based paths.
+- [ ] Add the ZIM `EntryProducer` mapping: preserve the archive `_index` and
+      redirect target id, including zero, as the canonical non-negative row id.
+      Preserve duplicate paths as distinct rows and reject integer
+      overflow/collisions.
 - [ ] Move the local-source branch of `_rebuild_sources` and
       `_source_from_catalog` into `providers/zim/metadata.py`.
 - [ ] Move `refresh_local_sources` / local half of `refresh_sources` into the

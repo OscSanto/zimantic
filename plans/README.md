@@ -108,14 +108,24 @@ Every phase must hold these:
   parallel content APIs. Kiwix remains external-only and returns absolute
   `kiwix-serve` links.
 - **One index layout.** Every local indexed provider uses the same locator and
-  index schema. Kiwix is remote/search-only. Old index files are not discovered
-  or upgraded; they are rebuilt.
+  index schema. Kiwix is remote/search-only. A one-time importer may adopt only
+  recognized, validated old ZIM indexes; normal readers support only the new
+  layout. Preserve usable old indexes while building replacements, atomically
+  switch a complete SQLite/FAISS generation on success, and reclaim superseded
+  files as soon as no reader pins them. Unrecognized or incompatible indexes
+  are rebuilt, not served through a legacy compatibility path.
 - **One config schema.** Collections are declared only with `[[collections]]`.
   There are no flat `zim_dir` or `kiwix_server` shorthands.
 - **The catalog is disposable.** `catalog.sqlite` is the ZIM archive metadata
   cache; Files and Kolibri do not write it, and Kiwix has no persistent local
   catalog. An incompatible catalog is rebuilt after checking its schema version;
   no old-table inspection, row migration, or aliases.
+- **Index rebuilds preserve the last good result.** Build and validate a
+  replacement off to the side. On failure, warn with the source, cause, and
+  whether the previous index remains usable; never destroy it first. Use it as
+  a fallback only when its source identity and required search channels still
+  validate. Clean obsolete owned files after successful publication and reader
+  release, so a failed attempt does not accumulate duplicate generations.
 - **Items never become sources.** Any provider that discovers many items maps
   them to a bounded source set.
 - **Provider failure is isolated.** A broken or slow provider cannot crash the

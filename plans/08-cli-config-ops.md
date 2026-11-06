@@ -270,9 +270,13 @@ Scope:
 ## Index layout and catalog rebuild
 
 - Every local indexed provider uses the phase-04 locator's
-  `<index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>.*`
-  layout. There is no ZIM-only path exception.
+  source directory with a `current` generation manifest and immutable
+  `generations/<uuid>/index.sqlite` / `index.faiss` pair. There is no ZIM-only
+  path exception.
 - The phase-04 locator is the only code that computes index paths.
+- Require SQLite 3.37 or newer for `STRICT` tables; check the runtime SQLite
+  version at startup and report an actionable error rather than silently
+  creating a non-STRICT schema.
 - `index_dir` may itself be configured as an absolute path. Do not incorporate
   source-root absolute paths into logical IDs or generated index filenames.
 - `catalog.sqlite` is the private ZIM archive metadata cache beside `index_dir`.
@@ -283,8 +287,9 @@ Scope:
 - Phase 01 bumps the catalog schema version and rebuilds a mismatched catalog
   by a full ZIM scan. Do not detect, migrate, or alias old tables.
 - Ignore unknown files and stale `.tmp`/`.upgrade` files except in `prune`.
-  Old indexes are not discovered; `prune` removes them only where it can prove
-  ownership, after the operator rebuilds configured collections.
+  The one-time phase-04 importer discovers only catalog-matched old ZIM index
+  paths; `prune` removes obsolete owned artifacts after successful adoption or
+  rebuild and leaves unknown files alone.
 - Store provider, collection, source key, and content fingerprint in index
   metadata; use them for `sources`, health, and prune.
 - Never serialize catalog locators into `sources --json`, HTTP responses, or
@@ -426,8 +431,9 @@ Scope:
       builds do not multiply its size.
 - [ ] Changing a derived-text operation or engine/model changes the fingerprint
       and forces a rebuild.
-- [ ] Old-format indexes are ignored; `prune` deletes only those whose
-      Zimantic ownership can be established and leaves unknown files alone.
+- [ ] The one-time index importer adopts only recognized, validated old ZIM
+      indexes; `prune` deletes only obsolete files whose Zimantic ownership can
+      be established and leaves unknown files alone.
 - [ ] A slow provider does not delay ZIM startup beyond the configured budget.
 
 ## Acceptance criteria

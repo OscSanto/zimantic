@@ -193,6 +193,10 @@ Required:
   per-provider budget.
 - FAISS/index memory is still per-open index; do not add per-provider caches
   proportional to item count.
+- Measure index migration/rebuild peak disk use and verify that failed rebuilds
+  preserve a validated last-good index, warn with the failure cause, and do not
+  accumulate duplicate generations. Successful publication switches the
+  SQLite/FAISS pair atomically; reclaim prior generations after reader release.
 - A derived-text worker's model memory is counted once per pool worker, not once
   per source; auto resolution uses one worker on a low-memory host when one
   fits, reports unavailable otherwise, and scales by memory, not just core count.
@@ -230,9 +234,10 @@ Also measure and record:
 - [ ] `open` with matched and fallback ZIM identities, stale/missing indexes,
       and an unaffected normal `serve` process.
 - [ ] Reload after adding/removing each provider's content.
-- [ ] Migration path: an old config, catalog, or index layout is rejected or
-      ignored, and the documented `[[collections]]` configuration plus rebuild
-      produces a working library.
+- [ ] Migration path: an old config, catalog, or index layout is migrated only
+      by an explicit validated importer; the documented `[[collections]]`
+      configuration and any required rebuild produce a working library without
+      deleting a usable index on failure.
 
 ### Security/adversarial
 

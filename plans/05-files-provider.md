@@ -184,9 +184,11 @@ Create `providers/files/entries.py` with a `FilesEntryProducer`.
 
 - Scan in deterministic relative-path order at build start; assign ids by
   manifest position. Bound visited entries and time as above.
-- Compute `fingerprint` from the selected ordered `(relative path, size, mtime)`
-  manifest and build settings. Re-scan and compare before publication; respect
-  the phase-04 caveat about metadata-preserving writes.
+- Compute `fingerprint` from the ordered selected `(relative path, size,
+  mtime)` signatures, where `mtime` is rounded to the nearest whole second,
+  plus the manifest and build settings. Re-scan and compare before publication;
+  subsecond changes and metadata-preserving writes may evade this practical
+  change detector.
 - Persist `source_fingerprint` in index `meta`; phase 04 restarts the build if
   it changes between resume attempts.
 - Since the producer holds the manifest for the build, `entry_at(i)` is O(1).
