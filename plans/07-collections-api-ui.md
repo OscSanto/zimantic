@@ -63,12 +63,12 @@ Each source uses:
 - Do not expose filesystem paths, database paths, or storage roots.
 - `media_types` is an array drawn from `text`, `video`, `audio`, `image`, and
   `other`. It describes known content families and can contain multiple values.
-  ZIM classification uses its MIME counter; other local providers may use their
-  indexed manifest as a partial summary. Use `null` only when no usable family
-  was observed; otherwise list every observed family, including from partial
-  classification. Use `[]` only when complete classification found no
-  supported families. A complete empty collection is rescanned once and emits
-  a warning if it remains empty. A source matches a specific content-type
+  ZIM classification uses its MIME counter; other local providers use bounded
+  provider metadata/classification, independent of indexing and derived-text
+  settings. Use `null` only when no usable family was observed; otherwise list
+  every observed family, including from partial classification. Use `[]` only
+  when complete classification found no supported families. A complete empty
+  collection is rescanned once and emits a warning if it remains empty. A source matches a specific content-type
   filter when `media_types` is non-null and contains the requested family; the
   unfiltered "All" view still includes both `null` and empty arrays. Providers
   populate this field; it is not a source identity.

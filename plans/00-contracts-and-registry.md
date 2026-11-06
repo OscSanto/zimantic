@@ -353,6 +353,11 @@ index_freshness: str | None = None  # current | stale | unknown; None if no inde
   and `other`. Providers classify content into those values; phase 07 only
   chooses labels and filters for this frozen taxonomy. Serialize observed
   values in this taxonomy order for stable payloads.
+- Classification is independent of search indexing and derived-text settings.
+  Providers may use bounded discovery metadata, manifests, database rows, or
+  file extensions without reading media bodies. An indexed manifest may refine
+  the classification, but an unindexed media item must not disappear from
+  `media_types` merely because indexing or enrichment is disabled.
 - `document_count` is the provider's total document-like content-item count,
   `media_count` is its total media-item count, and `item_count` is its total
   permitted source-item count (documents plus media where the provider can

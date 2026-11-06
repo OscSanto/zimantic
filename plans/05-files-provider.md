@@ -114,13 +114,12 @@ For `granularity = "collection"`:
 For `granularity = "children"`, the loose-files source uses the reserved
 root-relative identifier `__loose__`, so its key is
 `files:<name>:__loose__`. The `dir-` namespace keeps an actual child named
-`__loose__` distinct. Its producer indexes only loose root files; its store
-uses the collection root so root-page assets and links can resolve, even when
-that overlaps a child source's content root. This overlap is intentional:
-source membership scopes discovery and indexing, not authorization. Any source
-in the same files collection may directly serve a permitted descendant under
-the collection root; confinement, hidden-path, and exclusion rules apply
-identically to every such request.
+`__loose__` distinct. Its producer and store cover only loose root files.
+Source membership is also the serving boundary: a child source may serve its
+own descendants and assets, but cannot address a sibling or the collection
+root through its key. HTML links that cross a source boundary must use the
+other source's generated URL. Confinement, hidden-path, and exclusion rules
+apply identically to every source request.
 
 ### Caps
 
@@ -169,12 +168,13 @@ identically to every such request.
   otherwise.
 - `homepage` = relative `index.html`/`index.htm` when present, else `None`.
 - `media_types` = known content families (`text`, `video`, `audio`, `image`,
-`other`). An index manifest can provide a partial summary, and `include`
-can omit permitted media that remains servable. Use `None` only when no
-usable family was observed; otherwise list every observed family, including
-from a partial or truncated scan. Use `()` only after complete
-classification finds no supported families. A complete empty result is
-rescanned once and warned if it remains empty.
+  `other`) from bounded discovery classification. `include` can omit
+  permitted media that remains servable, so classification is independent of
+  the index manifest and derived-text settings. Use `None` only when no usable
+  family was observed; otherwise list every observed family, including from a
+  partial or truncated scan. Use `()` only after complete classification finds
+  no supported families. A complete empty result is rescanned once and warned
+  if it remains empty.
 
 ## Indexing
 

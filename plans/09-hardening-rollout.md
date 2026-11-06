@@ -105,23 +105,10 @@ Additional rules:
 - Discovery must never recurse without a cap and exclude list.
 - A traversal/time budget that prevents a complete discovery or a deterministically
   capped build is an explicit incomplete/error state, not a complete prefix.
-- Indexing a files tree must not parse assets or media bodies unless the
-  matching derived-text operation is explicitly enabled.
-- By default, Kolibri must not read video/audio/image bytes for indexing. Only
-  an enabled `asr`/`ocr` operation may decode them, under its caps.
-- Derived-text engines run only during builds, never on search, preview, or
-  serving paths. Bound decoded pixels, audio duration, output text, and worker
-  count; reject decode failures and truncated inputs instead of retrying
-  unbounded.
-- Caption parsing is in-process. OCR/ASR run in one lazy, shared process pool so
-  non-thread-safe native engines cannot corrupt each other and one engine crash
-  cannot kill the build. Worker inputs are bounded, spawn-safe, and never
-  arbitrary provider paths.
-- Auto worker resolution is `min(cpu_limit, memory_limit)`, never a fixed
-  `#CPU` or a magic cap. It must account for per-worker model memory, headroom
-  for `build_workers`/embedding/OS, and engine-internal threads (normally set
-  to 1). Concurrent source builds share one pool and cannot multiply model
-  memory.
+- Apply phase 04's canonical derived-text policy: operations are independent
+  opt-ins, build-time-only, local-only, bounded, and isolated; disabled media
+  is never read. Phase 04 also owns worker resolution, process-pool lifecycle,
+  cache/provenance, and partial-build semantics.
 - A truncated source must still serve all permitted content; only indexing is
   truncated.
   Search/API/health output must expose `truncated` and `indexed_count` so
@@ -174,11 +161,13 @@ Kiwix server, but the benchmark's Kiwix endpoint is a local controlled fixture.
 Record Pi 4 model/RAM, OS, storage, Python version, commit, and fixture revision.
 
 The reproducible mixed fixture contains one ZIM, a Files tree with 1,000
-indexable files, one fixture channel built from the pinned latest Kolibri
-release, and a local Kiwix catalog/search endpoint. Keep the fixture and query
-set versioned with the benchmark tests. Report cold/warm build and startup
-measurements, RSS, and p50/p95 search; a missing fixture or hardware result is
-an unverified gate, not a pass.
+indexable files, one fixture channel built from pinned Kolibri v0.19.5
+artifacts, and a local Kiwix catalog/search endpoint. Store the fixture
+generator, pinned inputs, and fixed query set under
+`tests/fixtures/mixed_library/` and `tests/benchmarks/`; keep them versioned
+with the benchmark tests. Report cold/warm build and startup measurements, RSS,
+and p50/p95 search; a missing fixture or hardware result is an unverified gate,
+not a pass.
 
 Required:
 
@@ -234,10 +223,10 @@ Also measure and record:
 - [ ] `open` with matched and fallback ZIM identities, stale/missing indexes,
       and an unaffected normal `serve` process.
 - [ ] Reload after adding/removing each provider's content.
-- [ ] Migration path: an old config, catalog, or index layout is migrated only
-      by an explicit validated importer; the documented `[[collections]]`
-      configuration and any required rebuild produce a working library without
-      deleting a usable index on failure.
+- [ ] Migration path: old config is rejected, the catalog is rebuilt, and
+    only recognized old indexes are imported by the validated phase-04
+    importer; unknown indexes are rebuilt without deleting a usable index on
+    failure.
 
 ### Security/adversarial
 
@@ -358,7 +347,7 @@ For a cautious rollout, ship with:
 - [ ] Major version bump. Release notes list the new providers, the
       `[[collections]]` config requirement, the catalog/index rebuild, and the
       removed compatibility paths.
-- [ ] A known-issues note covering the pinned latest Kolibri schema version and
+- [ ] A known-issues note covering the pinned Kolibri v0.19.5 schema version and
       derived-text engine/model limitations.
 
 ## Risks register

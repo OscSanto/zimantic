@@ -120,37 +120,13 @@ Phase 04 owns the canonical `[derived_text]` schema and validation. This phase
 loads and exposes that schema through `settings.py`, preserving its global
 scope and precedence; it does not introduce a second definition.
 
-- `[[collections.sources]]` contains exact-key per-source switches, all `off`
-  by default. A collection entry does not implicitly enable an operation for
-  its sources. Duplicate overrides are invalid; stale or unknown source keys
-  are reported, not reassigned. There is no global enable switch.
-- `captions = "index"` parses existing tracks. `ocr` and `asr` name the engine
-  (`"tesseract"`, `"whisper"`); `[derived_text]` holds only model, language,
-  cache, concurrency, and cap settings.
-- Validate engine names at config load. OCR and ASR are optional dependency
-  extras; a configured engine that is not installed marks only that operation
-  unavailable for the source with a clear error. Other builds continue; the
-  overall build exits non-zero and reports partial enrichment. Retry on a later
-  build when the engine becomes available. Document required system binaries
-  and local model/language data in addition to Python extras.
-- Models are local files or preinstalled packages. Never download at build time
-  and never contact a hosted OCR/ASR service.
-- Include resolved operations and engine/model/version/availability in the
-  source fingerprint so changing them rebuilds the index.
-- `workers` accepts `"auto"` or a positive integer. Auto uses the phase-04
-  CPU and memory limits, reserving headroom for `build_workers` and embeddings.
-  It reports unavailable if one estimated worker cannot fit; otherwise a
-  low-memory host may resolve to 1 and a large host to more than 4. An explicit
-  integer is honored with a warning if it exceeds the estimated memory budget.
-- Engine-internal threads are set to 1 by default so process workers do not
-  oversubscribe CPU. Report the resolved worker count and the binding limit in
-  the build report.
-- Caption parsing runs in-process. OCR/ASR use one lazy, shared process pool per
-  build run, not one pool per source. This isolates native engines that are not
-  thread-safe and keeps model memory bounded under concurrent source builds.
-- `zimantic sources` and health report the phase-04 last-build states
-  (`off`/`not_checked`/`ready`/`partial`/`unavailable`) without loading engines;
-  the build report counts extracted, cached, and cap-skipped inputs.
+Use exact-key `[[collections.sources]]` switches, all off by default, and
+expose the phase-04 operation states and build-report counters without loading
+engines. Validate engine names and report missing engines as operation-local
+unavailability; preserve the phase-04 fingerprint, local-only model, shared
+lazy pool, worker-resolution, cap, retry, and non-zero partial-build rules.
+This phase owns settings loading, precedence, diagnostics, and CLI exposure,
+not a second derived-text policy.
 
 ### Profiles and defaults
 
@@ -216,7 +192,8 @@ zimantic build --list              # show what would be built; no work
   a non-zero usage error, not a successful no-op.
 - `--workers`, `-j`, `--lock-timeout`, `--no-wait-lock`, `--fast`, `--force`,
   and `--device` apply to every provider where meaningful. `--fast` means
-  title/path-only indexing; `--force` rebuilds. These explicit command-line
+  title/path-only indexing and disables model/FAISS loading and semantic search
+  for the entire serve process; `--force` rebuilds. These explicit command-line
   options override applicable configured defaults for both configured and
   ad-hoc builds.
 - The shared `EmbeddingPipeline` remains global; provider workers submit into
@@ -379,8 +356,9 @@ Scope:
 - [ ] Add per-provider search budgets.
 - [ ] Add unit tests for config validation and CLI argument handling.
 - [ ] Update `config.toml`, `README.md`, `CONTRIBUTING.md`, and `deploy/`.
-- [ ] Add a migration test showing that an old config, catalog, or index layout
-      is not read and that the documented rebuild path works.
+- [ ] Add migration tests showing that old config is rejected, an old catalog
+      is rebuilt, and only recognized old index layouts are imported; unknown
+      indexes are rebuilt through the documented path.
 
 ## Tests
 

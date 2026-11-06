@@ -49,6 +49,11 @@ re-litigation inside the phase plans:
 9. **Derived text is dedupe-appended.** Append distinct derived-text
    contributions to native text in deterministic operation order; do not
    replace native text or duplicate equivalent contributions.
+10. **Migration is deliberately asymmetric.** Old config is rejected and must
+    be rewritten. An incompatible catalog is discarded and rebuilt without row
+    migration. Recognized old ZIM index variants may be imported once after
+    validation; unknown or incompatible indexes are rebuilt and never served
+    through a legacy reader.
 
 ## Vocabulary
 

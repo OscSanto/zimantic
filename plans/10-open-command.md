@@ -100,7 +100,8 @@ zimantic open zims/a.zim --debug
 |---|---|
 | `--port PORT` | Bind a fixed local port. Default `0` (OS-assigned). |
 | `--no-browser` | Start the server and print the URL without launching a browser. |
-| `--fast` | Like `serve --fast`: title/native full-text only, no model or FAISS. |
+| `--fast` | Like `serve --fast`: title/native full-text only; never load model or
+FAISS and disable semantic search for the entire process. |
 | `--debug` | Like `serve --debug`: ranking details in API responses. No restart-on-SIGHUP. |
 | `--device DEVICE` | Same accepted values and precedence as `serve`. |
 | `--max-sources N` | Safety cap for folder expansion. Default `64`. |
@@ -199,9 +200,11 @@ When present:
   index-reuse paths fail.
 - A missing, in-progress, stale, or size-mismatched index falls back to the
   archive's native full-text search, with the same warnings as `serve`.
-- Model and FAISS loading stay off the startup path. The browser opens while
-  title/native full-text search already works; semantic search becomes
-  available when the model is ready.
+- Model and FAISS loading stay off the startup path. Without `--fast`, the
+  browser opens while title/native full-text search already works and semantic
+  search may become available when the model is ready. With `--fast`, model and
+  FAISS loading remain disabled for the process lifetime and semantic search is
+  unavailable, even when a finished semantic index exists.
 - Full-text isolation (`start_fulltext_isolation`) is enabled, as in `serve`,
   so a bad native index cannot abort the ephemeral process.
 - No index is created, resumed, published, or pruned.
@@ -342,6 +345,8 @@ order.
       fails explicitly instead of scanning indefinitely.
 - [ ] `--port`, `--no-browser`, `--fast`, `--debug`, and `--device` parse and
       propagate correctly.
+- [ ] `--fast` prevents model/FAISS loading and semantic results in both
+      `serve` and `open`, including when a finished FAISS index is present.
 
 ### Scope and read-only behavior
 

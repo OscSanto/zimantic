@@ -27,10 +27,9 @@ There is no Kolibri code today. This provider builds on phases 00, 03, 04, and
 seam, then supplies discovery metadata, a `ContentStore`, and an
 `EntryProducer`.
 
-The initial supported target is the latest upstream Kolibri release available
-when this phase begins. Pin its exact version and source revision in
-release-derived fixtures; do not claim support for older versions until each
-has its own tested fixture and schema mapping.
+The initial supported target is **Kolibri v0.19.5**. Pin the v0.19.5 release
+artifacts and schema mapping in release-derived fixtures; do not claim support
+for older versions until each has its own tested fixture and schema mapping.
 
 ## Configuration
 
@@ -173,14 +172,15 @@ fixture.
 - `indexed_count` = nodes actually present in the index; `truncated` is true
   when the source exceeds `max_entries`, and the reduced search coverage is
   reported in health/API metadata.
-- `media_types` = content families present in the indexed manifest (`text`,
-  `video`, `audio`, `image`, `other`). Use `None` only when no usable family
-  was observed; otherwise list every observed family, including from a
-  partial or truncated manifest. Use `()` only after complete classification
-  finds no supported families; rescan that result once and warn if it remains
-  empty. A specific content-type filter matches only a non-null value
-  containing the requested family; the unfiltered "All" view still includes
-  both `None` and empty values.
+- `media_types` = content families from bounded node/file metadata and storage
+  mapping (`text`, `video`, `audio`, `image`, `other`), independent of whether
+  the node is indexed or derived text is enabled. Use `None` only when no
+  usable family was observed; otherwise list every observed family, including
+  from a partial or truncated classification. Use `()` only after complete
+  classification finds no supported families; rescan that result once and warn
+  if it remains empty. A specific content-type filter matches only a non-null
+  value containing the requested family; the unfiltered "All" view still
+  includes both `None` and empty values.
 
 ### Channel and source icons
 
@@ -225,8 +225,9 @@ fixture.
 
 ### Captions and derived text (opt-in)
 
-Each operation is independent and defaults to off. Enabling one does not enable
-another.
+Apply the canonical operation, caching, provenance, worker, cap, and failure
+rules from phase 04. This section only describes Kolibri-specific candidate
+discovery and mapping.
 
 - `captions = "index"`:
   - discover existing caption/subtitle files associated with video/audio nodes

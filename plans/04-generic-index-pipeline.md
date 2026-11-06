@@ -19,8 +19,9 @@ search an index in tests.
   embedding pipeline, staging/upgrade/publish.
   `_index_entries` loops `range(start, zim.entry_count)` and calls
   `read_entry(zim, i, ...)`.
-- `zimantic/content/reader.py` — `EntryRecord` and `read_entry`, plus pure HTML,
-  plain-text, and PDF extraction. `read_entry` is ZIM-entry-shaped.
+- `zimantic/content/reader.py` — ZIM-shaped entry reading plus pure HTML,
+  plain-text, and PDF extraction. `EntryRecord` currently lives here but moves
+  to the dependency-free indexing types module in this phase.
 - `zimantic/searching/index.py` — `_LocalIndex`, `ensure_open`,
   `ensure_searcher`, `_nprobe`.
 - `zimantic/search.py` — `_search_local_locked`, `_fetch_docs`, previews, and
@@ -33,7 +34,7 @@ search an index in tests.
 ```
 zimantic/indexing/
     __init__.py
-    types.py          # EntryRecord re-export, EntryProducer protocol
+    types.py          # dependency-free EntryRecord and EntryProducer protocol
     schema.py         # docs/meta/vecs schema and meta keys
     pipeline.py       # prepare/resume/embed/publish; no libzim imports
     locator.py        # provider-scoped index paths
@@ -117,6 +118,10 @@ available. An unchecked index may still be searched, but its unknown freshness
 is exposed.
 
 ### Derived text enrichment
+
+This section is the canonical derived-text policy. Files, Kolibri, CLI, and
+rollout plans reference it rather than redefining operation, cache, worker, or
+failure semantics.
 
 Native text extraction stays in the existing readers. Derived text is a shared,
 optional stage in `indexing/derived.py` so every provider gets the same policy,
@@ -345,6 +350,12 @@ not the provider's source totals.
 - `meta.done`, `meta.next`, and crash resumability;
 - build locking remains global in `zimantic/locking.py`.
 
+Runtime fast mode is separate from fast build mode. When `serve --fast` or
+`open --fast` is active, the process must not load a model or FAISS and must
+disable semantic search for its entire lifetime, even when a finished semantic
+index is available. SQLite lexical/title/body search and native full-text
+search remain usable.
+
 Even a forced rebuild stages its replacement without deleting the last
 published index first. Before starting, report current artifact bytes and
 available staging space; if the known minimum cannot fit, fail before modifying
@@ -393,7 +404,7 @@ successful ZIM index. Current and previously written databases in the field
 include `docs` FTS5 layouts both with and without an unindexed `excerpt`
 column, while legacy `meta` values can be SQLite INTEGER, TEXT, or BLOB; the
 new schema adds provider/source identity, fingerprints, typed publication
-metadata, and optional body FTS. Some completed indexes have no `vecs` table
+metadata, and contentless body FTS. Some completed indexes have no `vecs` table
 because vectors live in the separate FAISS file. Migration must inspect the
 actual table/column definitions and storage classes rather than infer a format
 from a version integer alone.
@@ -414,18 +425,42 @@ if any required field is irrecoverable, reject adoption and perform a clean
 build while keeping the old artifact untouched. Do not create a permanent
 legacy search path.
 
-The new `body` FTS index may be populated from a recognized stored excerpt.
-When no excerpt exists, body search can be added by a normal producer build;
-it must not force discarding compatible title/redirect data. Record which
-channels were migrated, rebuilt, unavailable, or stale in the report. Measure
-migration time, peak extra disk/RSS, rows reused, and fallback channel status
-on representative existing indexes before deciding which legacy variants to
-support.
+The new `body` FTS index is contentless by default. A recognized stored excerpt
+may be tokenized into its postings during migration, but the raw excerpt is
+not retained in the new index. When no excerpt exists, body search can be
+added by a normal producer build; it must not force discarding compatible
+title/redirect data. Record which channels were migrated, rebuilt, unavailable,
+or stale in the report. Measure migration time, peak extra disk/RSS, rows
+reused, and fallback channel status on representative existing indexes.
 
 ### Excerpt and derived-text storage experiment
 
 Do not add an excerpt or raw derived-text column to the new `docs` table by
-default. Compare on identical representative ZIM, Files, and Kolibri fixtures:
+default. A preliminary local sizing test used the supplied 22-minute video's 
+547-cue English SRT plus a 45-second Whisper-tiny ASR preview:
+
+- the subtitle file was 36,049 bytes, normalized caption text was 16,749 bytes,
+  and gzip-compressed normalized text was 8,052 bytes;
+- the 45-second ASR preview produced 281 bytes of text. The tiny model output
+  was used for sizing only, not as a quality benchmark;
+- on a synthetic 1,000-row corpus, stored-content body FTS5 was 811,008 bytes
+  versus 372,736 bytes for contentless FTS5 (54% smaller), with effectively
+  identical term-query time (~0.0118 ms versus ~0.0117 ms per query).
+
+Use contentless body FTS5 as the initial default. It cannot provide snippets or
+stored text, so preview hydration must use `ContentStore` for native content
+and a private digest-keyed derived-text cache for derived contributions. Keep a
+row-to-cache-reference mapping in index metadata or a side table, not a raw
+derived-text column. Revisit this choice only if the release benchmark shows
+that preview latency or cache misses are unacceptable.
+
+The strong alternative is stored-content body FTS5: it costs substantially more
+space but supports direct snippets/highlighting and avoids a separate native
+text hydration path. Choose it only if those latency/UX benefits survive the
+same release benchmark.
+
+The preliminary result does not replace a representative benchmark. Compare on
+identical representative ZIM, Files, and Kolibri fixtures:
 
 - body FTS5 with stored content versus contentless FTS5 postings plus
   `ContentStore` hydration for result previews;
@@ -434,15 +469,16 @@ default. Compare on identical representative ZIM, Files, and Kolibri fixtures:
 - derived-text searchable postings with no retained raw output versus a
   digest-keyed result cache and query-time re-extraction/streaming.
 
-For each mode record SQLite/FAISS/cache bytes, peak additional disk during
-rebuild, build time, peak RSS, query p50/p95, first-result latency, preview
-hydration latency, and derived-engine invocations. Use a fixed query/result
-set, warm and cold cache runs, and include long/large excerpts. Query-time
-derived processing must be bounded and must not scan or run models across the
-whole corpus per request; if streaming cannot meet the same search-result
-semantics and latency budget, keep derived output in the digest cache and
-persist only what the searchable index requires. Adopt the smallest-storage
-option only if it passes the phase-09 latency and memory gates.
+For the selected contentless baseline and the stored-content alternative,
+record SQLite/FAISS/cache bytes, peak additional disk during rebuild, build
+time, peak RSS, query p50/p95, first-result latency, preview hydration
+latency, and derived-engine invocations. Use a fixed query/result set, warm
+and cold cache runs, and include long/large excerpts. Query-time derived
+processing must be bounded and must not scan or run models across the whole
+corpus per request; if streaming cannot meet the same search-result semantics
+and latency budget, keep derived output in the digest cache and persist only
+what the searchable index requires. The stored-content alternative is adopted
+only if it demonstrates a material preview/UX benefit at the phase-09 gates.
 
 ### Generic local search
 
@@ -461,13 +497,13 @@ Move `_search_local_locked` and its helpers out of `Search` into
   is not partial solely because it lacks one.
 - Build local result `id` values from `source_key` plus the canonical row id,
   not from the content path; duplicate paths must remain distinct results.
-- One `docs` FTS5 schema and rowid model for every local indexed provider. Add an optional
-  `body` FTS5 table keyed by the same rowids, populated from
-  `EntryRecord.excerpt`. There are no legacy index variants or schema
-  fallbacks.
+- One `docs` FTS5 schema and rowid model for every local indexed provider. Add
+  a contentless `body` FTS5 table keyed by the same rowids and populated from
+  `EntryRecord.excerpt`; retain only derived-text cache references needed for
+  preview hydration. There are no legacy index variants or schema fallbacks.
 - A normal Files/Kolibri build makes indexed body text searchable through
-  `body`; `--fast` intentionally remains title/path-only, with neither body
-  FTS nor embeddings or derived-text processing, as specified in phase 08.
+  `body`; a fast build intentionally remains title/path-only, with neither
+  body FTS nor embeddings or derived-text processing, as specified in phase 08.
   Report that configured enrichment was not attempted in a fast build.
 - Preview hydration calls `ContentStore.read`, not libzim directly.
 - Redirect resolution still follows `docs.target` chains for all providers.
@@ -518,12 +554,13 @@ connection. Phase 10 uses this mode for reused indexes.
 
 ## Work items
 
-- [ ] Add `zimantic/indexing/types.py`; re-export `EntryRecord` and define
-      `EntryProducer`/`NativeSearcher`.
+- [ ] Add `zimantic/indexing/types.py`; move the canonical `EntryRecord` there
+      and define `EntryProducer`/`NativeSearcher`. The module must import
+      without libzim, FAISS, or web dependencies.
 - [ ] Move the schema and meta-key constants from `build.py` into
       `indexing/schema.py`; use `STRICT` ordinary tables where the minimum
-      SQLite supports them, and add the optional `body` FTS5 table, identity
-      metadata, and canonical codec.
+      SQLite supports them, and add the default contentless `body` FTS5 table,
+      derived-text cache references, identity metadata, and canonical codec.
 - [ ] Add a one-time, allowlisted importer for recognized old ZIM index
       variants. Preserve rowids and compatible FTS data; migrate metadata and
       semantic channels only when each can be validated. Reject unknown
@@ -544,9 +581,9 @@ connection. Phase 10 uses this mode for reused indexes.
 - [ ] Move `_fetch_docs`, `suggest`, and non-ZIM preview logic into
       `indexing/search.py`; `suggest` must use `IndexHandle`, not
       `Search.indexes`.
-- [ ] Benchmark the excerpt/derived-text storage alternatives above on fixed
-      fixtures before selecting the default body FTS content mode. Preserve
-      title/path-only `--fast` behavior.
+- [ ] Benchmark the selected contentless body-FTS baseline against stored
+      content on fixed fixtures; preserve title/path-only `--fast` behavior
+      and retain stored content only if it wins the preview/UX gate.
 - [ ] Move `_enrich_pool` exact-phrase verification and MIME population behind
       `ContentStore` reads, retaining byte limits and error handling; it must
       not open a ZIM archive directly.
@@ -568,8 +605,9 @@ connection. Phase 10 uses this mode for reused indexes.
 
 ## Tests
 
-- [ ] ZIM build produces the generic `docs`/`body` schema, `meta.done`/`next`,
-      FAISS ids, and search results through `build_index`.
+- [ ] ZIM build produces the generic `docs`/contentless-`body` schema,
+      `meta.done`/`next`, FAISS ids, derived-text cache references, and search
+      results through `build_index`.
 - [ ] A ZIM exceeding the item cap reports truncated index coverage while its
       available native full-text and content serving continue to work.
 - [ ] Resume after interruption works; changing the fingerprint restarts the
@@ -594,9 +632,11 @@ connection. Phase 10 uses this mode for reused indexes.
       and bounded; independent of source-root relocation; no source absolute
       path in generated filenames or public metadata.
 - [ ] Generic local search over a synthetic producer returns semantic,
-      title/body keyword, and preview results without importing libzim.
-- [ ] The excerpt/derived-text experiment records storage, build, RSS, query,
-      hydration, and engine-invocation measurements for all candidate modes.
+      title/body keyword, and preview results without importing libzim; native
+      previews and derived-text cache references hydrate correctly.
+- [ ] The storage benchmark records the contentless baseline and stored-content
+      alternative, including storage, build, RSS, query, hydration, and
+      engine-invocation measurements.
 - [ ] A non-ZIM body-term query returns a lexical result without embeddings or
       a `NativeSearcher`; a fast build is explicitly title/path-only.
 - [ ] Derived text is off by default: caption/image/media inputs are never
