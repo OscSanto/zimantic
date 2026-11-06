@@ -3,6 +3,7 @@
 
     const catalogs = {
         es: {
+            "Language": "Idioma",
             "Primary": "Principal",
             "Search": "Buscar",
             "Library": "Biblioteca",
@@ -54,18 +55,30 @@
         },
     };
 
+    const LOCALE_STORAGE_KEY = "zimantic.locale";
+    const normalizeLocale = (value) =>
+        String(value || "").toLowerCase().split(/[-_]/, 1)[0];
+    const isSupportedLocale = (value) =>
+        value === "en" ||
+        Object.prototype.hasOwnProperty.call(catalogs, value);
+    const readStoredLocale = () => {
+        try {
+            return localStorage.getItem(LOCALE_STORAGE_KEY) || "";
+        } catch (_) {
+            return "";
+        }
+    };
+
     const preferredLanguages = [
         ...(Array.isArray(navigator.languages) ? navigator.languages : []),
         navigator.language || "",
     ];
-    const locale = preferredLanguages
-        .map((language) => language.toLowerCase().split(/[-_]/, 1)[0])
-        .find(
-            (language) =>
-                language === "en" ||
-                Object.prototype.hasOwnProperty.call(catalogs, language),
-        ) || "en";
-    const translations = catalogs[locale] || {};
+    let locale = [
+        new URLSearchParams(location.search).get("lang"),
+        readStoredLocale(),
+        ...preferredLanguages,
+    ].map(normalizeLocale).find(isSupportedLocale) || "en";
+    let translations = catalogs[locale] || {};
     // Only explicitly marked UI chrome is translated. Translating every text
     // node also rewrites article titles, search-result titles and metadata
     // (for example an English article called "Library" became "Biblioteca").
@@ -112,9 +125,44 @@
         }
     }
 
-    window.zimanticI18n = Object.freeze({ locale, translate, translateTree });
+    function setLocale(value) {
+        const nextLocale = normalizeLocale(value);
+        if (!isSupportedLocale(nextLocale)) return false;
+
+        locale = nextLocale;
+        translations = catalogs[locale] || {};
+        document.documentElement.lang = locale;
+        translateTree(document.documentElement);
+
+        try {
+            localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+        } catch (_) {
+            // Locale persistence is optional.
+        }
+
+        const picker = document.getElementById("localePicker");
+        if (picker) picker.value = locale;
+        return true;
+    }
+
+    window.zimanticI18n = Object.freeze({
+        get locale() {
+            return locale;
+        },
+        translate,
+        translateTree,
+        setLocale,
+    });
     document.documentElement.lang = locale;
     translateTree(document.documentElement);
+
+    const localePicker = document.getElementById("localePicker");
+    if (localePicker) {
+        localePicker.value = locale;
+        localePicker.addEventListener("change", (event) => {
+            setLocale(event.target.value);
+        });
+    }
 
     new MutationObserver((mutations) => {
         for (const mutation of mutations) {
