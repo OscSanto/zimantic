@@ -621,7 +621,7 @@ class Search:
         zim_dir = cfg.get("zim_dir")
         catalog = self.catalog
         if catalog is not None:
-            catalog.zim_dir = Path(zim_dir).resolve() if zim_dir else None
+            catalog.zim_dir = Path(zim_dir).absolute() if zim_dir else None
             return catalog
 
         index_dir = cfg.get("index_dir")

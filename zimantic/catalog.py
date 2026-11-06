@@ -67,6 +67,11 @@ _CATALOG_CORRUPTION_MESSAGES = (
 )
 
 
+def _absolute_path(path: Path | str) -> Path:
+    """Make a path absolute without resolving aliases or symlinks."""
+    return Path(os.path.abspath(path))
+
+
 def _is_catalog_corruption(error: BaseException) -> bool:
     """Return whether an initialization error warrants rebuilding the cache."""
     code = getattr(error, "sqlite_errorcode", None)
@@ -371,7 +376,7 @@ def metadata_from_archive(archive: Any, zim_path: Path | str) -> dict[str, Any]:
     name = metadata.get("Name", "") or perma_ref(stem)
 
     return {
-        "path": str(path.resolve()),
+        "path": str(_absolute_path(path)),
         "stem": stem,
         "uuid": zim_uuid,
         "size": stat.st_size,
@@ -489,7 +494,7 @@ class ZimCatalog:
         archive_factory: Any | None = None,
     ):
         self.db_path = Path(db_path) if db_path is not None else Path(":memory:")
-        self.zim_dir = Path(zim_dir).resolve() if zim_dir else None
+        self.zim_dir = _absolute_path(zim_dir) if zim_dir else None
         self.archive_factory = archive_factory
         self._lock = threading.RLock()
         # Bumped on every local write; combined with SQLite's data_version in
@@ -706,7 +711,7 @@ class ZimCatalog:
         mtime: float | None = None,
     ) -> None:
         """Record an unreadable archive without discarding earlier metadata."""
-        path = str(Path(zim_path).resolve())
+        path = str(_absolute_path(zim_path))
         try:
             stat = Path(zim_path).stat()
             size = stat.st_size if size is None else size
@@ -766,7 +771,7 @@ class ZimCatalog:
         def remember_error(error: OSError) -> None:
             nonlocal top_error
             target = (
-                Path(error.filename).resolve()
+                _absolute_path(error.filename)
                 if error.filename
                 else self.zim_dir
             )
@@ -779,10 +784,10 @@ class ZimCatalog:
 
         for path in iter_zim_files(self.zim_dir, on_error=remember_error):
             try:
-                files[str(path.resolve())] = path.stat()
+                files[str(_absolute_path(path))] = path.stat()
             except OSError as error:
                 # A transient stat failure must not look like a deletion.
-                stat_failed.add(str(path.resolve()))
+                stat_failed.add(str(_absolute_path(path)))
                 logger.warning(
                     "zimantic: cannot stat %s (%s); keeping its row",
                     path,
@@ -907,7 +912,7 @@ class ZimCatalog:
 
     def _get_path_locked(self, path: Path | str) -> sqlite3.Row | None:
         return self.db.execute(
-            "SELECT * FROM zims WHERE path = ?", (str(Path(path).resolve()),)
+            "SELECT * FROM zims WHERE path = ?", (str(_absolute_path(path)),)
         ).fetchone()
 
     def rows(self, *, include_favicon: bool = False) -> list[CatalogRecord]:
