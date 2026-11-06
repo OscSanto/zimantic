@@ -1,6 +1,6 @@
 # Phase 02 — Kiwix provider
 
-Status: proposed.
+Status: implemented.
 
 ## Goal
 

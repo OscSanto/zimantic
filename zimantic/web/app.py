@@ -998,12 +998,8 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
     except OSError as error:
         logger.error("zimantic: could not write PID file %s: %s", pid_file, error)
 
-    # Optional Kiwix catalog discovery runs in the background so an unreachable
-    # Kiwix server cannot delay binding the port.
-    start_catalog = getattr(searchClass, "start_catalog_refresh", None)
-    if callable(start_catalog):
-        start_catalog()
-
+    # Provider runtimes start their own bounded discovery in the background;
+    # an unreachable Kiwix server cannot delay binding the port.
     sighup = getattr(signal, "SIGHUP", None)
     if sighup is not None:
         if debug:

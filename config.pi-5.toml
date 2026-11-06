@@ -6,8 +6,8 @@ model_dir = "./model/int8"
 index_dir = "./indexes"
 
 port = 8090
-# Optional URL of a running kiwix-serve HTTP API for catalog discovery and
-# remote full-text fallback; leave blank to use only local Zimantic indexes.
+# A Kiwix server is declared only as an explicit [[collections]] entry below.
+# Leave those entries commented out to search local Zimantic indexes only.
 
 page_size = 10
 max_results = 100
@@ -49,7 +49,7 @@ path = "./zims"
 # type = "kiwix"
 # name = "kiwix"
 # server = "http://localhost:8085"
-# catalog_path = "/kiwix/catalog/v2/entries?count=50000"
+# catalog_path = "/kiwix/catalog/v2/entries"
 # catalog_limit = 1000
 # max_catalog_entries = 50000
 # max_response_bytes = 67108864

@@ -11,10 +11,10 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, Protocol, Sequence
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 
 from ..content.store import ArticleData, ContentEntry, ContentRange, ContentStore
-from ..media_types import MEDIA_TYPE_ORDER, classify_mime_counts, ordered_media_types
+from ..media_types import MEDIA_TYPE_ORDER, ordered_media_types
 from ..contracts import (
     RankedResultDocument,
     ResultDocument,
@@ -65,6 +65,7 @@ class ProviderContext:
     logger: logging.Logger
     archive_factory: Any | None = None
     persist_catalog: bool = True
+    on_sources_changed: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True)

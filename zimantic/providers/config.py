@@ -8,7 +8,7 @@ validation (and provider modules) out of the core settings loader.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
@@ -279,7 +279,11 @@ def _catalog_path(value: Any, name: str) -> str | None:
     assert raw is not None
     # The path is appended to the configured server base; it must not supply a
     # scheme, authority, or fragment.
-    if "://" in raw or raw.startswith("//") or "#" in raw:
+    if (
+        re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", raw)
+        or raw.startswith("//")
+        or "#" in raw
+    ):
         raise ConfigValidationError(
             f"{name} must be a relative or root-relative path without a "
             "scheme, authority, or fragment"

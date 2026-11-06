@@ -8,11 +8,11 @@ import re
 import secrets
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .content.reader import DEFAULT_MAX_HTML_BYTES, DEFAULT_PREVIEW_CHARS
@@ -31,23 +31,13 @@ from .content.serving import (
     read_archive_icon,
     resolve_article_entry,
 )
-from .contracts import SourceInfo, SourceResult, encode_document_id
-from .libzim_compat import get_entry_by_id
+from .contracts import SourceInfo, SourceResult
 from .providers.base import CollectionInfo, CollectionSnapshot, ProviderContext, SourceQuery
-from .providers.config import ProviderConfig, RuntimeConfig, ZimConfig, KiwixConfig
+from .providers.config import ProviderConfig, RuntimeConfig, ZimConfig
 from .searching.config import (
     DEFAULT_MAX_ARTICLE_BYTES,
     _float_config,
     _int_config,
-)
-from .searching.kiwix import (
-    DEFAULT_KIWIX_CATALOG_ATTEMPTS,
-    DEFAULT_KIWIX_CATALOG_LIMIT,
-    DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF,
-    DEFAULT_KIWIX_RESULT_LIMIT,
-    DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
-    MAX_KIWIX_CATALOG_RETRY_BACKOFF,
-    catalog_entries,
 )
 from .searching.query import (
     MAX_QUERY_LENGTH,
@@ -56,7 +46,6 @@ from .searching.query import (
     _phrase,
     _phrase_words,
     _query_terms,
-    _title_prefix_query,
     _title_query,
 )
 from .searching.ranking import (
@@ -75,12 +64,6 @@ from .searching.ranking import (
     matched_by,
     rank_results,
 )
-from .searching.sources import (
-    _bounded_catalog_url,
-    _child_text,
-    _parse_remote_xml,
-    _read_limited_response,
-)
 from .settings import normalize_web_base_path
 
 logger = logging.getLogger(__name__)
@@ -90,32 +73,21 @@ __all__ = [
     "ArticleSourceNotFoundError",
     "ArticleTooLargeError",
     "ArticleUnavailableError",
-    "DEFAULT_KIWIX_CATALOG_ATTEMPTS",
-    "DEFAULT_KIWIX_CATALOG_LIMIT",
-    "DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF",
-    "DEFAULT_KIWIX_RESULT_LIMIT",
     "DEFAULT_LONG_QUERY",
-    "DEFAULT_MAX_KIWIX_RESPONSE_BYTES",
     "FULLTEXT_WEIGHT",
     "HEAD_READ_BYTES",
     "KEYWORD_WEIGHT",
     "LONG_FULLTEXT_WEIGHT",
-    "MAX_KIWIX_CATALOG_RETRY_BACKOFF",
     "RANDOM_ARTICLE_ATTEMPTS",
     "RRF_K",
     "SEMANTIC_WEIGHT",
     "Search",
     "_RankedAssessment",
     "_assess_ranked_document",
-    "_bounded_catalog_url",
-    "_child_text",
     "_collect_ranked_candidates",
     "_deduplicate_ranked",
-    "_parse_remote_xml",
-    "_read_limited_response",
     "_render_ranked_document",
     "_rrf_scores",
-    "catalog_entries",
     "is_random_article_entry",
     "matched_by",
     "normalize_article_path",
@@ -144,7 +116,6 @@ DEFAULT_MAX_RESULTS = 100
 # selections are promoted to one full search so their pool can be shared.
 SELECTIVE_SOURCE_LIMIT = 10
 SELECTIVE_SOURCE_RATIO = 0.35
-DEFAULT_MAX_REMOTE_SOURCES = 100
 MAX_PHRASE_CANDIDATES = 32
 # Previews only need the opening of an article. Reading a bounded prefix keeps
 # a few unusually large pages from dominating search latency; the preview path
@@ -299,9 +270,6 @@ class Search:
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
-        self.max_remote_sources = _int_config(
-            cfg, "max_remote_sources", DEFAULT_MAX_REMOTE_SOURCES, minimum=0
-        )
         self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
         self.max_html_bytes = _int_config(
             cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES
@@ -383,9 +351,9 @@ class Search:
             )
         self.runtime_config = runtime_config
         self.search_timeout_seconds = float(runtime_config.search_timeout_seconds)
-        # Provider runtimes discover sources synchronously.  The optional Kiwix
-        # catalog still refreshes in the background so an unreachable server
-        # cannot delay startup (see start_catalog_refresh).
+        # Provider runtimes own their discovery.  Kiwix starts a bounded
+        # background catalog refresh when its batch opens, so an unreachable
+        # server cannot delay startup.
         self.refresh_collections()
 
     @property
@@ -604,26 +572,6 @@ class Search:
                 )
         return self._publish_runtime_sources()
 
-    def start_catalog_refresh(self) -> None:
-        """Fetch optional remote catalogs off the startup path."""
-        with self._state_lock:
-            remote = any(
-                getattr(runtime.collection, "provider", None) == "kiwix"
-                for runtime in self.runtimes.values()
-            )
-        if not remote:
-            return
-
-        def _refresh() -> None:
-            try:
-                sources = self.refresh_sources()
-            except Exception as error:  # a catalog failure must not affect serving
-                logger.warning("zimantic: catalog refresh failed (%s)", error)
-                return
-            logger.info("zimantic: catalog refresh ready (%d source(s))", len(sources))
-
-        threading.Thread(target=_refresh, name="zimantic-catalog", daemon=True).start()
-
     def resolve_source(self, identifier: str) -> SourceInfo | None:
         """Resolve an exact canonical source key; no aliases or fallbacks."""
         with self._state_lock:
@@ -638,25 +586,13 @@ class Search:
         if entries:
             return tuple(entries)
         # Compatibility for direct Search callers/tests that still pass the
-        # internal zim_dir/kiwix_server settings. The TOML loader never accepts
-        # these flat keys from users.
+        # internal zim_dir setting. The TOML loader never accepts the flat key
+        # from users.  A Kiwix collection exists only through an explicit
+        # [[collections]] entry.
         computed: list[ProviderConfig] = []
         zim_dir = self.cfg.get("zim_dir")
         if zim_dir:
             computed.append(ZimConfig(name="library", path=str(zim_dir)))
-        server = str(self.cfg.get("kiwix_server") or "").strip()
-        if server:
-            computed.append(
-                KiwixConfig(
-                    name="kiwix",
-                    server=server.rstrip("/"),
-                    catalog_path=self.cfg.get("kiwix_catalog_path"),
-                    catalog_limit=self.cfg.get("kiwix_catalog_limit"),
-                    max_catalog_entries=self.cfg.get("max_catalog_entries"),
-                    max_response_bytes=self.cfg.get("max_kiwix_response_bytes"),
-                    max_remote_sources=self.cfg.get("max_remote_sources"),
-                )
-            )
         return tuple(computed)
 
     def refresh_collections(self, *, wait: bool = False) -> list[dict[str, Any]]:
@@ -673,6 +609,7 @@ class Search:
             logger=logger,
             archive_factory=getattr(self, "archive_factory", None),
             persist_catalog=bool(self.cfg.get("index_dir")),
+            on_sources_changed=self._publish_runtime_sources,
         )
         new_runtimes: dict[str, Any] = {}
         new_collections: dict[str, CollectionInfo] = {}
@@ -1064,47 +1001,43 @@ class Search:
     def _bounded_available_sources(
         self, available: list[SourceInfo]
     ) -> list[SourceInfo]:
-        """Limit remote catalog fan-out for an unscoped search per collection."""
-        default_limit = getattr(
-            self,
-            "max_remote_sources",
-            _int_config(
-                self.cfg,
-                "max_remote_sources",
-                DEFAULT_MAX_REMOTE_SOURCES,
-                minimum=0,
-            ),
-        )
+        """Apply each runtime's per-search source budget.
+
+        The provider owns the policy: a runtime returns ``None`` when it has no
+        special fan-out cap and a non-negative integer when unscoped searches
+        must be bounded.  Each collection is budgeted independently so one
+        large remote catalog cannot consume another server's allowance.
+        """
         by_collection: dict[str, list[SourceInfo]] = {}
         for source in available:
-            if source.provider == "kiwix":
-                by_collection.setdefault(source.collection_key, []).append(source)
+            by_collection.setdefault(source.collection_key, []).append(source)
+        with self._state_lock:
+            runtimes = dict(getattr(self, "runtimes", {}))
         keep: set[str] = set()
-        for collection_key, remote in by_collection.items():
-            limit = default_limit
-            runtime = getattr(self, "runtimes", {}).get(collection_key)
+        for collection_key, collection_sources in by_collection.items():
+            runtime = runtimes.get(collection_key)
+            limit = None
             if runtime is not None:
-                configured = runtime.max_sources_per_search()
-                if configured is not None:
-                    limit = configured
-            if len(remote) <= limit:
-                keep.update(source.key for source in remote)
+                policy = getattr(runtime, "max_sources_per_search", None)
+                if callable(policy):
+                    try:
+                        limit = policy()
+                    except Exception:
+                        limit = None
+            if limit is None or len(collection_sources) <= limit:
+                keep.update(source.key for source in collection_sources)
                 continue
-            keep.update(source.key for source in remote[:limit])
+            keep.update(source.key for source in collection_sources[:limit])
             if not getattr(self, "_remote_limit_warned", False):
                 logger.warning(
                     "zimantic: %d remote Kiwix sources available in %s; "
                     "searching the first %d (configure max_remote_sources to change this)",
-                    len(remote),
+                    len(collection_sources),
                     collection_key,
                     limit,
                 )
                 self._remote_limit_warned = True
-        return [
-            source
-            for source in available
-            if source.provider != "kiwix" or source.key in keep
-        ]
+        return [source for source in available if source.key in keep]
 
     def _select_sources(
         self, available: list[SourceInfo], zim: list[str]
@@ -1808,36 +1741,102 @@ class Search:
             deadline = started_at + max(
                 1.0, getattr(self, "search_timeout_seconds", 30.0)
             )
+            provider_order: list[str] = []
+            queues: dict[str, deque[SourceInfo]] = {}
             for src in sources:
-                futures.append(
-                    self._executor.submit(
-                        self._run_source_task,
-                        stop,
-                        src,
-                        query,
-                        title_query,
-                        fulltext_query,
-                        query_vector,
-                        source_limit,
-                        deadline,
-                    )
-                )
+                provider = src.provider or ""
+                if provider not in queues:
+                    queues[provider] = deque()
+                    provider_order.append(provider)
+                queues[provider].append(src)
+            max_workers = max(1, int(getattr(self, "source_workers", 1)))
+            executor_workers = getattr(self._executor, "_max_workers", None)
+            if isinstance(executor_workers, int) and executor_workers > 0:
+                max_workers = min(max_workers, executor_workers)
+            active = {provider: 0 for provider in provider_order}
+            active_lock = threading.Lock()
+            cursor = 0
+            future_sources: dict[Future, SourceInfo] = {}
+            remaining: set[Future] = set()
 
-            future_sources = dict(zip(futures, sources))
+            def _release_provider(provider: str) -> None:
+                # Runs only when the callable actually exits (or a queued
+                # future is cancelled before it ever starts).
+                with active_lock:
+                    active[provider] = max(0, active[provider] - 1)
+
+            def _submit_available() -> None:
+                nonlocal cursor
+                while time.monotonic() < deadline:
+                    if not any(queues.values()):
+                        return
+                    competing = (
+                        sum(
+                            1
+                            for provider in provider_order
+                            if queues[provider] or active[provider] > 0
+                        )
+                        > 1
+                    )
+                    provider_limit = (
+                        max(1, max_workers - 1) if competing else max_workers
+                    )
+                    source = None
+                    for _ in range(len(provider_order)):
+                        provider = provider_order[cursor]
+                        cursor = (cursor + 1) % len(provider_order)
+                        if queues[provider] and active[provider] < provider_limit:
+                            source = queues[provider].popleft()
+                            break
+                    if source is None:
+                        return
+                    with active_lock:
+                        if sum(active.values()) >= max_workers:
+                            # No free pool slot; put the source back and retry
+                            # after a completion releases one.
+                            queues[source.provider].appendleft(source)
+                            return
+                        active[source.provider] += 1
+                    try:
+                        future = self._executor.submit(
+                            self._run_source_task,
+                            stop,
+                            source,
+                            query,
+                            title_query,
+                            fulltext_query,
+                            query_vector,
+                            source_limit,
+                            deadline,
+                        )
+                    except Exception:
+                        with active_lock:
+                            active[source.provider] -= 1
+                        raise
+                    futures.append(future)
+                    future_sources[future] = source
+                    remaining.add(future)
+                    future.add_done_callback(
+                        lambda _future, provider=source.provider: _release_provider(
+                            provider
+                        )
+                    )
+
+            _submit_available()
             last_rank_at = started_at
             rank_passes = 0
             unranked = 0
             # Ids of the page last sent to the client, so a snapshot that didn't
             # move the page can omit its (large, unchanged) result list.
             last_page_signature: tuple[str, ...] | None = None
-            remaining = set(futures)
-            while remaining:
+            while remaining or any(queues.values()):
                 if time.monotonic() >= deadline:
                     break
+                _submit_available()
                 timed_out = False
                 try:
                     for future in as_completed(
-                        remaining,
+                        set(remaining),
                         timeout=(
                             max(0.0, min(update_interval, deadline - time.monotonic()))
                             if update_interval > 0
@@ -1911,9 +1910,10 @@ class Search:
                                 self._matched_by(pool) if debug else None,
                                 include_results=include_results,
                             )
+                        _submit_available()
                 except TimeoutError:
                     timed_out = True
-                if not remaining:
+                if not remaining and not any(queues.values()):
                     break
                 if not timed_out:
                     continue
@@ -1949,7 +1949,11 @@ class Search:
                         "elapsed": round(now - started_at, 1),
                     }
 
-            deadline_hit = bool(remaining) or time.monotonic() >= deadline
+            deadline_hit = (
+                bool(remaining)
+                or any(queues.values())
+                or time.monotonic() >= deadline
+            )
             if deadline_hit:
                 stop.set()
                 for future in remaining:

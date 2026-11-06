@@ -16,19 +16,15 @@ import numpy as np
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult, encode_document_id
 from zimantic.search import (
-    ArticleUnavailableError,
     PREVIEW_HTML_BYTES,
     Search as _SearchBase,
     SearchBusyError,
-    _bounded_catalog_url,
     _fulltext_query,
-    _parse_remote_xml,
     _phrase_words,
     _query_terms,
-    _read_limited_response,
-    _title_prefix_query,
     _title_query,
 )
+from zimantic.searching.query import _title_prefix_query
 from zimantic.providers.zim.metadata import (
     find_archive_icon_path as _find_archive_icon_path,
     source_icon_url as _source_icon_url,
@@ -39,7 +35,6 @@ from zimantic.providers.zim.search import (
 )
 from zimantic.searching.index import _LocalIndex, _nprobe
 from zimantic.searching.config import _file_signature
-from zimantic.searching.kiwix import _book_identity
 from zimantic.searching.sources import _html_attribute
 
 
@@ -648,27 +643,6 @@ class SearchContractTests(unittest.TestCase):
             Search._cache_key("q", ["manual"]),
             Search._cache_key("q", ["other"]),
         )
-
-    def test_catalog_limit_replaces_unbounded_count(self):
-        url = _bounded_catalog_url(
-            "http://kiwix/entries?count=-1&foo=bar",
-            50_000,
-        )
-        self.assertEqual(url, "http://kiwix/entries?count=50000&foo=bar")
-
-    def test_remote_xml_rejects_dtds(self):
-        with self.assertRaises(ValueError):
-            _parse_remote_xml(b"<!DOCTYPE root [<!ENTITY x 'y'>]><root/>")
-
-    def test_remote_response_reader_enforces_a_hard_limit(self):
-        class _Response:
-            headers = {}
-
-            def read(self, size=-1):
-                return b"x" * 4
-
-        with self.assertRaises(ValueError):
-            _read_limited_response(_Response(), 3)
 
     def test_hybrid_ranking_is_deterministic(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
@@ -2236,161 +2210,6 @@ class GracefulDegradationTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
 
-class CatalogRefreshTests(unittest.TestCase):
-
-    def test_catalog_refresh_retries_with_bounded_backoff(self):
-        class _Response:
-            headers = {}
-
-            def __init__(self):
-                self._read = False
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            @staticmethod
-            def _payload():
-                return (
-                    b"<feed><entry><title>Remote Manual</title>"
-                    b'<link href="/content/manual" /></entry></feed>'
-                )
-
-            def read(self, _size):
-                if self._read:
-                    return b""
-                self._read = True
-                return self._payload()
-
-        search = _bare_search({})
-        self.addCleanup(search.close)
-        with (
-            patch(
-                "zimantic.search.urlopen",
-                side_effect=[OSError("temporary outage"), _Response()],
-            ) as urlopen,
-            patch("zimantic.search.time.sleep") as sleep,
-        ):
-            entries = search._catalog_entries("http://kiwix")
-
-        self.assertEqual(entries[0]["book"], "manual")
-        self.assertEqual(urlopen.call_count, 2)
-        sleep.assert_called_once_with(1.0)
-
-    def test_catalog_refresh_does_not_retry_invalid_responses(self):
-        search = _bare_search({})
-        self.addCleanup(search.close)
-        with (
-            patch("zimantic.search.urlopen", side_effect=ValueError("bad XML")) as urlopen,
-            patch("zimantic.search.time.sleep") as sleep,
-        ):
-            entries = search._catalog_entries("http://kiwix")
-
-        self.assertIsNone(entries)
-        self.assertEqual(urlopen.call_count, 1)
-        sleep.assert_not_called()
-
-
-    def test_catalog_limit_is_enforced_after_parsing(self):
-        class _Response:
-            headers = {}
-
-            def __init__(self):
-                self._read = False
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, _size):
-                if self._read:
-                    return b""
-                self._read = True
-                return (
-                    b"<feed>"
-                    b'<entry><title>One</title><link href="/content/one" /></entry>'
-                    b'<entry><title>Two</title><link href="/content/two" /></entry>'
-                    b'<entry><title>Three</title><link href="/content/three" /></entry>'
-                    b"</feed>"
-                )
-
-        search = _bare_search({"kiwix_catalog_limit": 2})
-        self.addCleanup(search.close)
-        with patch("zimantic.search.urlopen", return_value=_Response()):
-            entries = search._catalog_entries("http://kiwix")
-
-        self.assertEqual([entry["book"] for entry in entries], ["one", "three"])
-
-    def test_catalog_book_uses_the_content_segment_for_article_links(self):
-        class _Response:
-            headers = {}
-
-            def __init__(self):
-                self._read = False
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, _size):
-                if self._read:
-                    return b""
-                self._read = True
-                return (
-                    b"<feed><entry><title>Manual</title>"
-                    b'<link type="text/html" '
-                    b'href="https://example.test/content/manual/A/Main_Page" />'
-                    b"</entry></feed>"
-                )
-
-        search = _bare_search({})
-        self.addCleanup(search.close)
-        with patch("zimantic.search.urlopen", return_value=_Response()):
-            entries = search._catalog_entries("http://kiwix")
-
-        self.assertEqual(entries[0]["book"], "manual")
-
-
-class KiwixSearchTests(unittest.TestCase):
-    def test_relative_result_links_are_resolved_against_the_server(self):
-        class _Response:
-            headers = {}
-
-            def __init__(self):
-                self.payload = (
-                    b"<rss><item><title>Relative</title>"
-                    b"<link>manual/page</link><description>snippet</description>"
-                    b"</item></rss>"
-                )
-                self._read = False
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self, _size):
-                if self._read:
-                    return b""
-                self._read = True
-                return self.payload
-
-        search = _bare_search({"candidate_count": 4, "kiwix_server": "http://kiwix"})
-        self.addCleanup(search.close)
-        source = SourceInfo("remote", "Remote", "manual", "kiwix")
-        with patch("zimantic.search.urlopen", return_value=_Response()):
-            result = search._search_kiwix(source, "query", 4)
-
-        self.assertEqual(result.items[0]["url"], "http://kiwix/manual/page")
-
-
 class RandomArticleServingTests(unittest.TestCase):
     def test_fallback_uses_get_entry_by_id_from_search_module(self):
         class _Archive:
@@ -2412,7 +2231,9 @@ class RandomArticleServingTests(unittest.TestCase):
                 return types.SimpleNamespace(mimetype="text/html")
 
         search = _bare_search({})
-        with patch("zimantic.search.get_entry_by_id", return_value=_Entry()):
+        with patch(
+            "zimantic.libzim_compat.get_entry_by_id", return_value=_Entry()
+        ):
             self.assertEqual(search._random_fallback_article(_Index()), "Article")
 
 
@@ -2766,6 +2587,162 @@ class PaginationTests(unittest.TestCase):
             release.set()
             search._executor.shutdown(wait=True)
 
+    def test_competing_providers_reserve_a_worker_for_local_work(self):
+        search = _bare_search({})
+        search.source_workers = 2
+        search.sources = {
+            "remote-one": SourceInfo(
+                key="remote-one", provider="kiwix", title="Remote One",
+                collection_key="kiwix:remote", searchable=True,
+            ),
+            "remote-two": SourceInfo(
+                key="remote-two", provider="kiwix", title="Remote Two",
+                collection_key="kiwix:remote", searchable=True,
+            ),
+            "local": SourceInfo(
+                key="local", provider="zim", title="Local",
+                collection_key="zim:local", searchable=True,
+            ),
+        }
+        remote_started = threading.Event()
+        local_started = threading.Event()
+        release = threading.Event()
+
+        def search_source(source, *_args):
+            if source.provider == "kiwix":
+                remote_started.set()
+                release.wait(timeout=5)
+                return SourceResult(
+                    source=source, error="remote is down", status="error"
+                )
+            local_started.set()
+            return SourceResult(source=source)
+
+        search._search_source = search_source
+        search.stream_update_interval = 0.01
+        events = []
+
+        def run():
+            events.extend(search.stream_search("anything", limit=1))
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            self.assertTrue(remote_started.wait(timeout=5))
+            # One remote worker is blocked, but the reserved slot lets local
+            # work run instead of queuing behind it.
+            self.assertTrue(local_started.wait(timeout=5))
+        finally:
+            release.set()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(events[-1]["type"], "done")
+        search._executor.shutdown(wait=True)
+
+    def test_one_worker_keeps_the_slot_until_the_remote_call_exits(self):
+        search = _bare_search({})
+        old_executor = search._executor
+        search.source_workers = 1
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        old_executor.shutdown(wait=True)
+        search.sources = {
+            "remote": SourceInfo(
+                key="remote", provider="kiwix", title="Remote",
+                collection_key="kiwix:remote", searchable=True,
+            ),
+            "local": SourceInfo(
+                key="local", provider="zim", title="Local",
+                collection_key="zim:local", searchable=True,
+            ),
+        }
+        remote_started = threading.Event()
+        local_started = threading.Event()
+        release = threading.Event()
+
+        def search_source(source, *_args):
+            if source.provider == "kiwix":
+                remote_started.set()
+                release.wait(timeout=5)
+                return SourceResult(
+                    source=source, error="remote is down", status="error"
+                )
+            local_started.set()
+            return SourceResult(source=source)
+
+        search._search_source = search_source
+        search.stream_update_interval = 0.01
+        events = []
+
+        def run():
+            events.extend(search.stream_search("anything", limit=1))
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            self.assertTrue(remote_started.wait(timeout=5))
+            # A running call retains the only worker; it is not detached as if
+            # the slot were free.
+            self.assertFalse(local_started.wait(timeout=0.15))
+        finally:
+            release.set()
+        try:
+            self.assertTrue(local_started.wait(timeout=5))
+            thread.join(timeout=5)
+        finally:
+            release.set()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(events[-1]["type"], "done")
+        search._executor.shutdown(wait=True)
+
+    def test_slow_remote_source_error_does_not_fail_merged_search(self):
+        search = _bare_search({})
+        search.sources = {
+            "remote": SourceInfo(
+                key="remote", provider="kiwix", title="Remote",
+                collection_key="kiwix:remote", searchable=True,
+            ),
+            "local": SourceInfo(
+                key="local", provider="zim", title="Local",
+                collection_key="zim:local", searchable=True,
+            ),
+        }
+        doc = {
+            "id": encode_document_id("local", "page"),
+            "source_key": "local",
+            "source": "Local",
+            "source_icon": None,
+            "title": "Local Page",
+            "lead": "",
+            "path": "page",
+            "url": "/content/local/page",
+            "mimetype": None,
+            "source_rank": 1,
+        }
+
+        def search_source(source, *_args):
+            if source.provider == "kiwix":
+                return SourceResult(
+                    source=source, error="Kiwix search failed: timed out",
+                    status="error",
+                )
+            return SourceResult(source=source, items=[doc], fulltext=[(1, doc)])
+
+        search._search_source = search_source
+        events = list(search.stream_search("page", limit=5))
+        try:
+            done = events[-1]
+            self.assertEqual(done["type"], "done")
+            self.assertEqual([result["source_key"] for result in done["results"]], ["local"])
+            remote = next(
+                event for event in events
+                if event["type"] == "source"
+                and event["source"]["key"] == "remote"
+            )
+            self.assertEqual(remote["status"], "error")
+        finally:
+            search._executor.shutdown(wait=True)
+
     def test_debug_flag_gates_ranking_explanation(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
@@ -2897,18 +2874,35 @@ class SourceScopeTests(unittest.TestCase):
         self.assertTrue(selective)
 
     def test_unscoped_search_caps_remote_sources_but_honors_explicit_ones(self):
-        search = _bare_search({"max_remote_sources": 1})
+        class _RemoteRuntime:
+            def __init__(self, limit):
+                self.limit = limit
+
+            def max_sources_per_search(self):
+                return self.limit
+
+        search = _bare_search({})
+        search.runtimes["kiwix:remote"] = _RemoteRuntime(1)
         search.sources = {
-            "local": SourceInfo("local", "Local", "local", "local"),
-            "remote-one": SourceInfo("remote-one", "One", "one", "kiwix"),
-            "remote-two": SourceInfo("remote-two", "Two", "two", "kiwix"),
+            "local": SourceInfo(
+                key="local", provider="zim", title="Local",
+                collection_key="zim:local", searchable=True,
+            ),
+            "remote-one": SourceInfo(
+                key="remote-one", provider="kiwix", title="One",
+                collection_key="kiwix:remote", searchable=True,
+            ),
+            "remote-two": SourceInfo(
+                key="remote-two", provider="kiwix", title="Two",
+                collection_key="kiwix:remote", searchable=True,
+            ),
         }
         try:
             sources, _selective, _scope = search._search_scope(None)
             self.assertEqual([source.key for source in sources], ["local", "remote-one"])
             sources, _selective, _scope = search._search_scope(["remote-two"])
             self.assertEqual([source.key for source in sources], ["remote-two"])
-            search.max_remote_sources = 0
+            search.runtimes["kiwix:remote"].limit = 0
             sources, _selective, _scope = search._search_scope(["remote-two"])
             self.assertEqual([source.key for source in sources], ["remote-two"])
             sources, _selective, _scope = search._search_scope(None)
@@ -2919,24 +2913,6 @@ class SourceScopeTests(unittest.TestCase):
 
 
 
-
-    def test_book_identity_strips_dates_and_flavours(self):
-        self.assertEqual(
-            _book_identity("wikipedia_en_medicine_mini_2025-10"),
-            "wikipedia_en_medicine",
-        )
-        self.assertEqual(
-            _book_identity("wikipedia_en_medicine_nopic_2025-10"),
-            "wikipedia_en_medicine",
-        )
-        self.assertEqual(
-            _book_identity("wikipedia_en_top_mini_2026-09"),
-            "wikipedia_en_top",
-        )
-        self.assertNotEqual(
-            _book_identity("phet_en_all_2025-03"),
-            _book_identity("phet_mul_all_2025-06"),
-        )
 
     def test_unknown_display_filter_falls_back_to_the_full_page(self):
         with _temp_dir(self) as tmp:
@@ -3558,39 +3534,6 @@ def _test_open_zim_index(self, zim_path):
     )
 
 
-def _test_rebuild_sources(self, entries):
-    return self._publish_runtime_sources()
-
-
-def _test_catalog_entries(self, server):
-    import zimantic.search as search_module
-
-    return search_module.catalog_entries(
-        self.cfg,
-        server,
-        self.source_timeout,
-        urlopen_fn=search_module.urlopen,
-        sleep_fn=search_module.time.sleep,
-    )
-
-
-def _test_search_kiwix(self, source, query, limit, deadline=None):
-    import zimantic.search as search_module
-    from zimantic.searching.kiwix import search_kiwix
-
-    return search_kiwix(
-        source,
-        query,
-        limit,
-        self.cfg,
-        self.candidate_count,
-        self.source_timeout,
-        lambda text: text,
-        urlopen_fn=search_module.urlopen,
-        deadline=deadline,
-    )
-
-
 def _test_random_indexed_article(self, index, db):
     from zimantic.content.serving import RANDOM_ARTICLE_ATTEMPTS, random_indexed_article
 
@@ -3598,13 +3541,13 @@ def _test_random_indexed_article(self, index, db):
 
 
 def _test_random_fallback_article(self, index):
-    import zimantic.search as search_module
     from zimantic.content.serving import RANDOM_ARTICLE_ATTEMPTS, random_fallback_article
+    from zimantic.libzim_compat import get_entry_by_id
 
     return random_fallback_article(
         index,
         attempts=RANDOM_ARTICLE_ATTEMPTS,
-        get_entry_fn=search_module.get_entry_by_id,
+        get_entry_fn=get_entry_by_id,
     )
 
 
@@ -3650,9 +3593,6 @@ Search._match_zim_path = _test_match_zim_path
 Search._discover_local_indexes = _test_discover_local_indexes
 Search._open_index = _test_open_index
 Search._open_zim_index = _test_open_zim_index
-Search._rebuild_sources = _test_rebuild_sources
-Search._catalog_entries = _test_catalog_entries
-Search._search_kiwix = _test_search_kiwix
 Search._random_indexed_article = _test_random_indexed_article
 Search._random_fallback_article = _test_random_fallback_article
 Search._fetch_docs = _test_fetch_docs
