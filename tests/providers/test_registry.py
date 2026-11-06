@@ -7,9 +7,9 @@ class _Provider:
     kind = "test"
 
 
-def test_builtin_registry_contains_zim_and_kiwix():
+def test_builtin_registry_contains_zim_kiwix_and_files():
     kinds = [provider.kind for provider in registry.builtin_providers()]
-    assert kinds == ["zim", "kiwix"]
+    assert kinds == ["zim", "kiwix", "files"]
 
 
 def test_unknown_provider_is_rejected_without_a_fallback():

@@ -1209,6 +1209,42 @@ def _markdown_excerpt(
     return truncate_at_word_boundary(" ".join(text.split()), max_chars), title
 
 
+def extract_plain_text_document(
+    raw: bytes,
+    max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
+) -> tuple[str, str, bool]:
+    """Return ``(excerpt, body, body_truncated)`` for a plain-text file.
+
+    Whitespace is normalized for both the short excerpt and the lexical body.
+    The body cap is applied at a UTF-8 character boundary.
+    """
+    text = raw.decode("utf-8", "ignore")
+    full = " ".join(text.split())
+    excerpt = truncate_at_word_boundary(full, max_preview_chars)
+    body, truncated = truncate_utf8(full, max_body_text_bytes)
+    encoded = len(full.encode("utf-8", "ignore"))
+    truncated = truncated or encoded > len(body.encode("utf-8", "ignore"))
+    return excerpt, body, truncated
+
+
+def extract_markdown_document(
+    raw: bytes,
+    max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
+) -> tuple[str, str, str, bool]:
+    """Return ``(title, excerpt, body, body_truncated)`` for Markdown.
+
+    The existing Markdown normalizer removes front matter and fenced code and
+    reduces link/image syntax to its label.  No new dependency is introduced.
+    """
+    body_text, title = _markdown_excerpt(raw, max_body_text_bytes)
+    body, truncated = truncate_utf8(body_text, max_body_text_bytes)
+    truncated = truncated or len(body_text.encode("utf-8", "ignore")) >= max_body_text_bytes
+    excerpt = truncate_at_word_boundary(body_text, max_preview_chars)
+    return title, excerpt, body, truncated
+
+
 def _pdf_module():
     """Return the PyMuPDF module, imported lazily, or None when unavailable.
 

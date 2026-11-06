@@ -10,6 +10,7 @@ serve search path.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import multiprocessing
@@ -110,6 +111,42 @@ def compose_body(
         return combined, False, tuple(used)
     text = encoded[:limit].decode("utf-8", "ignore")
     return text, True, tuple(used)
+
+
+_CAPTION_TAG = re.compile(r"<[^>]+>")
+
+
+def parse_caption_bytes(data: bytes, **_options: Any) -> str:
+    """Parse a SubRip or WebVTT sidecar into plain, normalized text.
+
+    This is the built-in in-process captions engine.  It never decodes media,
+    never runs a model, and is intentionally permissive: malformed cues are
+    ignored rather than failing the whole build.
+    """
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode("utf-16", "ignore")
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if upper.startswith("WEBVTT"):
+            continue
+        if "-->" in line:
+            continue
+        if line.isdigit():
+            continue
+        if upper.startswith(("NOTE ", "STYLE", "REGION")):
+            continue
+        line = _CAPTION_TAG.sub(" ", line)
+        line = html.unescape(line)
+        normalized = " ".join(line.split())
+        if normalized:
+            lines.append(normalized)
+    return " ".join(" ".join(lines).split())
 
 
 # -- configuration ---------------------------------------------------------
@@ -572,6 +609,9 @@ class DerivedTextStage:
         self.operations = operations or SourceDerivedOperations()
         self.cache = cache
         self.engines = dict(engines or {})
+        # Standalone SubRip/WebVTT parsing is pure Python and needs no extra
+        # dependency or external tool.
+        self.engines.setdefault("captions", parse_caption_bytes)
         self.worker_pool = worker_pool
         self.spool_directory = spool_directory
         self._last_cache_key: str | None = None
@@ -662,14 +702,14 @@ class DerivedTextStage:
             elif kind == "image":
                 if not self.operations.ocr:
                     continue
+                # The provider/global input caps are enforced by the input
+                # wrapper; OCR has page/pixel/output limits, not an input-byte
+                # limit of its own.
                 text, error = self._extract(
                     candidate,
                     operation="ocr",
                     engine=self.operations.ocr,
-                    cap=min(
-                        self.config.max_ocr_output_bytes,
-                        int(getattr(candidate, "size", self.config.max_ocr_output_bytes)),
-                    ),
+                    cap=max(1, int(getattr(candidate, "size", 1))),
                 )
                 if error:
                     result.errors.append(error)
@@ -684,14 +724,16 @@ class DerivedTextStage:
                     )
                     result.states["ocr"] = OPERATION_READY
             elif kind in {"audio", "video"}:
-                if self.operations.captions:
+                if self.operations.captions and self.engines.get("ffmpeg") is not None:
                     # Embedded caption parsing is delegated to the provider's
-                    # demuxer; a usable contribution suppresses ASR.
+                    # demuxer; a usable contribution suppresses ASR.  Without a
+                    # local ffmpeg adapter, leave the operation not_checked
+                    # rather than feeding media bytes to the sidecar parser.
                     text, error = self._extract(
                         candidate,
                         operation="captions",
                         engine="ffmpeg",
-                        cap=self.config.max_asr_bytes,
+                        cap=max(1, int(getattr(candidate, "size", 1))),
                     )
                     if error:
                         result.errors.append(error)
@@ -707,7 +749,7 @@ class DerivedTextStage:
                         candidate,
                         operation="asr",
                         engine=self.operations.asr,
-                        cap=self.config.max_asr_output_bytes,
+                        cap=self.config.max_asr_bytes,
                     )
                     if error:
                         result.errors.append(error)
@@ -737,6 +779,8 @@ class DerivedTextStage:
     ) -> tuple[str, str | None]:
         self._last_cache_key = None
         engine_function = self.engines.get(operation)
+        if operation == "captions" and engine == "ffmpeg":
+            engine_function = self.engines.get("ffmpeg")
         if engine_function is None:
             return "", f"{operation} engine {engine!r} is unavailable"
         try:
@@ -785,6 +829,7 @@ __all__ = [
     "SourceDerivedOperations",
     "compose_body",
     "normalize_for_equality",
+    "parse_caption_bytes",
     "parse_derived_text",
     "parse_source_override",
     "parse_source_overrides",

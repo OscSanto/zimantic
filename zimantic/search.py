@@ -319,9 +319,11 @@ class Search:
         )
         self._library_scan_at = 0.0
         # Provider/collection state: every provider path goes through a runtime.
-        from .providers.registry import get_provider
+        from .providers.registry import builtin_providers
 
-        self.providers = {kind: get_provider(kind) for kind in ("zim", "kiwix")}
+        self.providers = {
+            provider.kind: provider for provider in builtin_providers()
+        }
         self.runtimes: dict[str, Any] = {}
         self.collections: dict[str, CollectionInfo] = {}
         self._discovery_batches: list[Any] = []

@@ -99,6 +99,13 @@ def _string_tuple(value: Any, name: str) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _pattern_tuple(value: Any, name: str) -> tuple[str, ...]:
+    patterns = _string_tuple(value, name)
+    if any(not pattern.strip() for pattern in patterns):
+        raise ConfigValidationError(f"{name} patterns must not be empty")
+    return tuple(pattern.strip() for pattern in patterns)
+
+
 def validate_name(name: Any) -> str:
     if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
         raise ConfigValidationError(
@@ -191,8 +198,18 @@ class FilesConfig:
 
     def __post_init__(self) -> None:
         validate_name(self.name)
+        if not self.path:
+            raise ConfigValidationError("files path must not be empty")
         if self.granularity not in ("collection", "children"):
             raise ConfigValidationError("granularity must be collection or children")
+        patterns = (*self.include, *self.exclude)
+        if any(
+            not isinstance(pattern, str) or not pattern.strip()
+            for pattern in patterns
+        ):
+            raise ConfigValidationError(
+                "files include/exclude patterns must be non-empty strings"
+            )
 
 
 @dataclass(frozen=True)
@@ -342,6 +359,45 @@ def _parse_kiwix(entry: Mapping[str, Any], base: Path) -> KiwixConfig:
     )
 
 
+_FILES_KEYS = frozenset(
+    {
+        "type",
+        "name",
+        "label",
+        "path",
+        "granularity",
+        "include",
+        "exclude",
+        "max_sources",
+        "max_entries",
+        "max_file_bytes",
+        "traversal",
+        "max_visited_entries",
+        "traversal_timeout_seconds",
+        "sources",
+    }
+)
+
+
+def _parse_files(entry: Mapping[str, Any], base: Path) -> FilesConfig:
+    common = _common(entry)
+    granularity = entry.get("granularity", "collection")
+    if granularity not in ("collection", "children"):
+        raise ConfigValidationError("granularity must be collection or children")
+    return FilesConfig(
+        path=_resolve_path(entry.get("path"), "path", base),
+        granularity=granularity,
+        include=_pattern_tuple(entry.get("include"), "include"),
+        exclude=_pattern_tuple(entry.get("exclude"), "exclude"),
+        max_sources=_optional_positive_int(entry.get("max_sources"), "max_sources"),
+        max_entries=_optional_positive_int(entry.get("max_entries"), "max_entries"),
+        max_file_bytes=_optional_positive_int(
+            entry.get("max_file_bytes"), "max_file_bytes"
+        ),
+        **common,
+    )
+
+
 def parse_collections(
     data: Mapping[str, Any],
     *,
@@ -383,7 +439,7 @@ def parse_collections(
             diagnostics.append(f"collection #{index + 1}: {error}")
             continue
         names[name] = names.get(name, 0) + 1
-        if kind in {"files", "kolibri"}:
+        if kind == "kolibri":
             if allow_disabled_providers:
                 diagnostics.append(
                     f"collection {name!r}: provider {kind!r} is not supported yet"
@@ -392,6 +448,14 @@ def parse_collections(
         try:
             if kind == "zim":
                 parsed = _parse_zim(entry, base)
+            elif kind == "files":
+                unknown = sorted(set(entry) - _FILES_KEYS)
+                if unknown:
+                    diagnostics.append(
+                        f"collection {name!r}: unknown key(s) ignored: "
+                        + ", ".join(unknown)
+                    )
+                parsed = _parse_files(entry, base)
             else:
                 parsed = _parse_kiwix(entry, base)
         except ConfigValidationError as error:

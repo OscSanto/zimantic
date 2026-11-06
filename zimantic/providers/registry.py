@@ -13,12 +13,14 @@ _REGISTRY: dict[str, SourceProvider] | None = None
 
 
 def _default_providers() -> dict[str, SourceProvider]:
+    from .files import FilesProvider
     from .kiwix import KiwixProvider
     from .zim import ZimProvider
 
     return {
         "zim": ZimProvider(),
         "kiwix": KiwixProvider(),
+        "files": FilesProvider(),
     }
 
 
@@ -32,7 +34,11 @@ def _registry() -> dict[str, SourceProvider]:
 def builtin_providers() -> list[SourceProvider]:
     """Return the in-tree providers in deterministic order."""
     registry = _registry()
-    return [registry[kind] for kind in ("zim", "kiwix") if kind in registry]
+    return [
+        registry[kind]
+        for kind in ("zim", "kiwix", "files")
+        if kind in registry
+    ]
 
 
 def get_provider(kind: ProviderKind) -> SourceProvider:

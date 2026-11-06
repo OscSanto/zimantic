@@ -185,7 +185,9 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     _add_device_argument(serve_cmd)
 
-    build = commands.add_parser("build", help="index ZIM files")
+    build = commands.add_parser(
+        "build", help="index configured collections or ZIM files"
+    )
     _add_verbosity_argument(build)
     build.add_argument(
         "paths",
@@ -359,14 +361,25 @@ def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path
 
 
 def _configured_zim_roots(cfg: dict) -> list[Path]:
+    entries = cfg.get("collections") or ()
     roots = [
         Path(entry.path)
-        for entry in cfg.get("collections") or ()
+        for entry in entries
         if getattr(entry, "kind", None) == "zim"
     ]
-    if not roots and cfg.get("zim_dir"):
+    # The historical zim_dir fallback is only for a config with no explicit
+    # collections. A files-only config must not scan the default ZIM root.
+    if not roots and not entries and cfg.get("zim_dir"):
         roots = [Path(cfg["zim_dir"])]
     return roots
+
+
+def _configured_files_collections(cfg: dict) -> list:
+    return [
+        entry
+        for entry in cfg.get("collections") or ()
+        if getattr(entry, "kind", None) == "files"
+    ]
 
 
 def _collect_zims_from_roots(
@@ -538,6 +551,94 @@ def _build_producer_for_zim(zim: Path, cfg: dict, *, fast: bool):
     )
 
 
+def _build_files_collections(
+    cfg: dict,
+    args,
+    embedder,
+    embedding_pipeline,
+    failures: list[tuple[Path, BaseException]],
+) -> None:
+    """Build every configured files collection through the generic pipeline."""
+    from .build import build_index
+    from .indexes import IndexLocator
+    from .providers.base import ProviderContext
+    from .providers.files import FilesProvider
+    from .settings import normalize_web_base_path
+
+    entries = _configured_files_collections(cfg)
+    if not entries:
+        return
+    runtime_config = cfg.get("runtime_config")
+    ctx = ProviderContext(
+        config=runtime_config,
+        index_dir=Path(cfg["index_dir"]),
+        web_base_path=normalize_web_base_path(cfg.get("web_base_path")),
+        logger=logger,
+        persist_catalog=False,
+    )
+    build_cfg = dict(cfg)
+    build_cfg["embedding_pipeline"] = embedding_pipeline
+    for entry in entries:
+        try:
+            batch = FilesProvider().discover(entry, ctx)
+        except Exception as error:
+            logger.error(
+                "zimantic: files collection %s discovery failed: %s",
+                getattr(entry, "name", "files"),
+                error,
+            )
+            failures.append((Path(entry.path), error))
+            continue
+        try:
+            for collection in batch.collections:
+                runtime = None
+                try:
+                    runtime = batch.open(collection)
+                    if runtime.snapshot.error:
+                        logger.warning(
+                            "zimantic: files collection %s: %s",
+                            collection.label,
+                            runtime.snapshot.error,
+                        )
+                    sources = list(runtime.library_sources())
+                    if not sources and runtime.snapshot.error:
+                        failures.append(
+                            (Path(entry.path), RuntimeError(runtime.snapshot.error))
+                        )
+                    for source in sources:
+                        try:
+                            producer = runtime.entry_producer(
+                                source, fast=args.fast
+                            )
+                            build_index(
+                                producer,
+                                IndexLocator(cfg["index_dir"]),
+                                embedder,
+                                build_cfg,
+                                fast=args.fast,
+                                force=args.force,
+                            )
+                        except Exception as error:
+                            logger.error(
+                                "zimantic: failed to index %s: %s",
+                                source.key,
+                                error,
+                            )
+                            failures.append((Path(entry.path), error))
+                except Exception as error:
+                    logger.error(
+                        "zimantic: files collection %s failed: %s",
+                        collection.label,
+                        error,
+                    )
+                    failures.append((Path(entry.path), error))
+                finally:
+                    if runtime is not None:
+                        runtime.close()
+        finally:
+            batch.close()
+
+
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     from tqdm import tqdm
 
@@ -573,8 +674,11 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             "y" if len(appended) == 1 else "ies",
             getattr(getattr(cfg.get("runtime_config"), "config_path", None), "__str__", lambda: "config"),
         )
-    if not zims:
-        logger.info("zimantic: no .zim files to index")
+    files_entries = (
+        _configured_files_collections(cfg) if not args.paths else []
+    )
+    if not zims and not files_entries:
+        logger.info("zimantic: no sources to index")
         return
 
     workers = args.workers
@@ -583,21 +687,24 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     if workers < 1:
         parser.error("--workers must be at least 1")
 
-    zim_sizes = {zim: zim.stat().st_size for zim in zims}
-    # The stability poll exists for downloads and the systemd.path trigger; an
-    # explicit CLI build of already-present files should start immediately.
-    downloading = (
-        _find_downloading_sizes(zim_sizes) if args.wait_stable else set()
-    )
-    if downloading:
-        _wait_for_stable_sizes(downloading)
-        # Selection prefers the largest copy of an ambiguous ZIM stem, so it
-        # must see the finished sizes rather than the sizes observed before the
-        # download completed.
+    zim_sizes: dict[Path, int] = {}
+    if zims:
         zim_sizes = {zim: zim.stat().st_size for zim in zims}
-    zims = _select_zim_paths(zims, zim_sizes)
-    if not zims:
-        logger.info("zimantic: no .zim files to index")
+        # The stability poll exists for downloads and the systemd.path trigger;
+        # an explicit CLI build of already-present files should start
+        # immediately.
+        downloading = (
+            _find_downloading_sizes(zim_sizes) if args.wait_stable else set()
+        )
+        if downloading:
+            _wait_for_stable_sizes(downloading)
+            # Selection prefers the largest copy of an ambiguous ZIM stem, so
+            # it must see the finished sizes rather than the sizes observed
+            # before the download completed.
+            zim_sizes = {zim: zim.stat().st_size for zim in zims}
+        zims = _select_zim_paths(zims, zim_sizes)
+    if not zims and not files_entries:
+        logger.info("zimantic: no sources to index")
         return
 
     embedder = None
@@ -648,35 +755,42 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         )
 
     try:
-        if workers == 1 or len(zims) == 1:
-            for zim in zims:
-                try:
-                    run_build(zim)
-                except Exception as error:
-                    logger.error("zimantic: failed to index %s: %s", zim, error)
-                    failures.append((zim, error))
-                if global_progress is not None:
-                    global_progress.update(zim_sizes[zim])
-        else:
-            pool = ThreadPoolExecutor(
-                max_workers=min(workers, len(zims)),
-                thread_name_prefix="zimantic-build",
-            )
-            try:
-                futures = {pool.submit(run_build, zim): zim for zim in zims}
-                for future in as_completed(futures):
-                    zim = futures[future]
+        if zims:
+            if workers == 1 or len(zims) == 1:
+                for zim in zims:
                     try:
-                        future.result()
+                        run_build(zim)
                     except Exception as error:
                         logger.error("zimantic: failed to index %s: %s", zim, error)
                         failures.append((zim, error))
                     if global_progress is not None:
                         global_progress.update(zim_sizes[zim])
-            finally:
-                # On Ctrl-C/SIGTERM drop builds that have not started yet
-                # instead of running every queued ZIM to completion.
-                pool.shutdown(wait=True, cancel_futures=True)
+            else:
+                pool = ThreadPoolExecutor(
+                    max_workers=min(workers, len(zims)),
+                    thread_name_prefix="zimantic-build",
+                )
+                try:
+                    futures = {pool.submit(run_build, zim): zim for zim in zims}
+                    for future in as_completed(futures):
+                        zim = futures[future]
+                        try:
+                            future.result()
+                        except Exception as error:
+                            logger.error(
+                                "zimantic: failed to index %s: %s", zim, error
+                            )
+                            failures.append((zim, error))
+                        if global_progress is not None:
+                            global_progress.update(zim_sizes[zim])
+                finally:
+                    # On Ctrl-C/SIGTERM drop builds that have not started yet
+                    # instead of running every queued ZIM to completion.
+                    pool.shutdown(wait=True, cancel_futures=True)
+        if files_entries:
+            _build_files_collections(
+                cfg, args, embedder, embedding_pipeline, failures
+            )
     finally:
         if embedding_pipeline is not None:
             embedding_pipeline.close()
@@ -698,8 +812,8 @@ def _run_serve(args, cfg: dict) -> None:
     search = Search(cfg, semantic=not args.fast)
     if not search.source_keys():
         logger.warning(
-            "zimantic: no local ZIM sources are available; "
-            "add a .zim to zim_dir or run `zimantic build --fast`"
+            "zimantic: no local searchable sources are available; "
+            "add a ZIM or files collection and run `zimantic build --fast`"
         )
     if not args.fast:
         # Load the model off the critical path: the server answers title and

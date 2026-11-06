@@ -210,17 +210,30 @@ def test_duplicate_collection_names_disable_all_duplicates(tmp_path):
     assert any("same" in message for message in parsed.diagnostics)
 
 
-def test_files_and_kolibri_are_disabled_with_diagnostics(tmp_path):
-    from zimantic.providers.config import parse_collections
+def test_files_is_supported_and_kolibri_remains_disabled(tmp_path):
+    from zimantic.providers.config import FilesConfig, parse_collections
 
     parsed = parse_collections(
         {
             "collections": [
-                {"type": "files", "name": "files", "path": "files"},
+                {
+                    "type": "files",
+                    "name": "modules",
+                    "path": "modules",
+                    "granularity": "children",
+                    "include": ["**/*.html"],
+                    "unknown_knob": True,
+                },
                 {"type": "kolibri", "name": "kolibri", "path": "kolibri"},
             ]
         },
         config_dir=tmp_path,
     )
-    assert parsed.collections == ()
-    assert len(parsed.diagnostics) == 2
+    assert len(parsed.collections) == 1
+    files = parsed.collections[0]
+    assert isinstance(files, FilesConfig)
+    assert files.path == str(tmp_path / "modules")
+    assert files.granularity == "children"
+    assert files.include == ("**/*.html",)
+    assert any("unknown key" in message for message in parsed.diagnostics)
+    assert any("kolibri" in message for message in parsed.diagnostics)

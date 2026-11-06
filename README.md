@@ -1,6 +1,6 @@
 # Zimantic
 
-Zimantic is an offline search engine for Kiwix ZIM files, the compressed offline copies of Wikipedia and other sites published by Kiwix. It retrieves articles by meaning rather than by exact keyword overlap, so it can answer questions, match a description written without the article's name, tolerate misspellings, and accept a query in a different language from the article. It runs entirely offline, including on hardware as small as a Raspberry Pi Zero 2 W.
+Zimantic is an offline search engine for Kiwix ZIM files, the compressed offline copies of Wikipedia and other sites published by Kiwix, and for configured directory trees such as an offline `/library/www/html/modules`. It retrieves articles by meaning rather than by exact keyword overlap, so it can answer questions, match a description written without the article's name, tolerate misspellings, and accept a query in a different language from the article. It runs entirely offline, including on hardware as small as a Raspberry Pi Zero 2 W.
 
 Meaning search performs best in widely spoken languages. Coverage varies by language; see [Compared with Kiwix search](#compared-with-kiwix-search).
 
@@ -18,10 +18,11 @@ Meaning search performs best in widely spoken languages. Coverage varies by lang
 - **Alternate names and misspellings.** "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - **Multilingual queries.** One model covers 100+ languages, and a query in one language can find articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](#compared-with-kiwix-search).
 - **Multiple sources.** Search a small selection of ZIMs directly, or search the full library and filter the ranked results by source. See [Source selection](#source-selection).
+- **Files collections.** Search and serve a configured directory tree, such as an offline copy of `/library/www/html/modules`, as one bounded collection. See [Files collections](#files-collections).
 - **Hybrid ranking.** Meaning, title-word, and full-text retrieval are fused into a single ranking.
 - **Merged results and bounded previews.** Redirects are merged into their target article, so each article appears once. Each result carries a bounded excerpt as its preview.
 - **Progressive results.** Sources run in parallel. The page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Library view.** Browse installed ZIMs at `/library` with artwork, descriptions, metadata, and links to each homepage or a random article. See [Library view](#library-view).
+- **Library view.** Browse installed ZIMs and files sources at `/library` with artwork, descriptions, metadata, and links to each homepage or a random article. See [Library view](#library-view).
 - **Low resource use.** Runs on low-resource devices such as a Raspberry Pi Zero 2 W (512 MB RAM) using roughly 250–325 MB while serving; see [Measured memory use](#measured-memory-use).
 - **Graceful degradation.** Title-word and full-text search work as soon as an index exists. Vectors are optional, and a ZIM with no index remains searchable through its native full-text index. A missing model, a missing FAISS file, or a different model whose probe embeddings do not match falls back to lexical search instead of failing the server. Native full-text searches run in helper processes, so an archive with an inconsistent full-text index cannot take the server down; only that archive loses native full-text results, and the server logs why.
 - **Concurrent searches.** `max_concurrent_searches` bounds simultaneous searches. A request waits up to `slot_wait_seconds` for a free slot before reporting busy, so overlapping searches queue on slow hardware instead of failing immediately; abandoned browser streams skip queued source work and return their slot. Identical in-flight queries share one computation, and repeated queries are answered from an in-memory cache bounded by `cache_size` and `cache_bytes`. Small one-off source selections are intentionally not cached; see [Source selection](#source-selection).
@@ -153,6 +154,49 @@ $XDG_RUNTIME_DIR/zimantic/zimantic.pid ← PID file while serving
 
 If the files are on a USB drive or another disk, point a ZIM collection's `path`, `model_dir`, or `index_dir` in the XDG config at them.
 
+### Files collections
+
+A `type = "files"` collection searches and serves an ordinary directory tree, such as an offline copy of `/library/www/html/modules`. One configured directory is one collection. The default granularity keeps the whole tree as a single source, so a directory of thousands of pages does not become a wall of library cards:
+
+```toml
+[[collections]]
+type = "files"
+name = "modules"
+path = "/library/www/html/modules"
+label = "Modules"
+granularity = "collection"       # "collection" or "children"
+include = ["**/*.html", "**/*.htm", "**/*.xhtml",
+           "**/*.txt", "**/*.md", "**/*.pdf"]
+exclude = ["**/node_modules/**", "**/.git/**", "**/__pycache__/**"]
+max_sources = 64
+max_entries = 100000
+max_file_bytes = 268435456
+```
+
+`granularity = "children"` makes each immediate child directory its own source, plus one source for loose files directly in the root. Use it when the tree has a handful of stable top-level units; otherwise keep `collection` so the library stays bounded. If the number of child sources exceeds `max_sources`, the whole collection collapses to one source with a distinct key and a warning. Collapse and recovery change source keys, so a later build is required and any `[[collections.sources]]` override for an old key is reported as stale.
+
+`max_entries` bounds the indexed manifest and marks the source truncated when more candidates exist; all permitted files remain servable. `max_file_bytes` is combined with the global `max_entry_bytes` to bound document extraction, and `max_sources` bounds the child-source list.
+
+Source keys are derived from the configured `name` and root-relative identifiers, never the absolute path. Renaming `name` creates a new collection and requires a rebuild. The collection key is `files:<name>`; collection granularity uses `files:<name>:root`, a collapsed collection uses `files:<name>:collapsed`, a child uses `files:<name>:dir-<slug>-<digest>`, and loose root files use the reserved `files:<name>:__loose__`.
+
+All sources in one files collection share the collection-relative serving namespace. A child page can link to `../shared/style.css` and it resolves under the same source key; search results and library membership still belong to the source that indexed the item. Hidden paths, configured excludes, symlinks, and paths outside the configured root are never served. Unknown extensions are served as attachments with `X-Content-Type-Options: nosniff`; SVG opened directly is sandboxed with a restrictive CSP.
+
+`include` selects native documents for indexing. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless an exact source override enables them:
+
+```toml
+# Discover the exact key first (for example from `/sources`).
+[[collections.sources]]
+key = "files:modules:root"
+captions = "index"     # .srt/.vtt sidecars (embedded tracks use the shared
+                       # ffmpeg adapter when one is available)
+ocr = "tesseract"      # images and image-only PDF pages
+asr = "whisper"        # audio/video
+```
+
+`zimantic build` with no positional paths builds configured files collections as well as ZIM collections, using the same index generations, embeddings, and lock as ZIM builds. Serving does not require an index: permitted files remain browsable even when indexing was capped or skipped.
+
+With `secure_browsing = true`, the `/content/` shell sandboxes the article iframe. A raw `/article/` page opened directly or in a permitted popup is not sandboxed; treat untrusted file trees as untrusted input regardless of that setting.
+
 ### Copying finished indexes to another machine
 
 Embeddings live only in `index.faiss`. Its row IDs refer to `docs.rowid` in the matching `index.sqlite`, which holds titles, paths, the title and body full-text indexes, derived-text cache references, and build metadata. Copy the pair plus the source's `current` manifest; a `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and body lexical search only. A full index whose `.faiss` is missing still serves lexical results, but a later full build requires `--force` to replace it.
@@ -208,7 +252,7 @@ zimantic model --dir ./models         # write models/<precision>/ instead of mod
 zimantic model --list                 # show supported models and precisions
 ```
 
-`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM collection. An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; restart a running server to load that config change. Existing complete generations are skipped; pass `--force` to rebuild selected indexes. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
+`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM collection plus every configured files collection. An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; restart a running server to load that config change. Existing complete generations are skipped; pass `--force` to rebuild selected indexes. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
 
 ### Build behavior and locking
 
@@ -280,7 +324,7 @@ How a selection is searched depends on its size:
 
 ### Library view
 
-`/library` shows the installed ZIMs in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. Dated and flavour variants of the same local book collapse to one card, keeping the largest readable and searchable copy; a larger archive is usually the more complete download and may contain larger artwork or media. **Shuffle** reorders the cards.
+`/library` shows the installed ZIM and files sources in a responsive card grid with archive artwork, descriptions, metadata, and direct links to each homepage or random article. Each card carries its collection key and label; a files collection remains one bounded source list rather than one card per file. Dated and flavour variants of the same local book collapse to one card, keeping the largest readable and searchable copy; a larger archive is usually the more complete download and may contain larger artwork or media. **Shuffle** reorders the cards.
 
 An unreadable archive stays in the grid marked **Unavailable**, with the catalog's reason. Click a ZIM's title or **Details** for an infobox with its thumbnail, homepage, descriptions, counts, license, scraper, source, attribution, relation, tags, and content-type breakdown. Prefix filter terms with `-` to exclude matching sources; multiple exclusions are supported. The filter searches all catalog metadata, including the ZIM stem.
 

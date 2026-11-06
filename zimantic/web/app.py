@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response, StreamingResponse
 
+from ..content.serving import content_disposition, is_inline_mimetype
 from ..search import (
     ArticleNotFoundError,
     ArticleTooLargeError,
@@ -877,12 +878,29 @@ def _article_content_response(
     *,
     status_code: int = 200,
     headers: dict[str, str] | None = None,
+    filename: str | None = None,
 ) -> Response:
     response_headers = {
         "Cache-Control": "no-cache",
+        "X-Content-Type-Options": "nosniff",
         **ARTICLE_CORS_HEADERS,
         **(headers or {}),
     }
+    if not is_inline_mimetype(mimetype):
+        # Unknown binaries are attachments and must never be interpreted as
+        # HTML by a browser that guesses from their first bytes.
+        response_headers["Content-Disposition"] = content_disposition(
+            mimetype, filename
+        )
+        response_headers["X-Content-Type-Options"] = "nosniff"
+    elif str(mimetype).split(";", 1)[0].strip().lower() == "image/svg+xml":
+        # Direct SVG views are active documents.  Sandbox them even though an
+        # <img> reference to the same bytes is inert.
+        response_headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
+            "img-src data:; font-src data:"
+        )
+        response_headers["X-Content-Type-Options"] = "nosniff"
     if len(content) > ARTICLE_STREAM_THRESHOLD:
         # Python-libzim exposes the decompressed item as one memoryview.
         # Chunking here avoids another whole-entry response copy and lets

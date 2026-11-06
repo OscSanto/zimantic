@@ -10,6 +10,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 from typing import Any
+from urllib.parse import quote
 
 from ..libzim_compat import get_entry_by_id
 from .reader import _READABLE_MIMETYPES
@@ -17,6 +18,50 @@ from .reader import _READABLE_MIMETYPES
 RANDOM_ARTICLE_ATTEMPTS = 128
 HEAD_READ_BYTES = 256 << 10
 MAX_ICON_BYTES = 1 << 20
+
+# The response policy is provider-neutral.  Files, ZIM, and Kolibri stores all
+# return a MIME type; the web layer decides whether it is safe to render inline.
+INLINE_MIME_TYPES = frozenset(
+    {
+        "text/html",
+        "application/xhtml+xml",
+        "application/pdf",
+        "text/plain",
+        "text/markdown",
+        "text/x-markdown",
+        "text/css",
+        "text/javascript",
+        "application/javascript",
+        "application/json",
+        "application/ld+json",
+        "application/manifest+json",
+        "application/wasm",
+        "image/svg+xml",
+    }
+)
+INLINE_MIME_PREFIXES = ("image/", "audio/", "video/", "font/")
+
+
+def is_inline_mimetype(mimetype: str | None) -> bool:
+    """True when a representation may be rendered in place."""
+    value = str(mimetype or "").split(";", 1)[0].strip().lower()
+    if not value:
+        return False
+    return value in INLINE_MIME_TYPES or value.startswith(INLINE_MIME_PREFIXES)
+
+
+def content_disposition(mimetype: str | None, filename: str | None = None) -> str:
+    """Return the response disposition for one MIME type."""
+    if is_inline_mimetype(mimetype):
+        return "inline"
+    if not filename:
+        return "attachment"
+    safe = str(filename).replace("\\", "_").replace('"', "_").replace("\n", "_")
+    ascii_name = safe.encode("ascii", "replace").decode("ascii")
+    return (
+        f'attachment; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{quote(safe, safe='')}"
+    )
 
 
 def is_random_article_entry(entry: Any) -> bool:
@@ -101,8 +146,12 @@ def random_fallback_article(
 
 __all__ = [
     "HEAD_READ_BYTES",
+    "INLINE_MIME_PREFIXES",
+    "INLINE_MIME_TYPES",
     "MAX_ICON_BYTES",
     "RANDOM_ARTICLE_ATTEMPTS",
+    "content_disposition",
+    "is_inline_mimetype",
     "is_random_article_entry",
     "random_fallback_article",
     "random_indexed_article",

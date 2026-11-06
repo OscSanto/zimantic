@@ -1,6 +1,6 @@
 # Phase 05 — Files provider
 
-Status: proposed.
+Status: implemented.
 
 ## Goal
 
@@ -325,30 +325,30 @@ directly or in a permitted popup is not sandboxed even when the shell is.
 
 ## Work items
 
-- [ ] Add `zimantic/providers/files/` with provider, discovery, entries, and
+- [x] Add `zimantic/providers/files/` with provider, discovery, entries, and
       store modules.
-- [ ] Add provider-level validation for normalized files configuration, and
+- [x] Add provider-level validation for normalized files configuration, and
       consume the phase-00 `[[collections]]` parser without adding a provider-local
       parser.
-- [ ] Implement collection/source discovery with `children` and `collection`
+- [x] Implement collection/source discovery with `children` and `collection`
       granularity, excludes, and the source cap collapse.
-- [ ] Implement `FilesEntryProducer` with stable ids and a manifest
+- [x] Implement `FilesEntryProducer` with stable ids and a manifest
       fingerprint.
-- [ ] Add Markdown/plain-text extraction support if not already covered by the
+- [x] Add Markdown/plain-text extraction support if not already covered by the
       refactored extractors.
-- [ ] Wire opt-in `captions`, `ocr`, and `asr` to the shared derived-text stage;
+- [x] Wire opt-in `captions`, `ocr`, and `asr` to the shared derived-text stage;
       keep all three off by default.
-- [ ] Implement `FilesContentStore` with confinement, MIME policy, directory
+- [x] Implement `FilesContentStore` with confinement, MIME policy, directory
       index handling, icons, and random.
-- [ ] Wire build and index discovery into the runtime, including the
+- [x] Wire build and index discovery into the runtime, including the
       `zimantic build` entry point for configured files collections.
-- [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
+- [x] Add source metadata: `provider`, `collection`, `key`, `searchable`,
       `homepage`, `item_count`,
       `indexed_count`, `truncated`, `body_truncated_count`, and
       `media_types` (empty when no family is known).
-- [ ] Document a recommended `/library/www/html/modules` configuration and the
+- [x] Document a recommended `/library/www/html/modules` configuration and the
       `granularity` trade-off in `README.md`.
-- [ ] Add a files-provider example to `config.toml` (commented out by default).
+- [x] Add a files-provider example to `config.toml` (commented out by default).
 
 ## Tests
 

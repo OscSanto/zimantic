@@ -529,10 +529,13 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                         headers={
                             "Cache-Control": "no-cache",
                             "Content-Length": str(len(content)),
+                            "X-Content-Type-Options": "nosniff",
                             **web_app.ARTICLE_CORS_HEADERS,
                         },
                     )
-                return web_app._article_content_response(content, mimetype)
+                return web_app._article_content_response(
+                    content, mimetype, filename=article_path
+                )
 
             store = opener(source)
             entry = store.resolve(path)
@@ -568,6 +571,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                         headers={
                             "Cache-Control": "no-cache",
                             "Content-Length": str(len(content)),
+                            "X-Content-Type-Options": "nosniff",
                             **web_app.ARTICLE_CORS_HEADERS,
                         },
                     )
@@ -576,8 +580,23 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             if request.method == "HEAD":
                 headers = {
                     "Cache-Control": "no-cache",
+                    "X-Content-Type-Options": "nosniff",
                     **web_app.ARTICLE_CORS_HEADERS,
                 }
+                if not web_app.is_inline_mimetype(mimetype):
+                    headers["Content-Disposition"] = (
+                        web_app.content_disposition(mimetype, entry.path)
+                    )
+                    headers["X-Content-Type-Options"] = "nosniff"
+                elif (
+                    str(mimetype).split(";", 1)[0].strip().lower()
+                    == "image/svg+xml"
+                ):
+                    headers["Content-Security-Policy"] = (
+                        "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
+                        "img-src data:; font-src data:"
+                    )
+                    headers["X-Content-Type-Options"] = "nosniff"
                 if entry.size is not None:
                     headers["Content-Length"] = str(entry.size)
                     headers["Accept-Ranges"] = "bytes"
@@ -602,6 +621,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                                 "Content-Range": f"bytes */{entry.size}",
                                 "Accept-Ranges": "bytes",
                                 "Content-Encoding": "identity",
+                                "X-Content-Type-Options": "nosniff",
                                 **web_app.ARTICLE_CORS_HEADERS,
                             },
                         )
@@ -624,6 +644,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                             # A partial body must never pass through gzip.
                             "Content-Encoding": "identity",
                         },
+                        filename=data.path,
                     )
 
             data = store.read(path, head_only=False, max_bytes=limit)
@@ -633,7 +654,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 else {}
             )
             return web_app._article_content_response(
-                data.content, data.mimetype, headers=headers
+                data.content,
+                data.mimetype,
+                headers=headers,
+                filename=data.path,
             )
         except ArticleNotFoundError as error:
             # Some Stack Exchange captures reference MathJax fonts the ZIM did
@@ -1133,5 +1157,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             return web_app._article_content_response(
                 content,
                 mimetype or "application/octet-stream",
+                filename=candidate,
             )
         raise HTTPException(status_code=404, detail="not found")
