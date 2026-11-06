@@ -5,7 +5,16 @@ libzim.  The reader/extractor helpers are resolved lazily so importing this
 package (and ``zimantic.providers.base``) does not require libzim either.
 """
 
-from .store import ArticleData, ContentEntry, ContentRange, ContentStore
+from .store import (
+    ArticleData,
+    ArticleNotFoundError,
+    ArticleSourceNotFoundError,
+    ArticleTooLargeError,
+    ArticleUnavailableError,
+    ContentEntry,
+    ContentRange,
+    ContentStore,
+)
 
 _READER_EXPORTS = {
     "DEFAULT_MAX_ENTRY_BYTES",
@@ -29,6 +38,10 @@ __all__ = [
     "DEFAULT_PREVIEW_CHARS",
     "MIN_BLOCK_CHARS",
     "ArticleData",
+    "ArticleNotFoundError",
+    "ArticleSourceNotFoundError",
+    "ArticleTooLargeError",
+    "ArticleUnavailableError",
     "ContentEntry",
     "ContentRange",
     "ContentStore",

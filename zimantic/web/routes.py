@@ -2,22 +2,36 @@
 
 import hashlib
 import json
-from urllib.parse import unquote, urlsplit
+import re
+from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from ..search import (
-    SELECTIVE_SOURCE_LIMIT,
+from ..content.path import has_encoded_separator, raw_request_path
+from ..content.store import (
     ArticleNotFoundError,
     ArticleSourceNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
+)
+from ..search import (
+    SELECTIVE_SOURCE_LIMIT,
     SearchBusyError,
     SearchQueryError,
 )
 from ..searching.query import MAX_QUERY_LENGTH, STOPWORDS
 from . import app as web_app
+
+_ARTICLE_METHODS = "GET, HEAD, OPTIONS"
+_ARTICLE_REQUEST_HEADERS = (
+    "Range, If-Range, If-None-Match, If-Modified-Since"
+)
+_RANGE_RE = re.compile(
+    r"^\s*bytes\s*=\s*(?P<start>\d*)\s*-\s*(?P<end>\d*)\s*$",
+    re.IGNORECASE,
+)
+_DEFAULT_CONTENT_LIMIT = 1 << 30
 
 
 _CAPTURE_ASSET_PREFIXES = (
@@ -34,7 +48,9 @@ _CAPTURE_ASSET_PREFIXES = (
 
 def _capture_asset_candidates(path: str) -> list[str]:
     """Return archive paths worth trying for a root-absolute capture asset."""
-    rel = unquote(str(path or "")).lstrip("/")
+    # The route parameter is already decoded exactly once by the ASGI server.
+    # Decoding again would turn a literal %2F filename into a traversal step.
+    rel = str(path or "").lstrip("/")
     if not rel:
         return []
     if not (
@@ -68,8 +84,8 @@ def _capture_asset_candidates(path: str) -> list[str]:
     return candidates
 
 
-def _referer_article_zim(referer: str | None) -> str | None:
-    """Extract the ZIM name from an /article/ or /content/ referrer."""
+def _referer_source_key(referer: str | None) -> str | None:
+    """Extract the canonical source key from an article/content referrer."""
     if not referer:
         return None
     path = urlsplit(referer).path
@@ -78,9 +94,112 @@ def _referer_article_zim(referer: str | None) -> str | None:
         if index < 0:
             continue
         remainder = path[index + len(marker) :]
-        zim = remainder.split("/", 1)[0]
-        return unquote(zim) if zim else None
+        key = remainder.split("/", 1)[0]
+        # The referrer preserves the encoded source segment.  Decode it exactly
+        # once so keys with colons match the canonical SourceInfo.key.
+        return unquote(key) if key else None
     return None
+
+
+def _raw_path_is_safe(request: Request) -> bool:
+    """Reject encoded separators before the decoded route path is trusted.
+
+    A trustworthy ASGI server preserves ``raw_path``.  During the transition to
+    a reverse-proxy deployment that strips it, path-bearing content requests
+    fail closed rather than guessing: a decoded path cannot reveal whether a
+    separator was encoded.
+    """
+    raw_path = raw_request_path(request)
+    if raw_path is None:
+        return False
+    return not has_encoded_separator(raw_path)
+
+
+def _content_error_code(error: Exception) -> tuple[int, str]:
+    if isinstance(error, ArticleTooLargeError):
+        return 413, "article_too_large"
+    if isinstance(error, ArticleSourceNotFoundError):
+        return 404, "source_not_found"
+    if isinstance(error, ArticleUnavailableError):
+        return 503, "store_unavailable"
+    if isinstance(error, ArticleNotFoundError):
+        return 404, "not_found"
+    return 500, "content_error"
+
+
+def _article_error_response(
+    error: Exception, source_key: str | None
+) -> JSONResponse:
+    status, code = _content_error_code(error)
+    payload: dict[str, str] = {"error": code}
+    if source_key:
+        payload["source"] = source_key
+    headers = dict(web_app.ARTICLE_CORS_HEADERS)
+    if status == 503:
+        headers["Retry-After"] = "1"
+    return JSONResponse(
+        status_code=status,
+        content=payload,
+        headers=headers,
+    )
+
+
+def _if_none_match_star(value: str | None) -> bool:
+    if not value:
+        return False
+    return any(part.strip() == "*" for part in value.split(","))
+
+
+def _parse_range(
+    value: str | None, total: int | None
+) -> tuple[int, int, bool] | None:
+    """Parse one satisfiable range, or return None to serve the full body.
+
+    ``None`` covers malformed/multiple ranges, unknown totals, and values the
+    plan says to ignore.  A syntactically valid range that starts at or past the
+    representation is returned as ``(-1, -1, False)`` so the caller can send a
+    416 with the total length.
+    """
+    if not value or total is None:
+        return None
+    match = _RANGE_RE.match(value)
+    if match is None:
+        return None
+    start_text = match.group("start")
+    end_text = match.group("end")
+    if not start_text and not end_text:
+        return None
+    total = int(total)
+    if total <= 0:
+        return (-1, -1, False)
+    if not start_text:
+        suffix = int(end_text)
+        if suffix <= 0:
+            return (-1, -1, False)
+        start = max(0, total - suffix)
+        end = total - 1
+        return start, end, True
+    start = int(start_text)
+    if end_text and int(end_text) < start:
+        return None
+    if start >= total:
+        return (-1, -1, False)
+    end = total - 1 if not end_text else int(end_text)
+    return start, min(end, total - 1), False
+
+
+def _bounded_range(
+    start: int, end: int, suffix: bool, max_bytes: int
+) -> tuple[int, int]:
+    """Clamp a requested range to the configured returned-slice limit."""
+    limit = max(0, int(max_bytes))
+    length = end - start + 1
+    if length <= limit:
+        return start, end
+    if suffix:
+        # A suffix request keeps the end of the representation.
+        return end - limit + 1, end
+    return start, start + limit - 1
 
 
 def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
@@ -225,17 +344,27 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
         app.get(route, include_in_schema=False)(static_asset)
 
-    @app.get("/source-icon/{zim}", include_in_schema=False)
-    def source_icon(zim: str):
+    @app.get("/source-icon/{source}", include_in_schema=False)
+    def source_icon(source: str, request: Request):
+        if not _raw_path_is_safe(request):
+            return _article_error_response(
+                ArticleNotFoundError("invalid article path"), source
+            )
         try:
-            icon = search_class.read_source_icon(zim)
+            icon = search_class.read_source_icon(source)
         except (
             ArticleNotFoundError,
             ArticleTooLargeError,
             ArticleUnavailableError,
         ) as error:
-            raise web_app._article_http_error(error) from error
-        return web_app._article_content_response(icon["content"], icon["mimetype"])
+            return _article_error_response(error, source)
+        if isinstance(icon, dict):
+            content = icon.get("content") or b""
+            mimetype = icon.get("mimetype") or "application/octet-stream"
+        else:
+            content = icon.content
+            mimetype = icon.mimetype
+        return web_app._article_content_response(content, mimetype)
 
     @app.get("/config")
     def config(request: Request):
@@ -327,47 +456,208 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         value = (request.query_params.get("highlight") or "").strip()
         return value[:4096] or None
 
+    def _article_limit() -> int:
+        return int(
+            getattr(search_class, "max_article_bytes", _DEFAULT_CONTENT_LIMIT)
+        )
+
+    def _redirect_article(
+        route: str,
+        source_key: str,
+        path: str,
+        highlight: str | None,
+        request: Request | None = None,
+    ) -> Response:
+        target = (
+            web_app._article_url(source_key, path, base_path)
+            if route == "article"
+            else web_app._content_url(source_key, path, base_path)
+        )
+        if request is not None:
+            extras = [
+                (name, value)
+                for name, value in request.query_params.multi_items()
+                if name != "highlight"
+            ]
+            if extras:
+                separator = "&" if "?" in target else "?"
+                target += separator + urlencode(extras, doseq=True)
+        return Response(
+            status_code=307,
+            headers={
+                "Location": web_app._append_highlight(target, highlight),
+                "Cache-Control": "no-cache",
+                **web_app.ARTICLE_CORS_HEADERS,
+            },
+        )
+
+    def _decorated_article(
+        content: bytes, source_key: str, mimetype: str
+    ) -> bytes:
+        return web_app._decorate_article_bridge(
+            content,
+            source_key,
+            base_path,
+            xhtml=mimetype == "application/xhtml+xml",
+        )
+
     def raw_article_response(
-        zim: str, path: str | None = None, highlight: str | None = None
+        source: str,
+        request: Request,
+        path: str | None = None,
+        highlight: str | None = None,
     ):
+        store = None
         try:
-            article = search_class.read_article(zim, path)
+            opener = getattr(search_class, "content_store", None)
+            if not callable(opener):
+                article = search_class.read_article(source, path)
+                requested_path = None if path is None else path
+                article_path = _article_path(article)
+                if requested_path != article_path:
+                    return _redirect_article(
+                        "article", source, article_path, highlight, request
+                    )
+                content = _article_content(article)
+                mimetype = _article_mimetype(article)
+                if mimetype in web_app.HTML_MIMETYPES:
+                    content = _decorated_article(content, source, mimetype)
+                if request.method == "HEAD":
+                    return Response(
+                        content=b"",
+                        media_type=mimetype,
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Content-Length": str(len(content)),
+                            **web_app.ARTICLE_CORS_HEADERS,
+                        },
+                    )
+                return web_app._article_content_response(content, mimetype)
+
+            store = opener(source)
+            entry = store.resolve(path)
+
+            requested_path = None if path is None else path
+            if requested_path != entry.path:
+                return _redirect_article(
+                    "article", source, entry.path, highlight, request
+                )
+
+            if _if_none_match_star(request.headers.get("if-none-match")):
+                return Response(
+                    status_code=304,
+                    headers={
+                        "Cache-Control": "no-cache",
+                        **web_app.ARTICLE_CORS_HEADERS,
+                    },
+                )
+
+            limit = _article_limit()
+            mimetype = entry.mimetype
+            if mimetype in web_app.HTML_MIMETYPES:
+                # Byte offsets and validators for stored HTML do not describe
+                # the decorated response, so ranges are ignored here.
+                data = store.read(path, head_only=False, max_bytes=limit)
+                content = _decorated_article(
+                    bytes(data.content), source, mimetype
+                )
+                if request.method == "HEAD":
+                    return Response(
+                        content=b"",
+                        media_type=mimetype,
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Content-Length": str(len(content)),
+                            **web_app.ARTICLE_CORS_HEADERS,
+                        },
+                    )
+                return web_app._article_content_response(content, mimetype)
+
+            if request.method == "HEAD":
+                headers = {
+                    "Cache-Control": "no-cache",
+                    **web_app.ARTICLE_CORS_HEADERS,
+                }
+                if entry.size is not None:
+                    headers["Content-Length"] = str(entry.size)
+                    headers["Accept-Ranges"] = "bytes"
+                return Response(
+                    content=b"",
+                    media_type=mimetype,
+                    headers=headers,
+                )
+
+            range_header = request.headers.get("range")
+            # The store exposes no validators yet, so If-Range always
+            # mismatches and the full representation is served.
+            if range_header and not request.headers.get("if-range"):
+                parsed = _parse_range(range_header, entry.size)
+                if parsed is not None:
+                    start, end, suffix = parsed
+                    if start < 0:
+                        return Response(
+                            status_code=416,
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "Content-Range": f"bytes */{entry.size}",
+                                "Accept-Ranges": "bytes",
+                                "Content-Encoding": "identity",
+                                **web_app.ARTICLE_CORS_HEADERS,
+                            },
+                        )
+                    start, end = _bounded_range(start, end, suffix, limit)
+                    data = store.read_range(
+                        path,
+                        start=start,
+                        end=end,
+                        max_bytes=limit,
+                    )
+                    return web_app._article_content_response(
+                        data.content,
+                        data.mimetype,
+                        status_code=206,
+                        headers={
+                            "Content-Range": (
+                                f"bytes {data.start}-{data.end}/{data.total}"
+                            ),
+                            "Accept-Ranges": "bytes",
+                            # A partial body must never pass through gzip.
+                            "Content-Encoding": "identity",
+                        },
+                    )
+
+            data = store.read(path, head_only=False, max_bytes=limit)
+            headers = (
+                {"Accept-Ranges": "bytes"}
+                if entry.size is not None
+                else {}
+            )
+            return web_app._article_content_response(
+                data.content, data.mimetype, headers=headers
+            )
         except ArticleNotFoundError as error:
             # Some Stack Exchange captures reference MathJax fonts the ZIM did
             # not save. Serve the vendored MathJax 2.7.5 WOFF set for those
             # known paths instead of failing the whole equation.
             font = web_app._vendored_mathjax_font(path or "")
-            if font is None:
-                raise web_app._article_http_error(error) from error
-            return web_app._article_content_response(font.read_bytes(), "font/woff")
-        except (ArticleTooLargeError, ArticleUnavailableError) as error:
-            raise web_app._article_http_error(error) from error
-
-        requested_path = None if path is None else path
-        if requested_path != article["path"]:
-            return Response(
-                status_code=307,
-                headers={
-                    "Location": web_app._append_highlight(
-                        web_app._article_url(zim, article["path"], base_path),
-                        highlight,
-                    )
-                },
-            )
-        content = article["content"]
-        if article["mimetype"] in web_app.HTML_MIMETYPES:
-            content = web_app._decorate_article_bridge(
-                content,
-                zim,
-                base_path,
-                xhtml=article["mimetype"] == "application/xhtml+xml",
-            )
-        return web_app._article_content_response(content, article["mimetype"])
+            if font is not None:
+                return web_app._article_content_response(
+                    font.read_bytes(), "font/woff"
+                )
+            return _article_error_response(error, source)
+        except (
+            ArticleTooLargeError,
+            ArticleUnavailableError,
+        ) as error:
+            return _article_error_response(error, source)
+        finally:
+            if store is not None:
+                store.close()
 
     def error_shell_article(
         requested_path: str | None,
         error: Exception,
-        zim: str,
+        source: str,
     ) -> dict:
         safe_path = "/".join(
             part
@@ -376,7 +666,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         )
         # The source itself is missing: there is no home/random link to offer.
         # Any other not-found error still belongs to an existing source.
-        zim_found = not isinstance(error, ArticleSourceNotFoundError) and (
+        source_found = not isinstance(error, ArticleSourceNotFoundError) and (
             not isinstance(error, ArticleUnavailableError)
             or isinstance(error, ArticleTooLargeError)
         )
@@ -399,17 +689,16 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             "path": safe_path,
             "title": title,
             "message": detail,
-            "zim": zim,
-            "zim_found": zim_found,
+            "source": source,
+            "source_found": source_found,
         }
 
-    def zim_icon_url(zim: str) -> str | None:
+    def source_icon_url(source_key: str) -> str | None:
         """Return the favicon used when an article declares none."""
         try:
+            resolve = getattr(search_class, "resolve_content_source", None)
             source = (
-                search_class.resolve_source(zim)
-                if callable(getattr(search_class, "resolve_source", None))
-                else None
+                resolve(source_key) if callable(resolve) else None
             )
             sources = search_class.source_dicts()
         except Exception:
@@ -417,7 +706,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         for candidate in sources:
             if not isinstance(candidate, dict):
                 continue
-            if candidate.get("key") != zim and (
+            if candidate.get("key") != source_key and (
                 source is None or candidate.get("key") != source.key
             ):
                 continue
@@ -426,11 +715,11 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 return icon_url
         return None
 
-    def zim_search_available(zim: str) -> bool:
+    def source_search_available(source_key: str) -> bool:
         """True when this identifier resolves to a searchable source."""
         try:
-            resolve = getattr(search_class, "resolve_source", None)
-            source = resolve(zim) if callable(resolve) else None
+            resolve = getattr(search_class, "resolve_content_source", None)
+            source = resolve(source_key) if callable(resolve) else None
             sources = search_class.source_dicts()
         except Exception:
             return False
@@ -439,16 +728,49 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         for candidate in sources:
             if not isinstance(candidate, dict):
                 continue
-            if candidate.get("key") == zim and candidate.get("searchable"):
+            if candidate.get("key") == source_key and candidate.get("searchable"):
                 return True
         return False
 
+    def _article_path(article) -> str:
+        if isinstance(article, dict):
+            return str(article.get("path") or "")
+        return str(getattr(article, "path", "") or "")
+
+    def _article_title(article) -> str:
+        if isinstance(article, dict):
+            return str(article.get("title") or "")
+        return str(getattr(article, "title", "") or "")
+
+    def _article_mimetype(article) -> str:
+        if isinstance(article, dict):
+            return str(article.get("mimetype") or "application/octet-stream")
+        return str(
+            getattr(article, "mimetype", None) or "application/octet-stream"
+        )
+
+    def _article_content(article) -> bytes:
+        if isinstance(article, dict):
+            return bytes(article.get("content") or b"")
+        return bytes(getattr(article, "content", b"") or b"")
+
+    def _article_dict(article) -> dict:
+        return {
+            "path": _article_path(article),
+            "title": _article_title(article),
+            "mimetype": _article_mimetype(article),
+            "content": _article_content(article),
+        }
+
     def content_shell_response(
-        zim: str, path: str | None = None, highlight: str | None = None
+        source: str,
+        path: str | None = None,
+        highlight: str | None = None,
+        request: Request | None = None,
     ):
         requested_path = None if path is None else path
-        fallback_icon = zim_icon_url(zim)
-        show_zim_search = zim_search_available(zim)
+        fallback_icon = source_icon_url(source)
+        show_source_search = source_search_available(source)
         read_head = getattr(search_class, "read_article_head", None)
         check_path = getattr(search_class, "article_path_exists", None)
 
@@ -456,11 +778,11 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             """True when the path is a real entry, so breadcrumbs do not link to containers."""
             try:
                 if callable(check_path):
-                    return bool(check_path(zim, parent_path))
+                    return bool(check_path(source, parent_path))
                 if callable(read_head):
-                    read_head(zim, parent_path)
+                    read_head(source, parent_path)
                 else:
-                    search_class.read_article(zim, parent_path)
+                    search_class.read_article(source, parent_path)
                 return True
             except (
                 ArticleNotFoundError,
@@ -469,19 +791,39 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             ):
                 return False
 
+        resolve = getattr(search_class, "resolve_content", None)
         try:
-            if callable(read_head):
-                article = read_head(zim, path)
+            if callable(resolve):
+                entry = resolve(source, path)
+                article_dict = {
+                    "path": entry.path,
+                    "title": entry.title,
+                    "mimetype": entry.mimetype,
+                    "content": b"",
+                }
+                # The shell only needs the head for HTML metadata.  Large
+                # non-HTML media must not be rejected because a whole-body read
+                # would exceed max_article_bytes.
+                if entry.mimetype in web_app.HTML_MIMETYPES:
+                    if callable(read_head):
+                        head = read_head(source, path)
+                    else:
+                        head = search_class.read_article(source, path)
+                    article_dict.update(_article_dict(head))
+            elif callable(read_head):
+                article_dict = _article_dict(read_head(source, path))
             else:
-                article = search_class.read_article(zim, path)
+                article_dict = _article_dict(
+                    search_class.read_article(source, path)
+                )
         except (
             ArticleNotFoundError,
             ArticleTooLargeError,
             ArticleUnavailableError,
         ) as error:
-            error_info = error_shell_article(requested_path, error, zim)
+            error_info = error_shell_article(requested_path, error, source)
             return web_app._content_shell(
-                zim,
+                source,
                 error_info,
                 web_app._article_http_error(error).status_code,
                 fallback_icon,
@@ -490,71 +832,134 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 path_exists=path_exists,
                 error=error_info,
                 secure_browsing=secure_browsing,
-                show_zim_search=show_zim_search,
+                show_zim_search=show_source_search,
             )
 
-        if requested_path != article["path"]:
-            return Response(
-                status_code=307,
-                headers={
-                    "Location": web_app._append_highlight(
-                        web_app._content_url(zim, article["path"], base_path),
-                        highlight,
-                    )
-                },
+        if requested_path != article_dict["path"]:
+            return _redirect_article(
+                "content", source, article_dict["path"], highlight, request
             )
         return web_app._content_shell(
-            zim,
-            article,
+            source,
+            article_dict,
             fallback_icon=fallback_icon,
             base_path=base_path,
             highlight=highlight,
             path_exists=path_exists,
             secure_browsing=secure_browsing,
-            show_zim_search=show_zim_search,
+            show_zim_search=show_source_search,
         )
 
-    @app.get("/content/{zim}")
-    def content_homepage(zim: str, request: Request):
-        return content_shell_response(zim, highlight=requested_highlight(request))
+    def _safe_content_request(request: Request) -> bool:
+        return _raw_path_is_safe(request)
 
-    @app.get("/content/{zim}/{path:path}")
-    def content_article(zim: str, path: str, request: Request):
+    @app.get("/content/{source}")
+    def content_homepage(source: str, request: Request):
+        if not _safe_content_request(request):
+            raise HTTPException(status_code=404, detail="not found")
         return content_shell_response(
-            zim,
-            path,
+            source,
             highlight=requested_highlight(request),
+            request=request,
         )
 
-    @app.get("/article/{zim}")
-    def article_homepage(zim: str, request: Request):
-        return raw_article_response(zim, highlight=requested_highlight(request))
+    @app.head("/content/{source}")
+    def content_homepage_head(source: str, request: Request):
+        return content_homepage(source, request)
 
-    @app.get("/article/{zim}/{path:path}")
-    def article(zim: str, path: str, request: Request):
+    @app.get("/content/{source}/{path:path}")
+    def content_article(source: str, path: str, request: Request):
+        if not _safe_content_request(request):
+            raise HTTPException(status_code=404, detail="not found")
+        return content_shell_response(
+            source,
+            path,
+            highlight=requested_highlight(request),
+            request=request,
+        )
+
+    @app.head("/content/{source}/{path:path}")
+    def content_article_head(source: str, path: str, request: Request):
+        return content_article(source, path, request)
+
+    @app.get("/article/{source}")
+    def article_homepage(source: str, request: Request):
+        if not _safe_content_request(request):
+            return _article_error_response(
+                ArticleNotFoundError("invalid article path"), source
+            )
         return raw_article_response(
-            zim,
+            source,
+            request,
+            highlight=requested_highlight(request),
+        )
+
+    @app.head("/article/{source}")
+    def article_homepage_head(source: str, request: Request):
+        return article_homepage(source, request)
+
+    @app.get("/article/{source}/{path:path}")
+    def article(source: str, path: str, request: Request):
+        if not _safe_content_request(request):
+            return _article_error_response(
+                ArticleNotFoundError("invalid article path"), source
+            )
+        return raw_article_response(
+            source,
+            request,
             path,
             highlight=requested_highlight(request),
         )
+
+    @app.head("/article/{source}/{path:path}")
+    def article_head(source: str, path: str, request: Request):
+        return article(source, path, request)
+
+    def _article_preflight(request: Request) -> Response:
+        if not _raw_path_is_safe(request):
+            return Response(
+                status_code=404,
+                headers={**web_app.ARTICLE_CORS_HEADERS},
+            )
+        return Response(
+            status_code=204,
+            headers={
+                **web_app.ARTICLE_CORS_HEADERS,
+                "Access-Control-Allow-Methods": _ARTICLE_METHODS,
+                "Access-Control-Allow-Headers": _ARTICLE_REQUEST_HEADERS,
+                "Access-Control-Expose-Headers": (
+                    "Content-Range, Accept-Ranges, ETag, Last-Modified"
+                ),
+                "Access-Control-Max-Age": "600",
+                "Vary": "Access-Control-Request-Headers",
+            },
+        )
+
+    @app.options("/article/{source}")
+    def article_preflight_homepage(source: str, request: Request):
+        return _article_preflight(request)
+
+    @app.options("/article/{source}/{path:path}")
+    def article_preflight(source: str, path: str, request: Request):
+        return _article_preflight(request)
 
     @app.get("/random")
-    def random_article(zim: str | None = Query(None, min_length=1)):
-        if not zim:
+    def random_article(source: str | None = Query(None, min_length=1)):
+        if not source:
             choose_source = getattr(search_class, "random_local_source", None)
             if not callable(choose_source):
                 raise HTTPException(
                     status_code=404, detail="random sources unavailable"
                 )
             try:
-                source = choose_source()
+                chosen = choose_source()
             except ArticleNotFoundError as error:
                 raise HTTPException(status_code=404, detail=str(error)) from error
             return Response(
                 status_code=307,
                 headers={
                     "Location": web_app._content_url(
-                        source.key, base_path=base_path
+                        chosen.key, base_path=base_path
                     ),
                     "Cache-Control": "no-store",
                 },
@@ -564,15 +969,15 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         if not callable(choose_article):
             raise HTTPException(status_code=404, detail="random articles unavailable")
         try:
-            path = choose_article(zim)
+            path = choose_article(source)
         except ArticleNotFoundError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+            return _article_error_response(error, source)
         except ArticleUnavailableError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
+            return _article_error_response(error, source)
         return Response(
             status_code=307,
             headers={
-                "Location": web_app._content_url(zim, path, base_path),
+                "Location": web_app._content_url(source, path, base_path),
                 "Cache-Control": "no-store",
             },
         )
@@ -580,17 +985,17 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     @app.get("/suggest")
     def api_suggest(
         q: str = Query(..., min_length=1, max_length=4096),
-        zim: list[str] | None = Query(None),
+        source: list[str] | None = Query(None),
         limit: int = Query(8, ge=1, le=20),
     ):
         suggest = getattr(search_class, "suggest", None)
         try:
             if callable(suggest):
-                items = suggest(q, zim, limit)
+                items = suggest(q, source, limit)
             else:
                 # Older search backends and test doubles only expose the full
                 # search API; its first page is still a usable suggestion list.
-                page = search_class.search_page(q, zim, limit, 0, None, False)
+                page = search_class.search_page(q, source, limit, 0, None, False)
                 items = page.get("results", [])
         except SearchBusyError as error:
             raise HTTPException(
@@ -699,23 +1104,34 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         """
         if request.method not in {"GET", "HEAD"}:
             raise HTTPException(status_code=404, detail="not found")
-        zim = _referer_article_zim(request.headers.get("referer"))
-        if not zim:
+        if not _raw_path_is_safe(request):
+            raise HTTPException(status_code=404, detail="not found")
+        source = _referer_source_key(request.headers.get("referer"))
+        if not source:
             raise HTTPException(status_code=404, detail="not found")
         for candidate in _capture_asset_candidates(path):
             try:
-                article = search_class.read_article(zim, candidate)
+                article = search_class.read_article(source, candidate)
             except (
                 ArticleNotFoundError,
                 ArticleTooLargeError,
                 ArticleUnavailableError,
             ):
                 continue
-            content = article.get("content")
+            content = (
+                article.get("content")
+                if isinstance(article, dict)
+                else getattr(article, "content", None)
+            )
             if content is None:
                 continue
+            mimetype = (
+                article.get("mimetype")
+                if isinstance(article, dict)
+                else getattr(article, "mimetype", None)
+            )
             return web_app._article_content_response(
                 content,
-                article.get("mimetype") or "application/octet-stream",
+                mimetype or "application/octet-stream",
             )
         raise HTTPException(status_code=404, detail="not found")

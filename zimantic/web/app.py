@@ -63,8 +63,14 @@ GZIP_MIN_SIZE = 512
 ARTICLE_STREAM_THRESHOLD = 512 * 1024
 ARTICLE_STREAM_CHUNK = 64 * 1024
 # Sandboxed article frames have an opaque origin, so in-article fetches need
-# explicit CORS access to the public raw-entry route.
-ARTICLE_CORS_HEADERS = {"Access-Control-Allow-Origin": "*"}
+# explicit CORS access to the public raw-entry route.  Actual responses also
+# expose the range/validator metadata that media and conditional scripts read.
+ARTICLE_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Expose-Headers": (
+        "Content-Range, Accept-Ranges, ETag, Last-Modified"
+    ),
+}
 # Both HTML flavors receive the article bridge, mobile fallback, and head
 # metadata handling.
 HTML_MIMETYPES = frozenset({"text/html", "application/xhtml+xml"})
@@ -319,20 +325,24 @@ ARTICLE_NAV_BRIDGE_SCRIPT = (
 
 
 def _route_url(
-    route: str, zim: str, path: str | None = None, base_path: str = ""
+    route: str, source_key: str, path: str | None = None, base_path: str = ""
 ) -> str:
-    url = f"{base_path}/{route}/{quote_path(zim, safe='')}"
+    url = f"{base_path}/{route}/{quote_path(source_key, safe='')}"
     if path:
         url += f"/{quote_path(path, safe='/')}"
     return url
 
 
-def _content_url(zim: str, path: str | None = None, base_path: str = "") -> str:
-    return _route_url("content", zim, path, base_path)
+def _content_url(
+    source_key: str, path: str | None = None, base_path: str = ""
+) -> str:
+    return _route_url("content", source_key, path, base_path)
 
 
-def _article_url(zim: str, path: str | None = None, base_path: str = "") -> str:
-    return _route_url("article", zim, path, base_path)
+def _article_url(
+    source_key: str, path: str | None = None, base_path: str = ""
+) -> str:
+    return _route_url("article", source_key, path, base_path)
 
 
 def _append_highlight(url: str, highlight: str | None = None) -> str:
@@ -410,7 +420,7 @@ def _article_toolbar(
     show_zim_search: bool = True,
 ) -> str:
     zim_url = _content_url(zim, base_path=base_path)
-    random_url = f"{base_path}/random?zim={quote_path(zim, safe='')}"
+    random_url = f"{base_path}/random?source={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
     site_name = _zim_site_name(zim)
     article_url_path = str(article.get("path") or "").strip()
@@ -500,7 +510,7 @@ def _article_toolbar(
 
     home_html = ""
     zim_search_html = ""
-    if error is None or error.get("zim_found"):
+    if error is None or error.get("source_found"):
         home_html = (
             f'<a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" '
             f'title="Open this ZIM\'s homepage ({zim_name})">'
@@ -861,7 +871,18 @@ def _content_shell(
     )
 
 
-def _article_content_response(content: bytes | memoryview, mimetype: str) -> Response:
+def _article_content_response(
+    content: bytes | memoryview,
+    mimetype: str,
+    *,
+    status_code: int = 200,
+    headers: dict[str, str] | None = None,
+) -> Response:
+    response_headers = {
+        "Cache-Control": "no-cache",
+        **ARTICLE_CORS_HEADERS,
+        **(headers or {}),
+    }
     if len(content) > ARTICLE_STREAM_THRESHOLD:
         # Python-libzim exposes the decompressed item as one memoryview.
         # Chunking here avoids another whole-entry response copy and lets
@@ -873,16 +894,17 @@ def _article_content_response(content: bytes | memoryview, mimetype: str) -> Res
         return StreamingResponse(
             chunks(),
             media_type=mimetype,
+            status_code=status_code,
             headers={
-                "Cache-Control": "no-cache",
+                **response_headers,
                 "Content-Length": str(len(content)),
-                **ARTICLE_CORS_HEADERS,
             },
         )
     return Response(
         content=content,
         media_type=mimetype,
-        headers={"Cache-Control": "no-cache", **ARTICLE_CORS_HEADERS},
+        status_code=status_code,
+        headers=response_headers,
     )
 
 

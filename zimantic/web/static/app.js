@@ -290,7 +290,7 @@
                 // searchable, open a random article instead of a broken
                 // homepage link; otherwise the card has Details only.
                 if (source.searchable !== false) {
-                    return appPath(`/random?zim=${encodeURIComponent(zim)}`);
+                    return appPath(`/random?source=${encodeURIComponent(zim)}`);
                 }
                 return "";
             }
@@ -1342,8 +1342,8 @@
                 try {
                     const articleUrl = new URL(value, location.href);
                     const isContent = articleUrl.pathname.startsWith(appPath("/content/"));
-                    // /random?zim=... redirects to a /content/ shell. Accept it
-                    // while the iframe resolves so a library card without a
+                    // /random?source=... redirects to a /content/ shell. Accept
+                    // it while the iframe resolves so a library card without a
                     // homepage can open a random article.
                     const isRandom = articleUrl.pathname === appPath("/random");
                     if (

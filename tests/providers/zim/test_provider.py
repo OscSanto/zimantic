@@ -178,7 +178,11 @@ def test_store_reads_articles_and_the_homepage(tmp_path):
             assert b"tires" in data.content
             assert data.truncated is False
             head = store.read("Beta", head_only=True, max_bytes=1 << 20)
-            assert head.truncated is True
+            # A prefix read that happens to contain the complete small item is
+            # not truncated; a genuinely partial prefix is covered by the
+            # shared content-store contract suite.
+            assert head.content == data.content
+            assert head.truncated is False
         finally:
             store.close()
     finally:

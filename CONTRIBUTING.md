@@ -81,9 +81,12 @@ the seam in `zimantic/providers/`:
 - `SourceResult` keeps four channels. Status is `ok`, `partial`, `error`, or
   `cancelled`; errors are operation-scoped and are never cached or persisted as
   source availability.
-- Content contracts live in `zimantic/content/store.py`. `providers.base`
-  re-exports them. `ContentStore` is frozen in phase 00, including
-  `read_range`, even when a runtime returns `None` until its store lands.
+- Content contracts and errors live in `zimantic/content/store.py`;
+  `providers.base` re-exports the types. `ContentStore` is frozen, including
+  inclusive `read_range`. Shared path normalization and request-target safety
+  live in `zimantic/content/path.py`, and every local store must pass
+  `tests/providers/test_content_store_contract.py`. A remote-only provider such
+  as Kiwix returns `None` from `content_store()`.
 - `zimantic/providers/zim/` is the reference provider. New providers implement
   the seam independently and must not import the ZIM package.
 - Provider-private metadata and filesystem locators must not be serialized.

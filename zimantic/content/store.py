@@ -11,6 +11,22 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 
+class ArticleNotFoundError(Exception):
+    """The requested source or article path does not exist."""
+
+
+class ArticleSourceNotFoundError(ArticleNotFoundError):
+    """No source is known for the requested canonical key."""
+
+
+class ArticleUnavailableError(Exception):
+    """A source exists but cannot currently serve the requested content."""
+
+
+class ArticleTooLargeError(ArticleUnavailableError):
+    """The requested representation exceeds the configured serving limit."""
+
+
 @dataclass(frozen=True)
 class ContentEntry:
     """Identity and metadata for one item addressed by a content store."""
@@ -81,6 +97,10 @@ class ContentStore(Protocol):
 
 __all__ = [
     "ArticleData",
+    "ArticleNotFoundError",
+    "ArticleSourceNotFoundError",
+    "ArticleTooLargeError",
+    "ArticleUnavailableError",
     "ContentEntry",
     "ContentRange",
     "ContentStore",

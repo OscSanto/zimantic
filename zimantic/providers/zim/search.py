@@ -16,11 +16,7 @@ from ...content.reader import (
     read_entry,
     truncate_at_word_boundary,
 )
-from ...content.serving import (
-    ArticleNotFoundError,
-    ArticleUnavailableError,
-    resolve_article_entry,
-)
+from ...content.zim_paths import ZimPathError, resolve_zim_path
 from ...contracts import SourceInfo, SourceResult, encode_document_id
 from ...libzim_compat import search_paths
 from ...searching.query import _title_prefix_query, _title_query
@@ -380,8 +376,8 @@ def fetch_archive_docs(
     docs: dict[int, dict[str, Any]] = {}
     for rowid, entry in entries.items():
         try:
-            target = resolve_article_entry(archive, entry.path)
-        except (ArticleNotFoundError, ArticleUnavailableError):
+            target = resolve_zim_path(archive, entry.path)
+        except ZimPathError:
             continue
         page_path = target.path
         title = getattr(target, "title", None) or page_path

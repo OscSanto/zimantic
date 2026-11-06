@@ -17,12 +17,10 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from ...catalog import SourceCatalog, SourceRecord, catalog_path
-from ...content.serving import (
+from ...content.serving import MAX_ICON_BYTES
+from ...content.store import (
     ArticleNotFoundError,
-    ArticleSourceNotFoundError,
     ArticleUnavailableError,
-    MAX_ICON_BYTES,
-    normalize_article_path,
 )
 from ...contracts import SourceInfo, SourceResult
 from ...indexes.locator import IndexLocator
@@ -217,18 +215,30 @@ class ZimRuntime(CollectionRuntime):
         index = self.indexes.get(source.key)
         record = self._record_for(source)
         archive = None
+        owns_archive = False
         if index is not None:
             archive = index.ensure_open()
         if archive is None:
             path = record.path if record is not None else None
             if not path:
-                return None
-            from libzim.reader import Archive
+                raise ArticleUnavailableError("source store is unavailable")
+            factory = self._archive_factory
+            if factory is None or factory is object:
+                from libzim.reader import Archive
 
+                factory = Archive
             try:
-                archive = Archive(path)
-            except Exception:
-                return None
+                archive = factory(path)
+                owns_archive = True
+            except Exception as error:
+                self._logger.warning(
+                    "zimantic: could not open content store for %s (%s)",
+                    source.key,
+                    type(error).__name__,
+                )
+                raise ArticleUnavailableError(
+                    "source store could not be opened"
+                ) from error
         return ArchiveContentStore(
             source,
             archive,
@@ -242,6 +252,7 @@ class ZimRuntime(CollectionRuntime):
             icon_path=record.icon_path if record is not None else "",
             max_article_bytes=self._max_article_bytes,
             max_icon_bytes=MAX_ICON_BYTES,
+            owns_archive=owns_archive,
         )
 
     def max_sources_per_search(self) -> int | None:
@@ -680,115 +691,12 @@ class ZimRuntime(CollectionRuntime):
                     return source
         return None
 
-    def read_article(
-        self, identifier: str, path: str | None = None, head_only: bool = False
-    ) -> dict[str, Any]:
-        source = self.find_source(identifier)
-        if source is None:
-            raise ArticleSourceNotFoundError("ZIM not found")
-        store = self.content_store(source)
-        if store is None:
-            raise ArticleUnavailableError("ZIM archive is unavailable")
-        try:
-            data = store.read(path, head_only=head_only, max_bytes=self._max_article_bytes)
-        except ArticleUnavailableError:
-            raise
-        finally:
-            store.close()
-        return {
-            "zim": source.key,
-            "path": data.path,
-            "title": data.title,
-            "mimetype": data.mimetype,
-            "content": data.content,
-        }
-
-    def read_article_head(
-        self, identifier: str, path: str | None = None
-    ) -> dict[str, Any]:
-        return self.read_article(identifier, path, head_only=True)
-
-    def article_path_exists(self, identifier: str, path: str) -> bool:
-        source = self.find_source(identifier)
-        if source is None:
-            return False
-        store = self.content_store(source)
-        if store is None:
-            return False
-        try:
-            return store.exists(normalize_article_path(path))
-        except ArticleNotFoundError:
-            return False
-        finally:
-            store.close()
-
-    def read_source_icon(self, identifier: str) -> dict[str, Any]:
-        source = self.find_source(identifier)
-        if source is None:
-            raise ArticleSourceNotFoundError("ZIM not found")
-        record = self._catalog.get_key(source.key)
-        store = self.content_store(source)
-        if store is None:
-            # A library-only archive can still serve its cached illustration.
-            if record is not None and record.icon_data:
-                return {
-                    "zim": source.key,
-                    "path": None,
-                    "title": source.title or source.key,
-                    "mimetype": (
-                        record.icon_mime_type
-                        or "application/octet-stream"
-                    ).split(";", 1)[0].strip().lower(),
-                    "content": record.icon_data,
-                }
-            raise ArticleUnavailableError("ZIM archive is unavailable")
-        # Prefer the icon cached by discovery so serving does not re-extract it.
-        if record is not None:
-            if record.icon_data:
-                store.icon_data = record.icon_data
-            if record.icon_mime_type:
-                store.icon_mime_type = record.icon_mime_type
-            if record.icon_path:
-                store.icon_path = record.icon_path
-        try:
-            icon = store.icon(MAX_ICON_BYTES)
-        finally:
-            store.close()
-        if icon is None:
-            raise ArticleNotFoundError("source icon not found")
-        return {
-            "zim": source.key,
-            "path": None,
-            "title": source.title or source.key,
-            "mimetype": icon.mimetype,
-            "content": icon.content,
-        }
-
-    def random_article_path(self, identifier: str) -> str:
-        source = self.find_source(identifier)
-        if source is None:
-            raise ArticleSourceNotFoundError("ZIM not found")
-        store = self.content_store(source)
-        if store is None:
-            raise ArticleUnavailableError("ZIM archive is unavailable")
-        try:
-            path = store.random_path()
-        except (sqlite3.Error, KeyError, RuntimeError, TypeError, ValueError, IndexError) as error:
-            raise ArticleUnavailableError(
-                "random article selection is unavailable"
-            ) from error
-        finally:
-            store.close()
-        if not path:
-            raise ArticleNotFoundError("ZIM has no available articles")
-        return normalize_article_path(path)
-
     def random_source(self) -> SourceInfo:
         with self._lock:
             candidates = [
                 source
-                for source in self._sources
-                if source.searchable and source.homepage
+                for source in self._library_sources
+                if source.homepage
             ]
         if not candidates:
             raise ArticleNotFoundError("no local source has a homepage")

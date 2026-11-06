@@ -3598,7 +3598,7 @@ Search._random_fallback_article = _test_random_fallback_article
 Search._fetch_docs = _test_fetch_docs
 Search._search_local_locked = _test_search_local_locked
 Search._article_path = staticmethod(
-    __import__("zimantic.content.serving", fromlist=["normalize_article_path"]).normalize_article_path
+    __import__("zimantic.content.path", fromlist=["normalize_article_path"]).normalize_article_path
 )
 
 
@@ -3641,9 +3641,9 @@ def _test_search_local(
 
 
 def _test_resolve_article_entry(archive, path=None):
-    from zimantic.content.serving import resolve_article_entry
+    from zimantic.content.zim_paths import resolve_zim_path
 
-    return resolve_article_entry(archive, path)
+    return resolve_zim_path(archive, path)
 
 
 Search._zim_source_key = _test_zim_source_key

@@ -278,7 +278,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b"zimantic-article-ready", shell.content)
             self.assertIn(b"zimantic-article-navigate", shell.content)
             self.assertIn(b"zimantic-parent-article-navigate", shell.content)
-            self.assertIn(f"/random?zim={ZIM_URL}".encode(), shell.content)
+            self.assertIn(f"/random?source={ZIM_URL}".encode(), shell.content)
             self.assertIn(b"<div data-zimantic-capture-notice hidden>", shell.content)
             self.assertIn(b"data-zimantic-capture-notice-dismiss", shell.content)
             self.assertIn(b"captureHasVisibleContent", shell.content)
@@ -323,7 +323,7 @@ class LocalIntegrationTests(unittest.TestCase):
 
             random_article = client.get(
                 "/random",
-                params={"zim": ZIM_KEY},
+                params={"source": ZIM_KEY},
                 follow_redirects=False,
             )
             self.assertEqual(random_article.status_code, 307)
@@ -352,7 +352,10 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertNotIn(b'src=f"/article/{ZIM_URL}/missing"', missing.content)
             missing_raw = client.get(f"/article/{ZIM_URL}/missing")
             self.assertEqual(missing_raw.status_code, 404)
-            self.assertEqual(missing_raw.json(), {"detail": "article not found"})
+            self.assertEqual(
+                missing_raw.json(),
+                {"error": "not_found", "source": ZIM_KEY},
+            )
 
             health = client.get("/health").json()
             self.assertEqual(health["status"], "ok")

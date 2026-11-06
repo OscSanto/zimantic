@@ -545,7 +545,7 @@
       const sequence = ++zimSearchSequence;
       const params = new URLSearchParams({
         q: query,
-        zim,
+        source: zim,
         limit: String(zimSearchLimit),
       });
       fetch(`${appBasePath}/suggest?${params}`, {

@@ -17,22 +17,9 @@ if TYPE_CHECKING:
 
 from ..libzim_compat import get_entry_by_id
 from ..redirects import RedirectError, resolve_redirect_entry
+from .path import normalize_archive_path
 
 logger = logging.getLogger(__name__)
-
-
-def normalize_archive_path(path: str) -> str | None:
-    candidate = path.lstrip("/")
-    if not candidate:
-        return None
-    normalized = posixpath.normpath(candidate)
-    if (
-        normalized in {"", ".", ".."}
-        or normalized.startswith("../")
-        or normalized.startswith("/")
-    ):
-        return None
-    return normalized
 
 
 def resolve_archive_href(

@@ -806,7 +806,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("\n[data-zimantic-toolbar] {", shell.text)
 
     def test_suggest_falls_back_to_the_search_page_api(self):
-        response = self.client.get("/suggest?q=page&zim=manual&limit=5")
+        response = self.client.get("/suggest?q=page&source=manual&limit=5")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["title"], "Page")
         self.assertEqual(

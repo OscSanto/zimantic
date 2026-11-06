@@ -1,141 +1,22 @@
-"""Archive-level helpers for serving ZIM articles and random entries."""
+"""Provider-neutral content helpers.
+
+Archive-specific parsing and extraction now live in the provider store that
+owns the backing content.  What remains here is the bounded random-article
+policy and shared serving limits, which several stores use.
+"""
+
+from __future__ import annotations
 
 import secrets
 import sqlite3
 from typing import Any
 
 from ..libzim_compat import get_entry_by_id
-from ..redirects import RedirectError, resolve_redirect_entry
-from .reader import _READABLE_MIMETYPES, normalize_archive_path
+from .reader import _READABLE_MIMETYPES
 
 RANDOM_ARTICLE_ATTEMPTS = 128
 HEAD_READ_BYTES = 256 << 10
 MAX_ICON_BYTES = 1 << 20
-
-
-class ArticleNotFoundError(Exception):
-    """The requested local ZIM or article path does not exist."""
-
-
-class ArticleSourceNotFoundError(ArticleNotFoundError):
-    """The named local source is not installed."""
-
-
-class ArticleUnavailableError(Exception):
-    """A local ZIM exists but cannot currently serve the requested article."""
-
-
-class ArticleTooLargeError(ArticleUnavailableError):
-    """The requested entry exceeds the configured serving limit."""
-
-
-def normalize_article_path(path: str) -> str:
-    # The ASGI server already percent-decodes the request path before it
-    # gets here. Unquoting again corrupts entries whose names contain
-    # literal escapes, such as the LibreTexts cover thumbnails stored as
-    # ``.../mindtouch.page%23thumbnail?revision=2``.
-    path = str(path)
-    if not path or path.startswith("/") or "\\" in path:
-        raise ArticleNotFoundError("invalid article path")
-    trailing_slash = path.endswith("/")
-    candidate = path[:-1] if trailing_slash else path
-    if any(part == ".." for part in candidate.split("/")):
-        raise ArticleNotFoundError("invalid article path")
-    normalized = normalize_archive_path(candidate)
-    if normalized is None or normalized != candidate:
-        raise ArticleNotFoundError("invalid article path")
-    return normalized + "/" if trailing_slash else normalized
-
-
-def resolve_article_entry(archive: Any, requested_path: str | None = None):
-    from .zim_paths import AmbiguousZimPathError, ZimPathError, ZimPathNotFoundError, resolve_zim_path
-
-    try:
-        return resolve_zim_path(archive, requested_path)
-    except AmbiguousZimPathError as error:
-        raise ArticleUnavailableError(str(error)) from error
-    except ZimPathNotFoundError as error:
-        raise ArticleNotFoundError("article not found") from error
-    except ZimPathError as error:
-        raise ArticleUnavailableError(str(error)) from error
-
-
-def read_archive_article(
-    archive: Any,
-    zim_name: str,
-    path: str | None,
-    head_only: bool,
-    max_bytes: int,
-) -> dict[str, Any]:
-    requested_path = None if path is None else normalize_article_path(path)
-    try:
-        entry = resolve_article_entry(archive, requested_path)
-        item = entry.get_item()
-        mimetype = (
-            (item.mimetype or "application/octet-stream")
-            .split(";", 1)[0]
-            .strip()
-            .lower()
-        )
-        size = int(getattr(item, "size", 0) or 0)
-        if size > max_bytes:
-            raise ArticleTooLargeError(
-                f"article exceeds the {max_bytes} byte serving limit"
-            )
-        content = item.content[:HEAD_READ_BYTES] if head_only else item.content
-    except (ArticleNotFoundError, ArticleUnavailableError):
-        raise
-    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
-        raise ArticleUnavailableError("article content is unavailable") from error
-    if not head_only and len(content) > max_bytes:
-        raise ArticleTooLargeError(
-            f"article exceeds the {max_bytes} byte serving limit"
-        )
-    return {
-        "zim": zim_name,
-        "path": entry.path,
-        "title": entry.title,
-        "mimetype": mimetype,
-        "content": content,
-    }
-
-
-def read_archive_icon(
-    archive: Any,
-    zim_name: str,
-    icon_path: str | None,
-    max_article_bytes: int,
-) -> dict[str, Any]:
-    if icon_path:
-        return read_archive_article(
-            archive,
-            zim_name,
-            icon_path,
-            False,
-            max_article_bytes,
-        )
-    try:
-        item = archive.get_illustration_item(48)
-        content = item.content
-        mimetype = (
-            (item.mimetype or "application/octet-stream")
-            .split(";", 1)[0]
-            .strip()
-            .lower()
-        )
-    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
-        raise ArticleNotFoundError("source icon not found") from error
-    if len(content) > MAX_ICON_BYTES:
-        raise ArticleTooLargeError(
-            f"source icon exceeds the {MAX_ICON_BYTES} byte serving limit"
-        )
-    return {
-        "zim": zim_name,
-        "path": None,
-        "title": zim_name,
-        "mimetype": mimetype,
-        "content": content,
-    }
 
 
 def is_random_article_entry(entry: Any) -> bool:
@@ -216,3 +97,13 @@ def random_fallback_article(
     except (KeyError, RuntimeError, ValueError, IndexError):
         return None
     return entry.path
+
+
+__all__ = [
+    "HEAD_READ_BYTES",
+    "MAX_ICON_BYTES",
+    "RANDOM_ARTICLE_ATTEMPTS",
+    "is_random_article_entry",
+    "random_fallback_article",
+    "random_indexed_article",
+]

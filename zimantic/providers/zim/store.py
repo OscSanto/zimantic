@@ -1,34 +1,71 @@
 """Path-addressed content store for one ZIM source.
 
-This is the reference local store.  Range responses are completed in phase 03;
-until then ``read_range`` reports unsupported without changing the stable
-``ContentStore`` contract.
+This is the reference local store.  It owns archive entry resolution, MIME and
+size normalization, redirect collapsing, bounded reads, ranges, icons, and
+random article selection.  The core and web layers only see the canonical
+:class:`zimantic.content.store.ContentStore` contract.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from ...content.path import normalize_article_path
 from ...content.serving import (
+    HEAD_READ_BYTES,
     MAX_ICON_BYTES,
     RANDOM_ARTICLE_ATTEMPTS,
+    random_fallback_article,
+    random_indexed_article,
+)
+from ...content.store import (
+    ArticleData,
     ArticleNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
-    normalize_article_path,
-    random_fallback_article,
-    random_indexed_article,
-    read_archive_article,
-    read_archive_icon,
-    resolve_article_entry,
+    ContentEntry,
+    ContentRange,
 )
-from ...content.store import ArticleData, ContentEntry
+from ...content.zim_paths import (
+    AmbiguousZimPathError,
+    ZimPathError,
+    ZimPathNotFoundError,
+    resolve_zim_path,
+)
 from ...libzim_compat import get_entry_by_id
 from .metadata import find_archive_icon_path
 
+logger = logging.getLogger(__name__)
+
+
+def _normalize_mimetype(value: Any) -> str:
+    return (
+        (str(value or "application/octet-stream"))
+        .split(";", 1)[0]
+        .strip()
+        .lower()
+    )
+
+
+def _item_size(item: Any) -> int | None:
+    value = getattr(item, "size", None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 
 class ArchiveContentStore:
-    """Read articles, assets, icons, and random entries from one ZIM."""
+    """Read articles, assets, icons, and random entries from one ZIM.
+
+    libzim entry reads are thread-safe; ``index`` contributes a courtesy read
+    lock so a concurrent reload cannot close the archive under an active read.
+    The store itself is read-only.  ``close`` is idempotent and does not close
+    an archive still owned by a runtime index.
+    """
 
     def __init__(
         self,
@@ -41,6 +78,7 @@ class ArchiveContentStore:
         icon_path: str = "",
         max_article_bytes: int,
         max_icon_bytes: int = MAX_ICON_BYTES,
+        owns_archive: bool = False,
     ) -> None:
         self.source = source
         self.archive = archive
@@ -50,55 +88,129 @@ class ArchiveContentStore:
         self.icon_path = icon_path
         self.max_article_bytes = max_article_bytes
         self.max_icon_bytes = max_icon_bytes
+        self._owns_archive = owns_archive
         self._closed = False
 
     # -- lifecycle ---------------------------------------------------------
 
     def _acquire(self) -> None:
         if self.index is not None:
-            self.index.acquire()
+            try:
+                self.index.acquire()
+            except RuntimeError as error:
+                raise ArticleUnavailableError(
+                    "source store is being reloaded"
+                ) from error
 
     def _release(self) -> None:
         if self.index is not None:
             self.index.release()
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        if not self._owns_archive:
+            return
+        archive = self.archive
+        self.archive = None
+        close = getattr(archive, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
-    # -- content -----------------------------------------------------------
+    # -- resolution --------------------------------------------------------
+
+    def _resolve_entry(self, path: str | None) -> Any:
+        try:
+            return resolve_zim_path(self.archive, path)
+        except AmbiguousZimPathError as error:
+            logger.warning(
+                "zimantic: ambiguous content path %r in source %s",
+                path or "",
+                self.source.key,
+            )
+            raise ArticleNotFoundError("article not found") from error
+        except ZimPathNotFoundError as error:
+            raise ArticleNotFoundError("article not found") from error
+        except ZimPathError as error:
+            logger.warning(
+                "zimantic: unverifiable content path %r in source %s",
+                path or "",
+                self.source.key,
+            )
+            raise ArticleNotFoundError("article not found") from error
+        except (
+            AttributeError,
+            KeyError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise ArticleUnavailableError(
+                "article content is unavailable"
+            ) from error
+
+    def _entry_item(self, entry: Any) -> Any:
+        try:
+            return entry.get_item()
+        except (
+            AttributeError,
+            KeyError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise ArticleUnavailableError(
+                "article content is unavailable"
+            ) from error
 
     def main_path(self) -> str | None:
         if self.source.homepage:
             return self.source.homepage
+        self._acquire()
         try:
-            return resolve_article_entry(self.archive, None).path
+            return self._resolve_entry(None).path
         except (ArticleNotFoundError, ArticleUnavailableError):
             return None
+        finally:
+            self._release()
 
     def resolve(self, path: str | None) -> ContentEntry:
         requested = None if path is None else normalize_article_path(path)
-        entry = resolve_article_entry(self.archive, requested)
+        self._acquire()
         try:
-            item = entry.get_item()
-            mimetype = (
-                (item.mimetype or "application/octet-stream")
-                .split(";", 1)[0]
-                .strip()
-                .lower()
+            entry = self._resolve_entry(requested)
+            try:
+                item = self._entry_item(entry)
+                mimetype = _normalize_mimetype(getattr(item, "mimetype", None))
+                size = _item_size(item)
+            except ArticleUnavailableError:
+                mimetype = "application/octet-stream"
+                size = None
+            try:
+                final_path = str(entry.path)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ArticleUnavailableError(
+                    "article content is unavailable"
+                ) from error
+            return ContentEntry(
+                path=final_path,
+                title=getattr(entry, "title", None) or final_path,
+                mimetype=mimetype,
+                size=size,
+                redirect_path=(
+                    requested
+                    if requested is not None and requested != final_path
+                    else None
+                ),
             )
-            size = int(getattr(item, "size", 0) or 0)
-        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
-            mimetype = "application/octet-stream"
-            size = None
-        return ContentEntry(
-            path=entry.path,
-            title=getattr(entry, "title", None) or entry.path,
-            mimetype=mimetype,
-            size=size,
-            redirect_path=(
-                requested if requested is not None and requested != entry.path else None
-            ),
-        )
+        finally:
+            self._release()
 
     def exists(self, path: str) -> bool:
         try:
@@ -107,44 +219,125 @@ class ArchiveContentStore:
         except (ArticleNotFoundError, ArticleUnavailableError, ValueError):
             return False
 
+    # -- reads -------------------------------------------------------------
+
     def read(
         self, path: str | None, *, head_only: bool, max_bytes: int
     ) -> ArticleData:
         self._acquire()
         try:
-            article = read_archive_article(
-                self.archive,
-                self.source.key,
-                path,
-                head_only,
-                min(max_bytes, self.max_article_bytes),
+            requested = None if path is None else normalize_article_path(path)
+            entry = self._resolve_entry(requested)
+            item = self._entry_item(entry)
+            size = _item_size(item)
+            mimetype = _normalize_mimetype(getattr(item, "mimetype", None))
+            limit = max(0, int(max_bytes))
+            if head_only:
+                prefix_limit = min(limit, HEAD_READ_BYTES)
+                try:
+                    content = bytes(item.content[:prefix_limit])
+                except (
+                    AttributeError,
+                    KeyError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as error:
+                    raise ArticleUnavailableError(
+                        "article content is unavailable"
+                    ) from error
+                total = size
+                truncated = True if size is None else len(content) < size
+            else:
+                if size is not None and size > limit:
+                    raise ArticleTooLargeError(
+                        f"article exceeds the {limit} byte serving limit"
+                    )
+                try:
+                    content = bytes(item.content)
+                except (
+                    AttributeError,
+                    KeyError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as error:
+                    raise ArticleUnavailableError(
+                        "article content is unavailable"
+                    ) from error
+                if len(content) > limit:
+                    raise ArticleTooLargeError(
+                        f"article exceeds the {limit} byte serving limit"
+                    )
+                total = size if size is not None else len(content)
+                truncated = total is not None and len(content) < total
+            return ArticleData(
+                source_key=self.source.key,
+                path=str(entry.path),
+                title=getattr(entry, "title", None) or str(entry.path),
+                mimetype=mimetype,
+                content=content,
+                total=total,
+                truncated=truncated,
             )
         finally:
             self._release()
-        content = bytes(article["content"])
-        total = None
-        try:
-            resolved = resolve_article_entry(
-                self.archive,
-                None if path is None else normalize_article_path(path),
-            )
-            total = int(resolved.get_item().size)
-        except Exception:
-            total = len(content) if not head_only else None
-        return ArticleData(
-            source_key=self.source.key,
-            path=article["path"],
-            title=article["title"],
-            mimetype=article["mimetype"],
-            content=content,
-            total=total,
-            truncated=bool(head_only),
-        )
 
     def read_range(
         self, path: str, *, start: int, end: int, max_bytes: int
-    ):
-        raise NotImplementedError("range requests are implemented in phase 03")
+    ) -> ContentRange:
+        start = int(start)
+        end = int(end)
+        if start < 0 or end < start:
+            raise ValueError("invalid content range")
+        self._acquire()
+        try:
+            requested = normalize_article_path(path)
+            entry = self._resolve_entry(requested)
+            item = self._entry_item(entry)
+            total = _item_size(item)
+            if total is None:
+                raise ArticleUnavailableError(
+                    "content length is unavailable"
+                )
+            if start >= total:
+                raise ValueError("content range starts past the representation")
+            end = min(end, total - 1)
+            limit = max(0, int(max_bytes))
+            # libzim exposes the decompressed entry as one buffer rather than a
+            # seekable file.  Read it only when the whole representation fits the
+            # configured limit; otherwise the honest answer is too-large.
+            if total > limit:
+                raise ArticleTooLargeError(
+                    f"article exceeds the {limit} byte serving limit"
+                )
+            try:
+                content = bytes(item.content)[start : end + 1]
+            except (
+                AttributeError,
+                KeyError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as error:
+                raise ArticleUnavailableError(
+                    "article content is unavailable"
+                ) from error
+            return ContentRange(
+                source_key=self.source.key,
+                path=str(entry.path),
+                title=getattr(entry, "title", None) or str(entry.path),
+                mimetype=_normalize_mimetype(getattr(item, "mimetype", None)),
+                content=content,
+                start=start,
+                end=end,
+                total=total,
+            )
+        finally:
+            self._release()
 
     def random_path(self) -> str | None:
         self._acquire()
@@ -162,7 +355,6 @@ class ArchiveContentStore:
                         path = None
                     if path:
                         return path
-            if self.index is not None:
                 return random_fallback_article(
                     self.index,
                     attempts=RANDOM_ARTICLE_ATTEMPTS,
@@ -177,7 +369,25 @@ class ArchiveContentStore:
             self._release()
 
     def icon(self, max_bytes: int) -> ArticleData | None:
-        limit = min(max_bytes, self.max_icon_bytes)
+        limit = max(0, min(int(max_bytes), self.max_icon_bytes))
+        # The discovery-time path already prefers "-/icon" and then homepage
+        # links; only then does an embedded illustration participate.
+        if self.icon_path and self.exists(self.icon_path):
+            return self.read(self.icon_path, head_only=False, max_bytes=limit)
+        homepage = self.main_path()
+        try:
+            discovered = find_archive_icon_path(self.archive, homepage)
+        except (
+            AttributeError,
+            KeyError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            discovered = None
+        if discovered and discovered != self.icon_path and self.exists(discovered):
+            return self.read(discovered, head_only=False, max_bytes=limit)
         if self.icon_data:
             data = self.icon_data
             if len(data) > limit:
@@ -188,44 +398,37 @@ class ArchiveContentStore:
                 source_key=self.source.key,
                 path=None,
                 title=self.source.title or self.source.key,
-                mimetype=(self.icon_mime_type or "application/octet-stream")
-                .split(";", 1)[0]
-                .strip()
-                .lower(),
-                content=data,
-                total=len(data),
-                truncated=False,
-            )
-        if self.icon_path and self.exists(self.icon_path):
-            return self.read(self.icon_path, head_only=False, max_bytes=limit)
-        try:
-            icon = read_archive_icon(
-                self.archive,
-                self.source.key,
-                None,
-                min(limit, self.max_article_bytes),
-            )
-        except (ArticleNotFoundError, ArticleTooLargeError):
-            icon = None
-        if icon is not None:
-            data = bytes(icon["content"])
-            return ArticleData(
-                source_key=self.source.key,
-                path=None,
-                title=self.source.title or self.source.key,
-                mimetype=icon["mimetype"],
+                mimetype=_normalize_mimetype(self.icon_mime_type),
                 content=data,
                 total=len(data),
                 truncated=False,
             )
         try:
-            homepage = self.main_path()
-        except (ArticleNotFoundError, ArticleUnavailableError):
-            homepage = None
-        path = find_archive_icon_path(self.archive, homepage)
-        if not path:
+            item = self.archive.get_illustration_item(48)
+            data = bytes(item.content)
+            mimetype = _normalize_mimetype(getattr(item, "mimetype", None))
+        except (
+            AttributeError,
+            KeyError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
             return None
-        return self.read(path, head_only=False, max_bytes=limit)
+        if len(data) > limit:
+            raise ArticleTooLargeError(
+                f"source icon exceeds the {limit} byte serving limit"
+            )
+        return ArticleData(
+            source_key=self.source.key,
+            path=None,
+            title=self.source.title or self.source.key,
+            mimetype=mimetype,
+            content=data,
+            total=len(data),
+            truncated=False,
+        )
 
 
 class _ArchiveOnly:

@@ -201,6 +201,39 @@ console.log(JSON.stringify({{
         self.assertIsNone(payload["mailto"])
         self.assertIsNone(payload["otherOrigin"])
 
+    def test_colon_source_keys_stay_percent_encoded_in_bridge_urls(self):
+        key = "files%3Amodules%3Aroot"
+        base_path = "/zimantic"
+        shell_href = (
+            f"http://example.test{base_path}/content/{key}/example.com/page"
+        )
+        article_href = (
+            f"http://example.test{base_path}/article/{key}/example.com/page"
+        )
+        script = f"""
+const location = {{href: {json.dumps(shell_href)}}};
+const shellUrl = new URL(location.href);
+const articleFrame = {{getAttribute: () => {json.dumps(article_href)}}};
+const appBasePath = {json.dumps(base_path)};
+{self.local_source}
+{self.helper_source}
+const route = articleRoute({json.dumps(article_href)});
+console.log(JSON.stringify({{
+  zim: route && route.zim,
+  content: route && contentPathFor(route.url),
+  offline: route && offlineUrlFor(
+    new URL("https://www.example.com/next?q=2#z"), route
+  ),
+}}));
+"""
+        payload = _run_node(script)
+        self.assertEqual(payload["zim"], key)
+        self.assertEqual(
+            payload["content"], f"{base_path}/content/{key}/example.com/page"
+        )
+        self.assertIn(f"{base_path}/content/{key}/example.com/next", payload["offline"])
+        self.assertNotIn("files:modules:root", payload["offline"])
+
     def _handle(self, data, *, base_path="/zimantic", embedded=True):
         shell_href = (
             f"http://example.test{base_path}/content/manual/example.com/page?x=1"

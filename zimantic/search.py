@@ -15,21 +15,18 @@ from pathlib import Path
 from typing import Any
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
+from .content.path import normalize_article_path
 from .content.reader import DEFAULT_MAX_HTML_BYTES, DEFAULT_PREVIEW_CHARS
-from .content.serving import (
-    HEAD_READ_BYTES,
-    RANDOM_ARTICLE_ATTEMPTS,
+from .content.serving import HEAD_READ_BYTES, RANDOM_ARTICLE_ATTEMPTS
+from .content.store import (
+    ArticleData,
     ArticleNotFoundError,
     ArticleSourceNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
-    is_random_article_entry,
-    normalize_article_path,
-    random_fallback_article,
-    random_indexed_article,
-    read_archive_article,
-    read_archive_icon,
-    resolve_article_entry,
+    ContentEntry,
+    ContentRange,
+    ContentStore,
 )
 from .contracts import SourceInfo, SourceResult
 from .providers.base import CollectionInfo, CollectionSnapshot, ProviderContext, SourceQuery
@@ -88,15 +85,9 @@ __all__ = [
     "_deduplicate_ranked",
     "_render_ranked_document",
     "_rrf_scores",
-    "is_random_article_entry",
     "matched_by",
     "normalize_article_path",
-    "random_fallback_article",
-    "random_indexed_article",
     "rank_results",
-    "read_archive_article",
-    "read_archive_icon",
-    "resolve_article_entry",
 ]
 
 
@@ -832,64 +823,133 @@ class Search:
         with self._state_lock:
             return sorted(self.sources)
 
-    def _runtime_lookup(self, identifier: str) -> tuple[SourceInfo, Any]:
-        source = self.resolve_source(identifier)
+    def resolve_content_source(self, identifier: str) -> SourceInfo | None:
+        """Resolve an exact canonical source key for content serving."""
+        return self.resolve_source(identifier)
+
+    def content_store(self, identifier: str) -> ContentStore:
+        """Open the canonical content store for one source key.
+
+        The caller owns the returned store and must close it.  Missing sources,
+        missing stores, and opening failures stay distinct so the HTTP layer can
+        map them to the documented status codes.
+        """
+        source = self.resolve_content_source(identifier)
         if source is None:
             raise ArticleSourceNotFoundError("source not found")
         with self._state_lock:
             runtime = self.runtimes.get(source.collection_key)
         if runtime is None:
             raise ArticleUnavailableError("source is unavailable")
-        return source, runtime
+        store = runtime.content_store(source)
+        if store is None:
+            raise ArticleNotFoundError("source has no content store")
+        return store
+
+    def resolve_content(
+        self, identifier: str, path: str | None = None
+    ) -> ContentEntry:
+        """Resolve one source path to its final entry and metadata."""
+        store = self.content_store(identifier)
+        try:
+            return store.resolve(path)
+        finally:
+            store.close()
 
     def read_article(
         self,
-        zim_name: str,
+        source_key: str,
         path: str | None = None,
         head_only: bool = False,
-    ) -> dict[str, Any]:
+    ) -> ArticleData:
         """Read one source entry through its runtime content store."""
-        source, runtime = self._runtime_lookup(zim_name)
-        reader = getattr(runtime, "read_article", None)
-        if not callable(reader):
-            raise ArticleNotFoundError("source content is unavailable")
-        return reader(source.key, path, head_only)
+        store = self.content_store(source_key)
+        try:
+            return store.read(
+                path,
+                head_only=head_only,
+                max_bytes=self.max_article_bytes,
+            )
+        finally:
+            store.close()
 
     def read_article_head(
-        self, zim_name: str, path: str | None = None
-    ) -> dict[str, Any]:
-        return self.read_article(zim_name, path, head_only=True)
+        self, source_key: str, path: str | None = None
+    ) -> ArticleData:
+        return self.read_article(source_key, path, head_only=True)
 
-    def article_path_exists(self, zim_name: str, path: str) -> bool:
+    def read_content_range(
+        self,
+        source_key: str,
+        path: str,
+        *,
+        start: int,
+        end: int,
+        max_bytes: int | None = None,
+    ) -> ContentRange:
+        """Read an inclusive byte range of one unchanged representation."""
+        limit = (
+            self.max_article_bytes
+            if max_bytes is None
+            else min(int(max_bytes), self.max_article_bytes)
+        )
+        store = self.content_store(source_key)
+        try:
+            return store.read_range(
+                path,
+                start=start,
+                end=end,
+                max_bytes=limit,
+            )
+        finally:
+            store.close()
+
+    def article_path_exists(self, source_key: str, path: str) -> bool:
         """Whether ``path`` resolves to a source entry."""
         try:
-            _source, runtime = self._runtime_lookup(zim_name)
-        except (ArticleSourceNotFoundError, ArticleUnavailableError):
-            return False
-        checker = getattr(runtime, "article_path_exists", None)
-        if not callable(checker):
+            store = self.content_store(source_key)
+        except (
+            ArticleSourceNotFoundError,
+            ArticleNotFoundError,
+            ArticleUnavailableError,
+        ):
             return False
         try:
-            return bool(checker(zim_name, path))
-        except (ArticleNotFoundError, ArticleUnavailableError):
+            return store.exists(path)
+        except (ArticleNotFoundError, ArticleUnavailableError, ValueError):
             return False
+        finally:
+            store.close()
 
-    def read_source_icon(self, zim_name: str) -> dict[str, Any]:
+    def read_source_icon(self, source_key: str) -> ArticleData:
         """Read the illustration selected for a source."""
-        source, runtime = self._runtime_lookup(zim_name)
-        reader = getattr(runtime, "read_source_icon", None)
-        if not callable(reader):
+        store = self.content_store(source_key)
+        try:
+            icon = store.icon(self.max_article_bytes)
+        finally:
+            store.close()
+        if icon is None:
             raise ArticleNotFoundError("source icon not found")
-        return reader(source.key)
+        return icon
 
     def random_local_source(self) -> SourceInfo:
         """Return a random readable local source that has a homepage."""
+        local_providers = {"zim", "files", "kolibri"}
         with self._state_lock:
             runtimes = [
                 runtime
                 for runtime in self.runtimes.values()
-                if getattr(runtime.collection, "provider", None) == "zim"
+                if getattr(runtime.collection, "provider", None) in local_providers
             ]
+            fallback_by_key = {
+                source.key: source
+                for source in (
+                    *self.sources.values(),
+                    *self._library_source_index.values(),
+                )
+                if source.provider in local_providers and source.homepage
+            }
+            fallback_sources = list(fallback_by_key.values())
         candidates: list[SourceInfo] = []
         for runtime in runtimes:
             chooser = getattr(runtime, "random_source", None)
@@ -900,16 +960,25 @@ class Search:
             except ArticleNotFoundError:
                 continue
         if not candidates:
+            candidates = fallback_sources
+        if not candidates:
             raise ArticleNotFoundError("no local source has a homepage")
         return secrets.choice(candidates)
 
-    def random_article_path(self, zim_name: str) -> str:
-        """Return a random indexed article path without changing search state."""
-        source, runtime = self._runtime_lookup(zim_name)
-        chooser = getattr(runtime, "random_article_path", None)
-        if not callable(chooser):
-            raise ArticleNotFoundError("random articles unavailable")
-        return chooser(source.key)
+    def random_article_path(self, source_key: str) -> str:
+        """Return a random article path without changing search state."""
+        store = self.content_store(source_key)
+        try:
+            path = store.random_path()
+        except (KeyError, RuntimeError, TypeError, ValueError, IndexError) as error:
+            raise ArticleUnavailableError(
+                "random article selection is unavailable"
+            ) from error
+        finally:
+            store.close()
+        if not path:
+            raise ArticleNotFoundError("source has no available articles")
+        return normalize_article_path(path)
 
     def health(self) -> dict[str, Any]:
         """Return read-only index, archive, and capability diagnostics."""
