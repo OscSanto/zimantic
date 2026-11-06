@@ -63,11 +63,20 @@ Rules:
   never introduce a second decode of `%3A` or content paths.
 - `SourceInfo.to_dict()` exposes `key`; the web UI continues to use `icon_url`
   and generated links only.
-- A store defines one unambiguous virtual path namespace. Files uses
+- A store defines one virtual path namespace. Files uses
   collection-relative paths for every source in that collection, including
   child-directory homepages and indexed paths. Source membership and serving
   authorization are deliberately different there; no route guesses whether
   a Files path is source-relative or collection-relative.
+- A result URL uses only its source key and canonical content path. Redirect
+  rows may share their final target's path; they represent the same item. If
+  distinct permitted final items have the same canonical path, omit the
+  affected search hits and report partial/error rather than guess; a direct
+  ambiguous request fails closed. Never infer uniqueness solely from a
+  truncated index manifest.
+- Preserve ordinary path, query, and fragment navigation through the shell,
+  raw iframe, redirects, history, and highlighting. The result UI follows the
+  supplied `url` rather than reconstructing it from display fields.
 
 ### `ContentStore`
 
@@ -80,6 +89,8 @@ Behavior:
 
 - `resolve` follows redirects and returns the final path; the HTTP layer
   redirects if the requested path differs.
+- Resolve only a permitted, unambiguous final item. A path that cannot be
+  resolved uniquely fails closed rather than returning an arbitrary item.
 - `read` enforces `max_article_bytes` for a complete representation.
   `head_only` is a bounded prefix read for internal extraction, not the
   implementation of an HTTP HEAD response. Every `ArticleData` reports
@@ -125,6 +136,7 @@ The route error contract is fixed:
 | Known source with no `ContentStore` (for example Kiwix) | `404` with the same envelope; do not redirect or proxy |
 | Known but unavailable local source | `503` with a retryable source-unavailable error |
 | Missing path in an available store | `404` with the standard not-found envelope |
+| Ambiguous or unverifiable path | `404` with the standard not-found envelope; record a diagnostic |
 
 `/article` includes its normal CORS headers on every row above. Error payloads
 contain a stable error code and public source key only; they never include a
@@ -168,6 +180,9 @@ Add optional `Range` handling to the raw content response:
 - A satisfiable range returns `206` with `Content-Range`, `Content-Length`, and
   `Accept-Ranges: bytes`; an unsatisfiable range returns `416` with
   `Content-Range: bytes */<total>`.
+- If the store cannot determine the total representation length, ignore the
+  range and return a bounded full response rather than inventing `206`/`416`
+  metadata. HEAD may omit `Content-Length` when it is genuinely unknown.
 - Apply `max_article_bytes` to the returned slice, not the total file size.
   If a requested range exceeds that cap, return a bounded subset as `206` with
   its actual `Content-Range` (for suffix ranges, keep the end of the item).
@@ -184,6 +199,11 @@ Add optional `Range` handling to the raw content response:
   generate ETags. Preserve that policy; a newly added strong ETag must identify
   the actual bytes, not just file size/mtime or an absolute path. Do not read an
   entire large media item merely to produce a validator for a range request.
+- Initially the stores provide no validators, so `If-Range` always mismatches
+  and non-wildcard validator conditions cannot match. Still honor
+  `If-None-Match: *` for an existing representation. Do not invent validators
+  from file metadata; any future store-provided validator needs an explicit
+  content-contract extension.
 - Ignore ranges on bridge-decorated HTML and return the normal bounded `200`
   representation; byte offsets and validators for stored HTML do not describe
   the decorated response. HEAD metadata for that representation must likewise
@@ -191,6 +211,11 @@ Add optional `Range` handling to the raw content response:
 - Preserve `Access-Control-Allow-Origin: *` on `/article` success, redirects,
   and error responses, including `206`, `416`, and too-large errors. Expose
   range/validator headers needed by scripts in opaque-origin sandbox frames.
+- Handle CORS preflight on `/article` for opaque-origin scripts sending
+  `Range`, `If-Range`, `If-None-Match`, or `If-Modified-Since`: allow only
+  `GET`, `HEAD`, and `OPTIONS` and those request headers, without credentials.
+  Expose `Content-Range`, `Accept-Ranges`, and applicable validator headers on
+  actual responses. Preflight must not read content or bypass path confinement.
 
 This can ship unused in this phase; files and Kolibri media need it.
 
@@ -199,9 +224,10 @@ This can ship unused in this phase; files and Kolibri media need it.
 - Reject encoded separators using the raw request path before the ASGI
   server's decoding; validate the decoded path once and never decode it again.
   Read the ASGI `raw_path` (or an equivalent server-preserved request target)
-  for this check. If the deployment server does not preserve the raw path,
-  reject ambiguous encoded-separator requests rather than claiming the check
-  succeeded; document and test the supported server configuration.
+  for this check. The server and any reverse proxy must preserve the original
+  request target. If a trustworthy raw target is unavailable, fail closed for
+  path-bearing content requests; decoded paths cannot reveal whether a
+  separator was encoded. Document and test the supported deployment.
   The shared normalizer rejects absolute paths, `..`, backslashes, NUL bytes,
   and empty paths where required. Literal percent-containing filenames such as
   `%23thumbnail` must still work when properly URL-encoded; double-encoded
@@ -235,9 +261,13 @@ This can ship unused in this phase; files and Kolibri media need it.
       and `/random` to use `key`.
 - [ ] Keep colon-containing keys percent-encoded in the source path segment and
       test generated URLs, route resolution, referers, and the navigation bridge.
+- [ ] Keep paths scoped by the source key, collapse redirect aliases, and fail
+      closed for a genuinely ambiguous path.
 - [ ] Add `Range` support to `_article_content_response`.
 - [ ] Implement the range, HEAD, conditional-request, and size-limit semantics
       above, including large seekable media.
+- [ ] Support bounded `/article` CORS preflights for range and conditional
+      requests from opaque-origin sandboxes.
 - [ ] Delete any remaining old `read_archive_*` functions after moving their
       logic into the ZIM store; do not leave deprecated shims.
 - [ ] Add content-store contract tests that every local provider with a
@@ -250,13 +280,22 @@ This can ship unused in this phase; files and Kolibri media need it.
       status; result URLs use the source key.
 - [ ] Redirect chains, missing entries, too-large entries, invalid paths, and
       assets with unusual filenames.
+- [ ] Identical paths in different sources open their respective bodies.
+      Redirect aliases open their shared final item; a genuinely ambiguous path
+      never opens a guessed item, including through shell, raw, HEAD, or range.
 - [ ] `/source-icon` prefers `-/icon`, then homepage links, then illustration.
 - [ ] Random article works for indexed and unindexed ZIMs.
 - [ ] Range: full, prefix, open-ended, suffix, out-of-range, multiple ranges,
-      HEAD, `If-Range`, decorated HTML, and a file larger than the full limit.
+      unknown total, HEAD, `If-Range`, decorated HTML, and a file larger than
+      the full limit.
       Exercise `bytes=0-` and playback across bounded chunks in a browser.
+- [ ] With no validators, `If-Range` falls back to the full response and
+      `If-None-Match: *` returns a bodyless `304` for an existing representation.
 - [ ] Wildcard CORS survives normal, redirected, partial, unsatisfiable, and
       error `/article` responses for sandboxed in-article fetches.
+- [ ] A preflight with `Origin: null` and `If-Range`/`Range` succeeds with the
+      documented allowlist; disallowed methods/headers are not granted, and
+      scripts can read the exposed range/validator response headers.
 - [ ] A source with no content store returns the documented 404/error shape.
 - [ ] Traversal tests: `..`, encoded separators, double encoding, backslashes,
       NUL, absolute paths, literal percent filenames, and symlink replacement

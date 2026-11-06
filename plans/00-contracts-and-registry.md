@@ -11,9 +11,9 @@ runtimes. The old `mode`/`content_kind` shape is replaced, not carried forward.
 
 ## Non-goals
 
-- Move the per-source dispatch and search implementations needed for real
-  runtimes; phase 01 moves the remaining ZIM discovery and lifecycle, and phase
-  02 moves the remaining Kiwix catalog lifecycle.
+- Do not complete provider-specific discovery/lifecycle moves here; phase 01
+  moves the remaining ZIM parts and phase 02 the remaining Kiwix parts. Move
+  the per-source dispatch and search code needed for real runtimes now.
 - Do not change `SourceResult`, ranking, fan-out, caching, or streaming.
 - Do not publish a third-party plugin API.
 - Do not rename the public `{zim}` route parameters yet. Phase 03 owns the
@@ -148,6 +148,10 @@ class CollectionRuntime(Protocol):
     def suggest(
         self, source: SourceInfo, query: str, limit: int
     ) -> Sequence[ResultDocument]: ...
+    def preview(
+        self, source: SourceInfo, document: ResultDocument, *,
+        max_chars: int, max_bytes: int, deadline: float | None
+    ) -> tuple[str, str | None]: ...
     def content_store(self, source: SourceInfo) -> ContentStore | None: ...
     def max_sources_per_search(self) -> int | None: ...
     def refresh(self, *, wait: bool = True) -> bool: ...
@@ -158,14 +162,16 @@ class CollectionRuntime(Protocol):
     def snapshot_version(self) -> int: ...
     def close(self) -> None: ...
 
+class DiscoveryBatch(Protocol):
+    collections: Sequence[CollectionInfo]
+    def open(self, collection: CollectionInfo) -> CollectionRuntime: ...
+    def close(self) -> None: ...
+
 class SourceProvider(Protocol):
     kind: ProviderKind
     def discover(
         self, config: ProviderConfig, ctx: ProviderContext
-    ) -> Iterable[CollectionInfo]: ...
-    def open(
-        self, config: ProviderConfig, collection: CollectionInfo, ctx: ProviderContext
-    ) -> CollectionRuntime: ...
+    ) -> DiscoveryBatch: ...
 ```
 
 The canonical `ContentStore` protocol defined in `content/store.py` is:
@@ -175,7 +181,9 @@ class ContentStore(Protocol):
     def main_path(self) -> str | None: ...
     def resolve(self, path: str | None) -> ContentEntry: ...
     def exists(self, path: str) -> bool: ...
-    def read(self, path: str | None, *, head_only: bool, max_bytes: int) -> ArticleData: ...
+    def read(
+        self, path: str | None, *, head_only: bool, max_bytes: int
+    ) -> ArticleData: ...
     def read_range(
         self, path: str, *, start: int, end: int, max_bytes: int
     ) -> ContentRange: ...
@@ -196,20 +204,36 @@ inclusive byte offsets, and `total` is always the full representation length
 for a successful range response. Phase 03 specifies the remaining error,
 range, redirect, and ownership rules.
 
+Stores address items by path within a source; the source key distinguishes
+identical paths in different sources. Several indexed redirect rows may point
+to the same final item. If distinct permitted final items within one source
+have the same canonical path, do not emit a guessed result or serve an
+ambiguous path: report affected search hits as partial/error and fail the
+content request closed. A path addresses the current source, not a pinned
+version of its contents. Phase 01 proves the required bounded ZIM lookup;
+phase 03 applies the same path contract to every local store.
+
 Notes:
 
-- `discover()` receives one normalized configured entry and returns its
+- `discover()` receives one normalized configured entry and returns a batch of
   collection descriptors, not items. One entry may produce several collections
-  (Kolibri), or none. It is bounded; slow discovery runs in the background.
-  Configured-entry diagnostics exist independently of collection descriptors,
-  so a failed multi-collection discovery is still visible.
+  (Kolibri), or none. The batch opens their runtimes and owns any shared
+  discovery resource, such as a private database snapshot; providers without
+  shared resources use a lightweight batch. Discovery is bounded; slow work
+  runs in the background. Configured-entry diagnostics exist independently of
+  collection descriptors, so a failed multi-collection discovery is visible.
 - `Search` retains the configured-entry-to-collection mapping and reruns
   `discover()` on reload, not just `refresh()` on existing runtimes. Buffer a
   complete descriptor set before replacing an entry's collections; an
   incomplete/error scan retains its last complete set. Publish additions,
   removals, descriptor changes, and source snapshots atomically. Retired
-  runtimes close only after their active readers release them. This is how
-  new/removed Kolibri channels work without provider branches in `Search`.
+  runtimes close only after their active readers release them. A batch stays
+  alive until all snapshots and runtimes borrowing it retire; unchanged batches
+  shared by successive aggregate snapshots are reference-counted. On failed
+  discovery or publication, close any newly opened runtimes and the new batch
+  without touching the last published batch. Close is idempotent, including for
+  an empty batch. This handles new/removed Kolibri channels without provider
+  branches in `Search`.
 - `CollectionRuntime.search()` is one source's work. Providers whose native
   query scope is broader than one source map that source to the appropriate
   subtree or content-node filter. Indexed providers still use the generic
@@ -219,6 +243,13 @@ Notes:
   Files/Kolibri reuse the phase-04 generic helper. A provider with no suggestion
   backend, including Kiwix, returns an empty sequence. `Search.suggest()`
   retains scope/merge orchestration without accessing private index handles.
+  Omit an ambiguous suggestion and record a bounded diagnostic; this sequence
+  has no per-channel status field.
+- `preview()` receives the result document and returns bounded native lead
+  text and an optional MIME type. Local runtimes may use `ContentStore`;
+  media use native metadata without reading or decoding the media body. Kiwix
+  returns its existing result metadata without a new network request. The core
+  orchestrates hydration and caching without knowing provider internals.
 - `ContentStore` is defined in `content/store.py` during this phase. The ZIM
   store starts in phase 01 and is completed in phase 03; other local providers
   implement it later. Kiwix always returns `None`.
@@ -321,12 +352,16 @@ channel errors; `partial` means at least one usable channel/result exists but
 could not produce usable results; and `cancelled` means scheduling stopped the
 source before completion. `error` is non-null for `partial`, `error`, and
 `cancelled`, and null for `ok`. Empty successful results are `ok`, not
-`error`. `id` is the stable document identity used for deduplication: local
-indexed providers use `source_key` plus the canonical row id, while remote or
-native providers use an equivalent provider-stable identifier. It must never
-be only `source_key` plus `path`, because duplicate paths are valid. Providers
-must not put `SourceInfo` fields into result documents or silently replace an
-error with an empty successful result.
+`error`. `id` is the stable document identity used for deduplication. Encode
+`(source_key, reference)` as
+`f"{len(source_key.encode('utf-8'))}:{source_key}{reference}"`; the byte-length
+prefix makes the pair unambiguous even when either component contains colons.
+The reference is the canonical final path for local providers and a
+provider-stable item reference for remote providers. Redirect rows share their
+final target's identity. SQLite/FAISS row ids remain internal index keys and may
+include zero; they are not content URL selectors. Providers must not put
+`SourceInfo` fields into result documents or silently replace an error with an
+empty successful result.
 
 ### `SourceInfo` shape
 
@@ -351,6 +386,7 @@ media_count: int | None = None
 item_count: int | None = None
 indexed_count: int | None = None
 truncated: bool | None = None
+body_truncated_count: int | None = None
 index_freshness: str | None = None  # current | stale | unknown; None if no index
 derived_text: Mapping[str, str] | None = None  # per-op state from index meta (phase 04)
 # Optional descriptive metadata included when to_dict(include_metadata=True):
@@ -389,10 +425,16 @@ provider_id: str | None = None
   `collection`, `title`, `available`, `searchable`, `error`, `homepage`,
   `icon_url`, `size`, `intent_phrases`, `media_types`, `document_count`,
   `media_count`, `item_count`, `indexed_count`, `truncated`,
-  `index_freshness`, and `derived_text`.
+  `body_truncated_count`, `index_freshness`, and `derived_text`.
 - `indexed_count` and `truncated` describe the published index; both are
   unknown (`null`) before one exists. Freshness is `unknown` until validated.
   Later phases populate these fields without introducing alternate payloads.
+- `body_truncated_count` counts indexed rows whose lexical body was truncated
+  by the phase-04 text budget or an incomplete native extraction. It is zero
+  when the built body channel has no such rows, and `null` when the channel
+  was not built or its coverage is unknown, including legacy imports whose
+  excerpts cannot establish full-body coverage. It is independent of
+  `truncated`, which describes the item-count cap.
 - `available` means the provider can currently open/read or search the source;
   it is runtime metadata and is not stored on disk. A source may remain
   discovered/addressable while unavailable. `searchable` means it has at least
@@ -543,10 +585,18 @@ class KolibriConfig:
     path: str
     label: str | None = None
     granularity: Granularity = "children"
-    database_dir: str | None = None
+    database_path: str | None = None
     storage: str | None = None
     max_sources: int | None = None
     max_entries: int | None = None
+    max_snapshot_bytes: int = 1_073_741_824
+    snapshot_disk_budget_bytes: int = 3_221_225_472
+    snapshot_timeout_seconds: int = 10
+    max_html5_zip_entries: int = 10_000
+    max_html5_zip_directory_bytes: int = 8_388_608
+    max_html5_zip_member_bytes: int = 268_435_456
+    max_html5_zip_total_bytes: int = 1_073_741_824
+    html5_zip_timeout_seconds: int = 10
     traversal: TraversalLimits = field(default_factory=TraversalLimits)
     kind: Literal["kolibri"] = field(default="kolibri", init=False)
 
@@ -637,6 +687,10 @@ keep a `mode` fallback.
       `zimantic/content/store.py` and re-export it from `providers/base.py`.
       Define the complete `ContentStore` protocol, including `read_range`; phase
       03 implements it rather than extending the contract.
+- [ ] Remove the eager `reader.py` import from `zimantic/content/__init__.py`
+      or otherwise make package/contract imports independent of libzim.
+      Preserve existing content exports for their callers; phase 04 separately
+      makes the pure extractors usable without libzim.
 - [ ] Create `zimantic/providers/registry.py`; register working `zim` and
       `kiwix` runtimes and move the existing per-source search dispatch into
       them.
@@ -651,6 +705,8 @@ keep a `mode` fallback.
 - [ ] Add `CollectionInfo` (in `contracts.py` or `providers/base.py`; keep one
       public import path).
 - [ ] Add provider/collection state and `resolve_source` to `Search`.
+- [ ] Implement discovery-batch ownership and provider-neutral preview
+      delegation, including cleanup on failed publication and reader retirement.
 - [ ] Add `CollectionInfo.to_dict()` for descriptor fields,
       `CollectionSnapshot.to_dict()` for descriptor-plus-runtime fields,
       `collection_dicts()`, and make `source_dicts()` include the new fields
@@ -688,8 +744,18 @@ keep a `mode` fallback.
 - `provider` is the only discriminator; no serializer emits a derived kind or
   mode.
 - The frozen `ContentStore` method set is unchanged when phase 03 implements it.
+- Stores distinguish identical paths in different sources and fail closed for
+  an ambiguous path within one source.
+- Result IDs distinguish source/path pairs containing colons or non-ASCII
+  characters and collapse redirect aliases to the final path.
+- Import `zimantic.content.store` and `zimantic.providers.base` with libzim,
+  FAISS, and FastAPI unavailable, including in a fresh interpreter.
 - One configured entry can discover multiple collections; invalid or duplicate
   entries produce diagnostics without disabling unrelated valid entries.
+- Multiple runtimes can share one discovery resource without closing it early;
+  failed and empty batches release it, and reload retires it only after readers.
+- Preview delegation preserves final document identity across redirect aliases
+  and never reads media bytes solely to hydrate a result.
 - Reload reruns entry discovery, atomically adds/removes collections, and
   retains the last complete set on an incomplete scan; retired runtimes stay
   alive until active readers release them.

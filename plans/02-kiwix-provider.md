@@ -68,11 +68,15 @@ zimantic/providers/kiwix/
   retaining the last complete catalog for addressability. A failed
   per-source search marks that source unavailable/unsearchable until a
   successful retry or later successful refresh.
-- `open()` returns a runtime with the catalog entries and a
+- The discovery batch's `open()` returns a runtime with the catalog entries and a
   `search(source, request)` implementation that calls `search_kiwix`.
 - No local `ContentStore`; return `None`. Result documents keep absolute
   `url` links and are served by `kiwix-serve`, not by `/content/{key}/...`. The
   unified content route applies to local providers; Kiwix keeps external links.
+- Use phase 00's result-ID encoding with the source key and a stable remote
+  item reference, such as the validated result URL; retain the existing title
+  fallback when no link is supplied. Distinguish URL and title references so
+  their strings cannot collide.
 - Validate result URLs and redirects: only HTTP(S) links on the configured
   Kiwix origin are accepted, with no embedded credentials. Resolve relative
   links against that origin; reject `javascript:`, `data:`, scheme-relative
@@ -99,7 +103,9 @@ provider:
 
 - `CollectionRuntime.max_sources_per_search()` returns
   `max_remote_sources` for Kiwix (default 100; `0` disables unscoped remote
-  search).
+  search) for that configured server entry. Each server's unscoped fan-out
+  budget is applied independently; the worker/provider cap and overall
+  deadline still bound their combined work.
 - The core applies the budget only to unscoped searches and still honors an
   explicit selection that names a source outside the budget.
 - `source_timeout` bounds each remote source search.
@@ -112,8 +118,11 @@ provider:
   releasing worker/provider slots before their calls actually exit. Phase 07
   exposes the common scope summary; phase 08 documents the existing setting.
 - The per-provider task cap and fair scheduling apply here first. With more
-  than one worker and competing providers, reserve capacity for other providers;
-  with one worker, fairness is bounded by the in-flight task's deadline.
+  than one worker and competing providers, reserve capacity for other providers.
+  With one worker, fairness requires the active call to actually terminate;
+  returning a timeout alone does not free its slot. Use bounded I/O or killable
+  isolation for operations, including name resolution, whose completion cannot
+  otherwise be bounded.
 
 Keep the one-time warning text and behavior for truncated remote fan-out. The
 cap does not truncate catalog discovery or remove Kiwix books from paged
@@ -138,7 +147,7 @@ source/library APIs.
       `_bounded_catalog_url`, `_read_limited_response`, `_parse_remote_xml`,
       `_child_text`, `_local_name`, `_catalog_book`.
       Leave ZIM/icon helpers in `searching/sources.py` until phase 03.
-- [ ] Implement `KiwixProvider.discover/open` and `KiwixRuntime`.
+- [ ] Implement `KiwixProvider.discover`, its batch's `open`, and `KiwixRuntime`.
 - [ ] Move `_catalog_entries`, `_source_from_catalog` remote branch,
       `_rebuild_sources` remote branch, and `_search_kiwix` out of `Search`.
 - [ ] Move `start_catalog_refresh` and the cached-entry fallback into the
@@ -171,6 +180,9 @@ source/library APIs.
       merged search.
 - [ ] Blocked remote work cannot starve local work, including with a small
       worker pool; timed-out work is counted until it really exits.
+- [ ] With one worker, a deliberately hung remote operation is terminated
+      within its hard bound before local work is admitted; a detached but still
+      running thread is never mistaken for a free worker.
 - [ ] No network access when no Kiwix collection is configured.
 
 ## Acceptance criteria

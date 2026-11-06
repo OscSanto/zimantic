@@ -1,6 +1,8 @@
 # Source extensibility plans
 
-Status: reviewed for implementation, 2026-11-05. Implementation has not started.
+Status: reviewed for implementation. Phase 01's ZIM path resolver and phase
+06's sidecar-free Kolibri snapshot backend still require the proofs specified
+in those phases. Implementation has not started.
 
 This directory turns Zimantic from a ZIM search engine with a Kiwix remote
 special case into a search engine whose core is source-agnostic, with in-tree
@@ -23,11 +25,12 @@ re-litigation inside the phase plans:
 1. **Kolibri channel = collection.** A channel is not a source. Its searchable
    subtrees/content roots are sources.
 2. **Derived text is opt-in, operation by operation.** Native text (titles,
-   descriptions, document text) is indexed normally. Text derived from other
-   media is off by default and enabled explicitly per source: `captions` for
-   existing subtitle/caption tracks, `ocr` for images and image-only pages, and
-   `asr` for audio/video speech-to-text. Enabling one never enables another, and
-   no derived-text operation runs unless it is enabled.
+   descriptions, document text) is indexed normally. Files media filenames are
+   searchable without decoding media. Text derived from other media is off by
+   default and enabled explicitly per source: `captions` for existing
+   subtitle/caption tracks, `ocr` for images and image-only pages, and `asr`
+   for audio/video speech-to-text. Enabling one never enables another, and no
+   derived-text operation runs unless it is enabled.
 3. **Files: one configured directory = one collection.** Within it, a source is
    the searchable unit and content root. Items (individual files/pages/videos)
    are never sources.
@@ -63,6 +66,15 @@ re-litigation inside the phase plans:
     serving authorization. A child source's homepage includes its directory
     prefix, so ordinary relative shared-asset links work without a second URL
     namespace.
+12. **Source-scoped paths.** The source key distinguishes identical paths in
+    different sources. Redirects to one final item deduplicate; if distinct
+    permitted items within one source cannot be distinguished by their
+    canonical paths, omit those hits and report the ambiguity rather than
+    adding item selectors or opening a guessed item.
+13. **Read-only Kolibri snapshots.** Never modify the installation or its
+    SQLite sidecars. Brief, bounded writer delays are allowed during a safe
+    snapshot; abort a closed-database snapshot when a writer starts. Unsupported
+    cases fail closed.
 
 ## Vocabulary
 
@@ -101,9 +113,10 @@ The scale rule that came out of the earlier `stash@{0}` attempt:
 | 09 | [Hardening and rollout](09-hardening-rollout.md) | 00–08, 10 | Security, limits, contract tests, performance, staged release |
 
 Phase 00 introduces the minimal `[[collections]]` parser, freezes the complete
-`SourceInfo`/`CollectionSnapshot`/`ContentStore` contracts (including the common
-media family taxonomy), and preserves both existing search backends through real
-runtimes. Phase 01 introduces the shared generation-based index locator for ZIM
+`SourceInfo`/`CollectionSnapshot`/`ContentStore` contracts and discovery-batch
+ownership (including the common media family taxonomy), and preserves both
+existing search backends through real runtimes. Phase 01 introduces the shared
+generation-based index locator for ZIM
 build and serve; phase 04 extends the index schema and validation and adds a
 one-time validated importer that adopts recognized pre-redesign and phase-01 ZIM
 indexes without re-extracting every article when compatible. Phase 05 adds
@@ -133,7 +146,7 @@ Every phase must hold these:
   index schema. Kiwix is remote/search-only. A one-time importer may adopt only
   recognized, validated old ZIM indexes; normal readers support only the new
   layout. Preserve usable old indexes while building replacements, atomically
-  switch a complete SQLite/FAISS generation on success, and reclaim superseded
+  switch a complete SQLite generation and any FAISS artifact on success, and reclaim superseded
   files as soon as no reader pins them. Unrecognized or incompatible indexes
   are rebuilt, not served through a legacy compatibility path.
 - **One config schema.** Collections are declared only with `[[collections]]`.
@@ -169,11 +182,12 @@ These are defaults, not hard-coded promises. Each provider may tighten them.
 | Sources overall | 512 | Advisory target, not a hard in-memory cap; page API responses and bound search fan-out |
 | Indexed items per source | 500,000 | Avoid pathological trees |
 | Indexed bytes per item | global `max_entry_bytes` | One limit for every provider |
+| Indexed body text per item | global `max_body_text_bytes`, default 1 MiB | Bound lexical text independently of the shorter embedding excerpt |
 | Discovery time per provider | 10 s startup budget | Do not block serving on discovery |
 | Entries examined per traversal | 1,000,000 | Includes excluded and non-indexable entries |
 | Traversal time | 300 s | Hard work budget, distinct from the startup budget |
 | Search tasks per provider | up to `min(4, search_workers)` | Fair scheduling; reserve capacity for competitors when possible |
-| Remote sources per search | `max_remote_sources` | Bound remote fan-out |
+| Remote sources per search | each Kiwix entry's `max_remote_sources` | Bound unscoped remote fan-out per server |
 | Admitted search deadline | `search_timeout_seconds` (30 s) | Bound scheduling and result processing across every scope |
 | Listing page size | global `page_size`, maximum 200 | Bound each API response; clients page explicitly |
 
@@ -197,7 +211,8 @@ and exclusion rules.
 - A Kolibri installation appears as one collection per channel, searchable by
   title/description, serving documents, PDFs, HTML5 apps, and media; derived
   text (captions, OCR, or ASR) is included only for the operations explicitly
-  enabled on that source.
+  enabled on that source. The initial SQLite provider reads installed state from
+  Kolibri's main database, not the separate channel-import databases.
 - Every source has one key; local providers use one content route and index
   layout, while Kiwix remains external-only. There are no provider-specific
   branches or compatibility shims in the core.

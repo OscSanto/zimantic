@@ -70,12 +70,14 @@ Rules:
 - `[[collections.sources]]` overrides are keyed by exact discovered source
   key as specified in phase 04; absent switches remain off. A stale key is
   reported and never matched by title or path.
-- `include` selects native documents for indexing; `exclude` and hidden-path
-  rules apply to discovery, indexing, and serving. `**/` matches zero or more
-  directory components, so the example includes root-level files too. A
-  directory exclusion also excludes that directory itself and its descendants.
-  Match both include/exclude patterns against collection-relative POSIX paths,
-  regardless of source granularity.
+- `include` selects native documents for indexing. Permitted image, audio, and
+  video files are also title-only candidates by default, using filenames without
+  reading media bytes; their bodies contribute text only when an operation is
+  enabled. `exclude` and hidden-path rules apply to discovery, indexing, and
+  serving. `**/` matches zero or more directory components, so the example
+  includes root-level files too. A directory exclusion also excludes that
+  directory itself and its descendants. Match both include/exclude patterns
+  against collection-relative POSIX paths, regardless of source granularity.
 - There is no flat `zim_dir` key; every collection, including ZIM, is declared
   with `[[collections]]`.
 - Absolute configured `path` values are allowed. Resolve the real root once
@@ -152,6 +154,11 @@ search results and counts to a source.
   most `max_entries` and mark `truncated: true` if there is another candidate.
   When truncated, the exact total count is unknown. Serve all permitted files
   regardless of indexing and expose reduced coverage in health/API metadata.
+- The candidate cap includes title-only media. Establish deterministic
+  depth-first, collection-relative path order before applying it: fully
+  enumerate and sort each visited directory under the visit/time budgets,
+  counting excluded entries too. Do not use an arbitrary filesystem
+  enumeration prefix as the supposedly stable capped manifest.
 - Bound directory entries examined and elapsed scan time separately from the
   indexing cap. If either budget expires before the scan completes or proves
   truncation, fail that build explicitly and retain its last published index;
@@ -178,6 +185,8 @@ search results and counts to a source.
   never the bounded manifest length.
 - `indexed_count` = documents actually present in the index when known;
   `truncated` is true when the manifest exceeds `max_entries`.
+- `body_truncated_count` follows the phase-04 body-coverage contract; it is
+  independent of the item-count cap.
 - `size` = optional cheap sum from discovery only if already available; skip
   otherwise.
 - `homepage` = collection-relative `index.html`/`index.htm` within that source's
@@ -202,9 +211,14 @@ Create `providers/files/entries.py` with a `FilesEntryProducer`.
   manifest position. Bound visited entries and time as above.
 - Compute `fingerprint` from the ordered selected `(relative path, size,
   mtime)` signatures, where `mtime` is rounded to the nearest whole second,
-  plus the manifest and build settings. Re-scan and compare before publication;
-  subsecond changes and metadata-preserving writes may evade this practical
-  change detector.
+  plus the manifest, build settings, and associated inputs for enabled
+  operations. Only when captions are enabled, include the presence and
+  signatures of matching caption sidecars, so adding, editing, or removing one
+  invalidates the index even if the media file is unchanged. Do not discover or
+  track sidecars for fingerprinting while captions are off; enabling captions
+  causes the next build to rescan the source. Re-scan and compare before
+  publication; subsecond changes and metadata-preserving writes may evade this
+  practical change detector.
 - Persist `source_fingerprint` in index `meta`; phase 04 restarts the build if
   it changes between resume attempts.
 - Since the producer holds the manifest for the build, `entry_at(i)` is O(1).
@@ -214,22 +228,34 @@ Create `providers/files/entries.py` with a `FilesEntryProducer`.
 Reuse the phase-04 extraction layer:
 
 - HTML/XHTML: existing HTML parser, title, readable blocks, disambiguation
-  handling where meaningful.
-- PDF: existing PyMuPDF text layer.
+  handling where meaningful, and bounded body text beyond the short excerpt.
+- PDF: existing PyMuPDF text layer, continuing across pages up to the
+  phase-04 body limit rather than stopping at the preview length.
 - Plain text and Markdown: normalize whitespace; strip Markdown markup only if
   the existing text parser can do so without adding a dependency.
-- Skip unsupported binaries, assets, empty files, and files above
-  the effective input limit; log at debug level. The effective limit is the
+- Skip unsupported binaries, non-media assets, empty documents, and documents
+  above the effective input limit; log at debug level. The effective limit is the
   minimum of `max_file_bytes` and global `max_entry_bytes`; a derived-text
   operation may impose a lower operation-specific cap. Report cap skips as
   partial enrichment only when an enabled derived-text operation needed the
   input; ordinary excluded/unsupported files are not enrichment failures.
-- Derived text is off by default. When a source enables `captions`, `ocr`, or
-  `asr`, add eligible image/audio/video items as candidates even though the
-  default `include` only names documents. Feed them through the shared stage,
-  subject to exclusions and the global, provider, and operation byte caps. An
-  image-only PDF remains eligible for OCR even if native extraction is empty.
-  A sidecar caption file belongs to its media item, not to a separate item.
+  A media title can still be indexed from its filename when the media body
+  exceeds an extraction cap.
+- Derived text is off by default. A permitted media candidate gets a
+  title/path-only row without reading its bytes. When its source enables
+  `captions`, `ocr`, or `asr`, feed eligible items through the shared stage,
+  subject to exclusions and the global, provider, and operation byte caps.
+  An image-only PDF remains eligible for OCR even if native extraction returns
+  no excerpt; emit a title/path record so enrichment can run.
+- When captions are enabled, associate permitted `.srt`/`.vtt` sidecars in the
+  same directory with their media item. Support the full media filename
+  followed by the track extension (optionally with a language suffix) and the
+  media stem followed by an optional language suffix and track extension. A
+  stem-only match is valid only when it identifies one media file; report an
+  ambiguous match rather than attaching it to the wrong item. Sort associated
+  sidecars by relative path, then process embedded text tracks in stream order.
+  Matched sidecars are not separate result rows. Phase 04 owns embedded
+  demuxing, deduplication, and operation failure semantics.
 - `EntryRecord.id` = one-based position in the deterministic manifest,
   yielding a positive canonical row id. `EntryRecord.path` = relative path
   within the collection root (POSIX separators), including a child directory's
@@ -250,6 +276,8 @@ locator and pipeline; do not write a files-specific build dispatcher or format.
 
 Create `providers/files/store.py` implementing `ContentStore`.
 
+- Files have unique collection-relative paths and use normal path-based
+  serving without requiring an index.
 - Resolve the real collection root once and open descendants using the race-safe,
   no-symlink policy in phase 03. Fail closed if confinement cannot be enforced.
 - Deny hidden paths and `exclude` matches for direct requests as well as
@@ -299,8 +327,9 @@ setting still applies; document that untrusted file trees should enable it.
   key in the same files collection to resolve a permitted collection-relative
   path, while search results and library/source listings remain attributed to
   the source that discovered or indexed the item.
-- Previews: read through the content store; never open files without the root
-  confinement check.
+- Previews: the runtime preview hook reads documents through the content store
+  and uses filename/native metadata for media without reading its body; never
+  open files without the root confinement check.
 
 ## Work items
 
@@ -323,7 +352,7 @@ setting still applies; document that untrusted file trees should enable it.
       `zimantic build` entry point for configured files collections.
 - [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
       `homepage`, `document_count`, `media_count`, `item_count`,
-      `indexed_count`, `truncated`, and
+      `indexed_count`, `truncated`, `body_truncated_count`, and
       nullable `media_types`.
 - [ ] Document a recommended `/library/www/html/modules` configuration and the
       `granularity` trade-off in `README.md`.
@@ -355,16 +384,29 @@ modules/
       `:collapsed` source.
 - [ ] Stable ids and resume: interrupt/restart with unchanged tree resumes;
       changing a file fingerprint restarts.
+- [ ] A capped manifest is identical across differing directory-enumeration
+      orders; an oversized directory exhausts the traversal budget rather
+      than publishing a nondeterministic prefix.
 - [ ] Exceeding `max_entries` is marked truncated with unknown total; exhausting
       a traversal/time budget preserves the last published index and reports
       failure.
 - [ ] A source with permitted media omitted from the index is not falsely
       excluded by media filters.
-- [ ] Indexing extracts HTML, PDF, text, and Markdown; skips binaries and
-      oversized files.
+- [ ] Indexing extracts HTML, PDF, text, and Markdown; skips unsupported
+      binaries and oversized document bodies.
+- [ ] Body search finds terms beyond the embedding excerpt and reports a body
+      cap separately from the source item cap.
+- [ ] Permitted media filenames are searchable by title with all operations off;
+      no media bytes are read, and exclusions still apply.
 - [ ] Derived text is absent by default and no image/media bytes are decoded;
       enabling `ocr` or `asr` indexes fake-engine output with the default
       document-only `include` and records provenance.
+- [ ] A same-directory sidecar and an embedded text track attach to the
+      intended media item; ambiguous sidecars are reported. Adding, editing, or
+      removing a sidecar invalidates a captions-enabled index, while a disabled
+      sidecar is never read. With the default document includes, sidecar
+      changes do not affect a captions-disabled fingerprint; enabling captions
+      causes the next build to rescan the affected source.
 - [ ] `/content/<key>/` wraps `index.html`; raw article assets resolve beneath
       the same key, and nested pages, CSS, JS, fonts, and WASM have usable
       MIME/disposition.
@@ -400,9 +442,10 @@ modules/
 - **Source explosion.** The cap-collapse rule is mandatory and tested.
 - **Untrusted HTML.** Keep the content-shell sandbox, `nosniff`, and attachment
   policy; recommend `secure_browsing = true` for file trees.
-- **Indexing cost.** Bound entries, bytes, and file types; do not index assets or
-  decode media by default. Media items start servable but not searchable;
-  `ocr`/`asr` are explicit, capped build-time operations.
+- **Indexing cost.** Bound entries, bytes, and file types; do not index
+  non-media assets or decode media by default. Media filenames are
+  title-searchable; captions,
+  `ocr`, and `asr` are explicit, capped build-time operations.
 - **Resume drift.** Fingerprint the manifest; never resume against a changed
   file list.
 - **MIME confusion.** Prefer extension, then constrained sniffing; never serve

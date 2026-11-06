@@ -60,15 +60,32 @@ class EntryProducer(Protocol):
     def close(self) -> None: ...
 ```
 
-- Move the existing five-field `EntryRecord` unchanged into `indexing/types.py`:
-  `id: int`, `title: str`, `excerpt: str`, `path: str`, and
-  `target_id: int | None`. `excerpt` is build-time text, not a promise to retain
-  raw text in the published index.
+- Move `EntryRecord` into `indexing/types.py` and give it `id: int`,
+  `title: str`, `excerpt: str`, `path: str`, `target_id: int | None`,
+  `body: str`, and `body_truncated: bool`. `excerpt` remains the short,
+  build-time embedding text; `body` is the separately bounded lexical text.
+  Neither field promises to retain raw text in the published index.
+- A normal build indexes document body text up to global
+  `max_body_text_bytes` (default 1 MiB per item), independently of
+  `max_preview_chars` (currently 1,000). Extractors continue beyond the
+  embedding excerpt, within input, output, and time limits; truncate only at a
+  UTF-8 character boundary. Set `body_truncated` when the budget or an
+  incomplete native extraction cuts off body text. The cap applies to the
+  combined native and enabled derived contributions, in their prescribed order.
+  A fast build has no body channel. Do not silently call excerpt-only indexing
+  full-document coverage.
+- Record the number of truncated body rows as `body_truncated_count` and
+  expose it through `SourceInfo`, health, and the build report. It is zero for
+  a body build with no truncated rows, and unknown for a fast build or a
+  migrated excerpt whose full coverage cannot be established. This is separate
+  from source-level `truncated`, which denotes an item-count cap. A native
+  body cap is reported but is not itself a failed build; a requested derived
+  contribution cut off by that cap is partial enrichment and exits non-zero.
 - `EntryRecord.id` is the canonical non-negative 63-bit SQLite row id written to
   `docs.rowid`, `vecs.id`, FAISS, and `EntryRecord.target_id`. It is not an
   arbitrary provider-native id. Providers must keep it stable for the duration
-  of a source snapshot and across unchanged rebuilds; path is not an identity
-  because duplicate paths are permitted.
+  of a source snapshot and across unchanged rebuilds. Redirect rows can share
+  a target path while retaining their own row ids.
 - Providers own the deterministic mapping from their native identity to this
   row-id space. ZIM preserves the archive entry's raw `_index` and redirect
   target id, including zero, so existing FTS rowids and FAISS ids do not need
@@ -76,14 +93,23 @@ class EntryProducer(Protocol):
   deterministic positive 63-bit `(channel_id, node_id)` mapping. A
   provider must reject overflow or mapping collisions rather than merge rows.
   The core never remaps ids after receiving an `EntryRecord`.
+- A provider must establish that a result's canonical path resolves to one
+  permitted final item. If distinct final items share a path or uniqueness
+  cannot be proved, omit the affected hits and report partial/error rather
+  than opening an arbitrary item. A capped manifest alone cannot establish
+  uniqueness; redirect aliases to one target are not ambiguous.
 - `EntryRecord.target_id` is the nullable canonical row id of the final
   redirect target; non-redirect rows use `None`. The field is named
-  `target_id` everywhere, including provider plans and the SQLite `docs.target`
-  column. `count` is the length of the bounded build manifest, not necessarily
-  the total source size. Non-indexable entries return `None` and are reported
-  as skipped rather than changing row-id assignment.
+  `target_id` in the producer contract and is stored in SQLite's `docs.target`
+  column. A redirect record's `path` is the final target path; a non-redirect
+  record's `path` is its own. `count` is the length of the bounded build
+  manifest, not necessarily the total source size. Non-indexable entries return
+  `None` and are reported as skipped rather than changing row-id assignment.
 - `entry_at` returns `None` for non-indexable items; the producer is
-  responsible for harmless skips.
+  responsible for harmless skips. An eligible media item or image-only document
+  with enabled enrichment must instead yield a title/path record even when
+  native extraction is empty, so the shared stage can run. Files media also
+  yield title-only records when enrichment is off.
 - `entry_at(index)` accepts a zero-based manifest ordinal in
   `0 <= index < count`; a caller outside that range receives `None`.
   `meta.next` is the next zero-based ordinal to visit, so `0` starts a build
@@ -93,10 +119,12 @@ class EntryProducer(Protocol):
   false on a detected change and raises a reported error if validation cannot
   finish; merely rereading the stored `fingerprint` is not validation.
 - `fingerprint` covers the ordered selected manifest, relevant source
-  signatures, extraction settings, and enabled derived-text inputs. Use ZIM
-  UUID/size/mtime rounded to whole seconds, a files manifest, and a consistent
-  Kolibri DB snapshot plus selected storage-file signatures as specified in
-  the provider plans.
+  signatures, extraction settings, and enabled derived-text inputs, including
+  the presence and signatures of associated caption sidecars. Use ZIM
+  UUID/size/mtime rounded to whole seconds, a files manifest, and relevant
+  selected-channel rows from a consistent Kolibri installation DB snapshot plus
+  selected storage-file signatures as specified in the provider plans. Do not
+  fingerprint unrelated channels or Kolibri user/activity tables.
 - Size/mtime signatures are a practical change detector, not a proof of
   identical bytes: same-size writes with restored timestamps can evade them.
   Document that limitation and require immutable content or an external
@@ -170,16 +198,23 @@ class DerivedTextProducer(Protocol):
   provider-confined inputs. The core decides whether to read them and computes
   the digest while consuming an enabled input, rather than requiring a separate
   digest read. Enumeration itself must not read bytes for a disabled operation.
+- `captions` inputs are standalone text tracks; the same `audio`/`video` inputs
+  serve embedded-caption extraction and ASR when their respective operations
+  are enabled. Do not track a separate caption-container kind. Enabling
+  captions changes the fingerprint, so the next normal build rescans and
+  rebuilds the affected source.
 - The hook is provider-neutral: ZIM, files, and Kolibri can implement it, while
   a provider with no local content bytes (Kiwix) cannot. A provider without the
   hook is not enrichable; a requested operation is reported unavailable, not
   silently ignored. ZIM adoption may follow files/Kolibri rather than delaying
   this phase.
 - Operations are independent and off by default:
-  - `captions = "index"` parses existing subtitle/caption tracks; no model.
+  - `captions = "index"` parses existing sidecar and embedded text
+    subtitle/caption tracks; no model.
   - `ocr = "tesseract"` extracts text from images and image-only pages.
   - `asr = "whisper"` transcribes speech from audio/video.
-- The core skips an input kind that the source has not enabled. Prefer native
+- Process standalone caption inputs only for captions, image inputs only for
+  OCR, and audio/video inputs when captions or ASR is enabled. Prefer native
   text, then enabled captions, then OCR/ASR: skip ASR when enabled caption
   parsing produced usable text, and skip OCR for each page with a text layer.
   When captions are off, never read them to decide whether ASR should run.
@@ -200,16 +235,23 @@ class DerivedTextProducer(Protocol):
   language, parser version, and caps). Partial/failed outputs are not cached as
   complete. Cache entries are not source identity and may be removed by
   `zimantic prune`.
-- Provenance and excerpt composition: retain native text first, then
+- The cache key uses the digest of the complete consumed input, never a partial
+  container read. For cached embedded-caption work, spool the bounded confined
+  container once while hashing, then probe/demux that private spool. With
+  caching disabled, a confined seekable descriptor may be demuxed directly
+  without reading the whole container just to hash it.
+- Provenance and text composition: retain native text first, then
   dedupe-append usable caption, OCR, and ASR contributions in that fixed order.
   Normalize each non-empty contribution to Unicode NFKC, casefold, and
   collapsed whitespace for equality only; preserve its original text when
   appending and append an equivalent normalized contribution at most once.
   Do not remove repetition within an individual contribution. Keep the
   operation suppression rules above (for example, captions suppress ASR only
-  when enabled captions produced usable text). Record contributing operations
-  in index metadata and the build report; optionally expose per-result
-  contributors.
+  when enabled captions produced usable text). Apply the combined body cap
+  explicitly, and keep the embedding excerpt within its existing short limit;
+  a derived contribution outside that excerpt can still match body FTS.
+  Record contributing operations in index metadata and the build report;
+  optionally expose per-result contributors.
 - Source/health output reports the last build's per-operation state:
   `off`, `not_checked`, `ready`, `partial`, or `unavailable`. A changed config
   or a fast build is `not_checked` until a matching full build runs. `serve`
@@ -218,8 +260,11 @@ class DerivedTextProducer(Protocol):
   pages/pixels/output bytes, ASR media seconds/input/output bytes, task time,
   aggregate spool bytes, and `workers`. The effective source-file input cap is
   the minimum of the provider's `max_file_bytes` (where applicable), global
-  `max_entry_bytes`, and the enabled operation's own byte cap. Serving limits
-  are independent. An input skipped or truncated because of a cap,
+  `max_entry_bytes`, and the enabled operation's input byte cap, if any.
+  `max_caption_bytes` caps standalone track input and extracted caption output;
+  it does not cap the size of an enclosing media container. Container input is
+  still bounded by the provider/global file caps, spool budget, and task time.
+  Serving limits are independent. An input skipped or truncated because of a cap,
   malformed data, or failure is logged and reported as partial enrichment;
   other items continue and the overall build exits non-zero. Intentionally
   disabled or unnecessary inputs are not failures.
@@ -240,8 +285,26 @@ unknown. Overrides carry no budgets. Phase 08 exposes the same schema.
 
 #### Execution model
 
-- Caption parsing is pure Python and cheap. It runs in-process; it does not need
-  a worker pool.
+- Standalone caption parsing is pure Python and runs in-process. For embedded
+  text tracks in supported local containers, use optional local `ffprobe` and
+  `ffmpeg` executables to enumerate and extract tracks in stream order without
+  decoding audio/video. Support at least embedded SubRip, WebVTT, and ASS text;
+  bitmap subtitles are reported as unsupported and never implicitly enable OCR.
+  Missing tools or failed/unsupported tracks make the requested operation
+  partial, while usable sidecars and other items still index. No tracks is a
+  successful empty result.
+- Run media probing/demuxing only when captions are enabled, in a bounded
+  subprocess with a hard timeout and bounded output. Supply an already-confined
+  seekable descriptor or a private bounded spool. Use only a descriptor-based
+  input protocol and pipe output (for example FFmpeg's `fd:`/`pipe:` with a
+  protocol whitelist), close unrelated inherited descriptors, and restrict
+  demuxers so external references cannot read other files or the network.
+  Probe that confinement support locally; if it is unavailable, report partial
+  enrichment rather than enabling an unrestricted `file:` or network protocol.
+  Terminate and reap the subprocess on failure or cancellation. Apply the
+  caption output limit across tracks per item; a large container is not itself
+  a caption-byte-limit violation. Standalone and embedded track contributions
+  are processed deterministically and deduplicated as above.
 - OCR and ASR run in a single shared process pool, created lazily only
   when an enabled operation needs it. Process isolation contains native engines
   that are not thread-safe and prevents an engine crash from taking down the
@@ -293,7 +356,7 @@ indexed provider:
 <index_dir>/<provider>/<collection-slug>-<collection-hash>/<source-slug>-<source-hash>/
     current
     generations/<build-generation>/index.sqlite
-    generations/<build-generation>/index.faiss
+    generations/<build-generation>/index.faiss  # only when vectors exist
     generations/<build-generation>/lease
 ```
 
@@ -305,8 +368,8 @@ unknown files. Unrecognized, corrupt, stale, or incompatible artifacts are
 rebuilt; a successfully adopted index is thereafter read only through the
 canonical layout.
 
-Store each source's artifacts as immutable generations. Build and validate a
-complete SQLite/FAISS pair in a new generation directory, fsync its files, then
+Store each source's artifacts as immutable generations. Build and validate
+SQLite and any required FAISS artifact in a new generation directory, fsync its files, then
 atomically replace a small `current` manifest naming that generation and its
 digests. Readers resolve that manifest once and pin the generation, so they
 cannot combine files from different builds. Keep the prior generation until
@@ -329,6 +392,9 @@ The phase-01 locator must already implement this lifecycle:
   opening artifacts; if publication/cleanup won the race, release and retry.
   Transfer that ownership to the phase-01 `_LocalIndex`, then `IndexHandle`
   after generalization, until its last reader closes.
+- Never reuse a generation ID or repoint `current` to a retired generation;
+  publishing a rollback creates a fresh generation. This makes the
+  acquire-and-recheck protocol immune to an old-generation ABA race.
 - Cleanup takes a nonblocking exclusive lock on the same lease and rechecks
   that the generation is not current before deleting only its recognized
   artifacts. Unsupported locking defers cleanup and fails read-only reuse
@@ -341,7 +407,8 @@ The phase-01 locator must already implement this lifecycle:
   WAL/SHM/journal files, and seal the generation against subsequent mutation.
   Read it with a sidecar-free immutable connection only after those invariants
   are validated. `immutable=1` is not a shortcut for opening a live database.
-  Fsync completed artifacts and the manifest's parent directory after replacement.
+  Fsync completed artifacts and generation directories before replacing the
+  fsynced manifest; fsync the manifest's parent directory afterward.
 
 The versioned `current` manifest contains provider/collection/source identity,
 a validated generation UUID, and SQLite plus optional FAISS digests. Its
@@ -385,11 +452,14 @@ one-time importer may convert recognized legacy metadata values through the
 canonical codec below; it must reject unknown or malformed values rather than
 silently coerce them. Ordinary `vecs` staging tables use
 `CREATE TABLE vecs(id INTEGER PRIMARY KEY, v BLOB NOT NULL) STRICT`.
+Probe FTS5 support as well as the SQLite version before a build/import;
+SQLite 3.37 alone does not guarantee that its build includes FTS5. If it is
+missing, report an actionable error without touching the published generation.
 
 | Key(s) | Meaning | Canonical encoding |
 |---|---|---|
 | `done` | publication mode | enum `"fast"` or `"full"` |
-| `next`, `filesize`, `build_filesize`, `indexed_count` | non-negative counts/offsets | decimal ASCII integer |
+| `next`, `filesize`, `build_filesize`, `indexed_count`, `body_truncated_count`, `semantic_vector_count` | non-negative counts/offsets | decimal ASCII integer |
 | `schema_version` | recognized SQLite schema revision | positive decimal ASCII integer |
 | `truncated` | bounded index coverage | `"0"` or `"1"` |
 | `build_mode` | in-progress mode | enum `"fast"` or `"full"` |
@@ -413,23 +483,47 @@ not the provider's source totals.
 `pipeline.py` keeps the current semantics:
 
 - staging DB/FAISS and upgrade; atomically publish a complete generation by
-  swapping its manifest and verify the SQLite/FAISS pair as described below;
+  swapping its manifest and verify its artifacts as described below;
 - progress, batching, embedding pipeline, fast mode;
 - model probes and fingerprint compatibility;
 - `meta.done`, `meta.next`, and crash resumability;
 - build locking remains global in `zimantic/locking.py`.
 
+Validate `max_body_text_bytes` as a positive global integer in this phase.
+Bound body text in flight across all concurrent source builds by bytes as well
+as rows; the shared budget defaults to 16 MiB and admits at least one
+maximum-sized configured body, warning when that requires more. Account for
+actual allocated buffers/copies, release reservations on every exit path, and
+do not send full body strings through the embedding queue. This prevents a
+batch of long documents from multiplying memory on small hosts.
+
 Runtime fast mode is separate from fast build mode. When `serve --fast` or
 `open --fast` is active, the process must not load a model or FAISS and must
 disable semantic search for its entire lifetime, even when a finished semantic
-index is available. SQLite lexical/title/body search and native full-text
-search remain usable.
+index is available. Do not open or hash FAISS artifacts in this mode. SQLite
+lexical/title/body search and native full-text search remain usable.
 
 Every generation has the same table schema, including an empty `body` table
 after a fast build; `indexed_channels` records built channels, including valid
 empty ones. A completed import may retain lexical channels while semantic search is
 unavailable, and must report that fact rather than imply `done = "full"`
 guarantees usable vectors.
+
+When a full build has no embeddable excerpts, including an empty or
+title-only-media source, publish a valid empty semantic channel with
+`semantic_vector_count = 0` and no FAISS artifact/digest. Querying that
+channel returns no semantic hits without loading FAISS or guessing a vector
+dimension. With vectors present, record their count and require the matching
+FAISS artifact and digest. A fast build or unavailable semantic channel omits
+the semantic channel and its vector count; it is not an empty full build.
+
+Contentless FTS5 cannot safely replace or delete a row without its original
+text: an `INSERT OR REPLACE` can leave the old terms searchable. Keep staging
+append-only. Commit each ordered batch's document rows, body postings,
+vectors/cache references, and next manifest ordinal in the same SQLite
+transaction; only advance the ordinal after every earlier batch commits.
+After a crash, resume from that committed ordinal. If an earlier row must be
+reprocessed, discard/restart staging rather than overwrite its postings.
 
 Even a forced rebuild stages its replacement without deleting the last
 published index first. Before starting, report current artifact bytes and
@@ -507,14 +601,18 @@ stored columns and normalize known metadata values in a staged copy.
 Preserve semantic search only when FAISS IDs, dimensions, and model identity
 are verified against the migrated rowids and current model; otherwise retain
 the compatible lexical index and rebuild or disable only the semantic channel.
-If source identity/freshness cannot be validated, if rowids/targets collide, or
-if any required field is irrecoverable, reject adoption and perform a clean
-build while keeping the old artifact untouched. Do not create a permanent
+Normalize recognized legacy redirect chains to the final target id and path;
+reject unresolved/cyclic chains rather than publish ambiguous identities.
+If source identity/freshness cannot be validated, rowids collide, a target
+cannot be resolved uniquely, or any required field is irrecoverable, reject
+adoption and perform a clean build while keeping the old artifact untouched.
+Multiple redirects to the same target are valid. Do not create a permanent
 legacy search path.
 
 The new `body` FTS index is contentless by default. A recognized stored excerpt
 may be tokenized into its postings during migration, but the raw excerpt is
-not retained in the new index. When no excerpt exists, body search can be
+not retained in the new index. Such a migrated channel has unknown full-body
+coverage and no invented `body_truncated_count`. When no excerpt exists, body search can be
 added by a normal producer build; it must not force discarding compatible
 title/redirect data. Record which channels were migrated, rebuilt, unavailable,
 or stale in the report. Measure migration time, peak extra disk/RSS, rows
@@ -582,8 +680,11 @@ until a documented schema decision, never dual runtime readers.
 Generalize `_search_local_locked` and its helpers, already moved from `Search`
 to the ZIM runtime in phase 01, into `indexing/search.py`:
 
-- Inputs: `IndexHandle`, `SourceInfo`, `SourceQuery`, config limits, and a
-  preview hook.
+- Inputs: `IndexHandle`, `SourceInfo`, `SourceQuery`, config limits, a preview
+  hook, and a runtime-supplied result-URL builder. The builder receives the
+  source and final path and returns a URL only after the provider verifies that
+  the permitted path identifies one item; otherwise it reports an
+  ambiguous/unverifiable hit to the caller.
 - Channels: semantic (FAISS), keyword/title (FTS5 `docs`), body/excerpt
   lexical (FTS5 where a provider supplies body text), native full-text
   (optional), and the documented fusion/limits.
@@ -592,21 +693,34 @@ to the ZIM runtime in phase 01, into `indexing/search.py`:
   deterministically; their native and BM25 scores are not comparable. Do not
   introduce a fifth `SourceResult` channel. A provider with no native searcher
   is not partial solely because it lacks one.
-- Build local result `id` values from `source_key` plus the canonical row id,
-  not from the content path; duplicate paths must remain distinct results.
+- Build local result `id` values from phase 00's encoding of
+  `(source_key, canonical final path)`. This matches indexed and native hits
+  without requiring native search to expose a row id. The runtime URL builder
+  uses the same source key and unambiguous final path; no item selector is
+  added. Verify uniqueness before assigning an identity, caching, or merging a
+  hit.
 - Key preview/phrase/MIME caches by document identity plus source/index
-  generation, never by `(source_key, path)` alone. Pass canonical row ids to
-  provider preview hooks so duplicate paths cannot alias different documents.
+  generation, never by `(source_key, path)` alone.
 - One `docs` FTS5 schema and rowid model for every local indexed provider. Add
   a contentless `body` FTS5 table keyed by the same rowids and populated from
-  `EntryRecord.excerpt`; retain only derived-text cache references needed for
+  `EntryRecord.body`; retain only derived-text cache references needed for
   preview hydration. There are no legacy index variants or schema fallbacks.
 - A normal Files/Kolibri build makes indexed body text searchable through
   `body`; a fast build intentionally remains title/path-only, with neither
   body postings nor embeddings or derived-text processing, as specified in phase 08.
   Report that configured enrichment was not attempted in a fast build.
-- Preview hydration calls `ContentStore.read`, not libzim directly.
-- Redirect resolution still follows `docs.target` chains for all providers.
+- Preview hydration uses the phase-00 runtime preview hook after the final path
+  is verified; ordinary native content is read through its store. Media
+  previews use bounded native metadata, not media-body reads.
+- Resolve redirect chains before assigning result identity: all channels and
+  suggestions use the final target path, so an alias and its target
+  deduplicate. For search channels, omit a known or unverifiable ambiguous path
+  and report partial/error rather than assigning or opening a guessed row.
+  Suggestions omit it and record a bounded diagnostic because their sequence
+  has no status field. If an indexed redirect's target lies outside
+  a truncated manifest, use its stored final target id/path and bounded store
+  metadata rather than dropping the alias merely because the target has no
+  `docs` row; report a genuinely unresolved/cyclic redirect.
 - Providers without a native index return no native hits; they still get
   semantic and title/body keyword results when those channels are indexed.
 - Providers that are not indexed still use their native searcher if one
@@ -652,7 +766,10 @@ access. Phase 10 uses this mode for reused indexes.
 - `fulltext.py` and `fulltext_worker.py` continue to isolate ZIM native
   searches in helper processes.
 - Non-ZIM providers return no native searcher. Do not add process isolation
-  for SQLite FTS, which is already in-process and bounded.
+  for SQLite FTS; use per-request connections/progress handlers or equivalent
+  interruption to enforce the remaining deadline without interrupting unrelated
+  requests. Operations that cannot otherwise be bounded need killable isolation
+  before their worker slot can be released.
 - Preserve the existing partial/error statuses when isolation fails.
 
 ## Work items
@@ -677,10 +794,13 @@ access. Phase 10 uses this mode for reused indexes.
 - [ ] Create `providers/zim/entries.py` with `ArchiveEntryProducer`, wrapping
       `read_entry`, applying the canonical row-id/`target_id` mapping, and
       preserving progress and fast mode.
-- [ ] Split `content/reader.py` into pure extractors and a ZIM adapter only if
-      it reduces coupling; keep `read_entry` behavior and tests.
+- [ ] Make pure extractors usable without libzim, building on phase 00's
+      dependency-free `zimantic.content` package import. Split the ZIM adapter
+      or defer its initialization. Preserve existing embedding-excerpt
+      behavior while adding bounded full-body extraction for lexical indexing.
 - [ ] Move the ZIM runtime's `_search_local_locked` into `indexing/search.py`;
-      make it take an `IndexHandle` + `ContentStore`.
+      pass an `IndexHandle`, the borrowed store, and the runtime's preview and
+      path-verifying URL hooks.
 - [ ] Generalize the runtime's `_fetch_docs`, `suggest`, and preview helpers in
       `indexing/search.py`; `suggest` must use `IndexHandle`, not
       `Search.indexes`.
@@ -696,8 +816,8 @@ access. Phase 10 uses this mode for reused indexes.
 - [ ] Keep `Search.indexes`/`Search.catalog` absent after their phase-01 removal;
       generalize provider-owned handles without reintroducing core aliases.
 - [ ] Add the shared derived-text stage with independent `captions`, `ocr`, and
-      `asr` opt-ins, optional engine extras, a digest cache, provenance, and
-      fingerprint inputs.
+      `asr` opt-ins, local embedded-caption demuxing, optional engine extras,
+      a digest cache, provenance, and fingerprint inputs.
 - [ ] Add the lazy shared process pool for OCR/ASR with spawn-safe workers,
       auto worker resolution, bounded temp-file spooling, and crash recovery.
 - [ ] Validate the SQLite/FAISS digest on open, including interrupted
@@ -714,10 +834,19 @@ access. Phase 10 uses this mode for reused indexes.
 - [ ] ZIM build produces the generic `docs`/contentless-`body` schema,
       `meta.done`/`next`, FAISS ids, derived-text cache references, and search
       results through `build_index`.
+- [ ] A term after the first 1,000 characters of a document is found through
+      body FTS; the embedding excerpt remains short. A document exceeding the
+      body cap reports `body_truncated_count` without being confused with an
+      item-count-truncated source.
+- [ ] Concurrent long-body builds respect the shared in-flight byte budget;
+      cancellation and failed batches release reservations.
 - [ ] A ZIM exceeding the item cap reports truncated index coverage while its
       available native full-text and content serving continue to work.
 - [ ] Resume after interruption works; changing the fingerprint restarts the
       build safely.
+- [ ] An interrupted batch resumes atomically without duplicate or stale body
+      terms; reprocessing a committed row restarts staging rather than replacing
+      its contentless FTS posting.
 - [ ] A detectable manifest/signature change during a build prevents
       publication; a later detectable change marks the index stale on reload.
 - [ ] Interrupted publication or concurrent opening cannot pair a SQLite index
@@ -736,25 +865,44 @@ access. Phase 10 uses this mode for reused indexes.
 - [ ] A separate reader process, including read-only `open`, pins an old
       generation across publication; cleanup waits for release/process exit
       and never creates/modifies a reader's lease or SQLite sidecars.
-- [ ] Fast build, force rebuild, upgrade-in-place, and a corrupt staging file
+- [ ] Fast build, force rebuild, staged upgrade, and a corrupt staging file
       all work.
 - [ ] Model fingerprint/probe mismatch falls back to lexical search.
+- [ ] An SQLite build without FTS5 fails the feature check with a clear error
+      before changing a published index.
 - [ ] Index locator: all local indexed providers use the same layout; paths are safe, unique,
       and bounded; independent of source-root relocation; no source absolute
       path in generated filenames or public metadata.
 - [ ] Generic local search over a synthetic producer returns semantic,
       title/body keyword, and preview results without importing libzim; native
       previews and derived-text cache references hydrate correctly.
-- [ ] Distinct canonical rows sharing a path cannot overwrite one another's
-      preview/phrase/MIME cache entries.
+- [ ] Identical paths in different sources have separate result and
+      preview/phrase/MIME cache identities.
+- [ ] Ambiguous same-source paths are omitted and reported, including when the
+      other matching item lies outside a capped manifest. Unambiguous results
+      keep ordinary source-key/path URLs.
+- [ ] Redirect aliases and their target collapse to one result across indexed,
+      native, and suggestion channels when the final path is unambiguous,
+      including a target outside a truncated manifest. An ambiguous native hit
+      is partial/error, not falsely merged with either row.
 - [ ] The storage benchmark records the contentless baseline and stored-content
       alternative, including storage, build, RSS, query, hydration, and
       engine-invocation measurements.
 - [ ] A non-ZIM body-term query returns a lexical result without embeddings or
       a `NativeSearcher`; a fast build is explicitly title/path-only.
+- [ ] An empty or title-only-media full build publishes successfully without
+      inventing a FAISS dimension; its semantic channel returns no hits and its
+      lexical title search remains available.
 - [ ] Derived text is off by default: caption/image/media inputs are never
       read. Each operation works alone with a fake engine, records provenance,
       respects its caps, and reuses the digest cache across rebuilds.
+- [ ] A tiny local media container with an embedded text subtitle is indexed
+      only with captions enabled, without decoding audio/video; container bytes
+      can exceed `max_caption_bytes` while extracted text stays within it.
+- [ ] Malicious media references cannot open another local file or a network
+      URL; missing descriptor/protocol confinement reports partial enrichment.
+      Missing tools, bitmap tracks, timeout, malformed streams, and attempted
+      external references are bounded and reported without network access.
 - [ ] Native text remains first; distinct derived contributions are appended
       captions/OCR/ASR in order, compared by normalized Unicode text, and
       duplicate contributions are appended only once without altering their

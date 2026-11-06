@@ -122,6 +122,11 @@ headers on `304` responses too. A revision change between pages makes the
 client discard/restart the affected load; retries are bounded, with a visible
 refresh-needed state if discovery keeps changing.
 
+Phase 10's explicit `open` scope is the only ordering exception:
+`/sources` and `/library.json` preserve expanded CLI source order after
+filtering and before slicing. `/collections.json` and every normal `serve`
+listing retain display-title/key order.
+
 ### Listing filters
 
 `/collections.json`, `/sources`, and `/library.json` accept optional
@@ -279,8 +284,8 @@ Keep `indexes`, `sources`, and `cache` counters.
 - [ ] Add `Search.collection_version()` and invalidate it with the source set.
 - [ ] Add `/collections.json` to `zimantic/web/routes.py` using the existing
       paged response helper.
-- [ ] Add `collection` to `SourceInfo.to_dict()` (phase 00) and ensure ZIM
-      sources populate it.
+- [ ] Reuse phase 00's `collection` field in `SourceInfo.to_dict()` and ensure
+      all providers populate it.
 - [ ] Add `collection` query parsing to `/search`, `/search/stream`, and
       `/suggest`; remove `zim` and the dual `(zim, source)` parameter split in
       `Search.search_page`/`Search.stream_search`, and expand `collection` +

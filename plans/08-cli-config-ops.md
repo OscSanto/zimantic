@@ -21,6 +21,7 @@ array-of-tables, so it needs explicit handling.
 # A request reports partial completion when this count or its deadline is hit.
 max_explicit_collection_sources = 500
 search_timeout_seconds = 30       # total admitted search work; phase 02
+max_body_text_bytes = 1048576     # per-item lexical body, independent of previews
 
 # Collections. Multiple entries are allowed. There are no flat provider keys.
 [[collections]]
@@ -88,6 +89,8 @@ name.
   and reserve `open` for the ephemeral ZIM collection.
 - Provider-specific keys are validated by the provider. Generic validation only
   checks `type`, `name`, and duplicate names.
+- Kolibri validates and documents phase 06's snapshot byte, disk, and time
+  budgets, including their per-process scope and fail-closed behavior.
 - Configured relative provider paths resolve against the active config file's
   directory; CLI path operands resolve against the invocation's working
   directory. Normalize once and preserve that resolved selection when saving
@@ -101,6 +104,9 @@ name.
   `30`, for admitted search work across every provider/scope. It is distinct
   from per-source `source_timeout` and slot admission's `slot_wait_seconds`.
   Expiry is reported using phase 07's partial-scope contract.
+- `max_body_text_bytes` is the phase-04 positive global per-item lexical body
+  cap, default 1 MiB. It is independent of the short embedding/preview limit.
+  Expose `body_truncated_count` separately from item-count truncation.
 - Phase 00 defines the normalized provider-entry interface, minimal
   `[[collections]]` TOML parser, and public `RuntimeConfig.collections`
   discovery API. Phases 04–06 may use that API plus the phase-04
@@ -125,7 +131,7 @@ name.
   typo into a crash.
 - Keep `collections` as a known top-level key and bypass the flat type coercion for
   it in `_typed_user_values`.
-- Do not log absolute `path`/`database_dir`/`storage` values above debug level.
+- Do not log absolute `path`/`database_path`/`storage` values above debug level.
 
 ### Derived text
 
@@ -147,8 +153,9 @@ not a second derived-text policy.
 - Keep `index_dir`, `cache_size`, `build_workers`, `embedding_workers`,
   `batch_size`, search limits, and model settings global.
 - Provider-specific limits (`max_sources`, `max_entries`, `max_file_bytes`,
-  `granularity`, and traversal budgets) default in the provider and may be
-  overridden per entry. Derived-text switches are exact-source overrides.
+  `granularity`, traversal budgets, and phase-06 HTML5 zip limits) default in
+  the provider and may be overridden per entry. Derived-text switches are
+  exact-source overrides.
 - `granularity` uses the same values for Files and Kolibri:
   `collection` means one source for the whole collection and `children` means
   immediate child groups.
@@ -273,11 +280,12 @@ Scope:
 
 - Every local indexed provider uses the phase-04 locator's
   source directory with a `current` generation manifest and immutable
-  `generations/<uuid>/index.sqlite` / `index.faiss` pair. There is no ZIM-only
-  path exception.
+  `generations/<uuid>/index.sqlite` and, when vectors exist, `index.faiss`.
+  There is no ZIM-only path exception.
 - The phase-04 locator is the only code that computes index paths.
 - Document and retain phase 01's SQLite 3.37 minimum and early version check;
-  do not defer it here or silently create a non-STRICT schema.
+  do not defer it here or silently create a non-STRICT schema. Phase 04 also
+  probes for FTS5, which a sufficiently new SQLite build can still lack.
 - `index_dir` may itself be configured as an absolute path. Do not incorporate
   source-root absolute paths into logical IDs or generated index filenames.
 - `catalog.sqlite` is the private ZIM archive metadata cache beside `index_dir`.
@@ -286,7 +294,9 @@ Scope:
   the logical primary key `key`. Canonicalize paths at discovery/update time,
   not repeatedly during search.
 - Phase 01 bumps the catalog schema version and rebuilds a mismatched catalog
-  by a full ZIM scan. Do not detect, migrate, or alias old tables.
+  by a full ZIM scan. Do not detect, migrate, or alias old tables. Before the
+  initial upgrade, stop all old-version catalog users; only upgraded processes
+  participate in the new cross-process catalog lease.
 - Ignore unknown files and stale `.tmp`/`.upgrade` files except in `prune`.
   The one-time phase-04 importer discovers only catalog-matched old ZIM index
   paths; `prune` removes obsolete owned artifacts after successful adoption or
@@ -318,9 +328,10 @@ Scope:
   killable isolation where cancellation/deadlines cannot otherwise be enforced;
   cancelling a thread future does not stop a running call.
 - Apply fair per-provider task budgets. Reserve a worker for competing providers
-  when `search_workers > 1`; with one worker, fairness is bounded by the active
-  task's deadline. Count work across all collections of a provider kind and all
-  concurrent searches, including timed-out calls still running. A bounded,
+  when `search_workers > 1`; with one worker, a hard bound requires the active
+  task to actually terminate, not merely time out. Count work across all
+  collections of a provider kind and all concurrent searches, including
+  timed-out calls still running. A bounded,
   fair queue admits work incrementally rather than submitting one future per
   discovered source. Keep the global search slot and cache behavior.
 - `max_sources`/`max_entries` caps apply to discovery and indexing; serving a
@@ -337,7 +348,10 @@ Scope:
   - index layout and catalog-rebuild note;
   - security note for untrusted file trees (`secure_browsing`);
   - derived-text section: the three independent opt-ins, local-only engines,
-    optional dependencies, and build-time-only execution;
+    optional dependencies (including local `ffmpeg`/`ffprobe` for embedded
+    text captions with supported descriptor-only input), build-time-only
+    execution, and the separate container input/spool caps that may need
+    raising for large media;
   - IIAB layout examples (`/library/www/html/modules`, `/library/kolibri`).
 - `CONTRIBUTING.md`:
   - "Adding an in-tree provider" checklist;
@@ -443,6 +457,8 @@ Scope:
       indexes; `prune` deletes only obsolete files whose Zimantic ownership can
       be established and leaves unknown files alone.
 - [ ] A slow provider does not delay ZIM startup beyond the configured budget.
+- [ ] The body-text cap is distinct from preview length and item truncation;
+      sources and build reports expose the documented coverage count.
 
 ## Acceptance criteria
 

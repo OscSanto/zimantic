@@ -219,9 +219,36 @@ usable search index just because the catalog schema changed.
   text are debug-only. An incomplete scan must not delete unseen rows or
   publish a prefix as the replacement.
 - Coordinate rebuilds across processes and close existing connections before
-  replacing a database and its SQLite sidecars; never unlink a live catalog
-  while another process can keep using or writing the old inode. If exclusive
-  coordination cannot be obtained, report the failure and retry later.
+  replacing catalog contents; never unlink a live catalog while another
+  process can keep using or writing the old inode. If exclusive coordination
+  cannot be obtained, report the failure and retry later.
+- Use a stable, separately owned catalog lease file beside the catalog.
+  Writable processes create it before catalog access and never replace or
+  unlink it. Every participating process holds a shared OS lock from before
+  opening a catalog connection until after closing it; replacement takes the
+  exclusive lock after closing its own connections. Phase 10 may acquire an
+  existing lease read-only but must never create it.
+- Pre-redesign processes do not know this lease. The initial upgrade therefore
+  requires the operator to stop all older Zimantic servers/builders and other
+  catalog users before starting the rebuild; the new lock alone cannot prove
+  that an uncooperative legacy process has closed its SQLite connection.
+  Document this maintenance precondition and never claim the lease protects
+  processes that do not participate.
+- For an existing readable SQLite catalog, keep its inode and use SQLite's
+  transactional backup API to copy the validated staged database into it
+  under the exclusive lease. Preserve the existing journal/WAL safety and
+  match its page size where required; an interrupted or failed backup must
+  leave the old logical catalog recoverable. Never rename a new main database
+  over an old live-WAL basename while old sidecars remain.
+- If the destination is corrupt and cannot accept a SQLite backup, or the main
+  database is absent but old sidecars remain, use a durable recovery marker
+  and an owned quarantine beside the catalog under the exclusive lease. Move
+  the old main file and recognized sidecars out of the way before atomically
+  installing a validated, sidecar-free staged main file; fsync the files and
+  directory. A crash at any step is recovered under the exclusive lease before
+  catalog access resumes. Do not follow symlinks or delete unknown files; if
+  recovery cannot be completed safely, leave the catalog unavailable.
+  Readers, including phase 10, must not open it while a recovery marker exists.
 - This is a breaking change: release notes state that old catalogs are
   discarded and rebuilt. Index files follow phase 04's separate validated
   adoption/rebuild policy.
@@ -286,8 +313,20 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       validated old stem-based paths.
 - [ ] Pin the ZIM row-id mapping for phase 04: preserve the archive `_index` and
       redirect target id, including zero, as the canonical non-negative row id.
-      Preserve duplicate paths as distinct rows and reject integer
-      overflow/collisions.
+      Preserve redirect rows and reject integer overflow/collisions.
+- [ ] Keep source-key/path URLs. Respect libzim's old/new namespace rules:
+      public content must not be conflated with metadata or search indexes, and
+      old namespace prefixes must not be flattened. Redirect aliases may share
+      a final path. If distinct permitted final entries share that path, or
+      their identity cannot be verified, omit the affected hits with a
+      partial/error status and fail ambiguous content requests closed.
+- [ ] Keep the isolated native helper's path/title protocol. Resolve each hit to
+      a canonical final path with a bounded, namespace-aware lookup, not an
+      archive-wide per-hit scan. If the path cannot be verified, omit that hit
+      and report partial/error rather than guessing. Unique native-only archives
+      must remain searchable without a local index, and a capped index alone
+      cannot prove uniqueness. Verify the resolver against supported libzim
+      3/4 bindings and old/new namespace fixtures before implementing it.
 - [ ] Move the local-source branch of `_rebuild_sources` and
       `_source_from_catalog` into `providers/zim/metadata.py`.
 - [ ] Move `refresh_local_sources` / local half of `refresh_sources` into the
@@ -315,13 +354,14 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       cache hooks, and the request object.
 - [ ] Move `_fetch_docs`, `_fetch_archive_docs`, `_extract_previews` (ZIM
       previews), and the ZIM half of `_result_doc` with them.
-- [ ] Keep `_hydrate_results` in `Search`; call the ZIM `ContentStore` for
-      previews through the shared runtime contract. Move existing serving
-      behavior into its final `ArchiveContentStore` now; `read_range` may
-      explicitly report unsupported until phase 03 implements range handling.
+- [ ] Keep `_hydrate_results` in `Search`; delegate to the runtime's phase-00
+      `preview` hook, preserving document identity and existing ZIM behavior.
+      The hook may read through `ArchiveContentStore`. Move existing serving
+      behavior into the final store now; `read_range` may report unsupported
+      until phase 03 implements ranges.
 - [ ] Move all remaining core index/catalog access in the same phase:
       `Search.suggest` delegates title-prefix queries to `runtime.suggest`, and
-      phrase/MIME/preview enrichment reads through `ContentStore`. Do not keep
+      phrase/MIME/preview enrichment uses the runtime/store. Do not keep
       `Search.indexes`/`Search.catalog` aliases until phase 04 to support these
       callers; phase 04 generalizes the already-moved helpers.
 - [ ] Keep the four `SourceResult` channels (`semantic`, `keyword`, `fulltext`,
@@ -375,6 +415,19 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       or failed replacement leaves the original artifact untouched.
 - [ ] Published index generations are sidecar-free, immutable, and protected
       by read-only cross-process leases before an old generation is reclaimed.
+- [ ] Redirect rows, including a target with row id zero, resolve to one final
+      result. Distinct permitted entries with an ambiguous path are reported
+      instead of guessed; old/new namespace handling does not confuse public
+      content with metadata. Ordinary native-only ZIM search still works on
+      supported libzim versions.
+- [ ] A catalog reader in another participating process blocks replacement
+      until its connection closes; a timed-out rebuild leaves the old catalog
+      and sidecars untouched. Migration instructions require older processes to
+      be stopped before the first upgrade.
+- [ ] An interrupted SQLite backup preserves the old logical catalog, including
+      with a live WAL. Crash at each corrupt-catalog quarantine/install step;
+      the next process recovers or fails closed without pairing a new main DB
+      with an old WAL.
 - [ ] `media_types` derives from the MIME counter and matches the phase-00
       classification (`text`/`video`/`audio`/`image`/`other`).
 - [ ] The database schema has no `zims` table or `zims_*` indexes.

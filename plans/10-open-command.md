@@ -159,8 +159,13 @@ expanded list. Check for collisions. Fallback keys are scoped to this command
 line and never locate a persistent index.
 
 The persistent catalog lookup must not initialize, migrate, repair, or create
-the database or its SQLite sidecars. If it is absent, incompatible, corrupt,
-or cannot be opened without writes, log the reason and use fallback keys.
+the database or its SQLite sidecars. Acquire the phase-01 catalog lease through
+an existing read-only descriptor before opening the catalog and hold it until
+the lookup connection closes; never create or replace the lease. A live WAL
+must be read consistently by a proven side-effect-free opener, not ignored via
+`immutable=1`. If a phase-01 recovery marker exists, or the catalog or lease
+is absent, incompatible, corrupt, or cannot be opened consistently without
+writes, log the reason and use fallback keys.
 Configured collection metadata may be read from config for matched keys, but
 configured roots are not scanned. The scope never invents a second locator
 for a catalogued archive.
@@ -180,6 +185,10 @@ When present:
   `source_dicts`, and random-source selection resolve only scoped archives.
   Collection metadata is emitted only for collections represented in the
   scope; `zim:open` is an ephemeral fallback collection.
+- Preserve expanded CLI order in scoped `/sources` and `/library.json` after
+  filtering and before pagination. Keep `/collections.json` and all normal
+  `serve` listings in phase-07 display-title/key order. Search result ranking
+  remains relevance-based.
 - Kiwix catalog refresh is disabled.
 - The scope is a constructor/runtime concern, not a new user-facing
   `config.toml` key.
@@ -189,8 +198,9 @@ When present:
 ### Indexes and search
 
 - A selected ZIM with a finished index at its key's locator in `index_dir`
-  uses that SQLite/FAISS pair read-only; the runtime key is the indexed source
-  key, not an alias. Validate the pair as in phase 04. Opening it must not
+  uses its SQLite and any FAISS artifact read-only; the runtime key is the
+  indexed source key, not an alias. Validate the generation as in phase 04.
+  Opening it must not
   create or modify SQLite sidecars: use Phase 04's `IndexHandle(read_only=True)`
   connection path and verify it is sidecar-free before exposing the index. If
   that cannot be guaranteed on the current platform/filesystem, report the
@@ -214,8 +224,10 @@ When present:
 - Full-text isolation (`start_fulltext_isolation`) is enabled, as in `serve`,
   so a bad native index cannot abort the ephemeral process.
 - No index is created, resumed, published, or pruned.
-- No model or cache is downloaded or written; an unavailable local model only
-  disables semantic search.
+- No model or cache is downloaded or written. Disable network access and
+  cache/telemetry writes in model loading; if an existing local model cannot be
+  loaded without those side effects, disable semantic search rather than
+  modifying user state.
 
 ### Server lifecycle
 
@@ -359,6 +371,9 @@ order.
 - [ ] `/sources`, `/collections.json`, `/library.json`, `/search`,
       `/search/stream`, `/suggest`, and `/random?source=` see only the selected
       ZIMs even when `index_dir` contains indexes for other archives.
+- [ ] Scoped source/library pages preserve CLI order, including across filters,
+      pages, and matched/fallback collections, even when titles sort in the
+      opposite order; normal `serve` remains title-sorted.
 - [ ] The configured collections are never scanned; no Kiwix collection is
       contacted.
 - [ ] A uniquely matched archive uses its phase-01 canonical key in
@@ -370,8 +385,14 @@ order.
       unrelated index. Cover overlapping collection roots.
 - [ ] A missing, stale, or mismatched index falls back to native full-text; a
       ZIM with no index at all still serves articles.
+- [ ] Search links and shell navigation use the selected source and canonical
+      path; an ambiguous native hit never opens a guessed item.
 - [ ] No `catalog.sqlite`, index file, `zimantic.pid`, or build lock is created
       or modified, including SQLite sidecars and model caches.
+- [ ] Catalog lookup holds the existing shared catalog lease and never creates
+      it or changes sidecars; a recovery marker, absent lease, or unsafe
+      live-WAL opener uses fallback keys. A concurrent catalog rebuild waits
+      for the lookup to close.
 - [ ] `open` does not append or alter config, and a missing index remains
       missing after the session; existing indexes are only opened read-only.
 - [ ] A concurrent builder/pruner cannot remove an index generation pinned by

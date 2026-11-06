@@ -18,7 +18,7 @@ that surface:
 | Input | New risk |
 |---|---|
 | Configured file trees | path traversal, symlink escape, malicious HTML, MIME confusion, huge media, filename tricks |
-| Kolibri database | malformed/schema-shifted SQLite, duplicate ids, inconsistent file mappings |
+| Kolibri database | malformed/schema-shifted SQLite, unrelated private user data, duplicate ids, inconsistent file mappings |
 | Kolibri HTML5 apps | zip-slip, asset path escape, executable content |
 | Kolibri media | range abuse, oversized responses, missing files |
 | Derived-text engines | image decompression bombs, oversized/corrupt media, expensive models, untrusted metadata |
@@ -71,8 +71,10 @@ return a path it should not.
 
 ### Database and network
 
-- Kolibri channel DBs are opened without writes, migrations, sidecar creation,
-  or schema changes. Live WAL contents must not be silently ignored.
+- Kolibri's installed main DB is opened without writes, migrations, sidecar
+  creation, or schema changes. Live WAL contents must not be silently ignored.
+  Private snapshots are owner-only and queries never expose unrelated user or
+  activity data.
 - All SQL uses parameters; schema/table names are hard-coded per supported
   version.
 - Local providers perform no network I/O. Kiwix is the only remote provider and
@@ -88,7 +90,9 @@ Keep the roadmap defaults and make them configurable per provider:
 | sources overall | 512 | advisory target, not a hard in-memory cap; never silently drop sources |
 | entries per source | 500k | indexing truncates only with explicit `truncated`/`indexed_count` metadata |
 | bytes per indexed item | existing `max_entry_bytes` | extraction |
+| indexed body text per item | 1 MiB (`max_body_text_bytes`) | lexical text; report `body_truncated_count` |
 | caption bytes | 1 MiB | caption parser |
+| Kolibri HTML5 zip | 10k members / 8 MiB directory / 256 MiB member / 1 GiB total / 10 s | phase-06 per-entry limits; actual decompression and range seeks are bounded |
 | OCR pages per item | 20 | OCR stage |
 | OCR pixels per page | 50 MP | image decode guard |
 | OCR output bytes | 256 KiB | OCR stage |
@@ -118,6 +122,8 @@ Additional rules:
   truncated.
   Search/API/health output must expose `truncated` and `indexed_count` so
   reduced search coverage is never presented as complete.
+- Report `body_truncated_count` independently when an indexed item's lexical
+  body exceeds its text budget or native extraction is incomplete.
 - A provider hitting a limit logs once and degrades, never crashes or loops.
 
 ## Failure isolation
@@ -151,7 +157,7 @@ Additional rules:
   - last refresh time;
   - truncation/collapse flags.
 - Build report: provider, collection, source, items indexed, skipped,
-  truncated, duration, failure reason.
+  item truncation, `body_truncated_count`, duration, and failure reason.
 - `zimantic sources --json` and `/collections.json` must agree with health.
 
 ## Performance and memory gates
@@ -166,8 +172,8 @@ Kiwix server, but the benchmark's Kiwix endpoint is a local controlled fixture.
 Record Pi 4 model/RAM, OS, storage, Python version, commit, and fixture revision.
 
 The reproducible mixed fixture contains one ZIM, a Files tree with 1,000
-indexable files, one fixture channel built from pinned Kolibri v0.19.5
-artifacts, and a local Kiwix catalog/search endpoint. Store the fixture
+indexable files, one fixture channel imported into a pinned Kolibri v0.19.5
+main SQLite database, and a local Kiwix catalog/search endpoint. Store the fixture
 generator, pinned inputs, and fixed query set under
 `tests/fixtures/mixed_library/` and `tests/benchmarks/`; keep them versioned
 with the benchmark tests. Report cold/warm build and startup measurements, RSS,
@@ -181,8 +187,8 @@ Required:
   engine that is not enabled costs zero work and is never loaded by `serve`.
 - Adding a files collection with `max_sources` sources does not load file
   contents at startup; discovery is `stat`-only.
-- Kolibri discovery uses bounded reads of the per-channel DBs; no storage walk
-  at startup.
+- Kolibri discovery uses a bounded read-only view of the installed main DB,
+  shared across its channels; no storage walk at startup.
 - Search fan-out over a mixed library stays within `search_workers` and the
   per-provider budget.
 - FAISS/index memory is still per-open index; do not add per-provider caches
@@ -190,7 +196,8 @@ Required:
 - Measure index migration/rebuild peak disk use and verify that failed rebuilds
   preserve a validated last-good index, warn with the failure cause, and do not
   accumulate duplicate generations. Successful publication switches the
-  SQLite/FAISS pair atomically; reclaim prior generations after reader release.
+  SQLite and any FAISS artifact atomically; reclaim prior generations after
+  reader release.
 - A derived-text worker's model memory is counted once per pool worker, not once
   per source; auto resolution uses one worker on a low-memory host when one
   fits, reports unavailable otherwise, and scales by memory, not just core count.
@@ -211,8 +218,10 @@ Also measure and record:
       resolution.
 - [ ] Provider contract suite run against ZIM, files, Kolibri (and Kiwix for
       search-only).
+- [ ] Discovery batches retain shared resources until all readers retire and
+      clean up after failed, empty, and replaced discoveries.
 - [ ] Content-store contract suite: read, resolve, redirect, exists, icon,
-      random, errors, ranges.
+      random, errors, ranges, and item-selector authorization.
 - [ ] Entry-producer contract: stable ids, fingerprint change, resume,
       truncation, optional buildable-runtime capability, and cleanup on every
       success/failure/cancellation path.
@@ -246,13 +255,22 @@ Also measure and record:
       not directly servable, while allowed assets remain accessible.
 - [ ] Files child homepages, results, previews, and shared-asset links all use
       collection-relative paths without ambiguous source-relative fallback.
+- [ ] Identical paths in different sources open their respective bytes.
+      Redirect aliases collapse to their target; genuinely ambiguous
+      same-source paths are reported rather than attributed or served
+      arbitrarily.
 - [ ] Absolute configured roots and private catalog locators are accepted, but
       absent from APIs, errors, and logs; relocating a provider root preserves
       its logical source ID and index locator when its identity is unchanged.
 - [ ] MIME confusion and `nosniff`.
+- [ ] Opaque-origin article preflights allow the documented range/conditional
+      headers without granting unrelated methods or headers.
 - [ ] Oversized files, PDFs, caption files, ranges, and XML.
 - [ ] Derived text off by default: no caption, image, or media bytes are read;
       fake engines prove each operation is independently opt-in.
+- [ ] Enabled embedded captions use bounded local-only demuxing, including a
+      media container larger than the caption-text cap; no audio/video decode
+      or implicit OCR occurs.
 - [ ] OCR/ASR adversarial inputs: decompression bomb, huge dimensions, corrupt
       codec, over-duration media, missing model, and cap-skipped output.
 - [ ] Auto worker resolution: 1 on a low-memory host, above 4 on a large host
@@ -265,8 +283,10 @@ Also measure and record:
       arbitrary paths.
 - [ ] Malicious/unsupported Kolibri DB schema and duplicate ids.
 - [ ] Untrusted HTML in sandbox/secure mode.
-- [ ] No writes to Kolibri channel DBs, SQLite sidecars, or configured content
-      roots, including with a live WAL.
+- [ ] No writes to Kolibri's installed DB, SQLite sidecars, or configured
+      content roots, including with a live WAL; private snapshots and queries
+      never expose unrelated user data. Closed databases without sidecars and
+      live WALs meet phase 06's proof gate, with prompt, bounded writer delays.
 - [ ] Provider refresh/close tests prove that background discovery is
       cancelled or joined and stores/database handles are closed exactly once.
 - [ ] `open` rejects index reuse when a sidecar-free read-only SQLite handle
