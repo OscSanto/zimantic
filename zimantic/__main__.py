@@ -382,6 +382,14 @@ def _configured_files_collections(cfg: dict) -> list:
     ]
 
 
+def _configured_kolibri_collections(cfg: dict) -> list:
+    return [
+        entry
+        for entry in cfg.get("collections") or ()
+        if getattr(entry, "kind", None) == "kolibri"
+    ]
+
+
 def _collect_zims_from_roots(
     paths: list[Path], roots: list[Path]
 ) -> list[Path]:
@@ -639,6 +647,94 @@ def _build_files_collections(
             batch.close()
 
 
+def _build_kolibri_collections(
+    cfg: dict,
+    args,
+    embedder,
+    embedding_pipeline,
+    failures: list[tuple[Path, BaseException]],
+) -> None:
+    """Build every configured Kolibri channel through the generic pipeline."""
+    from .build import build_index
+    from .indexes import IndexLocator
+    from .providers.base import ProviderContext
+    from .providers.kolibri import KolibriProvider
+    from .settings import normalize_web_base_path
+
+    entries = _configured_kolibri_collections(cfg)
+    if not entries:
+        return
+    runtime_config = cfg.get("runtime_config")
+    ctx = ProviderContext(
+        config=runtime_config,
+        index_dir=Path(cfg["index_dir"]),
+        web_base_path=normalize_web_base_path(cfg.get("web_base_path")),
+        logger=logger,
+        persist_catalog=False,
+    )
+    build_cfg = dict(cfg)
+    build_cfg["embedding_pipeline"] = embedding_pipeline
+    for entry in entries:
+        try:
+            batch = KolibriProvider().discover(entry, ctx)
+        except Exception as error:
+            logger.error(
+                "zimantic: Kolibri collection %s discovery failed: %s",
+                getattr(entry, "name", "kolibri"),
+                error,
+            )
+            failures.append((Path(entry.path), error))
+            continue
+        try:
+            for collection in batch.collections:
+                runtime = None
+                try:
+                    runtime = batch.open(collection)
+                    if runtime.snapshot.error:
+                        logger.warning(
+                            "zimantic: Kolibri collection %s: %s",
+                            collection.label,
+                            runtime.snapshot.error,
+                        )
+                    sources = list(runtime.library_sources())
+                    if not sources and runtime.snapshot.error:
+                        failures.append(
+                            (Path(entry.path), RuntimeError(runtime.snapshot.error))
+                        )
+                    for source in sources:
+                        try:
+                            producer = runtime.entry_producer(
+                                source, fast=args.fast
+                            )
+                            build_index(
+                                producer,
+                                IndexLocator(cfg["index_dir"]),
+                                embedder,
+                                build_cfg,
+                                fast=args.fast,
+                                force=args.force,
+                            )
+                        except Exception as error:
+                            logger.error(
+                                "zimantic: failed to index %s: %s",
+                                source.key,
+                                error,
+                            )
+                            failures.append((Path(entry.path), error))
+                except Exception as error:
+                    logger.error(
+                        "zimantic: Kolibri collection %s failed: %s",
+                        collection.label,
+                        error,
+                    )
+                    failures.append((Path(entry.path), error))
+                finally:
+                    if runtime is not None:
+                        runtime.close()
+        finally:
+            batch.close()
+
+
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     from tqdm import tqdm
 
@@ -677,7 +773,10 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     files_entries = (
         _configured_files_collections(cfg) if not args.paths else []
     )
-    if not zims and not files_entries:
+    kolibri_entries = (
+        _configured_kolibri_collections(cfg) if not args.paths else []
+    )
+    if not zims and not files_entries and not kolibri_entries:
         logger.info("zimantic: no sources to index")
         return
 
@@ -703,7 +802,7 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             # before the download completed.
             zim_sizes = {zim: zim.stat().st_size for zim in zims}
         zims = _select_zim_paths(zims, zim_sizes)
-    if not zims and not files_entries:
+    if not zims and not files_entries and not kolibri_entries:
         logger.info("zimantic: no sources to index")
         return
 
@@ -789,6 +888,10 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
                     pool.shutdown(wait=True, cancel_futures=True)
         if files_entries:
             _build_files_collections(
+                cfg, args, embedder, embedding_pipeline, failures
+            )
+        if kolibri_entries:
+            _build_kolibri_collections(
                 cfg, args, embedder, embedding_pipeline, failures
             )
     finally:

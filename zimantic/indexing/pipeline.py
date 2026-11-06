@@ -360,16 +360,41 @@ def _prepare_build_state(
                 )
         except (TypeError, ValueError):
             partial_enrichment = False
-        if done == index_schema.DONE_FULL and not partial_enrichment:
+        current_fingerprint = str(
+            current_meta.get(index_schema.SOURCE_FINGERPRINT, "") or ""
+        )
+        producer_fingerprint = str(
+            _producer_attr(producer, "fingerprint", "") or ""
+        )
+        fingerprint_matches = (
+            not current_fingerprint
+            or not producer_fingerprint
+            or current_fingerprint == producer_fingerprint
+        )
+        if (
+            done == index_schema.DONE_FULL
+            and not partial_enrichment
+            and fingerprint_matches
+        ):
             logger.info("%s: already built (use --force to rebuild)", source.key)
             return None
-        if done == index_schema.DONE_FAST and fast and not partial_enrichment:
+        if (
+            done == index_schema.DONE_FAST
+            and fast
+            and not partial_enrichment
+            and fingerprint_matches
+        ):
             logger.info(
                 "%s: already indexed for title/full-text search "
                 "(use --force to rebuild)",
                 source.key,
             )
             return None
+        if not fingerprint_matches and not force:
+            logger.info(
+                "%s: source or build inputs changed; rebuilding",
+                source.key,
+            )
 
     mode = index_schema.DONE_FAST if fast else index_schema.DONE_FULL
     build_db_path, build_faiss_path = _staging_paths(directory, mode)

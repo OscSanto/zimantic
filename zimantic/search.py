@@ -516,18 +516,13 @@ class Search:
                 old_indexes = set(_index_tokens())
             old_tokens = _index_tokens()
             if refresh or scan_catalog:
-                with self._state_lock:
-                    runtimes = list(self.runtimes.values())
-                for runtime in runtimes:
-                    try:
-                        runtime.refresh(wait=True)
-                    except Exception as error:
-                        logger.warning(
-                            "zimantic: collection refresh failed for %s (%s)",
-                            getattr(runtime.collection, "label", "collection"),
-                            error,
-                        )
-            self._publish_runtime_sources()
+                # Rerun entry discovery so a newly installed Kolibri channel or
+                # an added/removed source is published atomically.  Provider
+                # runtimes keep their own index generations, so unchanged
+                # sources are reopened without rebuilding or rereading content.
+                self.refresh_collections(wait=True)
+            else:
+                self._publish_runtime_sources()
             with self._state_lock:
                 new_keys = set(self.sources)
                 new_indexes = set(_index_tokens())
@@ -604,57 +599,106 @@ class Search:
             persist_catalog=bool(self.cfg.get("index_dir")),
             on_sources_changed=self._publish_runtime_sources,
         )
+        with self._state_lock:
+            previous_runtimes = dict(self.runtimes)
+            previous_batches = list(getattr(self, "_discovery_batches", []))
         new_runtimes: dict[str, Any] = {}
         new_collections: dict[str, CollectionInfo] = {}
         new_batches: list[Any] = []
         diagnostics: list[str] = []
-        for entry in self._configured_provider_entries():
+        failed_entries: set[str] = set()
+
+        def matches_entry(runtime: Any, entry: ProviderConfig) -> bool:
+            runtime_config = getattr(runtime, "config", None)
+            return (
+                getattr(runtime_config, "kind", None) == entry.kind
+                and getattr(runtime_config, "name", None) == entry.name
+            )
+
+        entries = self._configured_provider_entries()
+        for entry in entries:
             provider = self.providers.get(entry.kind)
             if provider is None:
                 diagnostics.append(f"no provider registered for {entry.kind!r}")
+                failed_entries.add(entry.name)
                 continue
             try:
                 batch = provider.discover(entry, ctx)
             except Exception as error:
                 diagnostics.append(f"{entry.name}: {entry.kind} discovery failed: {error}")
+                failed_entries.add(entry.name)
                 continue
+            batch_error = getattr(batch, "error", None)
+            if batch_error:
+                diagnostics.append(
+                    f"{entry.name}: {entry.kind} discovery: {batch_error}"
+                )
             try:
                 for collection in batch.collections:
                     runtime = batch.open(collection)
                     self._bind_runtime(runtime)
                     new_runtimes[collection.key] = runtime
                     new_collections[collection.key] = collection
+                if batch_error and not batch.collections:
+                    failed_entries.add(entry.name)
                 new_batches.append(batch)
             except Exception as error:
                 diagnostics.append(f"{entry.name}: {entry.kind} open failed: {error}")
-                for runtime in new_runtimes.values():
+                failed_entries.add(entry.name)
+                for key, runtime in list(new_runtimes.items()):
+                    if not matches_entry(runtime, entry):
+                        continue
+                    new_runtimes.pop(key, None)
+                    new_collections.pop(key, None)
                     try:
                         runtime.close()
                     except Exception:
                         pass
-                for opened_batch in new_batches:
-                    try:
-                        opened_batch.close()
-                    except Exception:
-                        pass
-                new_runtimes.clear()
-                new_collections.clear()
-                new_batches.clear()
                 batch.close()
+
+        kept_old_batches = False
+        for entry in entries:
+            if entry.name not in failed_entries:
+                continue
+            for key, runtime in previous_runtimes.items():
+                if key in new_runtimes or not matches_entry(runtime, entry):
+                    continue
+                new_runtimes[key] = runtime
+                new_collections[key] = runtime.collection
+                kept_old_batches = True
+        if kept_old_batches:
+            new_batches.extend(previous_batches)
+        if not new_runtimes and previous_runtimes and diagnostics:
+            # A failed discovery scan must not erase the last complete
+            # published collection/source set.  The next reload retries.
+            for opened_batch in new_batches:
+                try:
+                    opened_batch.close()
+                except Exception:
+                    pass
+            for message in diagnostics:
+                logger.warning("zimantic: collection discovery: %s", message)
+            return self._publish_runtime_sources()
+        old_runtimes = previous_runtimes
+        old_batches = previous_batches
         with self._state_lock:
-            old_runtimes = self.runtimes
-            old_batches = getattr(self, "_discovery_batches", [])
             self.runtimes = new_runtimes
             self.collections = new_collections
             self._discovery_batches = new_batches
             self._aggregate_revision = getattr(self, "_aggregate_revision", 0) + 1
         sources = self._publish_runtime_sources()
+        kept_runtime_ids = {id(runtime) for runtime in new_runtimes.values()}
+        kept_batch_ids = {id(batch) for batch in new_batches}
         for runtime in old_runtimes.values():
+            if id(runtime) in kept_runtime_ids:
+                continue
             try:
                 runtime.close()
             except Exception:
                 pass
         for batch in old_batches:
+            if id(batch) in kept_batch_ids:
+                continue
             try:
                 batch.close()
             except Exception:

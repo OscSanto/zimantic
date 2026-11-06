@@ -220,10 +220,40 @@ port = 8090
 # max_entries = 100000
 # max_file_bytes = 268435456
 #
+# Search and serve a local Kolibri installation. Supported target: Kolibri
+# v0.19.5 installed SQLite schema. Kolibri does not need to be running. Each
+# installed channel becomes one collection; "children" makes each top-level
+# topic a source plus an Ungrouped source for direct leaves. The installation
+# is read only: Zimantic creates private consistent snapshots outside
+# path/content/storage and never writes the database or its WAL/SHM sidecars.
+# IIAB-style example:
+#
+# [[collections]]
+# type = "kolibri"
+# name = "kolibri"
+# path = "/library/kolibri"
+# label = "Kolibri"
+# granularity = "children"          # "children" or "collection"
+# max_sources = 64
+# max_entries = 500000
+# max_snapshot_bytes = 1073741824
+# snapshot_disk_budget_bytes = 3221225472
+# snapshot_timeout_seconds = 10
+# max_html5_zip_entries = 10000
+# max_html5_zip_directory_bytes = 8388608
+# max_html5_zip_member_bytes = 268435456
+# max_html5_zip_total_bytes = 1073741824
+# html5_zip_timeout_seconds = 10
+# Optional overrides for non-standard installations:
+# database_path = "/library/kolibri/db.sqlite3"
+# storage = "/library/kolibri/content/storage"
+#
 # Optional exact-source enrichment overrides. Discover the key first; absent
-# switches stay off. captions reads .srt/.vtt sidecars (embedded tracks use the
-# shared ffmpeg adapter when available), ocr reads images and image-only PDF
-# pages, and asr transcribes audio/video.
+# switches stay off. captions reads .srt/.vtt sidecars and embedded text tracks
+# (embedded tracks use the shared ffmpeg adapter when available), ocr reads
+# images and image-only PDF pages, and asr transcribes audio/video. The same
+# switches work for Kolibri sources, for example:
+# key = "kolibri:kolibri:<channel_id>:root"
 # [[collections.sources]]
 # key = "files:modules:root"
 # captions = "index"

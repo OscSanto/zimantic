@@ -235,8 +235,43 @@ class KolibriConfig:
 
     def __post_init__(self) -> None:
         validate_name(self.name)
+        if not self.path:
+            raise ConfigValidationError("kolibri path must not be empty")
         if self.granularity not in ("collection", "children"):
             raise ConfigValidationError("granularity must be collection or children")
+        for name in (
+            "max_snapshot_bytes",
+            "snapshot_disk_budget_bytes",
+            "snapshot_timeout_seconds",
+            "max_html5_zip_entries",
+            "max_html5_zip_directory_bytes",
+            "max_html5_zip_member_bytes",
+            "max_html5_zip_total_bytes",
+            "html5_zip_timeout_seconds",
+        ):
+            _positive_int(getattr(self, name), name)
+        if self.snapshot_disk_budget_bytes < self.max_snapshot_bytes:
+            raise ConfigValidationError(
+                "snapshot_disk_budget_bytes must be at least max_snapshot_bytes"
+            )
+        for name in ("max_sources", "max_entries"):
+            value = getattr(self, name)
+            if value is not None:
+                _positive_int(value, name)
+        for name in ("path", "database_path", "storage"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigValidationError(f"{name} must be a non-empty string")
+            if (
+                re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value)
+                or value.startswith("//")
+                or value.startswith("\\\\")
+            ):
+                raise ConfigValidationError(
+                    f"{name} must be a local filesystem path"
+                )
 
 
 ProviderConfig = ZimConfig | KiwixConfig | FilesConfig | KolibriConfig
@@ -284,6 +319,12 @@ class ParsedCollections:
 def _resolve_path(value: Any, name: str, base: Path) -> str:
     raw = _string(value, name)
     assert raw is not None
+    if (
+        re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw)
+        or raw.startswith("//")
+        or raw.startswith("\\\\")
+    ):
+        raise ConfigValidationError(f"{name} must be a local filesystem path")
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = base / path
@@ -398,6 +439,89 @@ def _parse_files(entry: Mapping[str, Any], base: Path) -> FilesConfig:
     )
 
 
+_KOLIBRI_KEYS = frozenset(
+    {
+        "type",
+        "name",
+        "label",
+        "path",
+        "granularity",
+        "database_path",
+        "storage",
+        "max_sources",
+        "max_entries",
+        "max_snapshot_bytes",
+        "snapshot_disk_budget_bytes",
+        "snapshot_timeout_seconds",
+        "max_html5_zip_entries",
+        "max_html5_zip_directory_bytes",
+        "max_html5_zip_member_bytes",
+        "max_html5_zip_total_bytes",
+        "html5_zip_timeout_seconds",
+        "traversal",
+        "max_visited_entries",
+        "traversal_timeout_seconds",
+        "sources",
+    }
+)
+
+
+def _optional_path(value: Any, name: str, base: Path) -> str | None:
+    if value is None:
+        return None
+    return _resolve_path(value, name, base)
+
+
+def _parse_kolibri(entry: Mapping[str, Any], base: Path) -> KolibriConfig:
+    common = _common(entry)
+    granularity = entry.get("granularity", "children")
+    if granularity not in ("collection", "children"):
+        raise ConfigValidationError("granularity must be collection or children")
+    return KolibriConfig(
+        path=_resolve_path(entry.get("path"), "path", base),
+        granularity=granularity,
+        database_path=_optional_path(
+            entry.get("database_path"), "database_path", base
+        ),
+        storage=_optional_path(entry.get("storage"), "storage", base),
+        max_sources=_optional_positive_int(entry.get("max_sources"), "max_sources"),
+        max_entries=_optional_positive_int(entry.get("max_entries"), "max_entries"),
+        max_snapshot_bytes=_positive_int(
+            entry.get("max_snapshot_bytes", 1_073_741_824),
+            "max_snapshot_bytes",
+        ),
+        snapshot_disk_budget_bytes=_positive_int(
+            entry.get("snapshot_disk_budget_bytes", 3_221_225_472),
+            "snapshot_disk_budget_bytes",
+        ),
+        snapshot_timeout_seconds=_positive_int(
+            entry.get("snapshot_timeout_seconds", 10),
+            "snapshot_timeout_seconds",
+        ),
+        max_html5_zip_entries=_positive_int(
+            entry.get("max_html5_zip_entries", 10_000),
+            "max_html5_zip_entries",
+        ),
+        max_html5_zip_directory_bytes=_positive_int(
+            entry.get("max_html5_zip_directory_bytes", 8_388_608),
+            "max_html5_zip_directory_bytes",
+        ),
+        max_html5_zip_member_bytes=_positive_int(
+            entry.get("max_html5_zip_member_bytes", 268_435_456),
+            "max_html5_zip_member_bytes",
+        ),
+        max_html5_zip_total_bytes=_positive_int(
+            entry.get("max_html5_zip_total_bytes", 1_073_741_824),
+            "max_html5_zip_total_bytes",
+        ),
+        html5_zip_timeout_seconds=_positive_int(
+            entry.get("html5_zip_timeout_seconds", 10),
+            "html5_zip_timeout_seconds",
+        ),
+        **common,
+    )
+
+
 def parse_collections(
     data: Mapping[str, Any],
     *,
@@ -439,12 +563,6 @@ def parse_collections(
             diagnostics.append(f"collection #{index + 1}: {error}")
             continue
         names[name] = names.get(name, 0) + 1
-        if kind == "kolibri":
-            if allow_disabled_providers:
-                diagnostics.append(
-                    f"collection {name!r}: provider {kind!r} is not supported yet"
-                )
-            continue
         try:
             if kind == "zim":
                 parsed = _parse_zim(entry, base)
@@ -456,6 +574,14 @@ def parse_collections(
                         + ", ".join(unknown)
                     )
                 parsed = _parse_files(entry, base)
+            elif kind == "kolibri":
+                unknown = sorted(set(entry) - _KOLIBRI_KEYS)
+                if unknown:
+                    diagnostics.append(
+                        f"collection {name!r}: unknown key(s) ignored: "
+                        + ", ".join(unknown)
+                    )
+                parsed = _parse_kolibri(entry, base)
             else:
                 parsed = _parse_kiwix(entry, base)
         except ConfigValidationError as error:

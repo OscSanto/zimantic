@@ -1,6 +1,6 @@
 # Phase 06 — Kolibri provider
 
-Status: proposed.
+Status: implemented.
 
 ## Goal
 
@@ -466,32 +466,32 @@ bytes, total declared uncompressed bytes, and per-operation wall time.
 
 ## Work items
 
-- [ ] Create `zimantic/providers/kolibri/` with the modules above.
-- [ ] Add provider-level validation for normalized Kolibri configuration;
+- [x] Create `zimantic/providers/kolibri/` with the modules above.
+- [x] Add provider-level validation for normalized Kolibri configuration;
       accept only `granularity = "collection"` or `"children"` and validate
       the snapshot limits and their ordering.
-- [ ] Implement the read-only access/snapshot backend and main-DB schema
+- [x] Implement the read-only access/snapshot backend and main-DB schema
       detection and queries.
-- [ ] Share one pinned installation snapshot through the discovery batch and
+- [x] Share one pinned installation snapshot through the discovery batch and
       retire it only after its channel runtimes and readers close.
-- [ ] Implement channel discovery, granularity mapping, cap collapse, and icons.
-- [ ] Implement `KolibriEntryProducer` with stable ids and fingerprinting.
-- [ ] Detect row-id collisions while building the node-id mapping and fail with
+- [x] Implement channel discovery, granularity mapping, cap collapse, and icons.
+- [x] Implement `KolibriEntryProducer` with stable ids and fingerprinting.
+- [x] Detect row-id collisions while building the node-id mapping and fail with
       the colliding channel/node identities; never merge documents.
-- [ ] Implement document/HTML/PDF extraction; verify which Kolibri file kinds
+- [x] Implement document/HTML/PDF extraction; verify which Kolibri file kinds
       are readable and skip the rest.
-- [ ] Implement `captions = "index"` through the shared caption extractor, and
+- [x] Implement `captions = "index"` through the shared caption extractor, and
       opt-in `ocr`/`asr` through the shared derived-text stage.
-- [ ] Implement `KolibriContentStore`, including bounded HTML5 zip handling,
+- [x] Implement `KolibriContentStore`, including bounded HTML5 zip handling,
       asset resolution, and media ranges. Enforce phase 09's zip-bomb,
       duplicate-member, and confinement requirements in this phase.
-- [ ] Wire configured Kolibri sources into the build command in this phase.
-- [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
+- [x] Wire configured Kolibri sources into the build command in this phase.
+- [x] Add source metadata: `provider`, `collection`, `key`, `searchable`,
       `item_count`,
       `indexed_count`, `truncated`, `body_truncated_count`, and `media_types`
       (empty when no family is known).
-- [ ] Document supported Kolibri versions and the read-only guarantee.
-- [ ] Add a annotated example config for IIAB's `/library/kolibri` layout.
+- [x] Document supported Kolibri versions and the read-only guarantee.
+- [x] Add a annotated example config for IIAB's `/library/kolibri` layout.
 
 ## Tests
 

@@ -15,12 +15,14 @@ _REGISTRY: dict[str, SourceProvider] | None = None
 def _default_providers() -> dict[str, SourceProvider]:
     from .files import FilesProvider
     from .kiwix import KiwixProvider
+    from .kolibri import KolibriProvider
     from .zim import ZimProvider
 
     return {
         "zim": ZimProvider(),
         "kiwix": KiwixProvider(),
         "files": FilesProvider(),
+        "kolibri": KolibriProvider(),
     }
 
 
@@ -36,7 +38,7 @@ def builtin_providers() -> list[SourceProvider]:
     registry = _registry()
     return [
         registry[kind]
-        for kind in ("zim", "kiwix", "files")
+        for kind in ("zim", "kiwix", "files", "kolibri")
         if kind in registry
     ]
 

@@ -210,8 +210,8 @@ def test_duplicate_collection_names_disable_all_duplicates(tmp_path):
     assert any("same" in message for message in parsed.diagnostics)
 
 
-def test_files_is_supported_and_kolibri_remains_disabled(tmp_path):
-    from zimantic.providers.config import FilesConfig, parse_collections
+def test_files_and_kolibri_are_both_supported(tmp_path):
+    from zimantic.providers.config import FilesConfig, KolibriConfig, parse_collections
 
     parsed = parse_collections(
         {
@@ -229,11 +229,58 @@ def test_files_is_supported_and_kolibri_remains_disabled(tmp_path):
         },
         config_dir=tmp_path,
     )
-    assert len(parsed.collections) == 1
+    assert len(parsed.collections) == 2
     files = parsed.collections[0]
     assert isinstance(files, FilesConfig)
     assert files.path == str(tmp_path / "modules")
     assert files.granularity == "children"
     assert files.include == ("**/*.html",)
+    kolibri = parsed.collections[1]
+    assert isinstance(kolibri, KolibriConfig)
+    assert kolibri.path == str(tmp_path / "kolibri")
+    assert kolibri.granularity == "children"
     assert any("unknown key" in message for message in parsed.diagnostics)
-    assert any("kolibri" in message for message in parsed.diagnostics)
+
+
+def test_kolibri_limits_and_granularity_are_validated(tmp_path):
+    from zimantic.providers.config import (
+        ConfigValidationError,
+        KolibriConfig,
+        parse_collections,
+    )
+
+    with pytest.raises(ConfigValidationError):
+        KolibriConfig(name="kolibri", path="x", granularity="file")
+    with pytest.raises(ConfigValidationError):
+        KolibriConfig(name="kolibri", path="x", max_snapshot_bytes=0)
+    with pytest.raises(ConfigValidationError):
+        KolibriConfig(
+            name="kolibri",
+            path="x",
+            max_snapshot_bytes=100,
+            snapshot_disk_budget_bytes=99,
+        )
+    with pytest.raises(ConfigValidationError):
+        KolibriConfig(name="kolibri", path="http://example.test/kolibri")
+
+    parsed = parse_collections(
+        {
+            "collections": [
+                {
+                    "type": "kolibri",
+                    "name": "kolibri",
+                    "path": "home",
+                    "database_path": "db.sqlite3",
+                    "storage": "storage",
+                    "max_snapshot_bytes": 4096,
+                    "snapshot_disk_budget_bytes": 8192,
+                }
+            ]
+        },
+        config_dir=tmp_path,
+    )
+    entry = parsed.collections[0]
+    assert isinstance(entry, KolibriConfig)
+    assert entry.database_path == str(tmp_path / "db.sqlite3")
+    assert entry.storage == str(tmp_path / "storage")
+    assert entry.snapshot_disk_budget_bytes == 8192

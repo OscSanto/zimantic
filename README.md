@@ -19,10 +19,11 @@ Meaning search performs best in widely spoken languages. Coverage varies by lang
 - **Multilingual queries.** One model covers 100+ languages, and a query in one language can find articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](#compared-with-kiwix-search).
 - **Multiple sources.** Search a small selection of ZIMs directly, or search the full library and filter the ranked results by source. See [Source selection](#source-selection).
 - **Files collections.** Search and serve a configured directory tree, such as an offline copy of `/library/www/html/modules`, as one bounded collection. See [Files collections](#files-collections).
+- **Kolibri installations.** Search and serve a local Kolibri v0.19.5 installation directly, with one collection per installed channel and one source per top-level topic. See [Kolibri installations](#kolibri-installations).
 - **Hybrid ranking.** Meaning, title-word, and full-text retrieval are fused into a single ranking.
 - **Merged results and bounded previews.** Redirects are merged into their target article, so each article appears once. Each result carries a bounded excerpt as its preview.
 - **Progressive results.** Sources run in parallel. The page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- **Library view.** Browse installed ZIMs and files sources at `/library` with artwork, descriptions, metadata, and links to each homepage or a random article. See [Library view](#library-view).
+- **Library view.** Browse installed ZIMs, files sources, and Kolibri channels at `/library` with artwork, descriptions, metadata, and links to each homepage or a random article. See [Library view](#library-view).
 - **Low resource use.** Runs on low-resource devices such as a Raspberry Pi Zero 2 W (512 MB RAM) using roughly 250–325 MB while serving; see [Measured memory use](#measured-memory-use).
 - **Graceful degradation.** Title-word and full-text search work as soon as an index exists. Vectors are optional, and a ZIM with no index remains searchable through its native full-text index. A missing model, a missing FAISS file, or a different model whose probe embeddings do not match falls back to lexical search instead of failing the server. Native full-text searches run in helper processes, so an archive with an inconsistent full-text index cannot take the server down; only that archive loses native full-text results, and the server logs why.
 - **Concurrent searches.** `max_concurrent_searches` bounds simultaneous searches. A request waits up to `slot_wait_seconds` for a free slot before reporting busy, so overlapping searches queue on slow hardware instead of failing immediately; abandoned browser streams skip queued source work and return their slot. Identical in-flight queries share one computation, and repeated queries are answered from an in-memory cache bounded by `cache_size` and `cache_bytes`. Small one-off source selections are intentionally not cached; see [Source selection](#source-selection).
@@ -37,8 +38,8 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
 - 32-bit Linux platforms (armhf/armv7) have no prebuilt wheels for the native dependencies. They work when the dependencies are installed as distribution packages. Debian 13 (trixie) or newer provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic can use them.
 - About 120 MB for the default embedding model, plus the ZIM files. The English-only `e5-small-v2` model is about 35 MB on disk.
 - Wikipedia-style ZIM files. Zimantic relies on their predictable HTML structure to locate useful content blocks.
-- **One provider seam.** ZIM and remote Kiwix are working in-tree providers. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator. There is no `mode`, `content_kind`, `book`, or `local_name` field.
-- **Configured collections.** Collections are declared with `[[collections]]` entries (ZIM roots and Kiwix servers). Removed flat keys such as `zim_dir` and `kiwix_server` are fatal configuration errors with a migration message.
+- **One provider seam.** ZIM, remote Kiwix, files, and Kolibri are in-tree providers. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator. There is no `mode`, `content_kind`, `book`, or `local_name` field.
+- **Configured collections.** Collections are declared with `[[collections]]` entries (ZIM roots, Kiwix servers, files trees, and Kolibri installations). Removed flat keys such as `zim_dir` and `kiwix_server` are fatal configuration errors with a migration message.
 - No `kiwix-serve` for local sources: Zimantic serves local results and articles directly. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links returned by kiwix-serve's search API.
 
 ## Install
@@ -197,6 +198,51 @@ asr = "whisper"        # audio/video
 
 With `secure_browsing = true`, the `/content/` shell sandboxes the article iframe. A raw `/article/` page opened directly or in a permitted popup is not sandboxed; treat untrusted file trees as untrusted input regardless of that setting.
 
+### Kolibri installations
+
+A `type = "kolibri"` collection reads a local Kolibri installation directly; Kolibri does not need to be running. The supported target is **Kolibri v0.19.5** with its installed SQLite schema. Older releases and other layouts are reported as unsupported rather than guessed from a channel export database. An IIAB-style installation looks like this:
+
+```toml
+[[collections]]
+type = "kolibri"
+name = "kolibri"
+path = "/library/kolibri"          # home containing db.sqlite3 and content/storage
+label = "Kolibri"
+granularity = "children"           # "children" (top-level topics) or "collection"
+max_sources = 64
+max_entries = 500000
+# Private consistent snapshots; all limits must be positive. The disk budget
+# must be at least the per-snapshot limit.
+max_snapshot_bytes = 1073741824
+snapshot_disk_budget_bytes = 3221225472
+snapshot_timeout_seconds = 10
+# Bounded HTML5 zip serving.
+max_html5_zip_entries = 10000
+max_html5_zip_directory_bytes = 8388608
+max_html5_zip_member_bytes = 268435456
+max_html5_zip_total_bytes = 1073741824
+html5_zip_timeout_seconds = 10
+```
+
+Each installed channel is one collection (`kolibri:<name>:<channel_id>`). With `granularity = "children"`, each top-level topic becomes a source, direct leaf items under the channel root form an `Ungrouped` source, and a channel with no topics gets one whole-channel source. `granularity = "collection"` always uses one source per channel. If the topic count exceeds `max_sources`, the whole channel collapses to one source with the distinct `:collapsed` key and a warning; `max_entries` bounds the indexed manifest and marks the source truncated while all permitted items remain servable. Source keys are `kolibri:<name>:<channel_id>:node:<node_id>`, `:ungrouped`, `:root`, or `:collapsed`.
+
+Items are leaf content nodes with locally available files, plus exercises whose public description is non-empty. Topics are grouping only. Titles, public descriptions, HTML/PDF/plain documents, and an HTML5 app's entry page are indexed. Audio and video bodies contribute no text unless an exact source override enables captions, OCR, or ASR:
+
+```toml
+# Discover the exact key first (for example from `/sources`).
+[[collections.sources]]
+key = "kolibri:kolibri:<channel_id>:root"
+captions = "index"     # existing .vtt/.srt tracks and embedded text tracks
+ocr = "tesseract"      # images and image-only PDF pages
+asr = "whisper"        # audio/video when captions did not provide usable text
+```
+
+The provider **never writes to Kolibri**. It copies the installed database through a private, owner-only, SQLite-consistent snapshot outside the installation and storage roots; committed WAL data is included, and a concurrently changing source causes a bounded retry or a fail-closed diagnostic instead of a torn read. Snapshots are shared across a channel discovery batch, removed after their last reader, and capped by the configured size, disk, and time budgets. A failed refresh keeps the last complete published batch and reports the error. The installation database and its WAL/SHM/journal sidecars are not modified, migrated, vacuumed, or checkpointed.
+
+Keep the installation, storage, and private snapshot directory on local filesystems. The snapshot copy is validated before and after reading, but a stalled kernel or filesystem cannot provide a hard real-time bound. Content fingerprints use the selected database rows and storage-file size/mtime signatures, which are practical change detectors rather than proof of identical bytes: a same-size write that also restores the timestamp can evade detection. Keep installed content immutable or use an external snapshot when strong consistency is required.
+
+Set `database_path` and `storage` only when the active database or content directory is non-standard. The provider reads SQLite installations only: if `options.ini` explicitly declares PostgreSQL, the collection is reported unsupported rather than reading an old SQLite file. Absolute configured paths stay private runtime locators and never appear in source keys, API payloads, or normal logs. `zimantic build` with no positional paths builds configured Kolibri channels along with ZIM and files collections. HTML5 serving supports the `html5_zip` preset (entry `index.html` at the zip root) with bounded streaming, path confinement, duplicate/symlink rejection, and zip-bomb limits; other viewer-dependent presets such as H5P or IMSCP are reported explicitly as unsupported. As with files collections, the browser can still be asked by untrusted app HTML to contact external URLs.
+
 ### Copying finished indexes to another machine
 
 Embeddings live only in `index.faiss`. Its row IDs refer to `docs.rowid` in the matching `index.sqlite`, which holds titles, paths, the title and body full-text indexes, derived-text cache references, and build metadata. Copy the pair plus the source's `current` manifest; a `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and body lexical search only. A full index whose `.faiss` is missing still serves lexical results, but a later full build requires `--force` to replace it.
@@ -252,7 +298,7 @@ zimantic model --dir ./models         # write models/<precision>/ instead of mod
 zimantic model --list                 # show supported models and precisions
 ```
 
-`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM collection plus every configured files collection. An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; restart a running server to load that config change. Existing complete generations are skipped; pass `--force` to rebuild selected indexes. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
+`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM, files, and Kolibri collection. An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; restart a running server to load that config change. Existing complete generations are skipped; pass `--force` to rebuild selected indexes, or let a changed source fingerprint trigger a rebuild. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
 
 ### Build behavior and locking
 
