@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,6 +68,98 @@ class HardwareProfileTests(unittest.TestCase):
 
 
 class LoadConfigTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "XDG config paths are Unix-only")
+    def test_xdg_defaults_and_relative_overrides_use_data_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            work.mkdir()
+            config_home = root / "config"
+            config_file = config_home / "zimantic" / "config.toml"
+            config_file.parent.mkdir(parents=True)
+            config_file.write_text(
+                'zim_dir = "archives"\n'
+                'model_dir = "models/fp16"\n'
+                'index_dir = "indexes"\n',
+                encoding="utf-8",
+            )
+            data_home = root / "data"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "XDG_CONFIG_HOME": str(config_home),
+                        "XDG_DATA_HOME": str(data_home),
+                    },
+                ),
+                patch("zimantic.paths.Path.cwd", return_value=work),
+                patch.object(settings, "profile_for_hardware", return_value="desktop"),
+            ):
+                cfg = load_config(warn=lambda _message: None)
+
+        data_dir = data_home / "zimantic"
+        self.assertEqual(cfg["zim_dir"], str(data_dir / "archives"))
+        self.assertEqual(cfg["model_dir"], str(data_dir / "models/fp16"))
+        self.assertEqual(cfg["index_dir"], str(data_dir / "indexes"))
+
+    @unittest.skipIf(os.name == "nt", "XDG config paths are Unix-only")
+    def test_xdg_defaults_apply_without_a_config_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            work.mkdir()
+            config_home = root / "config"
+            data_home = root / "data"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "XDG_CONFIG_HOME": str(config_home),
+                        "XDG_DATA_HOME": str(data_home),
+                    },
+                ),
+                patch("zimantic.paths.Path.cwd", return_value=work),
+                patch.object(settings, "profile_for_hardware", return_value="desktop"),
+            ):
+                cfg = load_config(warn=lambda _message: None)
+
+        data_dir = data_home / "zimantic"
+        self.assertEqual(cfg["zim_dir"], str(data_dir / "zims"))
+        self.assertEqual(cfg["model_dir"], str(data_dir / "model/int8"))
+        self.assertEqual(cfg["index_dir"], str(data_dir / "indexes"))
+
+    @unittest.skipIf(os.name == "nt", "XDG config paths are Unix-only")
+    def test_cwd_config_keeps_legacy_relative_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            work.mkdir()
+            (work / "config.toml").write_text("port = 8999\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": str(root / "config")}),
+                patch("zimantic.paths.Path.cwd", return_value=work),
+                patch.object(settings, "profile_for_hardware", return_value="desktop"),
+            ):
+                cfg = load_config(warn=lambda _message: None)
+
+        self.assertEqual(cfg["port"], 8999)
+        self.assertEqual(cfg["zim_dir"], "./zims")
+        self.assertEqual(cfg["model_dir"], "./model/int8")
+        self.assertEqual(cfg["index_dir"], "./indexes")
+
+    def test_explicit_config_path_keeps_existing_relative_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("port = 8999\n", encoding="utf-8")
+            with (
+                patch.object(settings, "xdg_data_dir", side_effect=AssertionError),
+                patch.object(settings, "profile_for_hardware", return_value="desktop"),
+            ):
+                cfg = load_config(path, warn=lambda _message: None)
+
+        self.assertEqual(cfg["port"], 8999)
+        self.assertEqual(cfg["index_dir"], "./indexes")
+
     def test_missing_file_warns_and_uses_a_complete_profile(self):
         warnings = []
         with patch.object(settings, "profile_for_hardware", return_value="desktop"):

@@ -25,6 +25,7 @@ from ..search import (
 )
 from ..searching.sources import _html_attribute
 from ..settings import normalize_web_base_path
+from ..paths import server_pid_path
 
 ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"
@@ -44,7 +45,6 @@ MATHJAX_FONT_DIR = ASSET_DIR / "mathjax" / "HTML-CSS" / "TeX" / "woff"
 _MATHJAX_FONT_RE = re.compile(
     r"(?:^|/)fonts/HTML-CSS/TeX/woff/(MathJax_[A-Za-z0-9_.-]+\.woff)$"
 )
-PID_FILE = Path("zimantic.pid")
 logger = logging.getLogger(__name__)
 
 
@@ -991,10 +991,12 @@ def _handle_restart_request(_signum, _frame) -> None:
 def serve(searchClass, port: int, debug: bool = False) -> None:
     app = create_app(searchClass, debug=debug)
     warm_static_cache()
+    pid_file = server_pid_path()
     try:
-        PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        pid_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as error:
-        logger.error("zimantic: could not write PID file %s: %s", PID_FILE, error)
+        logger.error("zimantic: could not write PID file %s: %s", pid_file, error)
 
     # Optional Kiwix catalog discovery runs in the background so an unreachable
     # Kiwix server cannot delay binding the port.
@@ -1034,6 +1036,6 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
             except Exception as error:  # never mask the original shutdown path
                 logger.warning("zimantic: search shutdown failed (%s)", error)
         try:
-            PID_FILE.unlink()
+            pid_file.unlink()
         except OSError:
             pass

@@ -5,6 +5,7 @@ import sys
 import tomllib
 from pathlib import Path
 
+from .paths import default_config_path, xdg_data_dir
 from .searching.config import DEFAULT_MAX_ARTICLE_BYTES
 
 DEFAULT_EMBEDDING_TOKENS = 256
@@ -256,12 +257,12 @@ def profile_for_hardware() -> str:
     return "desktop"
 
 
-def load_config(path: str | Path = "config.toml", warn=None) -> dict:
+def load_config(path: str | Path | None = None, warn=None) -> dict:
     """Read config.toml over hardware-matched defaults.
 
-    A missing or unreadable config.toml is a warning, not an error: Zimantic
-    falls back to the profile chosen for the machine it is running on. Keys
-    present in the file always override their profile default.
+    XDG config is preferred on Unix; an existing config.toml in the current
+    directory remains a compatibility fallback. A missing or unreadable config
+    is a warning, not an error.
     """
     if warn is None:
         def warn_to_stderr(message):
@@ -270,24 +271,45 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
         warn = warn_to_stderr
     profile = profile_for_hardware()
     cfg = dict(PROFILES[profile])
-    config_path = Path(path)
+    legacy_config = False
+    data_dir: Path | None = None
+    if path is None:
+        config_path, legacy_config = default_config_path()
+        if not legacy_config and os.name != "nt":
+            data_dir = xdg_data_dir()
+            cfg.update(
+                zim_dir=str(data_dir / "zims"),
+                model_dir=str(data_dir / "model" / "int8"),
+                index_dir=str(data_dir / "indexes"),
+            )
+    else:
+        config_path = Path(path)
     user: dict = {}
     loaded = False
     try:
         user = tomllib.loads(config_path.read_text(encoding="utf-8"))
         loaded = True
     except FileNotFoundError:
-        warn(f"zimantic: warning: {path} not found; using {profile} defaults")
+        warn(f"zimantic: warning: {config_path} not found; using {profile} defaults")
     except (OSError, tomllib.TOMLDecodeError) as error:
-        warn(f"zimantic: warning: could not read {path} ({error}); using {profile} defaults")
+        warn(
+            f"zimantic: warning: could not read {config_path} ({error}); "
+            f"using {profile} defaults"
+        )
     # Only a file that parsed successfully can be called empty. A malformed or
     # unreadable file already got its own warning above, and calling it empty
     # afterwards contradicts that message.
     if loaded and not user:
-        warn(f"zimantic: warning: {path} is empty; using {profile} defaults")
+        warn(f"zimantic: warning: {config_path} is empty; using {profile} defaults")
     for key in sorted(set(user) - KNOWN_KEYS):
-        warn(f"zimantic: warning: unknown config key {key!r} in {path} (ignored)")
-    cfg.update(_typed_user_values(user, cfg, path, warn))
+        warn(f"zimantic: warning: unknown config key {key!r} in {config_path} (ignored)")
+    cfg.update(_typed_user_values(user, cfg, config_path, warn))
+    if data_dir is not None:
+        for key in ("zim_dir", "model_dir", "index_dir"):
+            configured_path = Path(cfg[key]).expanduser()
+            if not configured_path.is_absolute():
+                configured_path = data_dir / configured_path
+            cfg[key] = str(configured_path)
     # Validate embed_device here rather than in embed.py: a typo should not stay
     # hidden until the first embedding call (or forever in --fast mode).
     device = cfg.get("embed_device")
@@ -298,7 +320,7 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
         cfg["embed_device"] = normalized
     else:
         warn(
-            f"zimantic: warning: config key 'embed_device' in {path} "
+            f"zimantic: warning: config key 'embed_device' in {config_path} "
             f"must be one of {', '.join(sorted(EMBED_DEVICES))} "
             f"(got {device!r}); using 'auto'"
         )
@@ -313,7 +335,7 @@ def load_config(path: str | Path = "config.toml", warn=None) -> dict:
     for key in ("build_workers", "embedding_workers"):
         if key in cfg and cfg[key] < 1:
             warn(
-                f"zimantic: warning: config key {key!r} in {path} "
+                f"zimantic: warning: config key {key!r} in {config_path} "
                 "must be at least 1; using the automatic default"
             )
             del cfg[key]

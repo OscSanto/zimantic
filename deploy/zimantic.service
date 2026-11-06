@@ -7,11 +7,12 @@
 #   systemctl --user enable --now zimantic.service
 #
 # Install the CLI from the checkout first:
-#   cd ~/.local/share/zimantic
+#   cd "${XDG_DATA_HOME:-$HOME/.local/share}/zimantic"
 #   uv sync --locked --no-dev --no-editable
 #   install -d ~/.local/bin
 #   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
-# The default data directory is ~/.local/share/zimantic.
+# Configuration defaults to ~/.config/zimantic, and data to
+# ~/.local/share/zimantic; both follow their respective XDG_*_HOME overrides.
 
 [Unit]
 Description=Zimantic search server
@@ -31,8 +32,7 @@ RestartSec=10
 OOMPolicy=stop
 Environment=PYTHONUNBUFFERED=1
 
-# Hardening: the server only needs to read zims/model and write indexes/ plus
-# its PID file, all under the XDG data directory.
+# Hardening: the server only needs to read and write its XDG data directory.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

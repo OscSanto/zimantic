@@ -251,8 +251,11 @@ def _make_parser() -> argparse.ArgumentParser:
     reload_cmd.add_argument(
         "--pid",
         type=Path,
-        default=Path("zimantic.pid"),
-        help="file holding the server's PID (default: ./zimantic.pid)",
+        default=None,
+        help=(
+            "file holding the server's PID (default: "
+            "$XDG_RUNTIME_DIR/zimantic/zimantic.pid, or ./zimantic.pid)"
+        ),
     )
 
     model_cmd = commands.add_parser(
@@ -570,7 +573,10 @@ def _run_model(args, cfg: dict) -> None:
         )
 
 
-def _run_reload(pid_file: Path) -> None:
+def _run_reload(pid_file: Path | None) -> None:
+    from .paths import reload_pid_path
+
+    pid_file = reload_pid_path(pid_file)
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):

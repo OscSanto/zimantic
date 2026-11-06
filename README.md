@@ -40,12 +40,17 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
 
 ## Install
 
-1. **Clone the repository into the data directory.** `config.toml` is optional; missing values fall back to hardware-based defaults.
+1. **Clone the repository into the data directory.** Configuration lives at `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); omitted settings use hardware and XDG defaults.
 
    ```bash
-   mkdir -p ~/.local/share
-   git clone https://github.com/OscSanto/zimantic.git ~/.local/share/zimantic
-   cd ~/.local/share/zimantic
+   data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+   config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+   mkdir -p "$data_home" "$config_home/zimantic"
+   git clone https://github.com/OscSanto/zimantic.git "$data_home/zimantic"
+   cd "$data_home/zimantic"
+   if [ ! -e "$config_home/zimantic/config.toml" ]; then
+       cp config.toml "$config_home/zimantic/config.toml"
+   fi
    ```
 
 2. **Install the CLI with uv.** This installs the locked runtime dependencies without the development tools and creates the executable at `~/.local/bin/zimantic`.
@@ -74,19 +79,20 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
    zimantic model
    ```
 
-   This downloads the int8 export to `model/int8/model.onnx` and its tokenizer vocabulary. The example `config.toml` already points `model_dir` there. On a GPU host, download fp16 instead with `zimantic model fp16`; fp16 is faster on CUDA, ROCm, DirectML, and OpenVINO, while int8 is the smallest CPU-oriented default. In that case set `model_dir = "./model/fp16"`. `zimantic model --list` shows the other supported e5 models, and `zimantic model --help` shows the options. The equivalent manual download is:
+   This downloads the int8 export to `$XDG_DATA_HOME/zimantic/model/int8/model.onnx` and its tokenizer vocabulary. On a GPU host, download fp16 instead with `zimantic model fp16`; fp16 is faster on CUDA, ROCm, DirectML, and OpenVINO, while int8 is the smallest CPU-oriented default. In that case set `model_dir = "model/fp16"` in the XDG config. `zimantic model --list` shows the other supported e5 models, and `zimantic model --help` shows the options. The equivalent manual download is:
 
    ```bash
-   mkdir -p model/int8
-   curl -L -o model/int8/model.onnx https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
-   curl -L -o model/int8/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
+   data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+   mkdir -p "$data_home/zimantic/model/int8"
+   curl -L -o "$data_home/zimantic/model/int8/model.onnx" https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
+   curl -L -o "$data_home/zimantic/model/int8/sentencepiece.bpe.model" https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
    ```
 
    English-only and larger multilingual models use the same layout; see [Using a different embedding model](#using-a-different-embedding-model). Zimantic warns when `model.onnx` or `sentencepiece.bpe.model` differs from a documented checksum, but continues to run.
 
-4. **Put ZIM files in `zims/`.** Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
+4. **Put ZIM files in `$XDG_DATA_HOME/zimantic/zims/`.** Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. **Check `config.toml`.** The example already sets `model_dir = "./model/int8"`; change it if you downloaded a different precision or model. Also set `zim_dir` and `index_dir` if the folders differ from the defaults. Set `kiwix_server` only when remote Kiwix sources are also needed.
+5. **Check the XDG config.** Relative `zim_dir`, `model_dir`, and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`. Omit them to use the defaults. Set `kiwix_server` only when remote Kiwix sources are also needed.
 
 6. **Verify the installation.**
 
@@ -116,7 +122,7 @@ Download the default model with the CLI:
 zimantic model
 ```
 
-The example `config.toml` already points `model_dir` at `./model/int8`. On a GPU host use `zimantic model fp16` and change it to `./model/fp16`. The PowerShell equivalent of the manual int8 download is:
+On Windows, the default `model_dir` is `./model/int8`. On a GPU host use `zimantic model fp16` and set `model_dir = "./model/fp16"` in `config.toml`. The PowerShell equivalent of the manual int8 download is:
 
 ```powershell
 New-Item -ItemType Directory -Force model\int8 | Out-Null
@@ -128,21 +134,22 @@ Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/res
 
 ## Files and directories
 
-The installed CLI is separate from runtime data. Relative paths in `config.toml` resolve against the process working directory, and `config.toml` itself is read from the working directory. The recommended layout is `~/.local/share/zimantic`: the install steps above clone the checkout there, and the systemd units set `WorkingDirectory` to it, so the relative defaults point at these folders:
+The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). Relative path overrides in the XDG config resolve under that data directory. For compatibility, if no XDG config exists, an existing `config.toml` in the current directory is still loaded and its relative paths retain their historical current-directory behavior.
 
 ```
 ~/.local/share/zimantic/
-├── config.toml          ← settings (paths below are its defaults)
 ├── model/               ← downloaded models; model/int8/ is model_dir         (you download)
 ├── zims/                ← zim_dir:   your .zim files                          (you download)
 ├── indexes/             ← index_dir: <name>.sqlite (+ <name>.faiss for full indexes)
-├── catalog.sqlite       ← shared ZIM metadata cache (metadata only, no vectors)
-└── zimantic.pid         ← server PID (present while serving)
+└── catalog.sqlite       ← shared ZIM metadata cache (metadata only, no vectors)
 ```
 
-If you run the installed CLI from another directory, its relative paths and `config.toml` resolve there instead. Use absolute paths in `config.toml`, or run from the data directory, when that behavior is not desired.
+```
+~/.config/zimantic/config.toml          ← optional settings
+$XDG_RUNTIME_DIR/zimantic/zimantic.pid ← PID file while serving
+```
 
-If the files are on a USB drive or another disk, point `zim_dir`, `model_dir`, or `index_dir` in `config.toml` at them.
+If the files are on a USB drive or another disk, point `zim_dir`, `model_dir`, or `index_dir` in the XDG config at them.
 
 ### Copying finished indexes to another machine
 
@@ -248,9 +255,9 @@ The path-triggered fast build runs for each ZIM in `zims/`. The full build runs 
 
 The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server that cannot fit its archives fails visibly instead of looping through OOM kills. Check `systemctl --user status zimantic` and `journalctl --user -u zimantic`; after fixing the cause, `systemctl --user reset-failed zimantic` clears the rate limit. Its header also shows `MemoryHigh`/`MemoryMax` pairs for a Pi Zero 2 W and a Pi 5; uncomment and adjust them for the device, leaving headroom for the OS and kiwix-serve. `MemoryHigh` throttles first; `MemoryMax` is the hard limit that OOM-kills only Zimantic.
 
-Each unit has install instructions in its header. The units assume runtime data at the default XDG data directory, `~/.local/share/zimantic`, and the CLI installed at `~/.local/bin/zimantic`. Adjust `WorkingDirectory` and `ExecStart` if you use a custom `XDG_DATA_HOME` or install the CLI elsewhere.
+Each unit has install instructions in its header. The units assume runtime data at the default XDG data directory, `~/.local/share/zimantic`, and the CLI installed at `~/.local/bin/zimantic`. Their working directory preserves legacy `config.toml` fallback, while an XDG config takes precedence. If you use a custom `XDG_DATA_HOME`, adjust `WorkingDirectory`, `ReadWritePaths`, and `PathChanged`; if your systemd user manager does not inherit custom XDG variables, add them to the units or a drop-in.
 
-The units call the installed `~/.local/bin/zimantic` executable, while `WorkingDirectory` keeps configuration, model files, ZIMs, indexes, and `zimantic.pid` under the data directory. `reload` does not need `config.toml`; it reads the server PID from `zimantic.pid` next to it by default, or from the file passed with `--pid`. A stale PID file (left over after a crash or a signal-triggered shutdown) is reported and ignored.
+The units call the installed `~/.local/bin/zimantic` executable. `reload` does not need the config file; it reads the PID from `$XDG_RUNTIME_DIR/zimantic/zimantic.pid`, falling back to the legacy `./zimantic.pid` when present, or from the file passed with `--pid`.
 
 Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you [copy finished indexes from another machine](#copying-finished-indexes-to-another-machine), watch `indexes/` and run only `reload`.
 
