@@ -191,14 +191,32 @@ def test_store_reads_articles_and_the_homepage(tmp_path):
 
 
 def test_built_generation_is_discovered_and_searchable(tmp_path):
-    from zimantic.build import build
+    from types import SimpleNamespace
+
+    from zimantic.indexes import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+    from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
 
     zims = tmp_path / "zims"
     zims.mkdir()
     archive = zims / "manual.zim"
     _create_zim(archive)
     indexes = tmp_path / "indexes"
-    build(archive, indexes, embedder=None, batch_size=2, fast=True)
+    source = SimpleNamespace(
+        key=zim_source_key("library", archive.name),
+        provider="zim",
+        collection_key=zim_collection_key("library"),
+        provider_id=None,
+        path=str(archive),
+    )
+    build_index(
+        ArchiveEntryProducer(source, archive, fast=True),
+        IndexLocator(indexes),
+        None,
+        {"batch_size": 2},
+        fast=True,
+    )
 
     config, batch, runtime = _open(tmp_path, zims, index_dir=indexes)
     try:

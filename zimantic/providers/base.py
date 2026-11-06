@@ -11,9 +11,10 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, runtime_checkable
 
 from ..content.store import ArticleData, ContentEntry, ContentRange, ContentStore
+from ..indexing.types import EntryProducer
 from ..media_types import MEDIA_TYPE_ORDER, ordered_media_types
 from ..contracts import (
     RankedResultDocument,
@@ -29,6 +30,7 @@ DiscoveryState = Literal["loading", "ready", "error", "closed"]
 
 __all__ = [
     "ArticleData",
+    "BuildableRuntime",
     "CollectionInfo",
     "CollectionRuntime",
     "CollectionSnapshot",
@@ -178,6 +180,13 @@ class CollectionRuntime(Protocol):
     def snapshot_version(self) -> int: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class BuildableRuntime(CollectionRuntime, Protocol):
+    """A local runtime that can supply a bounded index build producer."""
+
+    def entry_producer(self, source: SourceInfo, *, fast: bool) -> EntryProducer: ...
 
 
 class DiscoveryBatch(Protocol):

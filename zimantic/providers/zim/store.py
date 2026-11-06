@@ -9,6 +9,7 @@ random article selection.  The core and web layers only see the canonical
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from ...content.path import normalize_article_path
@@ -70,8 +71,10 @@ class ArchiveContentStore:
     def __init__(
         self,
         source: Any,
-        archive: Any,
+        archive: Any = None,
         *,
+        path: str | Path | None = None,
+        archive_factory: Any | None = None,
         index: Any | None = None,
         icon_data: bytes | None = None,
         icon_mime_type: str = "",
@@ -82,14 +85,35 @@ class ArchiveContentStore:
     ) -> None:
         self.source = source
         self.archive = archive
+        self.path = str(path) if path is not None else None
+        self.archive_factory = archive_factory
         self.index = index
         self.icon_data = icon_data
         self.icon_mime_type = icon_mime_type
         self.icon_path = icon_path
         self.max_article_bytes = max_article_bytes
         self.max_icon_bytes = max_icon_bytes
-        self._owns_archive = owns_archive
+        self._owns_archive = owns_archive or archive is None
         self._closed = False
+
+    def ensure_archive(self) -> Any:
+        """Open the archive on first use, not at server startup."""
+        if self.archive is not None:
+            return self.archive
+        if not self.path:
+            raise ArticleUnavailableError("source store is unavailable")
+        factory = self.archive_factory
+        if factory is None or factory is object:
+            from libzim.reader import Archive
+
+            factory = Archive
+        try:
+            self.archive = factory(self.path)
+        except Exception as error:
+            raise ArticleUnavailableError(
+                "source store could not be opened"
+            ) from error
+        return self.archive
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -124,8 +148,9 @@ class ArchiveContentStore:
     # -- resolution --------------------------------------------------------
 
     def _resolve_entry(self, path: str | None) -> Any:
+        archive = self.ensure_archive()
         try:
-            return resolve_zim_path(self.archive, path)
+            return resolve_zim_path(archive, path)
         except AmbiguousZimPathError as error:
             logger.warning(
                 "zimantic: ambiguous content path %r in source %s",
@@ -361,7 +386,7 @@ class ArchiveContentStore:
                     get_entry_fn=get_entry_by_id,
                 )
             return random_fallback_article(
-                _ArchiveOnly(self.archive),
+                _ArchiveOnly(self.ensure_archive()),
                 attempts=RANDOM_ARTICLE_ATTEMPTS,
                 get_entry_fn=get_entry_by_id,
             )
@@ -376,7 +401,7 @@ class ArchiveContentStore:
             return self.read(self.icon_path, head_only=False, max_bytes=limit)
         homepage = self.main_path()
         try:
-            discovered = find_archive_icon_path(self.archive, homepage)
+            discovered = find_archive_icon_path(self.ensure_archive(), homepage)
         except (
             AttributeError,
             KeyError,
@@ -404,7 +429,7 @@ class ArchiveContentStore:
                 truncated=False,
             )
         try:
-            item = self.archive.get_illustration_item(48)
+            item = self.ensure_archive().get_illustration_item(48)
             data = bytes(item.content)
             mimetype = _normalize_mimetype(getattr(item, "mimetype", None))
         except (

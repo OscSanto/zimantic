@@ -2182,11 +2182,18 @@ class Search:
             self.preview_cache = preview_cache
 
         grouped: dict[str, list[dict[str, Any]]] = {}
+
+        def cache_key(source: Any, doc: dict[str, Any]):
+            runtime = runtimes.get(source.collection_key)
+            index = getattr(runtime, "indexes", {}).get(source.key) if runtime else None
+            generation = getattr(index, "generation", None) or ""
+            return (source.key, generation, doc["path"])
+
         for doc in docs:
             source = sources.get(doc.get("source_key"))
             if source is None:
                 continue
-            cached = preview_cache.get((source.key, doc["path"]))
+            cached = preview_cache.get(cache_key(source, doc))
             if cached is not None:
                 doc["lead"] = cached
                 continue
@@ -2233,7 +2240,7 @@ class Search:
                 if mimetype:
                     doc["mimetype"] = mimetype
                 if source is not None:
-                    preview_cache.put((source.key, doc["path"]), lead)
+                    preview_cache.put(cache_key(source, doc), lead)
 
     def _enrich_pool(
         self,

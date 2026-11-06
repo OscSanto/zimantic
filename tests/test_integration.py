@@ -18,7 +18,10 @@ from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic import build as build_module
+from zimantic.indexes import IndexLocator
 from zimantic.libzim_compat import get_entry_by_id
+from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
+from zimantic.providers.zim.entries import ArchiveEntryProducer
 from zimantic.search import Search
 from zimantic.web.app import create_app
 
@@ -41,6 +44,43 @@ AIR_DISAMBIGUATION_HTML = (
     "<p>This disambiguation page lists articles associated with the same title.</p>"
     "</body></html>"
 )
+
+
+def _build_zim(
+    zim_path: Path,
+    index_dir: Path,
+    embedder=None,
+    batch_size: int = 1,
+    *,
+    fast: bool = False,
+    force: bool = False,
+    **_kwargs,
+) -> None:
+    """Exercise the generic pipeline with a real ZIM producer."""
+    from types import SimpleNamespace
+
+    source = SimpleNamespace(
+        key=zim_source_key("library", Path(zim_path).name),
+        provider="zim",
+        collection_key=zim_collection_key("library"),
+        provider_id=None,
+        path=str(zim_path),
+    )
+    producer = ArchiveEntryProducer(
+        source,
+        zim_path,
+        fast=fast,
+        cfg={"batch_size": batch_size},
+        catalog_path=Path(index_dir).parent / "catalog.sqlite",
+    )
+    build_module.build_index(
+        producer,
+        IndexLocator(index_dir),
+        embedder,
+        {"batch_size": batch_size},
+        fast=fast,
+        force=force,
+    )
 
 
 @contextmanager
@@ -212,7 +252,7 @@ class LocalIntegrationTests(unittest.TestCase):
             ],
             redirects,
         )
-        build_module.build(
+        _build_zim(
             zim_path,
             indexes,
             embedder=None,
@@ -499,7 +539,7 @@ class LocalIntegrationTests(unittest.TestCase):
             indexes.mkdir()
             zim_path = zims / "manual.zim"
             _create_sparse_zim(zim_path)
-            build_module.build(zim_path, indexes, embedder=None, batch_size=1)
+            _build_zim(zim_path, indexes, embedder=None, batch_size=1)
 
             search = self._open_search(root)
             index = _zim_index(search)
@@ -572,7 +612,7 @@ class LocalIntegrationTests(unittest.TestCase):
                     _PdfPage("media/photosynthesis.pdf", "Photosynthesis", pdf)
                 )
 
-            build_module.build(zim_path, indexes, embedder=None, batch_size=1)
+            _build_zim(zim_path, indexes, embedder=None, batch_size=1)
             search = self._open_search(root)
 
             results = _search_results(search, "photosynthesis", limit=5)
@@ -608,7 +648,9 @@ class LocalIntegrationTests(unittest.TestCase):
             _create_zim(replacement, new_pages)
             replacement.replace(zim_path)
 
-            real_read_entry = build_module.read_entry
+            from zimantic.providers.zim import entries as entries_module
+
+            real_read_entry = entries_module.read_entry
             calls = 0
 
             def read_one_then_interrupt(zim, index, **kwargs):
@@ -618,9 +660,9 @@ class LocalIntegrationTests(unittest.TestCase):
                 calls += 1
                 return real_read_entry(zim, index, **kwargs)
 
-            with patch.object(build_module, "read_entry", side_effect=read_one_then_interrupt):
+            with patch.object(entries_module, "read_entry", side_effect=read_one_then_interrupt):
                 with self.assertRaisesRegex(RuntimeError, "interrupted upgrade"):
-                    build_module.build(
+                    _build_zim(
                         zim_path,
                         root / "indexes",
                         embedder=None,
@@ -631,7 +673,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(_search_results(search, "old article", limit=1)[0]["title"], "Old article")
             self.assertEqual(_search_results(search, "new article", limit=1), [])
 
-            build_module.build(
+            _build_zim(
                 zim_path,
                 root / "indexes",
                 embedder=None,
@@ -647,7 +689,20 @@ class LocalIntegrationTests(unittest.TestCase):
         with _temp_dir(self) as tmp:
             root = Path(tmp)
             zim_path = self._build_fixture(root)
-            faiss_path = root / "indexes" / "manual.faiss"
+            locator = IndexLocator(root / "indexes")
+            from types import SimpleNamespace
+
+            source = SimpleNamespace(
+                key=zim_source_key("library", Path(zim_path).name),
+                provider="zim",
+                collection_key=zim_collection_key("library"),
+            )
+            lease = locator.paths(source)
+            assert lease is not None
+            faiss_path = lease.faiss_path
+            lease.close()
+            if faiss_path is None:
+                self.skipTest("fixture built without vectors")
             faiss_path.write_bytes(b"not a faiss index")
 
             search = self._open_search(root, semantic=True)
@@ -805,7 +860,7 @@ class LocalIntegrationTests(unittest.TestCase):
             with creator:
                 creator.add_metadata("Name", "A Display Name")
                 creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
-            build_module.build(
+            _build_zim(
                 zim_path,
                 indexes,
                 embedder=None,
@@ -843,7 +898,7 @@ class LocalIntegrationTests(unittest.TestCase):
                         mimetype="application/xhtml+xml",
                     )
                 )
-            build_module.build(
+            _build_zim(
                 zim_path,
                 indexes,
                 embedder=None,

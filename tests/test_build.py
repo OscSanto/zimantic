@@ -1,4 +1,3 @@
-import importlib
 import os
 import sqlite3
 import tempfile
@@ -7,328 +6,432 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
-from zimantic.content.reader import EntryRecord
+from zimantic.indexing import pipeline as build_module
+from zimantic.indexing.schema import (
+    BODY_TRUNCATED_COUNT,
+    DONE,
+    NEXT,
+    SCHEMA,
+)
+from zimantic.indexing.types import EntryRecord
+from zimantic.indexes import IndexLocator
 
-build_module = importlib.import_module("zimantic.build")
 
-
-class _FakeArchive:
-    entry_count = 2
-
-    def __init__(self, path):
-        self.path = path
-
-
-def _create_fast_index(path: Path) -> None:
-    db = sqlite3.connect(path)
-    db.executescript(build_module.SCHEMA)
-    db.execute(
-        "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
-        (1, "Old title", "old", None),
+def _source(key="files:test:manual-0123", provider="files", collection_key="files:test"):
+    return SimpleNamespace(
+        key=key, provider=provider, collection_key=collection_key
     )
-    db.execute("INSERT INTO meta VALUES ('done', 'fast')")
-    db.commit()
-    db.close()
 
 
-def _create_done_index(path: Path) -> None:
-    db = sqlite3.connect(path)
-    db.executescript(build_module.SCHEMA)
-    db.execute(
-        "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
-        (1, "Old title", "old", None),
-    )
-    db.execute("INSERT INTO meta VALUES ('done', '1')")
-    db.commit()
-    db.close()
+class Producer:
+    def __init__(
+        self,
+        rows,
+        *,
+        source=None,
+        fingerprint="fingerprint-1",
+        truncated=False,
+        fail_at=None,
+        interrupt_at=None,
+        snapshot_valid=True,
+    ):
+        self.rows = list(rows)
+        self.source = source or _source()
+        self.key = self.source.key
+        self.provider = self.source.provider
+        self.collection_key = self.source.collection_key
+        self.fingerprint = fingerprint
+        self.count = len(self.rows)
+        self.truncated = truncated
+        self.fail_at = fail_at
+        self.interrupt_at = interrupt_at
+        self.snapshot_valid = snapshot_valid
+        self.closed = False
+
+    def entry_at(self, index):
+        if not isinstance(index, int) or index < 0 or index >= self.count:
+            return None
+        if index == self.fail_at:
+            raise RuntimeError("parse failed")
+        if index == self.interrupt_at:
+            raise KeyboardInterrupt
+        return self.rows[index]
+
+    def validate_snapshot(self):
+        return self.snapshot_valid
+
+    def close(self):
+        self.closed = True
 
 
-def _meta(path: Path) -> dict[str, str]:
-    db = sqlite3.connect(path)
-    values = dict(db.execute("SELECT key, value FROM meta"))
-    db.close()
-    return values
+def _build(producer, directory, cfg=None, **kwargs):
+    locator = IndexLocator(directory)
+    config = {"batch_size": 1}
+    config.update(cfg or {})
+    build_module.build_index(producer, locator, kwargs.pop("embedder", None), config, **kwargs)
+    return locator
 
 
-class BuildUpgradeTests(unittest.TestCase):
-    def test_fast_index_stays_searchable_until_full_upgrade_is_published(self):
+def _meta(locator, source):
+    lease = locator.paths(source)
+    assert lease is not None
+    try:
+        db = sqlite3.connect(lease.sqlite_path)
+        try:
+            return dict(db.execute("SELECT key, value FROM meta"))
+        finally:
+            db.close()
+    finally:
+        lease.close()
+
+
+def _docs(locator, source):
+    lease = locator.paths(source)
+    assert lease is not None
+    try:
+        db = sqlite3.connect(lease.sqlite_path)
+        try:
+            return db.execute("SELECT rowid, title, path FROM docs ORDER BY rowid").fetchall()
+        finally:
+            db.close()
+    finally:
+        lease.close()
+
+
+def _body_hits(locator, source, term):
+    lease = locator.paths(source)
+    assert lease is not None
+    try:
+        db = sqlite3.connect(lease.sqlite_path)
+        try:
+            return db.execute(
+                "SELECT rowid FROM body WHERE text MATCH ?", (f'"{term}"',)
+            ).fetchall()
+        finally:
+            db.close()
+    finally:
+        lease.close()
+
+
+class _Embedder:
+    genome = "embedder"
+
+    def truncate(self, text, prefix=""):
+        return text
+
+    def embed(self, texts):
+        return np.ones((len(texts), 4), dtype=np.float32)
+
+
+class _FingerprintEmbedder(_Embedder):
+    fingerprint = "model-fingerprint-1"
+
+
+def _write_fake_faiss(_db, path):
+    path.write_bytes(b"vectors")
+
+
+class BuildPipelineTests(unittest.TestCase):
+    def test_fast_build_has_no_body_or_vectors_and_full_build_upgrades(self):
+        rows = [
+            EntryRecord(0, "Alpha", "Alpha excerpt", "a", None, "Alpha body"),
+            EntryRecord(1, "Beta", "Beta excerpt", "b", None, ""),
+        ]
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            faiss_path = directory / "manual.faiss"
-            _create_fast_index(db_path)
-            rows = [
-                EntryRecord(1, "New title", "A stored excerpt.", "new", None),
-                EntryRecord(2, "Another title", "Another stored excerpt.", "another", None),
-            ]
+            locator = _build(Producer(rows), tmp, fast=True)
+            source = rows and _source()
+            meta = _meta(locator, source)
+            self.assertEqual(meta[DONE], "fast")
+            self.assertEqual(meta["indexed_channels"], '["title"]')
+            self.assertNotIn("body_truncated_count", meta)
+            lease = locator.paths(source)
+            assert lease is not None
+            self.assertIsNone(lease.faiss_path)
+            lease.close()
 
-            with (
-                patch.object(build_module, "Archive", _FakeArchive),
-                patch.object(
-                    build_module,
-                    "read_entry",
-                    side_effect=[rows[0], RuntimeError("interrupted")],
-                ),self.assertRaisesRegex(RuntimeError, "interrupted")
-            ):
-                build_module.build(directory / "manual.zim", directory, None, 1)
-
-            self.assertEqual(_meta(db_path), {"done": "fast"})
-            db = sqlite3.connect(db_path)
-            self.assertEqual(db.execute("SELECT title FROM docs").fetchone()[0], "Old title")
-            db.close()
-            staging_db, staging_faiss = build_module._upgrade_paths(db_path, faiss_path)
-            self.assertTrue(staging_db.exists())
-            self.assertFalse(staging_faiss.exists())
-
-            def write_fake_faiss(_db, path):
-                path.write_bytes(b"vectors")
-
-            with (
-                patch.object(build_module, "Archive", _FakeArchive),
-                patch.object(build_module, "read_entry", return_value=rows[1]),
-                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
-            ):
-                build_module.build(directory / "manual.zim", directory, None, 1)
-
-            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1", "filesize": "0"})
-            db = sqlite3.connect(db_path)
-            self.assertEqual(
-                db.execute("SELECT title FROM docs ORDER BY rowid").fetchall(),
-                [("New title",), ("Another title",)],
-            )
-            db.close()
-            self.assertEqual(faiss_path.read_bytes(), b"vectors")
-            self.assertFalse(staging_db.exists())
-            self.assertFalse(staging_faiss.exists())
-
-    def test_interrupted_fast_build_restarts_when_resumed_as_full(self):
-        class _TwoEntryArchive(_FakeArchive):
-            entry_count = 2
-
-        class _Embedder:
-            def truncate(self, text, prefix=""):
-                return text
-
-            def embed(self, texts):
-                return np.ones((len(texts), 4), dtype=np.float32)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            db = sqlite3.connect(db_path)
-            db.executescript(build_module.SCHEMA)
-            db.execute(
-                "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
-                (0, "Partial fast row", "partial", None),
-            )
-            db.execute("INSERT INTO meta VALUES ('next', 1)")
-            db.execute("INSERT INTO meta VALUES ('build_filesize', '0')")
-            db.execute("INSERT INTO meta VALUES ('build_mode', 'fast')")
-            db.commit()
-            db.close()
-
-            seen: list[int] = []
-            faiss_ids: list[int] = []
-
-            def read_entry(_zim, index, **_kwargs):
-                seen.append(index)
-                return EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
-
-            def write_fake_faiss(db, path):
-                faiss_ids.extend(
-                    row[0] for row in db.execute("SELECT id FROM vecs ORDER BY id")
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(
+                    Producer(rows, fingerprint="fingerprint-2"),
+                    tmp,
+                    {"batch_size": 2},
+                    embedder=_Embedder(),
                 )
-                path.write_bytes(b"vectors")
+            meta = _meta(locator, source)
+            self.assertEqual(meta[DONE], "full")
+            self.assertEqual(meta["indexed_channels"], '["title","body","semantic"]')
+            self.assertEqual(meta["semantic_vector_count"], "2")
+            self.assertIn("faiss_digest", meta)
+            lease = locator.paths(source)
+            assert lease is not None
+            self.assertIsNotNone(lease.faiss_path)
+            lease.close()
+            self.assertEqual(_body_hits(locator, source, "Alpha"), [(0,)])
 
-            with (
-                patch.object(build_module, "Archive", _TwoEntryArchive),
-                patch.object(build_module, "read_entry", side_effect=read_entry),
-                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
-            ):
-                build_module.build(directory / "manual.zim", directory, _Embedder(), 1)
-
-            self.assertEqual(seen, [0, 1])
-            self.assertEqual(faiss_ids, [0, 1])
-            self.assertEqual(str(_meta(db_path)["done"]), "1")
-
-    def test_full_build_stores_model_fingerprint_and_fast_build_removes_it(self):
-        class _OneEntryArchive(_FakeArchive):
-            entry_count = 1
-
-        class _FingerprintEmbedder:
-            fingerprint = "model-fingerprint-1"
-
-            def truncate(self, text, prefix=""):
-                return text
-
-            def embed(self, texts):
-                return np.ones((len(texts), 4), dtype=np.float32)
-
+    def test_body_after_the_first_thousand_characters_is_searchable(self):
+        body = ("filler " * 300) + "needleword appears late"
+        rows = [EntryRecord(1, "Long", "short excerpt", "long", None, body)]
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            rows = [EntryRecord(1, "Title", "Excerpt", "path", None)]
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(Producer(rows), tmp, embedder=_Embedder())
+            self.assertEqual(_body_hits(locator, _source(), "needleword"), [(1,)])
+            meta = _meta(locator, _source())
+            self.assertEqual(meta[BODY_TRUNCATED_COUNT], "0")
 
-            def write_fake_faiss(_db, path):
-                path.write_bytes(b"vectors")
-
-            with (
-                patch.object(build_module, "Archive", _OneEntryArchive),
-                patch.object(build_module, "read_entry", return_value=rows[0]),
-                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
-            ):
-                build_module.build(
-                    directory / "manual.zim", directory, _FingerprintEmbedder(), 1
+    def test_truncated_body_count_is_separate_from_item_cap(self):
+        rows = [
+            EntryRecord(1, "A", "", "a", None, "short", False),
+            EntryRecord(2, "B", "", "b", None, "cut body", True),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(
+                    Producer(rows, truncated=True), tmp, embedder=_Embedder()
                 )
+            meta = _meta(locator, _source())
+            self.assertEqual(meta[BODY_TRUNCATED_COUNT], "1")
+            self.assertEqual(meta["truncated"], "1")
+            self.assertEqual(meta["indexed_count"], "2")
 
-            meta = _meta(db_path)
+    def test_empty_full_build_publishes_without_a_faiss_dimension(self):
+        rows = [EntryRecord(1, "Title only", "", "title", None, "", False)]
+        with tempfile.TemporaryDirectory() as tmp:
+            locator = _build(Producer(rows), tmp, embedder=None)
+            meta = _meta(locator, _source())
+            self.assertEqual(meta[DONE], "full")
+            self.assertEqual(meta["semantic_vector_count"], "0")
+            self.assertNotIn("faiss_digest", meta)
+            lease = locator.paths(_source())
+            assert lease is not None
+            self.assertIsNone(lease.faiss_path)
+            lease.close()
+
+    def test_force_fast_rebuild_replaces_full_generation_without_faiss(self):
+        full = [EntryRecord(1, "Old", "excerpt", "old", None, "old body")]
+        fast = [EntryRecord(2, "New", "", "new", None, "")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(Producer(full), tmp, embedder=_Embedder())
+            first = locator.paths(_source())
+            assert first is not None
+            first_generation = first.generation
+            first.close()
+
+            locator = _build(Producer(fast, fingerprint="fast"), tmp, fast=True, force=True)
+            meta = _meta(locator, _source())
+            self.assertEqual(meta[DONE], "fast")
+            self.assertEqual(_docs(locator, _source()), [(2, "New", "new")])
+            lease = locator.paths(_source())
+            assert lease is not None
+            self.assertNotEqual(lease.generation, first_generation)
+            self.assertIsNone(lease.faiss_path)
+            lease.close()
+
+    def test_failed_force_rebuild_preserves_last_good_generation_and_warns(self):
+        good = [EntryRecord(1, "Old", "excerpt", "old", None, "old body")]
+        bad = [EntryRecord(2, "New", "excerpt", "new", None, "new body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(Producer(good), tmp, embedder=_Embedder())
+            generation = locator.paths(_source()).generation
+            with (
+                self.assertLogs("zimantic.indexing.pipeline", level="WARNING") as logs,
+                self.assertRaisesRegex(RuntimeError, "parse failed"),
+            ):
+                _build(
+                    Producer(bad, fail_at=0),
+                    tmp,
+                    embedder=_Embedder(),
+                    force=True,
+                )
+            self.assertTrue(
+                any("previous published generation" in message for message in logs.output)
+            )
+            self.assertEqual(locator.paths(_source()).generation, generation)
+            self.assertEqual(_docs(locator, _source()), [(1, "Old", "old")])
+            directory = locator.source_directory(
+                "files", "files:test", "files:test:manual-0123"
+            )
+            self.assertFalse((directory / "staging-full.sqlite").exists())
+
+    def test_model_fingerprint_and_probes_are_stored_then_removed_by_fast_build(self):
+        rows = [EntryRecord(1, "Title", "Excerpt", "path", None, "body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(Producer(rows), tmp, embedder=_FingerprintEmbedder())
+            meta = _meta(locator, _source())
             self.assertEqual(meta["model_fingerprint"], "model-fingerprint-1")
             self.assertIn("model_probe_texts", meta)
             self.assertIn("model_probe_vectors", meta)
             self.assertIn("model_probe_shape", meta)
 
-            with (
-                patch.object(build_module, "Archive", _OneEntryArchive),
-                patch.object(build_module, "read_entry", return_value=rows[0]),
-            ):
-                build_module.build(
-                    directory / "manual.zim", directory, None, 1, fast=True, force=True
-                )
-
-            meta = _meta(db_path)
+            locator = _build(
+                Producer(rows, fingerprint="fast"), tmp, fast=True, force=True
+            )
+            meta = _meta(locator, _source())
             self.assertNotIn("model_fingerprint", meta)
             self.assertNotIn("model_probe_texts", meta)
             self.assertNotIn("model_probe_vectors", meta)
             self.assertNotIn("model_probe_shape", meta)
 
-    def test_force_fast_rebuild_replaces_sqlite_and_removes_faiss(self):
+    def test_interrupted_build_resumes_from_the_last_committed_batch(self):
+        rows = [
+            EntryRecord(i, f"Title {i}", f"Excerpt {i}", f"path-{i}", None, f"body {i}")
+            for i in range(1, 9)
+        ]
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            faiss_path = directory / "manual.faiss"
-            _create_done_index(db_path)
-            faiss_path.write_bytes(b"existing vectors")
-            rows = [
-                EntryRecord(1, "New title", "", "new", None),
-                EntryRecord(2, "Another title", "", "another", None),
-            ]
-
-            with (
-                patch.object(build_module, "Archive", _FakeArchive),
-                patch.object(build_module, "read_entry", side_effect=rows),
-            ):
-                build_module.build(directory / "manual.zim", directory, None, 1, fast=True, force=True)
-
-            meta = _meta(db_path)
-            self.assertEqual(str(meta["done"]), "fast")
-            self.assertEqual(str(meta["next"]), "2")
-            db = sqlite3.connect(db_path)
-            self.assertEqual(db.execute("SELECT title FROM docs").fetchone(), ("New title",))
-            db.close()
-            self.assertFalse(faiss_path.exists())
-
-    def test_force_full_rebuild_replaces_existing_faiss(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            faiss_path = directory / "manual.faiss"
-            _create_done_index(db_path)
-            faiss_path.write_bytes(b"old vectors")
-            rows = [
-                EntryRecord(1, "New title", "New excerpt", "new", None),
-                EntryRecord(2, "Another title", "Another excerpt", "another", None),
-            ]
-
-            def write_fake_faiss(_db, path):
-                path.write_bytes(b"new vectors")
-
-            with (
-                patch.object(build_module, "Archive", _FakeArchive),
-                patch.object(build_module, "read_entry", side_effect=rows),
-                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
-            ):
-                build_module.build(directory / "manual.zim", directory, None, 1, force=True)
-
-            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1", "filesize": "0"})
-            self.assertEqual(faiss_path.read_bytes(), b"new vectors")
-
-    def test_failed_force_rebuild_preserves_last_good_index_and_warns(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            faiss_path = directory / "manual.faiss"
-            _create_done_index(db_path)
-            faiss_path.write_bytes(b"last good vectors")
-
-            with (
-                patch.object(build_module, "Archive", _FakeArchive),
-                patch.object(
-                    build_module, "read_entry", side_effect=RuntimeError("parse failed")
-                ),
-                self.assertLogs("zimantic.build", level="WARNING") as logs,
-                self.assertRaisesRegex(RuntimeError, "parse failed"),
-            ):
-                build_module.build(
-                    directory / "manual.zim", directory, None, 1, force=True
+            with self.assertRaises(KeyboardInterrupt):
+                _build(
+                    Producer(rows, interrupt_at=4),
+                    tmp,
+                    {"batch_size": 2},
+                    embedder=_Embedder(),
                 )
-
-            self.assertTrue(
-                any("index rebuild failed" in message for message in logs.output)
+            directory = IndexLocator(tmp).source_directory(
+                "files", "files:test", "files:test:manual-0123"
             )
-            self.assertEqual(_meta(db_path), {"done": "1"})
-            db = sqlite3.connect(db_path)
-            self.assertEqual(
-                db.execute("SELECT title FROM docs").fetchone()[0], "Old title"
-            )
-            db.close()
-            self.assertEqual(faiss_path.read_bytes(), b"last good vectors")
-            staging_db, staging_faiss = build_module._upgrade_paths(db_path, faiss_path)
-            self.assertFalse(staging_db.exists())
-            self.assertFalse(staging_faiss.exists())
+            db = sqlite3.connect(directory / "staging-full.sqlite")
+            try:
+                meta = dict(db.execute("SELECT key, value FROM meta"))
+            finally:
+                db.close()
+            self.assertEqual(meta[NEXT], "4")
+            self.assertNotIn(DONE, meta)
 
-    def test_changed_filesize_triggers_rebuild(self):
-        class _OneEntryArchive(_FakeArchive):
-            entry_count = 1
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(
+                    Producer(rows), tmp, {"batch_size": 2}, embedder=_Embedder()
+                )
+            self.assertEqual(_meta(locator, _source())[DONE], "full")
+            self.assertEqual(len(_docs(locator, _source())), 8)
 
+    def test_changed_fingerprint_discards_staging(self):
+        rows = [EntryRecord(i, f"T{i}", "e", f"p{i}", None, "body") for i in range(4)]
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            zim_path = directory / "manual.zim"
-            zim_path.write_bytes(b"x" * 200)
-            _create_done_index(db_path)
-            db = sqlite3.connect(db_path)
-            db.execute("INSERT INTO meta VALUES ('filesize', '100')")
-            db.commit()
+            with self.assertRaises(KeyboardInterrupt):
+                _build(
+                    Producer(rows, interrupt_at=2, fingerprint="first"),
+                    tmp,
+                    {"batch_size": 1},
+                    embedder=_Embedder(),
+                )
+            directory = IndexLocator(tmp).source_directory(
+                "files", "files:test", "files:test:manual-0123"
+            )
+            staging = directory / "staging-full.sqlite"
+            db = sqlite3.connect(staging)
+            self.assertIsNotNone(
+                db.execute("SELECT 1 FROM docs WHERE rowid = 1").fetchone()
+            )
             db.close()
 
-            row = EntryRecord(1, "New title", "New excerpt", "new", None)
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(
+                    Producer(rows, fingerprint="second"),
+                    tmp,
+                    {"batch_size": 1},
+                    embedder=_Embedder(),
+                )
+            self.assertEqual(_meta(locator, _source())["source_fingerprint"], "second")
+            self.assertEqual(len(_docs(locator, _source())), 4)
 
-            def write_fake_faiss(_db, path):
-                path.write_bytes(b"new vectors")
+    def test_snapshot_change_during_build_prevents_publication(self):
+        rows = [EntryRecord(1, "T", "e", "p", None, "body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(build_module.SnapshotChangedError):
+                _build(
+                    Producer(rows, snapshot_valid=False),
+                    tmp,
+                    embedder=_Embedder(),
+                )
+            self.assertIsNone(IndexLocator(tmp).paths(_source()))
 
+    def test_insufficient_space_fails_before_touching_the_published_generation(self):
+        rows = [EntryRecord(1, "T", "e", "p", None, "body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(Producer(rows), tmp, embedder=_Embedder())
+            generation = locator.paths(_source()).generation
+
+            fake = type("usage", (), {"free": 1, "total": 1, "used": 0})()
             with (
-                patch.object(build_module, "Archive", _OneEntryArchive),
-                patch.object(build_module, "read_entry", return_value=row),
-                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
+                patch.object(build_module.shutil, "disk_usage", return_value=fake),
+                self.assertRaises(build_module.InsufficientSpaceError),
             ):
-                build_module.build(zim_path, directory, None, 1)
+                _build(
+                    Producer(rows, fingerprint="new"),
+                    tmp,
+                    embedder=_Embedder(),
+                    force=True,
+                )
+            self.assertEqual(locator.paths(_source()).generation, generation)
 
-            self.assertEqual(str(_meta(db_path)["done"]), "1")
-            self.assertEqual(str(_meta(db_path)["filesize"]), "200")
-            db = sqlite3.connect(db_path)
-            self.assertEqual(db.execute("SELECT title FROM docs").fetchone(), ("New title",))
-            db.close()
+    def test_corrupt_staging_generation_is_discarded_and_rebuilt(self):
+        rows = [EntryRecord(1, "T", "e", "p", None, "body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = IndexLocator(tmp).source_directory(
+                "files", "files:test", "files:test:manual-0123"
+            )
+            directory.mkdir(parents=True)
+            staging = directory / "staging-full.sqlite"
+            staging.write_bytes(b"not a sqlite database")
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(Producer(rows), tmp, embedder=_Embedder())
+            self.assertEqual(_meta(locator, _source())[DONE], "full")
+            self.assertFalse(staging.exists())
+
+    def test_producer_is_closed_on_success_and_failure(self):
+        rows = [EntryRecord(1, "T", "e", "p", None, "body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                producer = Producer(rows)
+                _build(producer, tmp, embedder=_Embedder())
+            self.assertTrue(producer.closed)
+
+            failing = Producer(rows, fail_at=0)
+            with self.assertRaises(RuntimeError):
+                _build(failing, tmp, embedder=_Embedder(), force=True)
+            self.assertTrue(failing.closed)
+
+
+class BodyBudgetTests(unittest.TestCase):
+    def test_concurrent_reservations_are_bounded_and_released(self):
+        budget = build_module.BodyBudget(10)
+        budget.reserve(6)
+
+        def second():
+            budget.reserve(6)
+            budget.release(6)
+
+        thread = threading.Thread(target=second)
+        thread.start()
+        time.sleep(0.02)
+        self.assertEqual(budget.reserved, 6)
+        budget.release(6)
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(budget.reserved, 0)
+
+    def test_failed_batches_release_reservations(self):
+        class _FailingEmbedder(_Embedder):
+            def embed(self, texts):
+                raise RuntimeError("embed failed")
+
+        rows = [EntryRecord(1, "T", "e", "p", None, "body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            budget = build_module.BodyBudget(10)
+            with self.assertRaisesRegex(RuntimeError, "embed failed"):
+                _build(
+                    Producer(rows),
+                    tmp,
+                    {"body_budget": budget},
+                    embedder=_FailingEmbedder(),
+                )
+            self.assertEqual(budget.reserved, 0)
 
 
 class TempIndexFileTests(unittest.TestCase):
@@ -351,7 +454,6 @@ class FaissTrainingTests(unittest.TestCase):
         vector_count = 700_000
         cluster_count = int(4 * vector_count**0.5)
         step = build_module._faiss_training_step(vector_count, cluster_count)
-
         self.assertGreaterEqual(
             vector_count // step,
             build_module._FAISS_MIN_POINTS_PER_CENTROID * cluster_count,
@@ -360,14 +462,14 @@ class FaissTrainingTests(unittest.TestCase):
     def test_training_stride_uses_all_vectors_when_fewer_than_target(self):
         vector_count = 10_000
         cluster_count = int(4 * vector_count**0.5)
-
-        self.assertEqual(build_module._faiss_training_step(vector_count, cluster_count), 1)
+        self.assertEqual(
+            build_module._faiss_training_step(vector_count, cluster_count), 1
+        )
 
     def test_cluster_count_never_exceeds_trainable_centroids(self):
         for vector_count in (10_000, 10_728, 24_000, 24_335, 250_000, 700_000):
             with self.subTest(vector_count=vector_count):
                 cluster_count = build_module._faiss_cluster_count(vector_count)
-
                 self.assertGreaterEqual(cluster_count, 1)
                 self.assertLessEqual(
                     build_module._FAISS_MIN_POINTS_PER_CENTROID * cluster_count,
@@ -377,28 +479,21 @@ class FaissTrainingTests(unittest.TestCase):
 
 class BuildBatchTests(unittest.TestCase):
     def test_fast_build_flushes_rows_while_scanning(self):
-        class _ManyFakeArchive(_FakeArchive):
-            entry_count = 5
-
         rows = [
-            EntryRecord(index, f"Title {index}", "", f"path-{index}", None)
+            EntryRecord(index, f"Title {index}", "", f"path-{index}", None, "")
             for index in range(5)
         ]
         saved = []
 
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-
-            def save(_db, _embedder, batch, next_entry):
+            def save(_db, _embedder, batch, next_entry, **kwargs):
                 saved.append((len(batch), next_entry))
 
             with (
-                patch.object(build_module, "Archive", _ManyFakeArchive),
-                patch.object(build_module, "read_entry", side_effect=rows),
                 patch.object(build_module, "_save", side_effect=save),
+                patch.object(build_module, "_finish_build"),
             ):
-                build_module.build(directory / "manual.zim", directory, None, 2, fast=True)
+                _build(Producer(rows), tmp, {"batch_size": 2}, fast=True)
 
         self.assertEqual(saved, [(2, 2), (2, 4), (1, 5)])
 
@@ -417,12 +512,12 @@ class BuildBatchTests(unittest.TestCase):
                 return np.array([[1.0, 0.0]], dtype=np.float32)
 
         db = sqlite3.connect(":memory:")
-        db.executescript(build_module.SCHEMA)
+        db.executescript(SCHEMA)
         embedder = _FakeEmbedder()
         build_module._save(
             db,
             embedder,
-            [EntryRecord(1, "A title", "a stored excerpt", "article", None)],
+            [EntryRecord(1, "A title", "a stored excerpt", "article", None, "body text")],
             1,
         )
 
@@ -438,7 +533,9 @@ class BuildBatchTests(unittest.TestCase):
             embedder.truncate_calls,
             [("a stored excerpt", "passage: A title\n")],
         )
-        self.assertEqual(embedder.embed_calls, [["passage: A title\nword-safe embedding"]])
+        self.assertEqual(
+            embedder.embed_calls, [["passage: A title\nword-safe embedding"]]
+        )
         db.close()
 
 
@@ -463,7 +560,7 @@ class EmbeddingPipelineTests(unittest.TestCase):
                 return np.ones((len(texts), 2), dtype=np.float32)
 
         rows = [
-            EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
+            EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None, "")
             for index in range(4)
         ]
         pipeline = build_module.EmbeddingPipeline(
@@ -474,8 +571,7 @@ class EmbeddingPipelineTests(unittest.TestCase):
         try:
             with ThreadPoolExecutor(max_workers=4) as pool:
                 futures = [
-                    pool.submit(pipeline.submit, [row]).result()
-                    for row in rows
+                    pool.submit(pipeline.submit, [row]).result() for row in rows
                 ]
                 results = [future.result() for future in futures]
         finally:
@@ -483,53 +579,36 @@ class EmbeddingPipelineTests(unittest.TestCase):
 
         self.assertEqual(maximum, 2)
         self.assertEqual(
-            [list(result) for result in results],
-            [[row[0]] for row in rows],
+            [list(result) for result in results], [[row[0]] for row in rows]
         )
 
     def test_build_commits_pipeline_results_before_writing_faiss(self):
-        class _Archive2(_FakeArchive):
-            entry_count = 2
-
-        class _FakeEmbedder:
-            def truncate(self, text, prefix):
-                return text
-
-            def embed(self, texts):
-                return np.ones((len(texts), 2), dtype=np.float32)
-
         rows = [
-            EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None)
+            EntryRecord(index, f"Title {index}", f"Excerpt {index}", f"path-{index}", None, "body")
             for index in range(2)
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            pipeline = build_module.EmbeddingPipeline(_FakeEmbedder(), workers=1)
+            pipeline = build_module.EmbeddingPipeline(_Embedder(), workers=1)
 
             def write_fake_faiss(db, path):
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM vecs").fetchone()[0], 2)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM vecs").fetchone()[0], 2
+                )
                 path.write_bytes(b"vectors")
 
             try:
-                with (
-                    patch.object(build_module, "Archive", _Archive2),
-                    patch.object(build_module, "read_entry", side_effect=rows),
-                    patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
-                ):
-                    build_module.build(
-                        directory / "manual.zim",
-                        directory,
-                        _FakeEmbedder(),
-                        1,
-                        embedding_pipeline=pipeline,
+                with patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss):
+                    locator = _build(
+                        Producer(rows),
+                        tmp,
+                        {"embedding_pipeline": pipeline},
+                        embedder=_Embedder(),
                     )
             finally:
                 pipeline.close()
 
-            self.assertEqual(str(_meta(directory / "manual.sqlite")["done"]), "1")
-            self.assertEqual((directory / "manual.faiss").read_bytes(), b"vectors")
+            self.assertEqual(_meta(locator, _source())[DONE], "full")
 
 
 class FaissTrainingSamplingTests(unittest.TestCase):
@@ -545,7 +624,7 @@ class FaissTrainingSamplingTests(unittest.TestCase):
             directory = Path(tmp) / "indexes"
             directory.mkdir()
             db = sqlite3.connect(directory / "manual.sqlite")
-            db.execute("CREATE TABLE vecs(id INTEGER PRIMARY KEY, v BLOB)")
+            db.execute("CREATE TABLE vecs(id INTEGER PRIMARY KEY, v BLOB NOT NULL)")
             vector = np.array([1.0, 2.0], dtype=np.float16).tobytes()
             db.executemany(
                 "INSERT INTO vecs VALUES (?, ?)",
@@ -570,107 +649,6 @@ class FaissTrainingSamplingTests(unittest.TestCase):
             db.close()
 
         self.assertEqual(index.training_vectors.shape, (5_000, 2))
-
-
-class BuildInterruptTests(unittest.TestCase):
-    def test_interrupted_build_restarts_when_source_size_changes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            source = directory / "manual.zim"
-            db_path = directory / "manual.sqlite"
-            faiss_path = directory / "manual.faiss"
-            source.write_bytes(b"a" * 10)
-            state = build_module._prepare_build_state(
-                source,
-                db_path,
-                faiss_path,
-                fast=True,
-                force=False,
-            )
-            self.assertIsNotNone(state)
-            state.db.execute(
-                "INSERT INTO docs(rowid, title, path, target) VALUES (1, 'Old', 'old', NULL)"
-            )
-            state.db.execute(
-                "INSERT OR REPLACE INTO meta VALUES ('next', 1)"
-            )
-            state.db.commit()
-            state.db.close()
-
-            source.write_bytes(b"b" * 20)
-            state = build_module._prepare_build_state(
-                source,
-                db_path,
-                faiss_path,
-                fast=True,
-                force=False,
-            )
-            self.assertIsNotNone(state)
-            try:
-                meta = dict(state.db.execute("SELECT key, value FROM meta"))
-                self.assertEqual(meta["build_filesize"], "20")
-                self.assertNotIn("next", meta)
-                self.assertFalse(
-                    state.db.execute("SELECT 1 FROM docs WHERE rowid = 1").fetchone()
-                )
-            finally:
-                state.db.close()
-
-    def test_stopped_build_resumes_from_the_last_committed_batch(self):
-        class _Archive8(_FakeArchive):
-            entry_count = 8
-
-        rows = [
-            EntryRecord(i, f"Title {i}", f"Excerpt {i}", f"path-{i}", None)
-            for i in range(1, 9)
-        ]
-
-        def read_entry(_zim, index, **_kwargs):
-            if index == 4:
-                raise KeyboardInterrupt  # Ctrl-C or systemd SIGTERM, mid-scan
-            return rows[index]
-
-        def write_fake_faiss(_db, path):
-            path.write_bytes(b"vectors")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp) / "indexes"
-            directory.mkdir()
-            db_path = directory / "manual.sqlite"
-            faiss_path = directory / "manual.faiss"
-
-            with (
-                patch.object(build_module, "Archive", _Archive8),
-                patch.object(build_module, "read_entry", side_effect=read_entry),
-            ):
-                with self.assertRaises(KeyboardInterrupt):
-                    build_module.build(directory / "manual.zim", directory, None, 2)
-
-            # The interrupted run committed batches up to entry 4 (next=4) and
-            # never marked the index done, so a rerun resumes exactly there.
-            # build_filesize records the source version for that resume.
-            self.assertEqual(
-                _meta(db_path),
-                {"build_filesize": "0", "build_mode": "full", "next": 4},
-            )
-
-            with (
-                patch.object(build_module, "Archive", _Archive8),
-                patch.object(
-                    build_module,
-                    "read_entry",
-                    side_effect=lambda _zim, index, **_kwargs: rows[index],
-                ),
-                patch.object(build_module, "_write_faiss", side_effect=write_fake_faiss),
-            ):
-                build_module.build(directory / "manual.zim", directory, None, 2)
-
-            self.assertEqual({key: str(value) for key, value in _meta(db_path).items()}, {"done": "1", "filesize": "0"})
-            db = sqlite3.connect(db_path)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 8)
-            db.close()
-            self.assertEqual(faiss_path.read_bytes(), b"vectors")
 
 
 class SigtermHandlerTests(unittest.TestCase):

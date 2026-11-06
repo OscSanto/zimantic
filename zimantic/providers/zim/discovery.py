@@ -399,7 +399,7 @@ def _safe_display(root: Path, path: Path) -> str:
 
 
 def _index_uri(db_path: Path) -> str:
-    return db_path.resolve().as_uri() + "?mode=ro"
+    return db_path.resolve().as_uri() + "?mode=ro&immutable=1"
 
 
 def _read_index_meta(
@@ -413,7 +413,7 @@ def _read_index_meta(
     )
     done_raw = rows.get("done")
     done_value = str(done_raw) if done_raw is not None else ""
-    finished = done_value in {"1", "fast"}
+    finished = done_value in {"full", "fast"}
     size_raw = rows.get("filesize")
     try:
         source_size = int(size_raw) if size_raw is not None else None
@@ -456,15 +456,49 @@ def open_generation_index(
     index_dir: Path | str,
     options: ZimIndexOptions,
     expected_source_size: int | None,
+    expected_source_mtime: int | None = None,
 ) -> _LocalIndex | None:
     """Open the current validated generation for one ZIM source."""
     try:
-        lease = IndexLocator(index_dir).paths(source)
+        lease = IndexLocator(index_dir).paths(
+            source,
+            verify_faiss=bool(options.semantic and not options.defer_faiss),
+        )
     except IndexLocatorError as error:
         logger.warning("%s: index generation unavailable (%s)", source.key, error)
         return None
     if lease is None:
         return None
+    manifest_meta = (lease.manifest.get("metadata") or {}) if lease.manifest else {}
+    try:
+        recorded_size = manifest_meta.get("source_size")
+        if (
+            expected_source_size is not None
+            and recorded_size is not None
+            and int(recorded_size) != int(expected_source_size)
+        ):
+            logger.warning(
+                "%s: index was built from a source of a different size; "
+                "using native full-text until it is rebuilt",
+                source.key,
+            )
+            lease.close()
+            return None
+        recorded_mtime = manifest_meta.get("source_mtime")
+        if (
+            expected_source_mtime is not None
+            and recorded_mtime is not None
+            and int(recorded_mtime) != int(expected_source_mtime)
+        ):
+            logger.warning(
+                "%s: source archive changed since this index was built; "
+                "using native full-text until it is rebuilt",
+                source.key,
+            )
+            lease.close()
+            return None
+    except (TypeError, ValueError):
+        pass
     db_path = lease.sqlite_path
     try:
         db = sqlite3.connect(
@@ -475,6 +509,10 @@ def open_generation_index(
         return None
     try:
         finished, done_value, source_size, stored_fingerprint = _read_index_meta(db)
+        try:
+            index_meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
+        except sqlite3.Error:
+            index_meta = {}
         if not finished:
             db.close()
             lease.close()
@@ -500,7 +538,7 @@ def open_generation_index(
         if (
             options.semantic
             and not options.defer_faiss
-            and done_value == "1"
+            and done_value == "full"
             and faiss_path is not None
         ):
             current_fingerprint = options.model_fingerprint
@@ -566,6 +604,7 @@ def open_generation_index(
             has_fulltext_index=None,
             lease=lease,
             generation=lease.generation,
+            index_meta=index_meta,
         )
     except sqlite3.Error:
         db.close()
@@ -617,6 +656,39 @@ def open_native_index(
     )
 
 
+def _apply_index_metadata(source: Any, meta: dict[str, str]) -> None:
+    """Populate SourceInfo's published-index fields without inventing values."""
+    from ...indexing import schema
+
+    try:
+        if schema.INDEXED_COUNT in meta:
+            object.__setattr__(
+                source,
+                "indexed_count",
+                schema.decode_int(meta[schema.INDEXED_COUNT]),
+            )
+        if schema.TRUNCATED in meta:
+            object.__setattr__(
+                source,
+                "truncated",
+                schema.decode_bool(meta[schema.TRUNCATED]),
+            )
+        if schema.BODY_TRUNCATED_COUNT in meta:
+            object.__setattr__(
+                source,
+                "body_truncated_count",
+                schema.decode_int(meta[schema.BODY_TRUNCATED_COUNT]),
+            )
+        if schema.DERIVED_TEXT in meta:
+            value = schema.decode_json(meta[schema.DERIVED_TEXT])
+            if isinstance(value, dict):
+                object.__setattr__(source, "derived_text", value)
+        if meta:
+            object.__setattr__(source, "index_freshness", "unknown")
+    except (KeyError, TypeError, ValueError):
+        return
+
+
 def discover_source_indexes(
     records: list[SourceRecord],
     *,
@@ -655,6 +727,7 @@ def discover_source_indexes(
                 index_dir=index_dir,
                 options=options,
                 expected_source_size=record.size,
+                expected_source_mtime=record.mtime,
             )
             if index is None:
                 index = open_native_index(
@@ -682,6 +755,7 @@ def discover_source_indexes(
                 searchable=True,
                 web_base_path=web_base_path,
             )
+            _apply_index_metadata(searchable_source, index.index_meta)
             sources.append(searchable_source)
             library_sources.append(searchable_source)
             indexes[searchable_source.key] = index

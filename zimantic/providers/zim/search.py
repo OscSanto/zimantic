@@ -18,6 +18,7 @@ from ...content.reader import (
 )
 from ...content.zim_paths import ZimPathError, resolve_zim_path
 from ...contracts import SourceInfo, SourceResult, encode_document_id
+from ...indexing.search import body_search, fuse_fulltext
 from ...libzim_compat import search_paths
 from ...searching.query import _title_prefix_query, _title_query
 from ...searching.ranking import source_items
@@ -227,6 +228,13 @@ def _search_locked(
             rowids.add(int(rowid))
             keyword.append((float(bm25), {"rowid": int(rowid)}))
 
+    body_rows: list[tuple[int, float]] = []
+    if db is not None and (request.fulltext_query or request.query):
+        body_rows = body_search(
+            db, request.fulltext_query or request.query, count
+        )
+        rowids.update(rowid for rowid, _ in body_rows)
+
     fulltext_rows: list[tuple[int, int]] = []
     searcher = None
     fulltext_pool = ctx.fulltext_pool
@@ -329,11 +337,17 @@ def _search_locked(
         for score, row in keyword
         if row["rowid"] in docs
     ]
+    body_fulltext = [
+        (float(bm25), docs[rowid])
+        for rowid, bm25 in body_rows
+        if rowid in docs
+    ]
     for rank, rowid in fulltext_rows:
         doc = docs.get(rowid)
         if doc:
             fulltext.append((rank, doc))
     fulltext.extend(fulltext_hits)
+    fulltext = fuse_fulltext(body_fulltext, fulltext)
     if keyword or fulltext:
         minimum = ctx.min_cosine_similarity
         semantic_ids = [
@@ -439,17 +453,32 @@ def fetch_docs(
             next_id = int(row[3])
             if next_id in visited:
                 return None
+            if next_id not in rows:
+                # A truncated manifest can omit the target; the redirect row's
+                # stored path is already the final target path.
+                return current_id, row
             current_id = next_id
         return None
 
-    docs: dict[int, dict[str, Any]] = {}
+    resolved_rows: dict[int, tuple[int, tuple[Any, ...]]] = {}
+    path_ids: dict[str, set[int]] = {}
     for rowid in values:
         resolved = final_row(rowid)
         if not resolved:
             continue
-        _, (_, title, path, _) = resolved
+        final_id, row = resolved
+        resolved_rows[rowid] = (final_id, row)
+        path_ids.setdefault(str(row[2]), set()).add(int(final_id))
+    ambiguous = {
+        path for path, identifiers in path_ids.items() if len(identifiers) > 1
+    }
+    docs: dict[int, dict[str, Any]] = {}
+    for rowid, (_final_id, row) in resolved_rows.items():
+        _, title, path, _ = row
+        if str(path) in ambiguous:
+            continue
         docs[rowid] = result_doc(
-            source, path, title, web_base_path=web_base_path
+            source, str(path), title, web_base_path=web_base_path
         )
     return docs
 

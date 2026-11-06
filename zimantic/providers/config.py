@@ -142,6 +142,7 @@ class ZimConfig:
     name: str
     path: str
     label: str | None = None
+    max_entries: int | None = None
     traversal: TraversalLimits = field(default_factory=TraversalLimits)
     kind: Literal["zim"] = field(default="zim", init=False)
 
@@ -317,6 +318,7 @@ def _parse_zim(entry: Mapping[str, Any], base: Path) -> ZimConfig:
     common = _common(entry)
     return ZimConfig(
         path=_resolve_path(entry.get("path"), "path", base),
+        max_entries=_optional_positive_int(entry.get("max_entries"), "max_entries"),
         **common,
     )
 

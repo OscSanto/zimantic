@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlsplit
 if TYPE_CHECKING:
     from libzim.reader import Archive
 
+from ..indexing.types import EntryRecord
 from ..libzim_compat import get_entry_by_id
 from ..redirects import RedirectError, resolve_redirect_entry
 from .path import normalize_archive_path
@@ -61,16 +62,6 @@ DEFAULT_PARSE_TIMEOUT = 5.0
 MAX_ACTIVE_DEPTH = 200
 
 
-class EntryRecord(NamedTuple):
-    """Indexable fields extracted from one ZIM entry."""
-
-    id: int
-    title: str
-    excerpt: str
-    path: str
-    target_id: int | None
-
-
 class EntrySource(Protocol):
     """The part of a libzim ``Archive`` needed to read one entry by id.
 
@@ -85,6 +76,9 @@ class EntrySource(Protocol):
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
 DEFAULT_PREVIEW_CHARS = 1000
 DEFAULT_MAX_HTML_BYTES = 4 << 20
+# Per-item lexical body cap.  It is separate from the short embedding/preview
+# excerpt and defaults to 1 MiB, matching the phase-04 global setting.
+DEFAULT_MAX_BODY_TEXT_BYTES = 1 << 20
 # This protects the builder from pathological decompressed entries while still
 # accepting genuinely large articles by default. Profiles can lower it for
 # memory-constrained machines.
@@ -538,6 +532,20 @@ def truncate_at_word_boundary(text: str, max_chars: int) -> str:
     return cut[:boundary].rstrip() if boundary > 0 else cut
 
 
+def truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Truncate at a valid UTF-8 character boundary.
+
+    Returns ``(text, truncated)``.  The byte cap is applied to the encoded
+    representation, never to a Python character count, so a multi-byte
+    character is never split in half.
+    """
+    limit = max(1, int(max_bytes))
+    encoded = str(text).encode("utf-8", "ignore")
+    if len(encoded) <= limit:
+        return str(text), False
+    return encoded[:limit].decode("utf-8", "ignore"), True
+
+
 def _join_blocks(candidates: list[str], max_chars: int) -> str:
     """Join the opening blocks up to ``max_chars``, truncating the last one.
 
@@ -581,6 +589,33 @@ def extract_excerpt(
     if not candidates:
         return ""
     return _join_blocks(candidates, max_chars)
+
+
+def extract_body(
+    html: bytes,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
+    deadline: float | None = None,
+    *,
+    input_truncated: bool = False,
+) -> tuple[str, bool]:
+    """Return bounded lexical body text and whether extraction cut it off.
+
+    The cap is applied to encoded UTF-8 bytes.  Extraction continues beyond the
+    short embedding excerpt; ``body_truncated`` is true only when the budget or
+    an incomplete input parse actually removed text.
+    """
+    max_bytes = max(1, int(max_body_text_bytes))
+    # A character budget equal to the byte budget is an upper bound; multi-byte
+    # characters are then capped precisely below.
+    candidates = list(
+        iter_text_blocks(html, max_chars=max_bytes, deadline=deadline)
+    )
+    if not candidates:
+        return "", input_truncated
+    joined = _join_blocks(candidates, max_bytes)
+    text, byte_truncated = truncate_utf8(joined, max_bytes)
+    filled = len(joined) >= max_bytes
+    return text, bool(byte_truncated or input_truncated or filled)
 
 
 def _json_body(
@@ -1242,13 +1277,19 @@ def _read_pdf_entry(
     raw: bytes,
     max_preview_chars: int,
     deadline: float | None = None,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
 ) -> EntryRecord | None:
     excerpt = extract_pdf_excerpt(raw, max_preview_chars, deadline=deadline)
     if len(excerpt) < MIN_BLOCK_CHARS:
         # No text layer (a scan), password-protected, or malformed: skip it
         # rather than store a title-only entry with no searchable body.
         return None
-    return EntryRecord(entry_id, entry.title, excerpt, entry.path, None)
+    body = extract_pdf_excerpt(raw, max_body_text_bytes, deadline=deadline)
+    body, truncated = truncate_utf8(body, max_body_text_bytes)
+    truncated = truncated or len(body.encode("utf-8")) >= max_body_text_bytes
+    return EntryRecord(
+        entry_id, entry.title, excerpt, entry.path, None, body, truncated
+    )
 
 
 def _read_plain_text_entry(
@@ -1256,6 +1297,7 @@ def _read_plain_text_entry(
     entry_id: int,
     raw: bytes,
     max_preview_chars: int,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
 ) -> EntryRecord | None:
     # Bundled licenses, dotfiles and configs are text/plain too; only real
     # article text should become a search result.
@@ -1271,7 +1313,15 @@ def _read_plain_text_entry(
         if is_disambiguation(entry.title, excerpt, raw)
         else entry.title
     )
-    return EntryRecord(entry_id, title, excerpt, entry.path, None)
+    full_text = " ".join(raw.decode("utf-8", "ignore").split())
+    body = truncate_at_word_boundary(full_text, max_body_text_bytes)
+    body, truncated = truncate_utf8(body, max_body_text_bytes)
+    truncated = truncated or len(full_text.encode("utf-8")) > len(
+        body.encode("utf-8")
+    )
+    return EntryRecord(
+        entry_id, title, excerpt, entry.path, None, body, truncated
+    )
 
 
 def _redirect_target(entry):
@@ -1318,7 +1368,44 @@ def _read_html_entry(
     max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     truncated: bool = False,
     allow_phet: bool = True,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
 ) -> EntryRecord | None:
+    def with_body(
+        title: str,
+        excerpt: str,
+        *,
+        body_source: bytes | None = None,
+        body: str | None = None,
+        body_truncated: bool = False,
+        path: str | None = None,
+        target_id: int | None = None,
+    ) -> EntryRecord:
+        if body is None:
+            if body_source is None:
+                body_source = html
+            body, extracted_truncated = extract_body(
+                body_source,
+                max_body_text_bytes,
+                deadline,
+                input_truncated=truncated,
+            )
+            body_truncated = body_truncated or extracted_truncated
+            if not body and excerpt:
+                body = excerpt
+                body_truncated = False
+        else:
+            body, byte_truncated = truncate_utf8(body, max_body_text_bytes)
+            body_truncated = body_truncated or byte_truncated
+        return EntryRecord(
+            entry_id,
+            title,
+            excerpt,
+            entry.path if path is None else path,
+            target_id,
+            body,
+            body_truncated,
+        )
+
     if _HTML_ASSET_PATH.search(entry.path) and not _HTML_TAG.search(html):
         # A script/data file served as HTML (zimit crawls do this for <site>.js)
         # has no markup. A real page that merely ends in .js — a cheatsheet
@@ -1339,43 +1426,51 @@ def _read_html_entry(
             else None
         )
         if companion is not None:
-            kind, body = companion
+            kind, body_source = companion
             if kind == "markdown":
                 excerpt, md_title = _markdown_excerpt(
-                    body, max_preview_chars, deadline=deadline
+                    body_source, max_preview_chars, deadline=deadline
                 )
-                if excerpt and not is_javascript_shell(body, excerpt):
-                    return EntryRecord(
-                        entry_id,
+                if excerpt and not is_javascript_shell(body_source, excerpt):
+                    markdown_body = _markdown_excerpt(
+                        body_source, max_body_text_bytes, deadline=deadline
+                    )[0]
+                    return with_body(
                         entry.title or md_title,
                         excerpt,
-                        entry.path,
-                        None,
+                        body=markdown_body,
+                        body_truncated=len(markdown_body.encode("utf-8")) >= max_body_text_bytes,
                     )
             else:
                 # Keep this page's own title and path: it is a deep link into the
                 # app route, and its body is real text. Storing the shell target
                 # instead would collapse every article onto "index.html".
                 excerpt = extract_excerpt(
-                    body, max_preview_chars=max_preview_chars, deadline=deadline
+                    body_source, max_preview_chars=max_preview_chars, deadline=deadline
                 )
-                if not excerpt and not _HTML_TAG.search(body):
+                if not excerpt and not _HTML_TAG.search(body_source):
                     # Plain-text companions (video/playlist descriptions) have no
                     # HTML blocks, so normalize them directly. An HTML body with no
                     # visible text stays empty instead of leaking its markup.
-                    excerpt = _plain_text_excerpt(body, max_preview_chars)
-                if excerpt and not is_javascript_shell(body, excerpt):
+                    excerpt = _plain_text_excerpt(body_source, max_preview_chars)
+                if excerpt and not is_javascript_shell(body_source, excerpt):
                     title = (
                         disambiguation_title(entry.title)
-                        if is_disambiguation(entry.title, excerpt, body)
+                        if is_disambiguation(entry.title, excerpt, body_source)
                         else entry.title
                     )
-                    return EntryRecord(
-                        entry_id,
+                    if _HTML_TAG.search(body_source):
+                        return with_body(
+                            title, excerpt, body_source=body_source
+                        )
+                    plain_body = _plain_text_excerpt(
+                        body_source, max_body_text_bytes
+                    )
+                    return with_body(
                         title,
                         excerpt,
-                        entry.path,
-                        None,
+                        body=plain_body,
+                        body_truncated=len(plain_body.encode("utf-8")) >= max_body_text_bytes,
                     )
         redirect = _redirect_target(zim.get_entry_by_path(path))
         if redirect is None or redirect.path == entry.path:
@@ -1397,7 +1492,7 @@ def _read_html_entry(
             max_entry_bytes,
         )
         if excerpt:
-            return EntryRecord(entry_id, entry.title, excerpt, entry.path, None)
+            return with_body(entry.title, excerpt)
 
     excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars, deadline=deadline)
     if is_javascript_shell(html, excerpt):
@@ -1423,7 +1518,7 @@ def _read_html_entry(
                 return None
     disambiguation = is_disambiguation(entry.title, excerpt, html)
     title = disambiguation_title(entry.title) if disambiguation else entry.title
-    return EntryRecord(entry_id, title, excerpt, entry.path, None)
+    return with_body(title, excerpt)
 
 
 def read_entry(
@@ -1434,6 +1529,7 @@ def read_entry(
     max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
     max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
     timeout: float | None = None,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
 ) -> EntryRecord | None:
     """Return an ``EntryRecord`` for the entry, or None when it is not indexable.
 
@@ -1441,13 +1537,15 @@ def read_entry(
     path and id of the page they point to, so they are searchable by title only.
 
     fast=True stores the title and path without reading the article body, so no
-    text (and therefore no vector) is produced.
+    text (and therefore no vector or body posting) is produced.
 
     ``timeout`` bounds the whole parse (HTML and PDF) cooperatively via a
     shared ``time.monotonic()`` deadline; when it passes, the entry yields a
     partial excerpt rather than hanging the caller. The builder passes no
     timeout so nothing is silently dropped offline.
 
+    ``max_body_text_bytes`` bounds the separately indexed lexical body; the
+    embedding excerpt keeps its existing short ``max_preview_chars`` limit.
     """
     entry = get_entry_by_id(zim, i)
     if entry.is_redirect:
@@ -1497,6 +1595,7 @@ def read_entry(
                 max_entry_bytes=entry_limit,
                 truncated=entry_size > len(head),
                 allow_phet=False,
+                max_body_text_bytes=1,
             )
             if record is not None:
                 return EntryRecord(i, record.title, "", record.path, record.target_id)
@@ -1527,9 +1626,18 @@ def read_entry(
     del content, item
 
     if mimetype == "application/pdf":
-        return _read_pdf_entry(entry, i, raw, max_preview_chars, deadline=deadline)
+        return _read_pdf_entry(
+            entry,
+            i,
+            raw,
+            max_preview_chars,
+            deadline=deadline,
+            max_body_text_bytes=max_body_text_bytes,
+        )
     if mimetype == "text/plain":
-        return _read_plain_text_entry(entry, i, raw, max_preview_chars)
+        return _read_plain_text_entry(
+            entry, i, raw, max_preview_chars, max_body_text_bytes
+        )
     return _read_html_entry(
         cast(Any, zim),
         entry,
@@ -1539,4 +1647,5 @@ def read_entry(
         deadline=deadline,
         max_entry_bytes=entry_limit,
         truncated=truncated,
+        max_body_text_bytes=max_body_text_bytes,
     )

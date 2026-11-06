@@ -489,15 +489,66 @@ def _persist_unmatched_zim_paths(cfg: dict, paths: list[Path]) -> list[Path]:
     return appended
 
 
+def _build_producer_for_zim(zim: Path, cfg: dict, *, fast: bool):
+    """Build the ZIM producer through the configured collection entry."""
+    from types import SimpleNamespace
+
+    from .providers.zim.discovery import (
+        relative_archive,
+        zim_collection_key,
+        zim_source_key,
+    )
+    from .providers.zim.entries import create_zim_producer
+
+    entry = None
+    for candidate in cfg.get("collections") or ():
+        if getattr(candidate, "kind", None) != "zim":
+            continue
+        root = Path(candidate.path)
+        if root.is_file():
+            if root.resolve() == zim.resolve():
+                entry = candidate
+                break
+        else:
+            try:
+                zim.resolve().relative_to(root.resolve())
+                entry = candidate
+                break
+            except ValueError:
+                continue
+    collection_name = getattr(entry, "name", "library")
+    root = Path(getattr(entry, "path", None) or zim)
+    relative = zim.name if root.is_file() else relative_archive(root, zim)
+    source = SimpleNamespace(
+        key=zim_source_key(collection_name, relative),
+        provider="zim",
+        collection_key=zim_collection_key(collection_name),
+        provider_id=None,
+        path=str(zim),
+        max_entries=getattr(entry, "max_entries", None),
+    )
+    from .catalog import catalog_path
+
+    return create_zim_producer(
+        source,
+        fast=fast,
+        cfg=cfg,
+        max_entries=getattr(entry, "max_entries", None),
+        catalog_path=catalog_path(cfg["index_dir"]),
+    )
+
+
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     from tqdm import tqdm
 
-    from .build import build as build_zim
+    from .build import EmbeddingPipeline, build_index
     from .content.reader import (
+        DEFAULT_MAX_BODY_TEXT_BYTES,
         DEFAULT_MAX_ENTRY_BYTES,
         DEFAULT_MAX_HTML_BYTES,
         DEFAULT_PREVIEW_CHARS,
     )
+    from .indexes import IndexLocator
 
     sigterm = getattr(signal, "SIGTERM", None)
     if sigterm is not None:
@@ -583,37 +634,17 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         )
     failures: list[tuple[Path, BaseException]] = []
 
-    def _collection_for(zim: Path):
-        for entry in cfg.get("collections") or ():
-            if getattr(entry, "kind", None) != "zim":
-                continue
-            root = Path(entry.path)
-            if root.is_file():
-                if root.resolve() == zim.resolve():
-                    return entry
-            else:
-                try:
-                    zim.resolve().relative_to(root.resolve())
-                    return entry
-                except ValueError:
-                    continue
-        return None
-
     def run_build(zim: Path) -> None:
-        entry = _collection_for(zim)
-        build_zim(
-            zim,
-            cfg["index_dir"],
+        producer = _build_producer_for_zim(zim, cfg, fast=args.fast)
+        build_cfg = dict(cfg)
+        build_cfg["embedding_pipeline"] = embedding_pipeline
+        build_index(
+            producer,
+            IndexLocator(cfg["index_dir"]),
             embedder,
-            cfg["batch_size"],
+            build_cfg,
             fast=args.fast,
-            max_html_bytes=cfg.get("max_html_bytes", DEFAULT_MAX_HTML_BYTES),
-            max_entry_bytes=cfg.get("max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES),
-            max_preview_chars=cfg.get("max_preview_chars", DEFAULT_PREVIEW_CHARS),
             force=args.force,
-            embedding_pipeline=embedding_pipeline,
-            collection_root=getattr(entry, "path", None),
-            collection_name=getattr(entry, "name", "library"),
         )
 
     try:

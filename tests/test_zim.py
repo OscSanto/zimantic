@@ -1013,7 +1013,7 @@ class DisambiguationTests(unittest.TestCase):
     def test_read_entry_persists_disambiguation_suffix(self):
         row = _read_entry(_DisambiguationArchive(), 0)
         self.assertEqual(row[1], "Air (disambiguation)")
-        self.assertEqual(len(row), 5)
+        self.assertEqual(len(row), 7)
 
     def test_fast_read_entry_persists_disambiguation_suffix(self):
         row = _read_entry(_DisambiguationArchive(), 0, fast=True)

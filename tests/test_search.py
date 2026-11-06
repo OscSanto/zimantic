@@ -200,7 +200,7 @@ class _TestZimRuntime:
             reasons = []
             vectors_expected = (
                 self.core.semantic
-                and index.done == "1"
+                and index.done == "full"
                 and not self.core._defer_faiss
             )
             vectors_loaded = index.faiss_index is not None
@@ -1622,7 +1622,7 @@ class UserPageRankingTests(unittest.TestCase):
         self.assertEqual(ranked[0]["ranking"]["user_page"]["action"], "none")
 
 
-def _write_index(index_dir: Path, name: str, *, done: str = "1", rows=()):
+def _write_index(index_dir: Path, name: str, *, done: str = "full", rows=()):
     db = sqlite3.connect(index_dir / f"{name}.sqlite")
     db.executescript(
         "CREATE VIRTUAL TABLE docs USING fts5("
@@ -2154,7 +2154,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
             # Once the build finishes, the SQLite index becomes authoritative.
             db = sqlite3.connect(tmp / "manual.sqlite")
-            db.execute("INSERT INTO meta VALUES ('done', '1')")
+            db.execute("INSERT INTO meta VALUES ('done', 'full')")
             db.commit()
             db.close()
             self.assertEqual(search._discover_local_indexes()["manual"][0], "sqlite")
@@ -2163,7 +2163,7 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_index_whose_zim_changed_size_falls_back_to_the_unindexed_zim(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
+            _write_index(tmp, "manual", done="full", rows=[(1, "Old", "old", None)])
             db = sqlite3.connect(tmp / "manual.sqlite")
             db.execute("INSERT OR REPLACE INTO meta VALUES ('filesize', '999')")
             db.commit()
@@ -2181,7 +2181,7 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_index_matching_its_zim_size_stays_authoritative(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
+            _write_index(tmp, "manual", done="full", rows=[(1, "Old", "old", None)])
             zim = tmp / "manual.zim"
             zim.write_bytes(b"zim")
             db = sqlite3.connect(tmp / "manual.sqlite")
@@ -2200,7 +2200,7 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_finished_index_with_no_local_zim_is_ignored(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
-            _write_index(tmp, "manual", done="1", rows=[(1, "Old", "old", None)])
+            _write_index(tmp, "manual", done="full", rows=[(1, "Old", "old", None)])
             (tmp / "manual.zim").unlink()
 
             search = _bare_search(self._cfg(tmp))
@@ -3159,7 +3159,7 @@ class ProductionHardeningTests(unittest.TestCase):
                     None,
                     None,
                     threading.Lock(),
-                    done="1",
+                    done="full",
                     has_fulltext_index=False,
                     zim_path=str(archive),
                 )
@@ -3346,7 +3346,7 @@ def _test_open_index(self, db_path: Path):
         db.close()
         return None
     done = str(rows.get("done", ""))
-    if done not in {"1", "fast"}:
+    if done not in {"1", "full", "fast"}:
         db.close()
         return None
     try:
@@ -3361,7 +3361,7 @@ def _test_open_index(self, db_path: Path):
         if (
             self.semantic
             and not self._defer_faiss
-            and done == "1"
+            and done in {"1", "full"}
             and faiss_path.exists()
         ):
             model_changed = bool(

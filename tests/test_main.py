@@ -1,6 +1,7 @@
 import importlib
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -208,7 +209,14 @@ class BuildWorkerTests(unittest.TestCase):
                             "_find_downloading_sizes",
                             return_value=set(),
                         ) as find_sizes,
-                        patch.object(build_module, "build"),
+                        patch.object(
+                            build_module, "build_index"
+                        ),
+                        patch.object(
+                            main_module,
+                            "_build_producer_for_zim",
+                            return_value=object(),
+                        ),
                     ):
                         main_module.main()
                     self.assertEqual(find_sizes.call_count, expected)
@@ -221,9 +229,9 @@ class BuildWorkerTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         built = []
 
-        def fake_build(zim_path, *_args, **_kwargs):
+        def fake_build(producer, *_args, **_kwargs):
             barrier.wait(timeout=2)
-            built.append(zim_path.name)
+            built.append(Path(producer.path).name)
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -250,7 +258,14 @@ class BuildWorkerTests(unittest.TestCase):
                 patch.object(settings, "load_config", return_value=config),
                 patch.object(main_module, "_configure_logging"),
                 patch.object(main_module, "_find_downloading_sizes", return_value=set()),
-                patch.object(build_module, "build", side_effect=fake_build),
+                patch.object(build_module, "build_index", side_effect=fake_build),
+                patch.object(
+                    main_module,
+                    "_build_producer_for_zim",
+                    side_effect=lambda zim, cfg, fast: types.SimpleNamespace(
+                        path=str(zim)
+                    ),
+                ),
             ):
                 main_module.main()
 
@@ -301,7 +316,12 @@ class BuildWorkerTests(unittest.TestCase):
                 ]),
                 patch.object(settings, "load_config", return_value=config),
                 patch.object(main_module, "_configure_logging"),
-                patch.object(build_module, "build"),
+                patch.object(build_module, "build_index"),
+                patch.object(
+                    main_module,
+                    "_build_producer_for_zim",
+                    return_value=object(),
+                ),
                 patch.object(
                     build_module,
                     "EmbeddingPipeline",

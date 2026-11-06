@@ -4,6 +4,7 @@ import math
 import sqlite3
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from libzim.reader import Archive
@@ -15,20 +16,37 @@ DEFAULT_NPROBE_FRACTION = 0.06
 
 
 @dataclass
-class _LocalIndex:
-    """Open resources and lifecycle state for one local ZIM index."""
+class IndexLocks:
+    """Lifecycle, SQLite-read, and close locks for one index handle."""
+
+    lifecycle: threading.Condition = field(
+        default_factory=threading.Condition, repr=False
+    )
+    read: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    close: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+@dataclass
+class IndexHandle:
+    """Open resources and lifecycle state for one provider-neutral index.
+
+    ``store`` is borrowed from the runtime; an ``IndexHandle`` never closes it.
+    ``generation``/``lease`` pin one immutable generation for this handle's
+    lifetime.  ``read_only=True`` additionally forbids repair, lease creation,
+    cleanup, and cache writes on the read/reuse path.
+    """
 
     db: sqlite3.Connection | None
     faiss_index: Any | None
-    archive: Archive | None
-    searcher: Searcher | None
-    lock: threading.Lock  # serializes libzim Searcher (not thread-safe)
+    archive: Any | None = None
+    searcher: Any | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
     # Serializes bulk archive-entry scans (previews, MIME fills, phrase
     # checks, article reads) so they do not stall full-text search and vice
     # versa. libzim entry reads are thread-safe, so this is a courtesy bound,
     # not a correctness requirement.
     read_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    db_path: str | None = None  # read-only sqlite URI, used for per-thread connections
+    db_path: str | Path | None = None  # read-only sqlite URI or path
     db_signature: tuple[int, int, int, int] | None = None
     faiss_signature: tuple[int, int, int, int] | None = None
     _thread: threading.local = field(default_factory=threading.local)
@@ -37,7 +55,7 @@ class _LocalIndex:
     _active_searches: int = 0
     _retired: bool = False
     _closed: bool = False
-    done: str = "1"
+    done: str = "full"
     # Entry ids that /random accepts for an unindexed ZIM, built lazily on the
     # first request. Without a docs table there is no rowid set to sample, so a
     # sparse archive needs this one-time scan to remain both random and
@@ -54,6 +72,37 @@ class _LocalIndex:
     # Immutable generation lease pinned for the lifetime of this index handle.
     lease: Any | None = field(default=None, repr=False, compare=False)
     generation: str | None = None
+    # Provider-neutral additions.  ``store`` is borrowed, never closed here.
+    store: Any | None = field(default=None, repr=False, compare=False)
+    native: Any | None = None
+    faiss_path: Path | None = None
+    signatures: tuple[int, int, int, int] | None = None
+    locks: IndexLocks = field(default_factory=IndexLocks, repr=False)
+    read_only: bool = False
+    index_meta: dict[str, str] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        # Keep one lifecycle/read lock regardless of which public/private name
+        # an older caller uses.
+        self._lifecycle = self.locks.lifecycle
+        self.read_lock = self.locks.read
+        if self.signatures is None:
+            db_stat = self._artifact_signature(self.db_path)
+            faiss_stat = self._artifact_signature(self.faiss_path)
+            self.signatures = (db_stat[0], db_stat[1], faiss_stat[0], faiss_stat[1])
+
+    @staticmethod
+    def _artifact_signature(path: Any) -> tuple[int, int]:
+        if path is None:
+            return (0, 0)
+        text = str(path)
+        if "?" in text or text.startswith("file:"):
+            return (0, 0)
+        try:
+            stat = Path(text).stat()
+        except (OSError, TypeError, ValueError):
+            return (0, 0)
+        return (stat.st_size, round(stat.st_mtime_ns / 1_000_000_000))
 
     def ensure_open(self) -> Archive | None:
         """Open the archive on first use, not at server startup."""
@@ -202,3 +251,17 @@ def _nprobe(faiss_index: Any, cfg: dict) -> int:
     else:
         probes = 64
     return min(probes, nlist) if nlist else probes
+
+
+# Phase-01 code and provider discovery used the private name.  New code should
+# import ``IndexHandle``; the alias keeps the mechanical migration small while
+# there is exactly one implementation.
+_LocalIndex = IndexHandle
+
+__all__ = [
+    "DEFAULT_NPROBE_FRACTION",
+    "IndexHandle",
+    "IndexLocks",
+    "_LocalIndex",
+    "_nprobe",
+]

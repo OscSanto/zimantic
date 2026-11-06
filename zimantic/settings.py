@@ -45,6 +45,12 @@ _COMMON = {
     "max_html_bytes": 4_194_304,
     "max_article_bytes": DEFAULT_MAX_ARTICLE_BYTES,
     "max_preview_chars": 1_000,
+    # Per-item lexical body cap, independent of the short embedding/preview
+    # limit.  Fast builds intentionally have no body channel.
+    "max_body_text_bytes": 1_048_576,
+    # Optional derived-preview artifacts; reaching it omits new previews and
+    # never removes searchable postings.
+    "max_derived_cache_bytes_per_source": 536_870_912,
     "preview_limit": 10,
     "min_cosine_similarity": 0.85,
     "source_timeout": 12,
@@ -346,13 +352,20 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # Use the validated values in ``cfg``, not the raw user mapping: an
     # invalid worker type is skipped above and must still get a computed
     # default instead of leaving the key missing.
-    for key in ("build_workers", "embedding_workers"):
-        if key in cfg and cfg[key] < 1:
-            warn(
-                f"zimantic: warning: config key {key!r} in {config_path} "
-                "must be at least 1; using the automatic default"
-            )
-            del cfg[key]
+    for key in ("build_workers", "embedding_workers", "max_body_text_bytes", "max_derived_cache_bytes_per_source"):
+        if key in cfg and (not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1):
+            if key in {"build_workers", "embedding_workers"}:
+                warn(
+                    f"zimantic: warning: config key {key!r} in {config_path} "
+                    "must be at least 1; using the automatic default"
+                )
+                del cfg[key]
+            else:
+                warn(
+                    f"zimantic: warning: config key {key!r} in {config_path} "
+                    "must be a positive integer; using the profile default"
+                )
+                cfg[key] = PROFILES[profile][key]
     if "build_workers" not in cfg:
         cfg["build_workers"] = default_build_workers()
     if "embedding_workers" not in cfg:
@@ -371,11 +384,43 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
             default_root = config_dir / default_root
         collections = (ZimConfig(name="library", path=str(default_root)),)
     envelope = dict(parsed.envelope) if parsed is not None else {}
-    if envelope.get("derived_text"):
-        warn(
-            "zimantic: warning: [derived_text] is recognized but this phase does "
-            "not run derived-text operations; the values are preserved"
+    from .indexing.derived import (
+        DerivedTextConfig,
+        parse_derived_text,
+        parse_source_overrides,
+    )
+
+    try:
+        derived_text = parse_derived_text(envelope.get("derived_text"))
+        overrides = parse_source_overrides(
+            envelope.get("sources"),
+            collection_names=[entry.name for entry in collections],
+            warn=warn,
         )
+    except ValueError as error:
+        from .providers.config import ConfigValidationError
+
+        raise ConfigValidationError(f"derived_text: {error}") from error
+    envelope["derived_text"] = {
+        "max_caption_bytes": derived_text.max_caption_bytes,
+        "ocr_languages": list(derived_text.ocr_languages),
+        "max_ocr_pages": derived_text.max_ocr_pages,
+        "max_ocr_pixels": derived_text.max_ocr_pixels,
+        "max_ocr_output_bytes": derived_text.max_ocr_output_bytes,
+        "asr_model": derived_text.asr_model,
+        "max_asr_seconds": derived_text.max_asr_seconds,
+        "max_asr_bytes": derived_text.max_asr_bytes,
+        "max_asr_output_bytes": derived_text.max_asr_output_bytes,
+        "task_timeout_seconds": derived_text.task_timeout_seconds,
+        "max_spool_bytes": derived_text.max_spool_bytes,
+        "workers": derived_text.workers,
+        "cache": derived_text.cache,
+    }
+    envelope["source_operations"] = {
+        key: operations.state() for key, operations in overrides.items()
+    }
+    cfg["derived_text"] = derived_text
+    cfg["derived_source_operations"] = overrides
     cfg["collections"] = tuple(collections)
     cfg["config_dir"] = str(config_dir)
     settings = dict(cfg)

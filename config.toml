@@ -108,6 +108,32 @@ port = 8090
 # Maximum preview characters extracted for displayed results; build-time extraction is transient.
 # max_preview_chars = 1_000
 
+# Maximum lexical body text per item indexed into the contentless body FTS.
+# This is independent of max_preview_chars. Longer text is cut at a UTF-8
+# character boundary and counted in body_truncated_count.
+# max_body_text_bytes = 1_048_576
+
+# Maximum optional derived-preview cache bytes per source. Reaching it omits
+# new preview artifacts, never searchable postings.
+# max_derived_cache_bytes_per_source = 536_870_912
+
+# Optional build-time derived-text engines. Operations stay off unless an
+# exact [[collections.sources]] override enables them.
+# [derived_text]
+# max_caption_bytes = 1_048_576
+# ocr_languages = ["eng"]
+# max_ocr_pages = 20
+# max_ocr_pixels = 50_000_000
+# max_ocr_output_bytes = 262_144
+# asr_model = "base.en"
+# max_asr_seconds = 3_600
+# max_asr_bytes = 1_073_741_824
+# max_asr_output_bytes = 1_048_576
+# task_timeout_seconds = 7_200
+# max_spool_bytes = 2_147_483_648
+# workers = "auto"
+# cache = true
+
 # Large ZIMs only (10,000+ articles): how many IVF clusters each search scans.
 # By default, searches scan about 6% of the clusters, scaling automatically with ZIM size.
 # Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.

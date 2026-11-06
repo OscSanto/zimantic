@@ -17,12 +17,14 @@ from .store import (
 )
 
 _READER_EXPORTS = {
+    "DEFAULT_MAX_BODY_TEXT_BYTES",
     "DEFAULT_MAX_ENTRY_BYTES",
     "DEFAULT_MAX_HTML_BYTES",
     "DEFAULT_PREVIEW_CHARS",
     "MIN_BLOCK_CHARS",
     "EntryRecord",
     "disambiguation_title",
+    "extract_body",
     "extract_excerpt",
     "extract_pdf_excerpt",
     "is_disambiguation",
@@ -30,9 +32,11 @@ _READER_EXPORTS = {
     "iter_text_blocks",
     "read_entry",
     "truncate_at_word_boundary",
+    "truncate_utf8",
 }
 
 __all__ = [
+    "DEFAULT_MAX_BODY_TEXT_BYTES",
     "DEFAULT_MAX_ENTRY_BYTES",
     "DEFAULT_MAX_HTML_BYTES",
     "DEFAULT_PREVIEW_CHARS",
@@ -47,6 +51,7 @@ __all__ = [
     "ContentStore",
     "EntryRecord",
     "disambiguation_title",
+    "extract_body",
     "extract_excerpt",
     "extract_pdf_excerpt",
     "is_disambiguation",
@@ -54,6 +59,7 @@ __all__ = [
     "iter_text_blocks",
     "read_entry",
     "truncate_at_word_boundary",
+    "truncate_utf8",
 ]
 
 

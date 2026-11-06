@@ -211,37 +211,38 @@ class ZimRuntime(CollectionRuntime):
             max_article_bytes=max_article_bytes,
         )
 
+    def entry_producer(self, source: SourceInfo, *, fast: bool):
+        """Return a bounded ZIM entry producer for the generic build pipeline."""
+        from .entries import ArchiveEntryProducer
+
+        record = self._record_for(source)
+        if record is None or not record.path:
+            raise ValueError("ZIM archive is unavailable for indexing")
+        return ArchiveEntryProducer(
+            source,
+            record.path,
+            fast=fast,
+            cfg=self._cfg,
+            max_entries=getattr(self.config, "max_entries", None),
+            catalog_path=catalog_path(self.index_dir),
+        )
+
     def content_store(self, source: SourceInfo) -> ContentStore | None:
         index = self.indexes.get(source.key)
         record = self._record_for(source)
         archive = None
-        owns_archive = False
         if index is not None:
-            archive = index.ensure_open()
-        if archive is None:
-            path = record.path if record is not None else None
-            if not path:
-                raise ArticleUnavailableError("source store is unavailable")
-            factory = self._archive_factory
-            if factory is None or factory is object:
-                from libzim.reader import Archive
-
-                factory = Archive
-            try:
-                archive = factory(path)
-                owns_archive = True
-            except Exception as error:
-                self._logger.warning(
-                    "zimantic: could not open content store for %s (%s)",
-                    source.key,
-                    type(error).__name__,
-                )
-                raise ArticleUnavailableError(
-                    "source store could not be opened"
-                ) from error
+            # Reuse the runtime index's already-open archive if it has one;
+            # otherwise the store opens it lazily on its first read.
+            archive = getattr(index, "archive", None)
+        path = record.path if record is not None else None
+        if index is None and not path:
+            raise ArticleUnavailableError("source store is unavailable")
         return ArchiveContentStore(
             source,
             archive,
+            path=path,
+            archive_factory=self._archive_factory,
             index=index,
             icon_data=(
                 None
@@ -252,7 +253,7 @@ class ZimRuntime(CollectionRuntime):
             icon_path=record.icon_path if record is not None else "",
             max_article_bytes=self._max_article_bytes,
             max_icon_bytes=MAX_ICON_BYTES,
-            owns_archive=owns_archive,
+            owns_archive=index is None or archive is None,
         )
 
     def max_sources_per_search(self) -> int | None:
@@ -581,7 +582,9 @@ class ZimRuntime(CollectionRuntime):
             return False
         if index.generation is not None:
             try:
-                lease = IndexLocator(self.index_dir).paths(source)
+                lease = IndexLocator(self.index_dir).paths(
+                    source, verify_faiss=False
+                )
             except Exception:
                 return False
             if lease is None:
@@ -721,7 +724,7 @@ class ZimRuntime(CollectionRuntime):
             if not archive_current:
                 reasons.append("ZIM archive unavailable")
             vectors_expected = (
-                self._semantic and index.done == "1" and not self._defer_faiss
+                self._semantic and index.done == "full" and not self._defer_faiss
             )
             vectors_loaded = index.faiss_index is not None
             if vectors_expected and not vectors_loaded:
@@ -751,6 +754,29 @@ class ZimRuntime(CollectionRuntime):
                 report["homepage"] = record.homepage or None
                 report["article_count"] = record.item_count
                 report["media_count"] = 0
+            meta = getattr(index, "index_meta", None) or {}
+            if meta:
+                from ...indexing import schema
+
+                try:
+                    if schema.INDEXED_COUNT in meta:
+                        report["indexed_count"] = schema.decode_int(
+                            meta[schema.INDEXED_COUNT]
+                        )
+                    if schema.TRUNCATED in meta:
+                        report["truncated"] = schema.decode_bool(
+                            meta[schema.TRUNCATED]
+                        )
+                    if schema.BODY_TRUNCATED_COUNT in meta:
+                        report["body_truncated_count"] = schema.decode_int(
+                            meta[schema.BODY_TRUNCATED_COUNT]
+                        )
+                    if schema.DERIVED_TEXT in meta:
+                        report["derived_text"] = schema.decode_json(
+                            meta[schema.DERIVED_TEXT]
+                        )
+                except (KeyError, TypeError, ValueError):
+                    pass
             reports.append(report)
         return reports
 

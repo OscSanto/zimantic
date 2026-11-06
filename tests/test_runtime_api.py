@@ -132,7 +132,7 @@ class LibzimRuntimeApiTests(unittest.TestCase):
             if not get_entry_by_id(self.archive, index).is_redirect
         )
         assert row is not None
-        self.assertEqual(len(row), 5)
+        self.assertEqual(len(row), 7)
         self.assertIn("tires", row[2])
 
 
