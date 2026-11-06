@@ -27,6 +27,11 @@ There is no Kolibri code today. This provider builds on phases 00, 03, 04, and
 seam, then supplies discovery metadata, a `ContentStore`, and an
 `EntryProducer`.
 
+The initial supported target is the latest upstream Kolibri release available
+when this phase begins. Pin its exact version and source revision in
+release-derived fixtures; do not claim support for older versions until each
+has its own tested fixture and schema mapping.
+
 ## Configuration
 
 ```toml
@@ -157,7 +162,8 @@ fixture.
   the new sources. Never transfer an enrichment opt-in implicitly to the
   collapsed source. A scan that hits its separate traversal/time budget before
   proving truncation fails explicitly and retains the last published index.
-- `available` = database + storage readable; `searchable` = a usable, not
+- `available` = database + storage are currently readable (runtime-only and
+  never persisted); `searchable` = a usable, not
   detectably stale index exists.
 - `document_count` = local indexable document/exercise-node count only when
   known without an unbounded count; otherwise `None`.

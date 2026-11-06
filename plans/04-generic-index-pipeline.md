@@ -164,17 +164,26 @@ class DerivedTextProducer(Protocol):
   language, parser version, and caps). Partial/failed outputs are not cached as
   complete. Cache entries are not source identity and may be removed by
   `zimantic prune`.
-- Provenance: append derived text to `EntryRecord.excerpt` in a deterministic
-  order and record the contributing operations in index metadata and the build
-  report. Optionally expose the per-result contributors as an optional field.
+- Provenance and excerpt composition: retain native text first, then
+  dedupe-append usable caption, OCR, and ASR contributions in that fixed order.
+  Normalize each non-empty contribution to Unicode NFKC, casefold, and
+  collapsed whitespace for equality only; preserve its original text when
+  appending and append an equivalent normalized contribution at most once.
+  Do not remove repetition within an individual contribution. Keep the
+  operation suppression rules above (for example, captions suppress ASR only
+  when enabled captions produced usable text). Record contributing operations
+  in index metadata and the build report; optionally expose per-result
+  contributors.
 - Source/health output reports the last build's per-operation state:
   `off`, `not_checked`, `ready`, `partial`, or `unavailable`. A changed config
   or a fast build is `not_checked` until a matching full build runs. `serve`
   reads this metadata; it never loads an engine to probe its state.
 - Budgets come from the global `[derived_text]` config: caption bytes, OCR
   pages/pixels/output bytes, ASR media seconds/input/output bytes, task time,
-  aggregate spool bytes, and `workers`. The global `max_entry_bytes` also
-  applies to each input. An input skipped or truncated because of a cap,
+  aggregate spool bytes, and `workers`. The effective source-file input cap is
+  the minimum of the provider's `max_file_bytes` (where applicable), global
+  `max_entry_bytes`, and the enabled operation's own byte cap. Serving limits
+  are independent. An input skipped or truncated because of a cap,
   malformed data, or failure is logged and reported as partial enrichment;
   other items continue and the overall build exits non-zero. Intentionally
   disabled or unnecessary inputs are not failures.
@@ -492,6 +501,10 @@ connection. Phase 10 uses this mode for reused indexes.
 - [ ] Derived text is off by default: caption/image/media inputs are never
       read. Each operation works alone with a fake engine, records provenance,
       respects its caps, and reuses the digest cache across rebuilds.
+- [ ] Native text remains first; distinct derived contributions are appended
+      captions/OCR/ASR in order, compared by normalized Unicode text, and
+      duplicate contributions are appended only once without altering their
+      original text.
 - [ ] Changing an operation, engine, or model changes the fingerprint and
       restarts the build.
 - [ ] ASR works alone even when a caption file exists; with captions enabled,

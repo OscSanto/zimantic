@@ -82,7 +82,7 @@ class CollectionSnapshot:
     collection: CollectionInfo
     source_count: int
     media_types: tuple[str, ...] | None
-    available: bool
+    available: bool          # current runtime state; never persisted
     error: str | None
     discovery_state: Literal["loading", "ready", "error", "closed"]
     snapshot_version: int
@@ -241,6 +241,14 @@ Notes:
   SSE serializers call `CollectionSnapshot.to_dict()` to combine the descriptor
   with its current runtime fields. A previously published descriptor or
   snapshot is never mutated.
+- `available` is current runtime state and is never persisted in a catalog,
+  manifest, or index. Persisted provider source records establish that a source
+  was discovered/addressable; absence of such a record means it was not
+  discovered. Providers without a persistent source catalog (including Kiwix)
+  expose discovery state through their runtime snapshot.
+- `CollectionSnapshot.available` describes the collection-level discovery or
+  backend being operational; it does not assert that every member source is
+  available. `SourceInfo.available` is the per-source operational state.
 - `SourceResult` keeps its four channels (`semantic`, `keyword`, `fulltext`,
   `items`), but their document and status types are frozen below.
 
@@ -312,6 +320,7 @@ available: bool = False        # the provider can currently read/search the sour
 searchable: bool = False       # a supported search path is currently usable
 homepage: str | None = None    # source-relative path, never a filesystem locator
 icon_url: str | None = None    # generated public URL, never a provider locator
+size: int | None = None        # known content size in bytes; never a locator
 intent_phrases: tuple[str, ...] = ()
 media_types: tuple[str, ...] | None = None
 document_count: int | None = None
@@ -333,14 +342,17 @@ index_freshness: str | None = None  # current | stale | unknown; None if no inde
 - `indexed_count` and `truncated` describe the published index; both are
   unknown (`null`) before one exists. Freshness is `unknown` until validated.
   Later phases populate these fields without introducing alternate payloads.
-- `available` means the provider can currently open the source for its supported
-  read or remote-search operation. `searchable` means it has at least one usable
-  search path; it may be false for a readable source with no finished local
-  index or native searcher. `homepage`, `icon_url`, and `intent_phrases` are
-  nullable/empty when unavailable rather than inferred from a private locator.
+- `available` means the provider can currently open/read or search the source;
+  it is runtime metadata and is not stored on disk. A source may remain
+  discovered/addressable while unavailable. `searchable` means it has at least
+  one currently usable search path; it may be false for an available source
+  with no finished local index or native searcher. `homepage`, `icon_url`, and
+  `intent_phrases` are nullable/empty when unavailable rather than inferred
+  from a private locator.
 - `media_types` uses the phase-00 taxonomy `text`, `video`, `audio`, `image`,
   and `other`. Providers classify content into those values; phase 07 only
-  chooses labels and filters for this frozen taxonomy.
+  chooses labels and filters for this frozen taxonomy. Serialize observed
+  values in this taxonomy order for stable payloads.
 - `document_count` is the provider's total document-like content-item count,
   `media_count` is its total media-item count, and `item_count` is its total
   permitted source-item count (documents plus media where the provider can
@@ -352,8 +364,10 @@ index_freshness: str | None = None  # current | stale | unknown; None if no inde
   after exhaustive indexing and null before an index exists or when no
   published index state is available.
 - `media_types is None` means no usable classification was observed for the
-  source. A non-null tuple lists observed families and may be partial;
-  incidental web assets need not count as separate content items.
+  source, including when no suitable classifier matched or classification has
+  not run. A non-null tuple lists observed families and may be partial;
+  incidental web assets need not count as separate content items. This field
+  is classification metadata, never a discovery/addressability marker.
 - A source matches a specific content-type filter only when `media_types` is
   not `None` and contains the requested family. Unknown classification is
   intentionally excluded from specific filters.
@@ -555,6 +569,10 @@ keep a `mode` fallback.
 - `CollectionSnapshot.to_dict()` snapshots use the same fields and nullability
   in API, CLI, and SSE serialization; a descriptor alone never claims current
   availability or source counts.
+- Runtime `available` is recomputed and exposed in runtime serializers but is
+  absent from persisted catalog/index schemas; persisted source-record presence
+  is the discovery/addressability signal. `media_types: null` remains an
+  unknown classification and never means "undiscovered".
 - `resolve_source` matches exact `key` values only.
 - Registry returns the two built-ins and rejects unknown kinds; configured
   ZIM and Kiwix searches both continue working in this phase.

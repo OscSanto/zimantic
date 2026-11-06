@@ -154,7 +154,9 @@ identically to every such request.
 - `title` = display label (directory name).
 - `searchable` = a usable, not detectably stale index exists for this source;
   files have no native full-text fallback.
-- `available` = the root/directory is readable.
+- `available` = the root/directory is currently readable; runtime metadata,
+  never persisted as a catalog/index field. A persisted source record means it
+  was discovered/addressable, regardless of current availability.
 - `document_count` = total permitted document-like items only when known;
   otherwise `None` (including a truncated scan; do not walk the tree at
   startup).
@@ -199,7 +201,11 @@ Reuse the phase-04 extraction layer:
 - Plain text and Markdown: normalize whitespace; strip Markdown markup only if
   the existing text parser can do so without adding a dependency.
 - Skip unsupported binaries, assets, empty files, and files above
-  `max_file_bytes`; log at debug level.
+  the effective input limit; log at debug level. The effective limit is the
+  minimum of `max_file_bytes` and global `max_entry_bytes`; a derived-text
+  operation may impose a lower operation-specific cap. Report cap skips as
+  partial enrichment only when an enabled derived-text operation needed the
+  input; ordinary excluded/unsupported files are not enrichment failures.
 - Derived text is off by default. When a source enables `captions`, `ocr`, or
   `asr`, add eligible image/audio/video items as candidates even though the
   default `include` only names documents. Feed them through the shared stage,

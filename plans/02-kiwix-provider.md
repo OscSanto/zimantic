@@ -41,11 +41,15 @@ zimantic/providers/kiwix/
   slug privately for the remote API. Exact duplicate slugs name the same remote
   endpoint and are deduplicated; distinct dated or flavoured slugs are not
   merged. Detect key collisions instead of overwriting. There are no aliases.
-- `SourceInfo.provider = "kiwix"`. A book in the last complete catalog is
-  `available = True` because it remains addressable, but `searchable` reflects
-  current remote-search capability: it is false after a known outage or
-  request-health failure and true after a successful probe/search. A refresh
-  failure retains catalog visibility without claiming the server is reachable.
+- `SourceInfo.provider = "kiwix"`. A book in the last complete catalog remains
+  discovered/addressable during an outage, but `available` is runtime state:
+  it is true for the current catalog snapshot after a successful catalog
+  refresh and false for that snapshot after a known endpoint outage or failed
+  source request. `searchable` is true only while the source has a supported
+  search path and no known current failure. Both fields are runtime-only and
+  are never persisted with the cached catalog. A later successful catalog
+  refresh or source search clears a prior transient failure; retaining the last
+  good catalog alone never claims the endpoint is operational.
   There is no `content_kind` or `mode`.
 - `SourceInfo.homepage`/`icon_url` remain absent unless the catalog provides
   them. Do not fetch remote icons during discovery.
@@ -56,6 +60,12 @@ zimantic/providers/kiwix/
   the network. Its runtime exposes the last complete in-memory catalog, if
   any, while a background refresh runs and atomically publishes a complete
   replacement.
+- `CollectionSnapshot.available` reflects the latest catalog endpoint health.
+  A successful complete catalog refresh marks the collection and its current
+  catalog sources operational; a failed refresh marks them unavailable while
+  retaining the last complete catalog for addressability. A failed
+  per-source search marks that source unavailable/unsearchable until a
+  successful retry or later successful refresh.
 - `open()` returns a runtime with the catalog entries and a
   `search(source, request)` implementation that calls `search_kiwix`.
 - No local `ContentStore`; return `None`. Result documents keep absolute

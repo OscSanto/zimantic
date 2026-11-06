@@ -164,12 +164,25 @@ Additional rules:
 
 ## Performance and memory gates
 
-Baseline from the current README: roughly 250–325 MB while serving a ZIM
-library on a Pi Zero 2 W.
+The release target is a Raspberry Pi 4: cold startup to an HTTP-ready server
+with initial local-provider discovery settled in under 120 seconds; mixed-
+library search p95 below 8 seconds; and peak process RSS below 1 GiB while
+serving and searching. Measure search latency after one warm-up request and
+over 100 fixed queries after the model is ready; separately record cold first
+query latency. Startup does not wait for optional model loading or a remote
+Kiwix server, but the benchmark's Kiwix endpoint is a local controlled fixture.
+Record Pi 4 model/RAM, OS, storage, Python version, commit, and fixture revision.
+
+The reproducible mixed fixture contains one ZIM, a Files tree with 1,000
+indexable files, one fixture channel built from the pinned latest Kolibri
+release, and a local Kiwix catalog/search endpoint. Keep the fixture and query
+set versioned with the benchmark tests. Report cold/warm build and startup
+measurements, RSS, and p50/p95 search; a missing fixture or hardware result is
+an unverified gate, not a pass.
 
 Required:
 
-- ZIM-only startup time and search latency meet the documented target.
+- The Pi 4 targets above pass on the documented fixture.
 - Adding an unconfigured provider costs zero background work. A derived-text
   engine that is not enabled costs zero work and is never loaded by `serve`.
 - Adding a files collection with `max_sources` sources does not load file
@@ -185,9 +198,9 @@ Required:
   fits, reports unavailable otherwise, and scales by memory, not just core count.
 - Preview/cache byte limits remain global and respected for non-ZIM content.
 
-Measure and record:
+Also measure and record:
 
-- memory after serving a mixed fixture library;
+- memory after serving the mixed fixture library;
 - `/search` p50/p95 for ZIM-only and mixed;
 - `/library` payload size and render time;
 - cold/warm build time for a 1,000-file tree and a fixture channel.
@@ -253,6 +266,9 @@ Measure and record:
 - [ ] `open` rejects index reuse when a sidecar-free read-only SQLite handle
       cannot be created, binds only loopback, and its toolbar cannot navigate
       outside the selected source scope.
+- [ ] Read-only index reuse is verified on every officially supported
+      platform/filesystem combination; elsewhere it fails closed to native
+      full-text or readable-but-unsearchable behavior.
 
 ### Platform
 
@@ -337,7 +353,7 @@ For a cautious rollout, ship with:
 - [ ] Major version bump. Release notes list the new providers, the
       `[[collections]]` config requirement, the catalog/index rebuild, and the
       removed compatibility paths.
-- [ ] A known-issues note covering supported Kolibri schema versions and
+- [ ] A known-issues note covering the pinned latest Kolibri schema version and
       derived-text engine/model limitations.
 
 ## Risks register

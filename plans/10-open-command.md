@@ -45,8 +45,9 @@ PID files, or locks behind.
    phase-01 source key when exactly one read-only catalog row matches its
    path, size, and live nonempty UUID. The same key locates a finished
    phase-04 index under `index_dir`, subject to the provider, size, and
-   fingerprint checks; it never becomes a second locator. An archive with no
-   unique matching row uses an ephemeral `zim:open:` fallback key.
+   fingerprint checks; it never becomes a second locator. `open` never builds,
+   resumes, or publishes an index and never appends or changes config. An
+   archive with no unique matching row uses an ephemeral `zim:open:` fallback key.
    If the index is missing/stale/mismatched, the archive's native full-text
    index is used, exactly as `serve` does. A ZIM with neither remains readable
    and navigable but is not searchable; log that once.
@@ -192,8 +193,10 @@ When present:
   key, not an alias. Validate the pair as in phase 04. Opening it must not
   create or modify SQLite sidecars: use Phase 04's `IndexHandle(read_only=True)`
   connection path and verify it is sidecar-free before exposing the index. If
-  that cannot be guaranteed, report the index unavailable and use native
-  full-text instead.
+  that cannot be guaranteed on the current platform/filesystem, report the
+  index unavailable and use native full-text instead. Do not silently fall
+  back to writable access; archive viewing remains available even when both
+  index-reuse paths fail.
 - A missing, in-progress, stale, or size-mismatched index falls back to the
   archive's native full-text search, with the same warnings as `serve`.
 - Model and FAISS loading stay off the startup path. The browser opens while
@@ -358,6 +361,8 @@ order.
       ZIM with no index at all still serves articles.
 - [ ] No `catalog.sqlite`, index file, `zimantic.pid`, or build lock is created
       or modified, including SQLite sidecars and model caches.
+- [ ] `open` does not append or alter config, and a missing index remains
+      missing after the session; existing indexes are only opened read-only.
 - [ ] A normal `serve` startup with the same config is byte-for-byte unaffected
       in its public payloads and still uses the persistent catalog.
 

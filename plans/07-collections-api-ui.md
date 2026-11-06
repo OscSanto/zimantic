@@ -102,10 +102,13 @@ New endpoint, paged like `/sources`:
 
 Use the existing paged JSON envelope and cache/version helpers. `source_count`
 means all discovered sources, including unavailable or unsearchable sources;
-health exposes separate available/searchable counts. The media fields are the
-snapshot-wide union and unknown flag defined in phase 00, not a summary of one
-page. Add `collection_version()` to `Search`, invalidated when collection
-membership, discovery state, or metadata changes.
+health exposes separate available/searchable counts. `media_types` is the
+snapshot-wide union of observed source families, not a summary of one page; it
+is `null` only when no usable classification was observed for any member.
+Unknown members do not erase known families from the union. `available` is
+current runtime state and is never persisted. Serialize families in the
+phase-00 taxonomy order. Add `collection_version()` to `Search`, invalidated
+when collection membership, discovery state, or metadata changes.
 
 ### Collection-scoped search
 
@@ -129,9 +132,18 @@ Add an optional `collection` query parameter to `/search` and
   fan-out cap, but not resource bounds. A Kiwix collection request schedules
   sources in canonical catalog order up to
   `max_explicit_collection_sources` (default 500) and the request deadline;
-  it returns an explicit partial status and scheduled/completed counts when
-  either bound is hit. An explicit individual source remains one task. Do not
-  claim every selected book completed when the collection cap or deadline wins.
+  it returns a `scope` summary when either bound is hit, for example:
+  `{"scope":{"status":"partial","requested":700,"scheduled":500,"completed":498,"limit_reason":"source_cap"}}`.
+  The `limit_reason` enum is `source_cap`, `deadline`, or `null`. On an
+  unbounded successful request, `status` is `complete`. `requested` counts the resolved eligible source
+  scope after selector intersection; `scheduled` counts admitted source tasks;
+  `completed` counts tasks that reached a terminal result (including
+  per-source errors). The regular `/search` response includes this summary;
+  `/search/stream` emits the same summary in its final `search_summary` event.
+  A per-source provider error is carried by that source's `SourceResult` and
+  does not imply the scheduler hit a cap. An explicit individual source
+  remains one task. Do not claim every selected book completed when the
+  collection cap or deadline wins.
 
 Use `source` as the canonical source-selection query parameter. There is no
 `zim` parameter and no parallel source-selection API.
@@ -259,6 +271,9 @@ Keep `indexes`, `sources`, and `cache` counters.
       switching between group and individual selection has predictable UI state.
 - [ ] A Kiwix collection selection stops at its explicit collection cap or
       deadline deterministically and reports partial scheduled/completed counts.
+- [ ] Collection search response and terminal stream summary use the same
+      `scope` status/count fields; provider errors remain per-source results and
+      are not confused with scheduler cap/deadline partial status.
 - [ ] Library grouping: one-source collections, multi-source collections,
       empty collections, unavailable collections.
 - [ ] Content-type classification and filtering for ZIM MIME counters and

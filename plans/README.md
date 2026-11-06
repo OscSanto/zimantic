@@ -37,6 +37,18 @@ re-litigation inside the phase plans:
 6. **No compatibility layers.** Do not carry legacy fields, aliases, URL
    shapes, config shorthands, catalog detection, or dual index formats. Replace
    the old design outright and document the migration.
+7. **Availability is runtime state.** `available` describes whether a source
+   currently works and is recomputed at runtime; it is not persisted in the
+   catalog or index. A persisted source record's presence means it was
+   discovered/addressable. `media_types` describes classification only:
+   `null` means no usable classification has been observed, including when no
+   suitable classifier ran.
+8. **Ad-hoc build paths remain supported.** `zimantic build PATH...` continues
+   to index ZIM files or folders. `zimantic open PATH...` is inspection-only:
+   it may reuse a matching finished index but never builds one.
+9. **Derived text is dedupe-appended.** Append distinct derived-text
+   contributions to native text in deterministic operation order; do not
+   replace native text or duplicate equivalent contributions.
 
 ## Vocabulary
 
@@ -158,8 +170,9 @@ and exclusion rules.
   tests, traversal/security tests, and catalog/rebuild tests.
 - `config.toml`, `README.md`, `CONTRIBUTING.md`, and deployment examples
   document the `[[collections]]` schema and the uniform index layout.
-- A Pi Zero 2 W can serve a mixed library within the documented memory
-  envelope.
+- A mixed-library release benchmark on Raspberry Pi 4 meets phase 09's
+  startup, search, and peak-RSS targets. A Pi Zero 2 W receives a low-memory
+  smoke test; it is not the quantitative release benchmark.
 
 ## Non-goals
 
@@ -183,3 +196,6 @@ and exclusion rules.
 4. Update `plans/README.md` checkboxes and the phase document as work lands.
 5. Finish with `python -m pytest` and manual `/search` and `/library` smoke
    tests. Include a non-ZIM source once phase 05 makes one available locally.
+6. The roadmap makes no calendar-date commitment. Before a phase starts, its
+   tracking issue names one accountable owner, records an estimate/target
+   window, and maps each acceptance criterion to a test or sign-off.

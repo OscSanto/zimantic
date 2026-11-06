@@ -174,19 +174,41 @@ Current commands: `serve`, `build`, `reload`, `model`.
 
 ```bash
 zimantic build                     # all configured collections
+zimantic build zims/book.zim      # ad-hoc ZIM; matches config or saves a collection
+zimantic build zims/              # ad-hoc folder; matches config or saves a collection
 zimantic build --provider files    # only files collections
 zimantic build --collection modules
 zimantic build --source files:modules:root
 zimantic build --list              # show what would be built; no work
 ```
 
-- `--provider`, `--collection`, and `--source` are repeatable and intersect.
+- Positional paths preserve the ad-hoc ZIM build workflow: each argument is a
+  ZIM file or a folder expanded with the normal bounded ZIM traversal. With no
+  positional paths, build configured collections as before. Positional paths
+  and `--provider`/`--collection`/`--source` selectors are separate modes and
+  cannot be combined.
+- For each resolved ad-hoc path, match configured ZIM collection roots that
+  contain it; use the most-specific (longest resolved root) match, and report
+  an error for equally specific matches. The matched collection's settings
+  apply; explicit CLI build options override those settings. Matching supplies
+  defaults only: build exactly the files/folders selected on the command line,
+  never widen the build to the rest of the matched collection.
+- If an ad-hoc path has no matching configured collection, append a new
+  `[[collections]] type = "zim"` entry to the active config before building.
+  Use the path argument as that collection's path. Generate a unique safe name
+  from its final component plus the first available numeric suffix; do not
+  derive the name or source key from an absolute path. Report the entry and
+  config file changed. Under a config-write lock, reread and recheck matches,
+  append without rewriting existing TOML content, and atomically replace the
+  config. Preserve the original file on write failure and do not build if the
+  persistent config update fails. Duplicate resolved arguments are built once.
+  `--list` previews generated entries but never writes config or starts a build.
+- `--provider`, `--collection`, and `--source` are repeatable: values within
+  one selector are ORed, and different selector types are intersected.
 - `--collection` accepts an exact collection key or a configured entry name.
   When one entry expands to multiple collections (Kolibri channels), the entry
   name selects all of its collections; do not resolve this by an ambiguous
   string-prefix match.
-- There are no positional path arguments. Build only configured collections;
-  use `zimantic open` to browse an unconfigured archive without indexing it.
 - Provider builds run under the global `BuildLock`; do not run one lock per
   provider.
 - Kiwix is remote/search-only and is skipped with a clear report when building
@@ -194,7 +216,9 @@ zimantic build --list              # show what would be built; no work
   a non-zero usage error, not a successful no-op.
 - `--workers`, `-j`, `--lock-timeout`, `--no-wait-lock`, `--fast`, `--force`,
   and `--device` apply to every provider where meaningful. `--fast` means
-  title/path-only indexing; `--force` rebuilds.
+  title/path-only indexing; `--force` rebuilds. These explicit command-line
+  options override applicable configured defaults for both configured and
+  ad-hoc builds.
 - The shared `EmbeddingPipeline` remains global; provider workers submit into
   it.
 - Report per-source failures and partial requested enrichment at the end and
@@ -334,9 +358,15 @@ Scope:
       integer override.
 - [ ] Refactor `__main__.py`:
       - `_run_build` into a provider-aware orchestrator;
+      - preserve positional ZIM file/folder arguments and ad-hoc indexing;
       - add `--provider`, `--collection`, `--source`, `--list`;
       - add `sources` and `prune` commands;
       - generalize the "no sources" warning.
+- [ ] Resolve ad-hoc paths against configured ZIM roots by most-specific
+      ancestor; reject tied matches. Append an unmatched path as a new
+      configured ZIM collection using a safe unique name independent of the
+      absolute path and an atomic, non-rewriting config append; lock and recheck
+      config before writing, preserve config contents and report failure.
 - [ ] Add `Search` discovery of configured collections at startup, with
       background publication for slow providers.
 - [ ] Make build/source inspection/reload commands wait for discovery rather
@@ -353,10 +383,27 @@ Scope:
       TOML scope; duplicate names, unknown types, bad
       types, and missing `path` produce clear warnings and do not crash. Flat
       `zim_dir`/`kiwix_server` keys are unknown and never create collections.
-- [ ] `build` no-arg builds all configured providers; `--provider`,
+- [ ] `build` no-arg builds all configured providers; positional ZIM paths
+      still expand files/folders and index ad hoc; a matching configured root
+      supplies defaults, and an unmatched path is appended to config before
+      build. Explicit CLI options override matched settings.
+- [ ] Ad-hoc path matching chooses the most-specific configured root and
+      rejects ties; duplicate arguments build once; appending config is atomic
+      and leaves the original unchanged on failure. A matched collection
+      supplies settings without widening the selected input scope; `--list`
+      previews pending config changes without writing them.
+- [ ] Generated collection names are safe, unique, and do not encode absolute
+      path data; concurrent appends cannot lose an intervening config update.
+- [ ] A generated configuration entry for a single-file ZIM remains a
+      single-file collection; a generated entry for a folder remains scoped to
+      that folder. Serving either entry does not discover sibling archives.
+- [ ] An ad-hoc invocation does not mutate an existing matched collection's
+      options; only explicit CLI overrides affect that run. An unmatched path
+      is persisted once as a new collection, then used for that invocation.
+- [ ] `--provider`,
       `--collection`, and `--source` filter correctly; `--list` does no work.
-- [ ] Positional build paths are rejected with a clear message pointing at
-      configured collections and `zimantic open`.
+- [ ] Repeatable values are ORed within a selector and intersected across
+      selector types; positional paths cannot be mixed with selectors.
 - [ ] Build failures for one provider/source do not block the others; exit
       code is non-zero.
 - [ ] Kiwix is reported as skipped in an all-provider build; an explicitly
@@ -397,8 +444,10 @@ Scope:
 
 - **Config ambiguity.** One schema only; there are no legacy shorthands to
   merge with explicit entries. Duplicate `name` values are rejected.
-- **CLI behavior change.** There are no positional build paths. Document the
-  configured-collection and `open` workflows.
+- **Config mutation from ad-hoc builds.** Preserve positional ZIM builds and
+  their path-matched settings; unmatched paths are made reproducible by
+  appending a uniquely named collection atomically. `open` remains the
+  inspection-only command and never mutates config.
 - **Startup regressions.** Background discovery for slow providers and a hard
   time budget for synchronous ones.
 - **Deleting user data.** `prune` is opt-in, scoped to known index files, and

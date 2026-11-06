@@ -52,7 +52,9 @@ metadata rather than writing this catalog.
 ### Collection and source mapping
 
 - **Collection** = the configured ZIM root: `[[collections]] type = "zim"`,
-  `name = "..."`, `path = "..."`. Collection key is `zim:<name>`.
+  `name = "..."`, `path = "..."`. `path` may name one ZIM archive or a
+  directory of archives; directory discovery is bounded by the common scan
+  limits. Collection key is `zim:<name>`.
 - **Source** = one ZIM archive. Its key is
   `zim:<name>:<safe-stem>-<digest>`, where the digest always derives from its
   root-relative archive path, not just when a collision is discovered. Check
@@ -132,7 +134,6 @@ CREATE TABLE sources (
     icon_data BLOB,
     icon_mime_type TEXT NOT NULL DEFAULT '',
     icon_path TEXT NOT NULL DEFAULT '',
-    available INTEGER NOT NULL DEFAULT 1,
     last_error TEXT NOT NULL DEFAULT '',
     scanned_at REAL NOT NULL,
     provider_metadata TEXT NOT NULL DEFAULT '{}',
@@ -149,6 +150,15 @@ provider-neutral typed column; its contents are interpreted only by that
 provider's adapter. For ZIM rows, `provider_id` stores the archive UUID when
 available; phase 10 requires matching path and size and the same nonempty UUID
 in the row and live archive before reusing a catalog identity.
+
+The presence of a row in `sources` means the archive was discovered and is
+addressable by its canonical key. Do not persist `SourceInfo.available` or use
+it as a proxy for row presence; availability is recomputed from the live
+archive at runtime. `SourceInfo.media_types` is derived from the persisted MIME
+counts when they provide a usable classification and remains `null` when they
+do not; it does not encode discovery state. `last_error` is the latest
+discovery diagnostic only, is cleared on a successful scan, and never
+determines current `available`.
 
 For ZIM, populate `document_count` from the archive article count,
 `media_count` from its media count, and `item_count` from its entry count when
@@ -242,7 +252,11 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] Keep `reload()` behavior: rescan catalog/indexes and preserve open
       indexes whose files did not change. Invalidate affected search/preview
       caches when membership, index generation, content signature, or relevant
-      source metadata changes, even when keys stay the same.
+      source metadata changes, even when keys stay the same. Relevant metadata
+      includes title, description, homepage, MIME/media classification,
+      availability, and search capability. Locator-only changes refresh the
+      store/index handle; they invalidate result/preview caches only if content,
+      identity, or public metadata changed.
 - [ ] Keep `start_faiss` and `start_fulltext_isolation` startup sequencing, but
       iterate runtimes; ZIM capability checks stay in the ZIM runtime.
 - [ ] Add `ZimRuntime.library_sources()` for unreadable archives; distinct
@@ -300,6 +314,9 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
 - [ ] `reload()` finds a newly added ZIM and drops a removed one.
 - [ ] Duplicate stems in one collection get distinct stable keys; adding or
       removing one does not change the other's key.
+- [ ] A configured ZIM path naming one archive and one naming a directory
+      both discover only the intended archive set; ad-hoc single-file builds
+      persisted by phase 08 remain usable by `serve`.
 - [ ] A duplicate-stem collision logs one warning identifying both archives with
       paths relative to the configured root; paths outside that root use a
       basename or `<unknown>`, never an absolute path.

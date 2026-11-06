@@ -189,6 +189,10 @@ This can ship unused in this phase; files and Kolibri media need it.
 
 - Reject encoded separators using the raw request path before the ASGI
   server's decoding; validate the decoded path once and never decode it again.
+  Read the ASGI `raw_path` (or an equivalent server-preserved request target)
+  for this check. If the deployment server does not preserve the raw path,
+  reject ambiguous encoded-separator requests rather than claiming the check
+  succeeded; document and test the supported server configuration.
   The shared normalizer rejects absolute paths, `..`, backslashes, NUL bytes,
   and empty paths where required. Literal percent-containing filenames such as
   `%23thumbnail` must still work when properly URL-encoded; double-encoded
