@@ -95,6 +95,9 @@ Keep the roadmap defaults and make them configurable per provider:
 | entries per source | 500k | indexing truncates only with explicit `truncated`/`indexed_count` metadata |
 | bytes per indexed item | existing `max_entry_bytes` | extraction |
 | indexed body text per item | 1 MiB (`max_body_text_bytes`) | lexical text; report `body_truncated_count` |
+| staged index replacement | current + replacement generation plus free-space reserve | abort staging on storage errors and retain last good generation |
+| derived preview cache per source | 512 MiB (`max_derived_cache_bytes_per_source`) | omit new previews at cap; keep searchable postings |
+| Kiwix catalog entries | 50,000 (`max_catalog_entries`) | a larger/unpageable catalog is incomplete; retain last good snapshot |
 | caption bytes | 1 MiB | caption parser |
 | Kolibri HTML5 zip | 10k members / 8 MiB directory / 256 MiB member / 1 GiB total / 10 s | phase-06 per-entry limits; actual decompression and range seeks are bounded |
 | OCR pages per item | 20 | OCR stage |
@@ -133,7 +136,11 @@ Additional rules:
 ## Failure isolation
 
 - `SourceProvider.discover()` errors produce an entry-level diagnostic and mark
-  affected known collections unavailable; other entries/collections continue.
+  affected collections with discovery state `error`; other entries/collections
+  continue.
+- Do not cache source health or retry source-operation failures on a timer.
+  Search/content failures are returned by the operation; Kiwix catalog refresh
+  retains its separate bounded network backoff.
 - `CollectionRuntime.search()` errors become `SourceResult(status="error")`;
   the merged search continues.
 - `ContentStore` errors map to the existing HTTP error shapes; a broken source
@@ -155,7 +162,7 @@ Additional rules:
 - Log once per collection for: discovery collapse/truncation, unsupported
   schema, missing root, duplicate names, index failure.
 - Per-collection health:
-  - provider, source count, available/searchable count;
+  - provider, source count, searchable count;
   - discovery status/error;
   - index count and done/fast state;
   - last refresh time;

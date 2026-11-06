@@ -74,6 +74,12 @@ class EntryProducer(Protocol):
   combined native and enabled derived contributions, in their prescribed order.
   A fast build has no body channel. Do not silently call excerpt-only indexing
   full-document coverage.
+- Do not impose an arbitrary per-source index-byte ceiling: large sources are
+  core use cases. Before staging, estimate required space from the current
+  generation and planned artifacts; require room for both generations plus a
+  reserve, and recheck during the build. If storage runs out, abort and remove
+  only that staging generation; retain the prior published generation and
+  report the failure. Never publish a partial replacement as complete.
 - Record the number of truncated body rows as `body_truncated_count` and
   expose it through `SourceInfo`, health, and the build report. It is zero for
   a body build with no truncated rows, and unknown for a fast build or a
@@ -638,6 +644,11 @@ are verified against the migrated rowids and current model; otherwise retain
 the compatible lexical index and rebuild or disable only the semantic channel.
 Normalize recognized legacy redirect chains to the final target id and path;
 reject unresolved/cyclic chains rather than publish ambiguous identities.
+For the currently shipped builder, normalize a recognized legacy `meta.done`
+value of integer `1` or text/BLOB `"1"` to canonical `"full"`; normalize
+recognized `"fast"` values to `"fast"`. Reject other values, including an
+in-progress/false completion marker, rather than treating them as complete.
+This marker mapping does not waive the build-time provenance requirement.
 If source identity/freshness cannot be validated, rowids collide, a target
 cannot be resolved uniquely, or any required field is irrecoverable, reject
 adoption and perform a clean build while keeping the old artifact untouched.
@@ -678,6 +689,13 @@ supplied by content. With `cache = false`, do not retain/reuse raw derived
 outputs after the build or publish dangling cache references. A cache miss or
 explicit prune may remove a derived preview, but never a searchable posting or
 result: return bounded native text or an empty lead, without invoking an engine.
+Cap persistent preview artifacts at
+`max_derived_cache_bytes_per_source` (default 512 MiB), including temporary
+files while writing. When the source cache is full, continue indexing derived
+text but omit new preview artifacts and their references; fall back to bounded
+native/empty previews. Cache exhaustion is not a build or search failure.
+Prune unreferenced cache objects after publication/lease release, and never
+remove an object still referenced by a live generation.
 Use contentless FTS phrase queries for indexed body phrase evidence; do not
 require unavailable raw derived text to verify a hit. For media, use the
 provider's bounded native-metadata preview hook rather than reading or decoding
@@ -880,6 +898,10 @@ access. Phase 10 uses this mode for reused indexes.
       item-count-truncated source.
 - [ ] Concurrent long-body builds respect the shared in-flight byte budget;
       cancellation and failed batches release reservations.
+- [ ] An index build with insufficient free space or a mid-build storage error
+      discards only its staging generation and retains the prior generation.
+- [ ] A full derived-preview cache stops adding cache objects/references while
+      indexed postings remain searchable and preview fallback stays bounded.
 - [ ] A ZIM exceeding the item cap reports truncated index coverage while its
       available native full-text and content serving continue to work.
 - [ ] Resume after interruption works; changing the fingerprint restarts the
@@ -903,6 +925,8 @@ access. Phase 10 uses this mode for reused indexes.
       failed staging files are cleaned without accumulating duplicate copies.
 - [ ] Recognized old index schemas migrate without rowid changes; unknown
       schemas remain untouched and fall back to a clean staged build.
+- [ ] Legacy `meta.done` INTEGER/TEXT/BLOB `1` maps to `full`, `fast` remains
+      `fast`, and incomplete or unknown markers are never adopted as complete.
 - [ ] A recognized size-only legacy index cannot acquire provenance from a
       freshly rebuilt catalog; an unrelated same-size archive is never adopted.
 - [ ] Ambiguous same-stem legacy candidates are not arbitrarily adopted, and

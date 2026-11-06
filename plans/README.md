@@ -41,12 +41,13 @@ re-litigation inside the phase plans:
 6. **No compatibility layers.** Do not carry legacy fields, aliases, URL
    shapes, config shorthands, catalog detection, or dual index formats. Replace
    the old design outright and document the migration.
-7. **Availability is runtime state.** `available` describes whether a source
-   currently works and is recomputed at runtime; it is not persisted in the
-   catalog or index. A persisted source record's presence means it was
-   discovered/addressable. `media_types` describes classification only:
-   `null` means no usable classification has been observed, including when no
-   suitable classifier ran.
+7. **Failures are operation-scoped.** Do not maintain a source/collection
+   `available` property or probe for listing/UI status. Discovery, search, and
+   content-serving failures are reported by the operation that encounters
+   them; retain only the last complete discovery snapshot when refresh fails.
+   Cheap stats may detect identity/content changes, not act as health checks.
+   `media_types` is best-effort classification for filters; an empty array
+   means no family is known and carries no discovery/status meaning.
 8. **Ad-hoc build paths remain supported.** `zimantic build PATH...` continues
    to index ZIM files or folders. `zimantic open PATH...` is inspection-only:
    it may reuse a matching finished index but never builds one.
@@ -198,6 +199,8 @@ These are defaults, not hard-coded promises. Each provider may tighten them.
 | Indexed items per source | 500,000 | Avoid pathological trees |
 | Indexed bytes per item | global `max_entry_bytes` | One limit for every provider |
 | Indexed body text per item | global `max_body_text_bytes`, default 1 MiB | Bound lexical text independently of the shorter embedding excerpt |
+| Derived preview cache per source | `max_derived_cache_bytes_per_source`, default 512 MiB | Stop retaining previews at the cap; searchable postings remain usable |
+| Books per Kiwix collection | `max_catalog_entries`, default 50,000 | Hard complete-catalog bound; over-budget discovery is incomplete, never a published prefix |
 | Discovery time per provider | 10 s startup budget | Do not block serving on discovery |
 | Entries examined per traversal | 1,000,000 | Includes excluded and non-indexable entries |
 | Traversal time | 300 s | Hard work budget, distinct from the startup budget |
@@ -209,14 +212,21 @@ These are defaults, not hard-coded promises. Each provider may tighten them.
 When a hierarchical provider exceeds a discovery cap, it must collapse to a
 coarser source granularity (for example, the whole collection as one source)
 and log the collapse. Providers whose source identity is fixed by the content
-(ZIM archives and Kiwix books) must not invent an aggregate source: they keep
-the complete source set, expose it through paged APIs, and enforce limits only
-on search fan-out. Discovery that cannot complete within its other budgets must
-report an incomplete/error state and retain the last complete snapshot; it
-must not present a prefix as complete. Indexing caps are separate: they may
+(ZIM archives and Kiwix books) must not invent an aggregate source. They may
+publish only a complete source set that fits the provider's explicit discovery
+budgets, and expose that set through paged APIs. If a hard source/catalog cap
+or another discovery budget prevents completion, report an incomplete/error
+state and retain the last complete snapshot; never publish a prefix. Search
+fan-out limits remain separate. Indexing caps are separate again: they may
 reduce search coverage only when the source is explicitly marked truncated;
 serving must continue to cover all content permitted by the provider's access
 and exclusion rules.
+Do not impose an arbitrary per-source index-byte ceiling: large sources are
+core use cases. Before staging, require room for the current and replacement
+generations plus a reserve, and recheck during the build. A storage failure
+discards only the staging generation and retains the prior one. The
+derived-preview cache remains separately bounded because its contents are
+optional and never required to serve a search hit.
 
 ## Definition of done for the whole effort
 
@@ -262,7 +272,7 @@ and exclusion rules.
 4. Update the phase document's checkboxes and `plans/README.md` phase map/status
    as work lands.
 5. Finish with `python -m pytest` and manual `/search` and `/library` smoke
-   tests. Include a non-ZIM source once phase 05 makes one available locally.
+   tests. Include a non-ZIM source once phase 05 adds a local provider.
 6. The roadmap makes no calendar-date commitment. Before a phase starts, its
    tracking issue names one accountable owner, records an estimate/target
    window, and maps each acceptance criterion to a test or sign-off.

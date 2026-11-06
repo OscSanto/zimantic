@@ -120,8 +120,9 @@ zimantic open zims/a.zim --debug
   non-ZIM files. Stop as soon as the source cap is exceeded. If expansion
   cannot complete within its budget, report an error rather than launch a
   silently incomplete scope.
-- The first *available* source in that order is the initial browser URL. If
-  none is available, exit non-zero.
+- The first source in that order is the initial browser URL; do not preflight
+  sources for availability. An actual request failure is returned by the
+  content route.
 
 ### Output and lifetime
 
@@ -259,24 +260,23 @@ class SourceNavigation:
 def source_neighbors(
     self, key: str
 ) -> tuple[SourceNavigation, SourceNavigation] | None:
-    """Previous and next available scoped sources, wrapping at both ends."""
+    """Previous and next known scoped sources, wrapping at both ends."""
 ```
 
 - Navigation is built from the scoped catalog rows, not from `self.sources`.
   A readable ZIM with no search index still participates; otherwise an
   unsearchable file could be opened but never left.
-- Only unavailable archives are skipped.
-- If the current source is available, fewer than two available sources returns
-  `None`. If it becomes unavailable, seek around its original position for
-  available neighbors; one remaining source is sufficient and may be both
-  previous and next. With no available target, render no switcher.
+- Include all known scoped sources with a navigable homepage; do not probe or
+  skip sources based on a cached availability state. Fewer than two targets
+  returns `None`; an error shell for the current source still offers the other
+  known targets.
 - `content_shell_response` passes the previous/next source keys, titles, and
   homepage URLs into `_content_shell` / `_article_toolbar`.
 - The switcher is present on normal article shells and on error shells for a
   selected source, so a bad article does not strand the reader.
 - URLs use the normal `/content/<key>/` route and `web_base_path` helpers. They
   do not expose filesystem paths.
-- If an available archive has no homepage, try a bounded fallback article;
+- If an archive has no homepage, try a bounded fallback article;
   if none exists, show an error shell with the switcher rather than strand the
   reader or silently skip the archive.
 
@@ -295,8 +295,8 @@ Add a distinct group near the home link:
 </span>
 ```
 
-- The group is rendered when `source_neighbors` returns targets, including the
-  unavailable-current-source case above. It is independent of
+- The group is rendered when `source_neighbors` returns targets, including an
+  error shell for the current source. It is independent of
   `data-zimantic-context-previous` / `next`.
 - Clicking loads the target ZIM's homepage. A directly loaded shell navigates
   with `location.href`; inside the article modal, send the existing
@@ -404,7 +404,7 @@ order.
 ### Server and browser
 
 - [ ] Port `0` produces a real bound loopback port, and `webbrowser.open`
-      receives the first available `/content/<key>/` URL exactly once after the
+      receives the first `/content/<key>/` URL exactly once after the
       server is ready (patch the browser call in tests).
 - [ ] `--no-browser` never calls `webbrowser.open`.
 - [ ] A browser-launch failure leaves the server running and printable.
@@ -417,8 +417,8 @@ order.
       next from the last wraps to the first.
 - [ ] Arrows appear on article shells and error shells; the current ZIM is never
       a target.
-- [ ] If the current source becomes unavailable and only one other source
-      remains available, both arrows lead to that source.
+- [ ] A failed content request does not remove a known source from navigation;
+      the error shell still provides the other selected sources.
 - [ ] Targets are the adjacent ZIM's homepage and the titles name that ZIM.
 - [ ] A source with no homepage uses a bounded fallback or displays an error
       shell that still lets the user switch sources.

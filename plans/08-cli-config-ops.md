@@ -22,6 +22,7 @@ array-of-tables, so it needs explicit handling.
 max_explicit_collection_sources = 500
 search_timeout_seconds = 30       # total admitted search work; phase 00
 max_body_text_bytes = 1048576     # per-item lexical body, independent of previews
+max_derived_cache_bytes_per_source = 536870912   # optional preview cache cap
 
 # Collections. Multiple entries are allowed. There are no flat provider keys.
 [[collections]]
@@ -55,6 +56,8 @@ type = "kiwix"
 name = "remote"
 server = "http://localhost:8085"
 label = "Remote Kiwix"
+catalog_limit = 1000
+max_catalog_entries = 50000
 
 # Engines run locally at build time. This table configures them; it does not
 # enable any operation. Only an exact-source override can do that.
@@ -109,6 +112,14 @@ name.
 - `max_body_text_bytes` is the phase-04 positive global per-item lexical body
   cap, default 1 MiB. It is independent of the short embedding/preview limit.
   Expose `body_truncated_count` separately from item-count truncation.
+- `max_derived_cache_bytes_per_source` is a positive global byte limit for
+  optional derived-preview artifacts; reaching it omits new previews, never
+  search postings. Index builds use a free-space preflight and preserve the
+  prior generation if staging fails; there is no arbitrary per-source byte cap.
+- Kiwix `catalog_limit` is a positive per-page size (default 1,000);
+  `max_catalog_entries` is a positive total entry cap (default 50,000). Count
+  raw entries before deduplication; exceeding the cap makes refresh incomplete
+  and retains the last complete catalog.
 - Phase 00 defines the normalized provider-entry interface, minimal
   `[[collections]]` TOML parser, and public `RuntimeConfig.collections`
   discovery API. Phases 04–06 may use that API plus the phase-04

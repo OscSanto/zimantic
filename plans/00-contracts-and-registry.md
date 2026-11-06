@@ -85,8 +85,7 @@ class CollectionInfo:
 class CollectionSnapshot:
     collection: CollectionInfo
     source_count: int
-    media_types: tuple[str, ...] | None
-    available: bool          # current runtime state; never persisted
+    media_types: tuple[str, ...]
     error: str | None
     discovery_state: Literal["loading", "ready", "error", "closed"]
     snapshot_version: int
@@ -263,7 +262,7 @@ Notes:
   implement it later. Kiwix always returns `None`.
 - `library_sources()` defaults conceptually to `sources`; ZIM overrides it to
   include unreadable archives. `sources` includes readable but unsearchable
-  sources; search scheduling filters on both `available` and `searchable`.
+  sources; search scheduling filters on `searchable`.
   Content lookup also resolves unsearchable library sources, and
   `CollectionSnapshot.source_count` counts `library_sources`, not just
   searchable sources.
@@ -272,7 +271,7 @@ Notes:
   atomically and increment `snapshot_version`; non-blocking refreshes expose
   `loading` until the new snapshot is published.
 - `CollectionInfo` is a descriptor and remains frozen. Dynamic source counts,
-  availability, errors, and discovery state come from the current
+  errors, and discovery state come from the current
   `CollectionSnapshot`; serializers must not mutate a previously published
   descriptor or snapshot.
   Copy/freeze nested mappings and sequences on publication as well; a frozen
@@ -280,39 +279,36 @@ Notes:
 - Provider-private `metadata` and config must not be serialized wholesale;
   expose only explicitly approved fields and never filesystem locators.
 - `media_types` is the union of observed source media families in the
-  snapshot. `None` means no usable classification was observed; a non-null
-  tuple lists families that were observed, even when the scan was partial.
-  An empty tuple is published only after a complete classification finds no
-  supported families. A collection with no observed families is rescanned once
-  and emits a warning if the rescan is still empty.
-- For a collection union with no observed families, use `None` if any member
-  remains unknown; use `()` only when all members are known-empty and discovery
-  is complete, including a completely discovered empty collection. Unknown
-  members never erase families observed in another member.
-- A specific content-type filter is conservative: a source or collection with
-  `media_types is None` does not match it. The unfiltered "All" view still
-  includes both unknown (`None`) and known-empty (`()`) sources.
+  snapshot. Use an empty tuple when no families are known, whether
+  classification is unavailable or finds no supported families. This field is
+  best-effort filter metadata, not proof of exhaustive classification.
+- A specific content-type filter matches only when `media_types` contains the
+  requested family. The unfiltered "All" view includes sources with an empty
+  tuple.
 - A `sources` sequence is a snapshot, not an item-level manifest. API paging
   limits response size, not necessarily snapshot memory; the roadmap's 512
   sources is an advisory target, not a promise of lazy source storage.
 - `CollectionInfo` contains only immutable identity and configured/display
   metadata. `CollectionSnapshot` contains the current source count,
-  classification, availability, error, discovery state, and version.
+  classification, error, discovery state, and version.
   `CollectionInfo.to_dict()` serializes only the descriptor; the API, CLI, and
   SSE serializers call `CollectionSnapshot.to_dict()` to combine the descriptor
   with its current runtime fields. A previously published descriptor or
   snapshot is never mutated.
-- `available` is current runtime state and is never persisted in a catalog,
-  manifest, or index. Persisted provider source records establish that a source
-  was discovered/addressable; absence means undiscovered only when the catalog
-  is authoritative and complete. When it is unavailable or incomplete, use
-  the last complete runtime snapshot or independently completed in-memory
-  discovery instead of inferring absence. Providers without a persistent source
-  catalog (including Kiwix) expose discovery state through their runtime
-  snapshot.
-- `CollectionSnapshot.available` describes the collection-level discovery or
-  backend being operational; it does not assert that every member source is
-  available. `SourceInfo.available` is the per-source operational state.
+- Persisted source records establish discovery/addressability, not that a
+  source will succeed on its next operation. Absence means undiscovered only
+  when the catalog is authoritative and complete. If discovery is incomplete,
+  retain the last complete snapshot rather than inferring absence. Providers
+  without a persistent source catalog (including Kiwix) expose discovery state
+  through their runtime snapshot.
+- Do not maintain or serialize source/collection availability state, probe
+  sources for listing or UI status, or retry source-operation failures on a
+  timer. Refresh only for discovery and content/index changes. Search, content
+  serving, and metadata reads report failures from the operation that
+  encounters them.
+  Cheap `stat` calls may still detect source identity or content changes, not
+  maintain availability state. A missing item does not change source metadata;
+  discovery failures remain collection-level diagnostics.
 - `SourceResult` keeps its four channels (`semantic`, `keyword`, `fulltext`,
   `items`), but their document and status types are frozen below.
 
@@ -386,16 +382,12 @@ provider: str                  # required; never infer a fallback provider
 title: str | None = None       # display name
 collection_key: str = ""
 collection_label: str | None = None
-available: bool = False        # the provider can currently read/search the source
 searchable: bool = False       # a supported search path is currently usable
-error: str | None = None       # current discovery/index/search diagnostic
 homepage: str | None = None    # local store path or validated external HTTP(S) URL
 icon_url: str | None = None    # generated public URL, never a provider locator
 size: int | None = None        # known content size in bytes; never a locator
 intent_phrases: tuple[str, ...] = ()
-media_types: tuple[str, ...] | None = None
-document_count: int | None = None
-media_count: int | None = None
+media_types: tuple[str, ...] = ()
 item_count: int | None = None
 indexed_count: int | None = None
 truncated: bool | None = None
@@ -435,9 +427,9 @@ provider_id: str | None = None
   serializer: `/sources` and SSE `source` events call `to_dict()`, while
   `/library.json` and `zimantic sources --json` call
   `to_dict(include_metadata=True)`. Both include `key`, `provider`,
-  `collection`, `title`, `available`, `searchable`, `error`, `homepage`,
-  `icon_url`, `size`, `intent_phrases`, `media_types`, `document_count`,
-  `media_count`, `item_count`, `indexed_count`, `truncated`,
+  `collection`, `title`, `searchable`, `homepage`,
+  `icon_url`, `size`, `intent_phrases`, `media_types`, `item_count`,
+  `indexed_count`, `truncated`,
   `body_truncated_count`, `index_freshness`, and `derived_text`.
 - `indexed_count` and `truncated` describe the published index; both are
   unknown (`null`) before one exists. Freshness is `unknown` until validated.
@@ -448,13 +440,11 @@ provider_id: str | None = None
   was not built or its coverage is unknown, including legacy imports whose
   excerpts cannot establish full-body coverage. It is independent of
   `truncated`, which describes the item-count cap.
-- `available` means the provider can currently open/read or search the source;
-  it is runtime metadata and is not stored on disk. A source may remain
-  discovered/addressable while unavailable. `searchable` means it has at least
-  one currently usable search path; it may be false for an available source
-  with no finished local index or native searcher. `homepage`, `icon_url`, and
-  `intent_phrases` are nullable/empty when unavailable rather than inferred
-  from a private locator. Local homepages use the store's path namespace;
+- `searchable` means the source has at least one usable search path, based on
+  its index/provider capabilities rather than a live availability probe.
+  `homepage`, `icon_url`, and `intent_phrases` are nullable/empty when the
+  provider does not supply them; never infer them from a private locator. Local
+  homepages use the store's path namespace;
   external-only providers may supply an origin-validated HTTP(S) homepage.
 - `media_types` uses the phase-00 taxonomy `text`, `video`, `audio`, `image`,
   and `other`. Providers classify content into those values; phase 07 only
@@ -465,24 +455,19 @@ provider_id: str | None = None
   file extensions without reading media bodies. An indexed manifest may refine
   the classification, but an unindexed media item must not disappear from
   `media_types` merely because indexing or enrichment is disabled.
-- `document_count` is the provider's total document-like content-item count,
-  `media_count` is its total media-item count, and `item_count` is its total
-  permitted source-item count (documents plus media where the provider can
-  classify them). These are source totals, never bounded-manifest lengths or
-  published-row counts; each is `null` when the provider cannot know it without
-  an unbounded or incomplete scan. `indexed_count` is the number of published
-  index rows, including title-only rows, and `truncated` is true only when the
-  published index intentionally covers a bounded prefix. `truncated` is false
-  after exhaustive indexing and null before an index exists or when no
-  published index state is available.
-- `media_types is None` means no usable classification was observed for the
-  source, including when no suitable classifier matched or classification has
-  not run. A non-null tuple lists observed families and may be partial;
-  incidental web assets need not count as separate content items. This field
-  is classification metadata, never a discovery/addressability marker.
+- `item_count` is the total permitted source-item count when known without an
+  unbounded or incomplete scan; it is never the bounded-manifest length.
+  Avoid separate document/media counters. `indexed_count` is the number of
+  published index rows, including title-only rows, and `truncated` is true
+  only when the published index intentionally covers a bounded prefix.
+  `truncated` is false after exhaustive indexing and null before an index
+  exists or when no published index state is available.
+- `media_types` lists observed families and may be partial; an empty tuple
+  means no family is known. Incidental web assets need not count as separate
+  content items. This field is classification metadata, never a
+  discovery/addressability marker.
 - A source matches a specific content-type filter only when `media_types` is
-  not `None` and contains the requested family. Unknown classification is
-  intentionally excluded from specific filters.
+  non-empty and contains the requested family.
 
 `SourceInfo.to_dict()` emits canonical identity fields alongside the common
 display/status fields. This is an excerpt, not the complete payload:
@@ -529,14 +514,15 @@ paths.
 
 ### Catalog and build transition
 
-The current `zims` catalog persists `available`, and the current build command
-requires the removed `zim_dir` key. Neither can remain as-is until phase 01 or
-08 while this phase claims the new contracts work. Implement the generic
+The current `zims` catalog persists an `available` column, and the current
+build command requires the removed `zim_dir` key. The new catalog drops that
+column; phase 08 replaces the config key. Implement the generic
 `SourceCatalog` schema, coordinated rebuild, and catalog lease specified in
 [phase 01](01-zim-provider.md#catalog-schema-rebuild) here. Keep the existing
 ZIM scan orchestration where it is until phase 01 moves it; do not rebuild the
 catalog a second time merely for that move. Require SQLite 3.37 before
-creating the `STRICT` schema, and never persist runtime availability.
+creating the `STRICT` schema; omit the legacy availability and last-error
+columns rather than migrating their runtime observations.
 
 The current builder names index files by archive stem and discovery guesses a
 same-stem archive by size. That is incompatible with distinct canonical
@@ -588,10 +574,10 @@ pre-follow redirect checks, response bounds, and parser-level DTD/entity
 rejection across supported encodings. Phase 02 moves and extends this code; it
 must not be the first phase to fix the existing UTF-16 parser bypass.
 Also implement its paged, bounded complete-catalog discovery and runtime
-outage/recovery rules now. A failed or incomplete refresh retains the last
-complete snapshot but reports current unavailability; bounded background
-retry restores it without requiring an ineligible source to be searched.
-Keep each configured Kiwix entry's cache and health independent.
+recovery rules now. A failed or incomplete refresh retains the last complete
+snapshot and reports a collection discovery error; bounded catalog retry
+restores it without requiring a source search. Keep each configured Kiwix
+entry's cache and discovery state independent.
 
 ZIM and Kiwix are both live in this phase, so implement
 [phase 02's fair admission and deadline](02-kiwix-provider.md#fan-out-budget)
@@ -665,6 +651,7 @@ class KiwixConfig:
     label: str | None = None
     catalog_path: str | None = None
     catalog_limit: int | None = None
+    max_catalog_entries: int | None = None
     max_response_bytes: int | None = None
     max_remote_sources: int | None = None
     traversal: TraversalLimits = field(default_factory=TraversalLimits)
@@ -715,8 +702,8 @@ ProviderConfig = ZimConfig | KiwixConfig | FilesConfig | KolibriConfig
 paths, servers, and optional counts are nullable only where shown. All limits
 and byte/time budgets are positive integers when present, except
 `max_remote_sources`, which also accepts zero to disable unscoped remote
-search. Reject booleans as integer limits. `name` and provider
-strings are non-empty and names use the phase-00 safe-name pattern. Include,
+search. Reject booleans as integer limits. `name` and provider strings are
+non-empty and names use the phase-00 safe-name pattern. Include,
 exclude, language, and operation lists are immutable tuples.
 The flat entry keys `max_visited_entries` and `traversal_timeout_seconds`
 normalize into `traversal`; they bound remote catalog entry visits as well as
@@ -843,7 +830,7 @@ keep a `mode` fallback.
 - [ ] Update route resolution internals, `search.py`, `searching/kiwix.py`,
       `web/routes.py`, `web/app.py`, and `web/static/app.js` to use the
       canonical `key`, `provider`, `title`, and provider-neutral metadata fields
-      (`document_count`, `mime_counts`, `native_fulltext_available`, `origin`,
+      (`mime_counts`, `native_fulltext_available`, `origin`,
       `provider_id`) instead of `mode`, `local_name`, `book`, `name`, or
       ZIM-only field names; leave the public `{zim}` to `{source}` route
       parameter rename to phase 03.
@@ -860,11 +847,13 @@ keep a `mode` fallback.
   identity; private catalog locators never appear in source serialization.
 - `CollectionSnapshot.to_dict()` snapshots use the same fields and nullability
   in API, CLI, and SSE serialization; a descriptor alone never claims current
-  availability or source counts.
-- Runtime `available` is recomputed and exposed in runtime serializers but is
-  absent from persisted catalog/index schemas; persisted source-record presence
-  is the discovery/addressability signal. `media_types: null` remains an
-  unknown classification and never means "undiscovered".
+  runtime status or source counts.
+- No source/collection `available` property is serialized or persisted.
+  Listing endpoints do not probe; failures appear only in the result or content
+  response for the operation that encountered them. An empty `media_types`
+  array means no type is known; it never means "undiscovered".
+- Verify unchanged ZIMs are not reopened during refresh and path stats are
+  used only for discovery/content-change detection.
 - `resolve_source` matches exact `key` values only.
 - Registry returns the two built-ins and rejects unknown kinds; configured
   ZIM and Kiwix searches both continue working in this phase.
@@ -903,8 +892,8 @@ keep a `mode` fallback.
 - UTF-8/UTF-16 DTD declarations and cross-origin redirects are rejected before
   expansion or a foreign fetch; valid Kiwix catalogs and results still work.
 - Multiple Kiwix pages form a complete snapshot; incomplete scans retain the
-  prior snapshot, and an unavailable server recovers via bounded background
-  retry. Two configured servers keep independent caches and health.
+  prior snapshot, and catalog refresh retries with bounded background backoff.
+  Two configured servers keep independent caches and discovery state.
 - A blocked remote source cannot starve local work, including with one worker;
   timed-out calls retain their slots until terminated or finished. Cap/deadline
   truncation is visible in both search transports and is not cached as complete.

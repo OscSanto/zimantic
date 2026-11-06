@@ -13,7 +13,7 @@ remains metadata-only and delegates both search and serving to `kiwix-serve`.
 - `zimantic/searching/kiwix.py` — `catalog_entries()` and `search_kiwix()`,
   already returning `SourceResult`.
 - `zimantic/search.py` — `_search_source` branches on `mode == "kiwix"`;
-  `_search_kiwix()` is a thin wrapper; `_bounded_available_sources()` caps
+  `_search_kiwix()` is a thin wrapper; `_bounded_remote_sources()` caps
   remote fan-out; `start_catalog_refresh()` fetches the catalog in a daemon
   thread; `refresh_sources()` merges remote entries with local sources.
 - `zimantic/searching/sources.py` — bounded URL/response/XML helpers shared by
@@ -42,14 +42,11 @@ zimantic/providers/kiwix/
   endpoint and are deduplicated; distinct dated or flavoured slugs are not
   merged. Detect key collisions instead of overwriting. There are no aliases.
 - `SourceInfo.provider = "kiwix"`. A book in the last complete catalog remains
-  discovered/addressable during an outage, but `available` is runtime state:
-  it is true for the current catalog snapshot after a successful catalog
-  refresh and false for that snapshot after a known endpoint outage or failed
-  source request. `searchable` is true only while the source has a supported
-  search path and no known current failure. Both fields are runtime-only and
-  are never persisted with the cached catalog. A later successful catalog
-  refresh or source search clears a prior transient failure; retaining the last
-  good catalog alone never claims the endpoint is operational.
+  discovered/addressable during an outage. Do not retain source availability
+  or last-error state: failed refreshes appear in collection discovery status,
+  and failed searches appear in that request's `SourceResult`. Retry catalog
+  refresh with the provider's bounded background backoff; listing and source
+  selection do not issue network requests.
   There is no `content_kind` or `mode`.
 - `SourceInfo.homepage`/`icon_url` remain absent unless the catalog provides
   them. Any supplied URL follows the same origin/credential validation as
@@ -65,12 +62,11 @@ existing Kiwix code; this phase moves them behind the completed provider.
   the network. Its runtime exposes the last complete in-memory catalog, if
   any, while a background refresh runs and atomically publishes a complete
   replacement.
-- `CollectionSnapshot.available` reflects the latest catalog endpoint health.
-  A successful complete catalog refresh marks the collection and its current
-  catalog sources operational; a failed refresh marks them unavailable while
-  retaining the last complete catalog for addressability. A failed
-  per-source search marks that source unavailable/unsearchable until a
-  successful retry or later successful refresh.
+- `CollectionSnapshot.discovery_state` and `error` reflect catalog refresh
+  results. A failed refresh retains the last complete catalog for
+  addressability. A failed per-source search is reported only in that request's
+  `SourceResult`; the next request can try again without waiting for a health
+  timer or mutating source metadata.
 - The discovery batch's `open()` returns a runtime with the catalog entries and a
   `search(source, request)` implementation that calls `search_kiwix`.
 - No local `ContentStore`; return `None`. Result documents keep absolute
@@ -102,16 +98,16 @@ existing Kiwix code; this phase moves them behind the completed provider.
   the response is UTF-8. Phase 00 fixes this before shipping the new runtime.
 - `refresh()` is non-blocking for the server startup path and keeps the last good
   catalog on failure.
-- A known outage must have a recovery path even though unavailable sources are
-  excluded from normal search scheduling: retry catalog refresh with bounded
-  background backoff, clearing current failures on success. Reload may trigger
-  an immediate retry. Closing the runtime cancels its retry timer/work; do not
-  depend on an unavailable source being searched to make it available again.
-- `catalog_limit` is a per-page request size, not a total-book cutoff. Fetch
-  pages within explicit response-byte, total-entry, and time budgets. If the
-  server cannot be paged or the refresh cannot finish consistently within
-  those budgets, report an incomplete/error state and keep the last complete
-  snapshot; never silently publish a truncated catalog as complete.
+- Catalog discovery retries with bounded background backoff after a failed
+  refresh. Reload may trigger an immediate catalog refresh. Closing the
+  runtime cancels its retry timer/work. Search failures have no separate retry
+  timer; a later user request attempts the operation again.
+- `catalog_limit` is a per-page request size (default 1,000), not a total-book
+  cutoff. `max_catalog_entries` is a separate hard bound (default 50,000),
+  counted before duplicate-slug deduplication. Fetch pages within response-byte,
+  total-entry, and time budgets. If a catalog exceeds the entry cap, cannot be
+  paged, or cannot finish consistently within budget, report an incomplete
+  state and keep the last complete snapshot; never publish a prefix as complete.
 
 ### Fan-out budget
 
@@ -149,8 +145,8 @@ source/library APIs.
 ### Config
 
 - `type`, `name`, `label`, `server`, `catalog_path`, `catalog_limit`,
-  `max_response_bytes`, and `max_remote_sources` are the Kiwix keys, alongside
-  the common bounded-discovery settings.
+  `max_catalog_entries`, `max_response_bytes`, and `max_remote_sources` are the
+  Kiwix keys, alongside the common bounded-discovery settings.
 - There is no `kiwix_server` flat key. A Kiwix collection exists only through an
   explicit `[[collections]]` entry.
 - The search page and JSON API use the canonical source key and provider fields;
@@ -187,10 +183,14 @@ source/library APIs.
 - [ ] UTF-8 and UTF-16 DTD/entity declarations are rejected before expansion;
       ordinary documents in supported encodings remain parseable.
 - [ ] Catalog failure keeps the last good source set and logs once.
-- [ ] An unavailable source/server recovers after a successful background
-      refresh without requiring an otherwise-ineligible search task.
+- [ ] A failed source search is returned as an operation error, and a
+      subsequent request succeeds after the remote server recovers.
+- [ ] A source-listing/API request never triggers a network request; only
+      bounded catalog refresh and search work access the server.
 - [ ] Multiple catalog pages are discovered; a budget-exhausted or unpageable
       catalog is reported as incomplete rather than silently truncated.
+- [ ] A catalog exceeding `max_catalog_entries` keeps the prior complete
+      snapshot, reports the configured cap, and never publishes a prefix.
 - [ ] Remote search returns the expected documents/links/ordering.
 - [ ] A server configured under a URL path prefix keeps that prefix for catalog
       and search requests; ordinary relative and root-relative result links

@@ -107,7 +107,7 @@ For `granularity = "children"`:
    `files:<name>:dir-<safe-slug>-<digest>` with the digest always derived from
    the root-relative directory name. Detect a digest collision and report it
    instead of overwriting a source.
-5. Include empty directories and report unreadable ones as unavailable rather
+5. Include empty directories and report read failures as discovery errors rather
    than silently dropping them. An unreadable *root* disables the collection.
 
 For `granularity = "collection"`:
@@ -174,20 +174,13 @@ search results and counts to a source.
 - `title` = display label (directory name).
 - `searchable` = a usable, not detectably stale index exists for this source;
   files have no native full-text fallback.
-- `available` = the root/directory is currently readable; runtime metadata,
-  never persisted as a catalog/index field. A persisted source record means it
-  was discovered/addressable, regardless of current availability.
-- `document_count` = total permitted document-like items only when known;
-  otherwise `None` (including a truncated scan; do not walk the tree at
-  startup).
-- `media_count` = total permitted media items only when known; otherwise
-  `None`. `item_count` = total permitted source items only when known; it is
-  never the bounded manifest length.
+- `item_count` = total permitted source items only when known without an
+  unbounded scan; it is never the bounded manifest length.
 - `indexed_count` = documents actually present in the index when known;
   `truncated` is true when the manifest exceeds `max_entries`.
 - `body_truncated_count` follows the phase-04 body-coverage contract; it is
   independent of the item-count cap.
-- `size` = optional cheap sum from discovery only if already available; skip
+- `size` = optional cheap sum from discovery only if already computed; skip
   otherwise.
 - `homepage` = collection-relative `index.html`/`index.htm` within that source's
   membership root when present, else `None`; for a child this includes its
@@ -195,11 +188,9 @@ search results and counts to a source.
 - `media_types` = known content families (`text`, `video`, `audio`, `image`,
   `other`) from bounded discovery classification. `include` can omit
   permitted media that remains servable, so classification is independent of
-  the index manifest and derived-text settings. Use `None` only when no usable
-  family was observed; otherwise list every observed family, including from a
-  partial or truncated scan. Use `()` only after complete classification finds
-  no supported families. A complete empty result is rescanned once and warned
-  if it remains empty.
+  the index manifest and derived-text settings. List every observed family,
+  including from a partial or truncated scan; use an empty array when no
+  family is known.
 
 ## Indexing
 
@@ -352,9 +343,9 @@ directly or in a permitted popup is not sandboxed even when the shell is.
 - [ ] Wire build and index discovery into the runtime, including the
       `zimantic build` entry point for configured files collections.
 - [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
-      `homepage`, `document_count`, `media_count`, `item_count`,
+      `homepage`, `item_count`,
       `indexed_count`, `truncated`, `body_truncated_count`, and
-      nullable `media_types`.
+      `media_types` (empty when no family is known).
 - [ ] Document a recommended `/library/www/html/modules` configuration and the
       `granularity` trade-off in `README.md`.
 - [ ] Add a files-provider example to `config.toml` (commented out by default).

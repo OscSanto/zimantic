@@ -122,14 +122,10 @@ Phase 04's importer needs build-time identity evidence, not just freshly
 rescanned catalog metadata. Retain the read-only generation lease introduced
 with the locator; safe replacement cannot wait until phase 04 or `open`.
 
-The catalog count columns are nullable source totals, not index statistics:
-`document_count` is the total article/document-like content items reported by
-the provider, `media_count` is the total media items, and `item_count` is the
-total archive items (`documents + media` where the archive can classify them).
-`NULL` means the provider cannot know the total without an unbounded or
-incomplete scan; zero is a known empty total. `indexed_count` and `truncated`
-belong to the published index metadata and `SourceInfo`, and never change the
-meaning of these catalog totals.
+`item_count` is the nullable total archive-item count, not an index statistic;
+`NULL` means the provider cannot know it without an unbounded or incomplete
+scan, and zero means known empty. `indexed_count` and `truncated` belong to
+published index metadata and `SourceInfo`, and do not change this total.
 
 The target table has generic columns and a single logical key:
 
@@ -152,8 +148,6 @@ CREATE TABLE sources (
     tags TEXT NOT NULL DEFAULT '',
     public_tags TEXT NOT NULL DEFAULT '',
     category TEXT NOT NULL DEFAULT '',
-    document_count INTEGER,
-    media_count INTEGER,
     item_count INTEGER,
     license TEXT NOT NULL DEFAULT '',
     origin TEXT NOT NULL DEFAULT '',
@@ -165,15 +159,12 @@ CREATE TABLE sources (
     icon_data BLOB,
     icon_mime_type TEXT NOT NULL DEFAULT '',
     icon_path TEXT NOT NULL DEFAULT '',
-    last_error TEXT NOT NULL DEFAULT '',
     scanned_at REAL NOT NULL,
     provider_metadata TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (key),
     CHECK (native_fulltext_available IS NULL OR native_fulltext_available IN (0, 1)),
     CHECK (size IS NULL OR size >= 0),
     CHECK (mtime IS NULL OR mtime >= 0),
-    CHECK (document_count IS NULL OR document_count >= 0),
-    CHECK (media_count IS NULL OR media_count >= 0),
     CHECK (item_count IS NULL OR item_count >= 0)
 ) STRICT;
 CREATE INDEX sources_path ON sources(path);
@@ -197,19 +188,19 @@ before reusing a catalog identity. `native_fulltext_available` is `NULL` when
 the provider cannot determine it, rather than incorrectly recording false.
 
 The presence of a row in `sources` means the archive was discovered and is
-addressable by its canonical key. Do not persist `SourceInfo.available` or use
-it as a proxy for row presence; availability is recomputed from the live
-archive at runtime. `SourceInfo.media_types` is derived from the persisted MIME
-counts when they provide a usable classification and remains `null` when they
-do not; it does not encode discovery state. `last_error` is the latest
-discovery diagnostic only, is cleared on a successful scan, and never
-determines current `available`.
+addressable by its canonical key, not that it will succeed on the next
+operation. Do not persist source availability or per-source `last_error`.
+Refresh stats paths to detect identity/content changes and reopens only changed
+archives; operations report their own failures. The new schema omits the
+legacy availability and error columns.
+`SourceInfo.media_types` is derived from the persisted MIME counts when
+available; it is an empty array when no family is known. It does not encode
+discovery state. Discovery diagnostics are logged and exposed through
+collection-level discovery errors, not stored per source.
 
-For ZIM, populate `document_count` from the archive article count,
-`media_count` from its media count, and `item_count` from its entry count when
-those values are reliable; preserve `NULL` when a binding cannot distinguish a
-known zero from an unavailable count. These catalog totals are independent of
-the bounded generic index manifest.
+For ZIM, populate `item_count` from the archive entry count when reliable;
+preserve `NULL` when a binding cannot distinguish a known zero from an unknown
+count. This total is independent of the bounded generic index manifest.
 
 ### Catalog schema rebuild
 
@@ -225,8 +216,11 @@ search index just because the catalog schema changed.
   copy rows, or write a migration. ZIM is the only persistent provider in this
   redesign; any future provider that stores records in this catalog must also
   participate in its complete staged rebuild.
-- Rebuilding re-opens every archive once, which also refreshes icons,
-  availability, and provider metadata.
+- A one-time schema rebuild reopens every archive to repopulate metadata and
+  icons. Routine refreshes do not: stat discovered paths, retain the last
+  complete snapshot on missing/unreadable roots or incomplete scans, and reopen
+  only changed archives. Report per-archive open/read failures as operation
+  diagnostics, not persistent source metadata.
 - On a corrupt or unsupported catalog, use the same staged rebuild. Do not leave a
   `zims` view, compatibility table, or old index name in the new schema.
 - If catalog creation or repopulation fails, log a warning with a public
@@ -363,12 +357,13 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       `_source_from_catalog` into `providers/zim/metadata.py`.
 - [ ] Move `refresh_local_sources` / local half of `refresh_sources` into the
       runtime; `Search.refresh_sources` becomes a provider loop.
-- [ ] Keep `reload()` behavior: rescan catalog/indexes and preserve open
-      indexes whose files did not change. Invalidate affected search/preview
-      caches when membership, index generation, content signature, or relevant
-      source metadata changes, even when keys stay the same. Relevant metadata
-      includes title, description, homepage, MIME/media classification,
-      availability, and search capability. Locator-only changes refresh the
+- [ ] Keep `reload()` behavior: reconcile catalog paths with cheap stats and
+      preserve open indexes whose files did not change. Reopen archives only
+      when their signature changes. Invalidate affected search/preview caches
+      when membership, index generation, content signature, or relevant source
+      metadata changes, even when keys stay the same. Relevant metadata
+      includes title, description, homepage, MIME/media classification, and
+      search capability. Locator-only changes refresh the
       store/index handle; they invalidate result/preview caches only if content,
       identity, or public metadata changed.
 - [ ] Keep `start_faiss` and `start_fulltext_isolation` startup sequencing, but
@@ -406,10 +401,10 @@ hydration orchestration, and HTTP-facing metadata. Provider runtimes own
       `_book_identity` and the dated/flavoured alias matcher.
 - [ ] Replace `local_names()` with `source_keys()`; update health and callers.
 - [ ] `Search.health()` reports ZIM collection/index stats from the runtime.
-- [ ] Populate nullable `SourceInfo.media_types` for ZIM from the existing MIME
-      counter using the phase-00 media-family taxonomy; include observed families even
-      when the counter is partial, use `null` only when none are usable, and
-      rescan and warn when a complete collection remains empty.
+- [ ] Populate `SourceInfo.media_types` for ZIM from the existing MIME
+      counter using the phase-00 media-family taxonomy; include observed
+      families even when the counter is partial, and use an empty array when
+      none are known.
 
 ### Cleanup
 

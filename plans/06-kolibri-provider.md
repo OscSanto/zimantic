@@ -252,29 +252,21 @@ hand-invented fixture.
   the new sources. Never transfer an enrichment opt-in implicitly to the
   collapsed source. A scan that hits its separate traversal/time budget before
   proving truncation fails explicitly and retains the last published index.
-- `available` = the installed database snapshot and storage are readable and
-  the source can be queried (runtime-only and never persisted). An empty
-  source is available; missing individual files affect those items, not the
-  source as a whole. `searchable` = a usable, not
-  detectably stale index exists.
-- `document_count` = local indexable document/exercise-node count only when
-  known without an unbounded count; otherwise `None`.
-- `media_count` = local media-item count only when known; otherwise `None`.
-- `item_count` = total permitted local content-node items only when known; it
-  is never the bounded manifest length.
+- `item_count` = total permitted local content-node items only when known
+  without an unbounded count; it is never the bounded manifest length.
+- `searchable` = a usable, not detectably stale index exists. Read or mapping
+  failures are reported by discovery, search, or content operations rather
+  than stored as source availability state.
 - `indexed_count` = nodes actually present in the index; `truncated` is true
   when the source exceeds `max_entries`, and the reduced search coverage is
   reported in health/API metadata.
 - `body_truncated_count` follows the phase-04 body-coverage contract.
 - `media_types` = content families from bounded node/file metadata and storage
   mapping (`text`, `video`, `audio`, `image`, `other`), independent of whether
-  the node is indexed or derived text is enabled. Use `None` only when no
-  usable family was observed; otherwise list every observed family, including
-  from a partial or truncated classification. Use `()` only after complete
-  classification finds no supported families; rescan that result once and warn
-  if it remains empty. A specific content-type filter matches only a non-null
-  value containing the requested family; the unfiltered "All" view still
-  includes both `None` and empty values.
+  the node is indexed or derived text is enabled. List every observed family,
+  including from a partial or truncated classification; use an empty array
+  when no family is known. A specific content-type filter matches only when
+  the array contains the requested family; "All" includes empty arrays.
 
 ### Channel and source icons
 
@@ -291,12 +283,26 @@ hand-invented fixture.
   Topic nodes are grouping only. An exercise without a local file is indexed
   only when its public, normalized description is non-empty; serve a generated
   plain-text metadata page for that node. Never index coach-only/private text.
+- A content node remains one result item even when Kolibri maps multiple files
+  to it. The pinned-version schema adapter must classify mappings into one
+  canonical primary representation and associated files (caption tracks,
+  thumbnails, and HTML5 assets) using Kolibri's documented preset/role and
+  availability semantics, with deterministic tie-breaking. Do not select by
+  incidental SQL row order. If the installed schema does not identify one
+  primary representation unambiguously, omit the node from indexing and return
+  an explicit item-level ambiguity error for direct serving; never guess which
+  file represents the node. Caption discovery may use only tracks explicitly
+  associated with the selected primary media.
 - Node IDs are opaque strings and are always mapped to a deterministic
   positive 63-bit canonical row id derived from `(channel_id, node_id)`. Keep a
   reverse mapping in the producer and fail the build clearly if two distinct
   nodes produce the same row id; never silently merge their documents.
 - `EntryRecord.title` = node title; `path` = synthetic stable path
   `node/<node_id>`; `target_id = None`.
+- `node/<node_id>` resolves to the same canonical primary representation used
+  by extraction. URLs never expose a file ID or storage path. Associated
+  caption files are not separate result rows; HTML5 assets stay below the app
+  path and are resolved only within its validated bundle.
 - Text contributions, in order:
   1. public node description;
   2. document text (HTML/PDF/plain) when the file is a readable document;
@@ -395,8 +401,9 @@ Handling:
   - serve relative assets under the same source key;
   - apply the phase-05 web-asset MIME policy and never traverse outside the
     app's extracted directory or zip.
-- Missing local files: `ArticleNotFoundError` for reads; mark the node
-  unavailable during discovery. Do not return a different node's bytes.
+- Missing local files: `ArticleNotFoundError` for reads; mark only the node
+  unavailable when observed, not the entire source. Do not return a different
+  node's bytes.
 - Validate node membership in the selected topic, ungrouped set, or whole
   channel on every content request. A valid node ID from another source must
   not bypass that scope.
@@ -480,9 +487,9 @@ bytes, total declared uncompressed bytes, and per-operation wall time.
       duplicate-member, and confinement requirements in this phase.
 - [ ] Wire configured Kolibri sources into the build command in this phase.
 - [ ] Add source metadata: `provider`, `collection`, `key`, `searchable`,
-      `available`, `document_count`, `media_count`, `item_count`,
-      `indexed_count`, `truncated`, `body_truncated_count`, and nullable
-      `media_types`.
+      `item_count`,
+      `indexed_count`, `truncated`, `body_truncated_count`, and `media_types`
+      (empty when no family is known).
 - [ ] Document supported Kolibri versions and the read-only guarantee.
 - [ ] Add a annotated example config for IIAB's `/library/kolibri` layout.
 
@@ -504,6 +511,8 @@ channels, not just from an exported channel DB. Include:
   supported Kolibri release uses them;
 - missing file, duplicate/orphan node, external-only node, coach-only node,
   installed/uninstalled availability differences, and an unknown schema;
+- nodes with one primary file plus caption/thumbnail auxiliaries, multiple
+  variants, reordered DB rows, and ambiguous primary mappings;
 - a channel with more topics than `max_sources`.
 
 Assertions:
@@ -515,6 +524,9 @@ Assertions:
       `:collapsed` source.
 - [ ] Topics never become result rows; a no-file exercise with a public
       description gets a readable metadata page. Coach-only text is excluded.
+- [ ] Node file selection is independent of SQL row order; caption/thumbnail
+      auxiliaries never replace the primary, associated captions are not result
+      rows, and ambiguous primary mappings fail closed.
 - [ ] Deterministic node-id mapping is stable across builds and a forced
       63-bit collision fails clearly instead of merging documents.
 - [ ] Captions absent by default; present and parsed with `captions = "index"`;
@@ -524,8 +536,9 @@ Assertions:
 - [ ] A term beyond the short embedding excerpt is searchable, and body
       truncation is reported separately from the source item cap.
 - [ ] Missing local files do not break the build or serve another node's bytes.
-- [ ] An empty, readable source remains available; an individual missing
-      file affects that item without disabling other items in its source.
+- [ ] An empty source is valid; an individual missing file returns an
+      item-level error without disabling other items or altering source
+      metadata.
 - [ ] Missing or stale channel export DBs do not change installed discovery;
       mismatched channel/root mappings, malicious storage filenames, and
       arbitrary thumbnail requests cannot expose another channel's data.

@@ -134,8 +134,8 @@ The route error contract is fixed:
 |---|---|
 | Unknown source key | `404` with the standard not-found error envelope |
 | Known source with no `ContentStore` (for example Kiwix) | `404` with the same envelope; do not redirect or proxy |
-| Known but unavailable local source | `503` with a retryable source-unavailable error |
-| Missing path in an available store | `404` with the standard not-found envelope |
+| Local source store fails to open/read | `503` with a retryable store error |
+| Missing path in a successfully opened store | `404` with the standard not-found envelope |
 | Ambiguous or unverifiable path | `404` with the standard not-found envelope; record a diagnostic |
 
 `/article` includes its normal CORS headers on every row above. Error payloads
@@ -159,7 +159,7 @@ private locator or exception text.
   through `read_article(source_key, candidate)`.
 - Rename `zim_icon_url` to `source_icon_url` and `zim_search_available` to
   `source_search_available`; both resolve by exact `key`.
-- `random_local_source` selects any available local source with a homepage.
+- `random_local_source` selects any known local source with a homepage.
   `/random` redirects using that source key, including Files and Kolibri
   sources.
 - `/random` and `/suggest` accept a `source` query parameter instead of `zim`.

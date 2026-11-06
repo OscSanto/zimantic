@@ -65,13 +65,11 @@ Each source uses:
   `other`. It describes known content families and can contain multiple values.
   ZIM classification uses its MIME counter; other local providers use bounded
   provider metadata/classification, independent of indexing and derived-text
-  settings. Use `null` only when no usable family was observed; otherwise list
-  every observed family, including from partial classification. Use `[]` only
-  when complete classification found no supported families. A complete empty
-  collection is rescanned once and emits a warning if it remains empty. A source matches a specific content-type
-  filter when `media_types` is non-null and contains the requested family; the
-  unfiltered "All" view still includes both `null` and empty arrays. Providers
-  populate this field; it is not a source identity.
+  settings. List every observed family, including from partial classification;
+  use `[]` when no family is known. A source matches a specific content-type
+  filter only when the array contains the requested family; the unfiltered
+  "All" view includes empty arrays. Providers populate this field; it is not a
+  source identity.
 
 ### `/collections.json`
 
@@ -89,7 +87,6 @@ New endpoint, paged with `paged_json_response` like `/sources` and
     "description": null,
     "source_count": 12,
     "media_types": ["text", "video"],
-    "available": true,
     "error": null,
     "discovery_state": "ready",
     "snapshot_version": 7,
@@ -101,15 +98,14 @@ New endpoint, paged with `paged_json_response` like `/sources` and
 Use the existing `paged_json_response` helper and emit `X-Snapshot-Version` on
 `/collections.json`, `/sources`, and `/library.json` so `fetchCachedJson` and
 paged collection/source loaders share one array-plus-headers transport and can
-detect snapshot-version changes across pages. `source_count`
-means all discovered sources (`library_sources`), including unavailable or
-unsearchable sources; health exposes separate available/searchable counts.
+detect snapshot-version changes across pages. `source_count` means all
+discovered sources (`library_sources`), including unsearchable sources; health
+exposes the searchable count. Discovery errors appear in `error`; individual
+search/content failures are returned by those operations rather than cached in
+source metadata.
 `media_types` is the snapshot-wide union of observed source families, not a
-summary of one page; it is `null` only when no usable classification was
-observed for any member. Unknown members do not erase known families from the
-union; if none were observed, use `null` when any member is unknown and `[]`
-only after complete known-empty classification. `available` is current runtime
-state and is never persisted. Serialize families in the phase-00 taxonomy order.
+summary of one page. It is an empty array when no family is known. Serialize
+families in the phase-00 taxonomy order.
 Add `collection_version()` to `Search`,
 invalidated when collection membership, discovery state, or metadata changes.
 
@@ -151,7 +147,7 @@ unlimited cache.
 Add an optional `collection` query parameter (matching exact canonical
 `CollectionInfo.key` values) to `/search`, `/search/stream`, and `/suggest`:
 
-- It expands to all available, searchable sources in that collection before
+- It expands to all searchable sources in that collection before
   the normal source-selection rules.
 - It composes with an explicit `source` list by intersecting them.
 - Eliminate the legacy two-parameter `(zim, source)` split on `/search`,
@@ -199,8 +195,8 @@ already completed. Do not cache a deadline-truncated pool as a complete result
 for later requests, or present a partial candidate pool as an exhaustive hit
 count.
 The scope status describes scheduling of eligible sources only; it does not
-claim that unavailable or unsearchable sources, or truncated indexes, were
-searched exhaustively. Their state remains visible in source/library metadata.
+claim that unsearchable sources or truncated indexes were searched
+exhaustively. Per-source operation errors remain in their `SourceResult`.
 
 Use `source` as the canonical source-selection query parameter across `/search`,
 `/search/stream`, `/suggest`, and `/random`. There is no `zim` parameter and no
@@ -231,6 +227,11 @@ Keep `indexes`, `sources`, and `cache` counters.
 
 ### Library
 
+- When there are no configured or discovered collections, show provider-neutral
+  empty-state copy that directs users to configure a `[[collections]]` entry
+  and restart the server. Do not tell users only to add a `.zim` or refer to
+  `zim_dir`. If collections exist but have no sources, show their discovery
+  state/error instead of presenting the library as unconfigured.
 - Group cards by collection. A collection with one source renders like today
   (one card, optionally with a small collection label).
 - A collection with many sources renders a collection card/header with a count
@@ -244,13 +245,10 @@ Keep `indexes`, `sources`, and `cache` counters.
   the API so matches beyond the currently fetched page are discoverable.
 - Add an independent content-type filter (All / Text / Video / Audio / Images /
   Other). A source matches a selected type only when `media_types` contains
-  that type and `media_types` is not `null`. Unknown sources are hidden for
-  specific type filters rather than treated as possible matches. "All" does
-  not apply this exclusion.
+  that type. Sources with an empty array are excluded from specific type
+  filters; "All" includes every source.
   Collection cards summarize the union of known source types. A collection is
-  eligible for a specific type when its union contains that type; an unknown
-  member with no observed types does not make the collection eligible by
-  itself.
+  eligible for a specific type when its union contains that type.
 - The existing "search within this source" action remains; add "search within
   this collection" using the new `collection` parameter.
 - Details/infobox continues to show source metadata; add provider and
@@ -318,6 +316,8 @@ Keep `indexes`, `sources`, and `cache` counters.
       - group `renderSourceFilters` options;
       - add provider filter and collection selection;
       - add "search within collection";
+      - replace the ZIM-specific empty-library message with the provider-neutral
+        configured/discovered state behavior above;
       - keep history/back-button behavior.
 - [ ] Update `app.css` for collection headers/cards and grouped filters.
 - [ ] Update `README.md` API examples and the library section.
@@ -342,14 +342,17 @@ Keep `indexes`, `sources`, and `cache` counters.
       are not confused with scheduler cap/deadline partial status.
 - [ ] A deadline during ranking or preview reports partial scope even when
       `scheduled` and `completed` source-task counts are equal.
-- [ ] A known but unavailable explicit source resolves to an empty eligible
-      scope without broadening the search; its unavailable state remains
-      visible in source metadata.
+- [ ] A known unsearchable explicit source resolves to an empty eligible scope
+      without broadening the search. A selected remote source that fails
+      during search returns its per-source error without changing metadata.
 - [ ] Library grouping: one-source collections, multi-source collections,
-      empty collections, unavailable collections.
+      empty collections, discovery-error collections.
+- [ ] An unconfigured/empty library shows provider-neutral setup guidance;
+      empty or failed configured collections show discovery state without
+      ZIM-only `zim_dir` instructions.
 - [ ] Content-type classification and filtering for ZIM MIME counters and
       mixed Files/Kolibri sources: a truncated source still matches its known
-      families, while unknown classification does not match a specific type;
+      families, while an empty `media_types` array does not match a specific type;
       folder paths and absolute paths stay hidden.
 - [ ] Replacing an index without changing source keys invalidates cached
       results and previews.
