@@ -63,6 +63,8 @@ class ProviderContext:
     index_dir: Path
     web_base_path: str
     logger: logging.Logger
+    archive_factory: Any | None = None
+    persist_catalog: bool = True
 
 
 @dataclass(frozen=True)

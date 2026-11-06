@@ -29,6 +29,9 @@ class FakeSearch:
     def local_names(self):
         return ["manual"]
 
+    def source_keys(self):
+        return ["manual"]
+
     @staticmethod
     def read_source_icon(zim):
         return {

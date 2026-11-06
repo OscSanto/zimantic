@@ -305,7 +305,7 @@ def _make_parser() -> argparse.ArgumentParser:
 
 def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
     """Expand CLI files and folders into unique ZIM paths."""
-    from .catalog import is_zim_filename, iter_zim_files
+    from .providers.zim.discovery import is_zim_filename, iter_zim_files
 
     zims: list[Path] = []
     seen: set[Path] = set()
@@ -328,7 +328,7 @@ def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
 
 def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path]:
     """Choose one archive per index identity, preferring the largest copy."""
-    from .catalog import largest_zims_by_stem
+    from .providers.zim.discovery import largest_zims_by_stem
 
     by_stem: dict[str, list[Path]] = {}
     for zim in zims:
@@ -665,7 +665,7 @@ def _run_serve(args, cfg: dict) -> None:
         )
 
     search = Search(cfg, semantic=not args.fast)
-    if not search.local_names():
+    if not search.source_keys():
         logger.warning(
             "zimantic: no local ZIM sources are available; "
             "add a .zim to zim_dir or run `zimantic build --fast`"

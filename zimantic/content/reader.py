@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import codecs
 import json
 import logging
@@ -7,10 +9,11 @@ import time
 import unicodedata
 from collections.abc import Iterator
 from html.parser import HTMLParser
-from typing import Any, NamedTuple, Protocol, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
-from libzim.reader import Archive
+if TYPE_CHECKING:
+    from libzim.reader import Archive
 
 from ..libzim_compat import get_entry_by_id
 from ..redirects import RedirectError, resolve_redirect_entry
@@ -1499,7 +1502,7 @@ def read_entry(
             # targets, and app-shell companions. Discard the excerpt afterwards
             # because fast indexes do not store article text.
             record = _read_html_entry(
-                cast(Archive, zim),
+                cast(Any, zim),
                 entry,
                 i,
                 head,
@@ -1541,7 +1544,7 @@ def read_entry(
     if mimetype == "text/plain":
         return _read_plain_text_entry(entry, i, raw, max_preview_chars)
     return _read_html_entry(
-        cast(Archive, zim),
+        cast(Any, zim),
         entry,
         i,
         raw,

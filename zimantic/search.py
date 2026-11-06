@@ -1,39 +1,21 @@
-"""Hybrid search over local ZIM indexes and optional Kiwix sources."""
+"""Hybrid search core over provider runtimes."""
+
 from __future__ import annotations
 
 import logging
 import math
 import re
 import secrets
-import sqlite3
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 from urllib.request import urlopen
 
-from libzim.reader import Archive
-from libzim.search import Query
-
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
-from .catalog import (
-    ZimCatalog,
-    catalog_path,
-    largest_zims_by_stem,
-    perma_ref,
-    public_tags,
-)
-from .content.reader import (
-    DEFAULT_MAX_HTML_BYTES,
-    DEFAULT_PARSE_TIMEOUT,
-    DEFAULT_PREVIEW_CHARS,
-    read_entry,
-    truncate_at_word_boundary,
-)
+from .content.reader import DEFAULT_MAX_HTML_BYTES, DEFAULT_PREVIEW_CHARS
 from .content.serving import (
     HEAD_READ_BYTES,
     RANDOM_ARTICLE_ATTEMPTS,
@@ -50,22 +32,14 @@ from .content.serving import (
     resolve_article_entry,
 )
 from .contracts import SourceInfo, SourceResult, encode_document_id
-from .media_types import classify_mime_counts
-from .libzim_compat import get_entry_by_id, search_paths
-from .providers.base import CollectionInfo, CollectionSnapshot, SourceQuery
+from .libzim_compat import get_entry_by_id
+from .providers.base import CollectionInfo, CollectionSnapshot, ProviderContext, SourceQuery
 from .providers.config import ProviderConfig, RuntimeConfig, ZimConfig, KiwixConfig
-from .model_meta import (
-    MODEL_PROBE_SHAPE_KEY,
-    MODEL_PROBE_TEXTS_KEY,
-    MODEL_PROBE_VECTORS_KEY,
-)
 from .searching.config import (
     DEFAULT_MAX_ARTICLE_BYTES,
-    _file_signature,
     _float_config,
     _int_config,
 )
-from .searching.index import _LocalIndex, _nprobe
 from .searching.kiwix import (
     DEFAULT_KIWIX_CATALOG_ATTEMPTS,
     DEFAULT_KIWIX_CATALOG_LIMIT,
@@ -73,9 +47,7 @@ from .searching.kiwix import (
     DEFAULT_KIWIX_RESULT_LIMIT,
     DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
     MAX_KIWIX_CATALOG_RETRY_BACKOFF,
-    _catalog_book,
     catalog_entries,
-    search_kiwix,
 )
 from .searching.query import (
     MAX_QUERY_LENGTH,
@@ -102,19 +74,12 @@ from .searching.ranking import (
     _rrf_scores,
     matched_by,
     rank_results,
-    source_items,
 )
 from .searching.sources import (
-    _book_identity,
     _bounded_catalog_url,
     _child_text,
-    _find_archive_icon_path,
-    _intent_phrases,
-    _local_name,
     _parse_remote_xml,
     _read_limited_response,
-    _source_icon_url,
-    _zim_key,
 )
 from .settings import normalize_web_base_path
 
@@ -143,11 +108,9 @@ __all__ = [
     "_RankedAssessment",
     "_assess_ranked_document",
     "_bounded_catalog_url",
-    "_catalog_book",
     "_child_text",
     "_collect_ranked_candidates",
     "_deduplicate_ranked",
-    "_local_name",
     "_parse_remote_xml",
     "_read_limited_response",
     "_render_ranked_document",
@@ -162,8 +125,6 @@ __all__ = [
     "read_archive_article",
     "read_archive_icon",
     "resolve_article_entry",
-    "search_kiwix",
-    "source_items",
 ]
 
 
@@ -206,164 +167,6 @@ LIBRARY_SCAN_TTL_SECONDS = 120.0
 HEALTH_CACHE_TTL_SECONDS = 2.0
 
 
-_HTML_ENTITY = re.compile(r"&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]+);")
-# Script and style bodies are not visible article text. Treat a complete block
-# as one separator, and an unclosed opener as swallowing the rest of the page.
-_SCRIPT_STYLE_BLOCK = re.compile(
-    r"<\s*(script|style)\b[^>]*>.*?</\s*\1\s*>", re.IGNORECASE | re.DOTALL
-)
-_SCRIPT_STYLE_OPEN = re.compile(r"<\s*(?:script|style)\b", re.IGNORECASE)
-
-# Entries whose readable text can be searched for an exact query phrase.
-_PHRASE_MIMETYPES = frozenset({"text/plain", "text/html", "application/xhtml+xml"})
-
-
-def _source_tags(metadata: dict[str, Any]) -> tuple[str, ...]:
-    value = metadata.get("public_tags")
-    if value is None:
-        value = metadata.get("tags", ())
-    if isinstance(value, str):
-        return tuple(tag for tag in public_tags(value).split(";") if tag)
-    return tuple(value or ())
-
-
-def _source_info_from_metadata(
-    metadata: dict[str, Any],
-    *,
-    key: str,
-    provider: str,
-    collection_key: str = "",
-    collection_label: str | None = None,
-    searchable: bool,
-    icon_url: str | None,
-    title: str | None = None,
-    homepage: str | None = None,
-    media_types: tuple[str, ...] = (),
-    item_count: int | None = None,
-    provider_id: str | None = None,
-) -> SourceInfo:
-    """Build one canonical ``SourceInfo`` from catalog/archive metadata."""
-    raw_size = metadata.get("size")
-    raw_items = metadata.get("item_count", metadata.get("entry_count"))
-    raw_media = metadata.get("media_count")
-    raw_fulltext = metadata.get("native_fulltext_available")
-    if raw_fulltext is None:
-        raw_fulltext = metadata.get("has_fulltext_index")
-    return SourceInfo(
-        key=key,
-        provider=provider,
-        title=title or metadata.get("title") or metadata.get("name") or key,
-        collection_key=collection_key,
-        collection_label=collection_label,
-        searchable=searchable,
-        homepage=homepage if homepage is not None else metadata.get("homepage") or None,
-        icon_url=icon_url,
-        size=int(raw_size) if raw_size is not None else None,
-        intent_phrases=_intent_phrases(metadata.get("name") or title or key),
-        media_types=tuple(media_types),
-        item_count=(
-            int(raw_items) if raw_items is not None else None
-        ),
-        description=metadata.get("description") or None,
-        long_description=metadata.get("long_description") or None,
-        creator=metadata.get("creator") or None,
-        publisher=metadata.get("publisher") or None,
-        language=metadata.get("language") or None,
-        date=metadata.get("date") or None,
-        tags=_source_tags(metadata),
-        category=metadata.get("category") or None,
-        license=metadata.get("license") or None,
-        origin=metadata.get("origin") or None,
-        attribution=metadata.get("attribution") or None,
-        relation=metadata.get("relation") or None,
-        mime_counts=metadata.get("mime_counts") or metadata.get("counter") or None,
-        native_fulltext_available=(
-            None if raw_fulltext is None else bool(raw_fulltext)
-        ),
-        provider_id=provider_id or metadata.get("uuid") or None,
-    )
-
-
-def _entry_excerpt(row: Any) -> str:
-    """Return an entry record's excerpt, tolerating tuple-shaped test doubles."""
-    if not row:
-        return ""
-    try:
-        return getattr(row, "excerpt", row[2])
-    except (AttributeError, IndexError, TypeError):
-        return ""
-
-
-def _readable_words(text: str) -> Iterator[str]:
-    """Yield words from text while treating tags and entities as separators."""
-    position = 0
-    length = len(text)
-    tags_possible = True
-    while position < length:
-        if tags_possible and text[position] == "<":
-            block = _SCRIPT_STYLE_BLOCK.match(text, position)
-            if block is not None:
-                position = block.end()
-                continue
-            if _SCRIPT_STYLE_OPEN.match(text, position):
-                # An unclosed script/style has no reliable end; everything
-                # after it is code, not article text.
-                return
-            end = text.find(">", position + 1)
-            if end >= 0:
-                position = end + 1
-                continue
-            tags_possible = False
-        if text[position] == "&":
-            entity = _HTML_ENTITY.match(text, position)
-            if entity is not None:
-                position = entity.end()
-                continue
-        if text[position] == "_" or text[position].isalnum():
-            start = position
-            position += 1
-            while position < length and (
-                text[position] == "_" or text[position].isalnum()
-            ):
-                position += 1
-            yield text[start:position]
-            continue
-        position += 1
-
-
-def _phrase_in_word_stream(text: str, phrase_words: list[str]) -> bool:
-    """True when ``phrase_words`` appears as a contiguous run of readable words.
-
-    Streams ``_readable_words`` and matches with a KMP failure table in one
-    linear pass, so no joined copy of the whole article's words is ever
-    materialized (a few MB per candidate on large pages) and overlapping repeats
-    such as ``"very very very good"`` still match ``"very very good"``.
-    """
-    width = len(phrase_words)
-    if width == 0:
-        return True
-    # KMP prefix table: on a mismatch, fall back to the longest phrase prefix
-    # that is also a suffix of what has matched so far. A naive rolling window
-    # would drop a valid match when the phrase itself repeats a word.
-    failure = [0] * width
-    overlap = 0
-    for index in range(1, width):
-        while overlap and phrase_words[index] != phrase_words[overlap]:
-            overlap = failure[overlap - 1]
-        if phrase_words[index] == phrase_words[overlap]:
-            overlap += 1
-        failure[index] = overlap
-    matched = 0
-    for word in _readable_words(text):
-        while matched and word != phrase_words[matched]:
-            matched = failure[matched - 1]
-        if word == phrase_words[matched]:
-            matched += 1
-            if matched == width:
-                return True
-    return False
-
-
 class SearchQueryError(ValueError):
     """The requested query cannot be processed."""
 
@@ -376,84 +179,21 @@ def _source_title(source: SourceInfo) -> str:
     return source.title or source.key
 
 
-def _local_source_rank(source: SourceInfo) -> tuple:
-    """Preference order for one copy of a local book."""
-    try:
-        item_count = int(source.item_count or 0)
-    except (TypeError, ValueError):
-        item_count = 0
-    try:
-        size = int(source.size or 0)
-    except (TypeError, ValueError):
-        size = 0
-    title = _source_title(source)
-    return (
-        bool(source.searchable),
-        size,
-        item_count,
-        str(source.date or ""),
-        -len(title),
-        title,
-    )
-
-
-def _choose_sources(sources: list[SourceInfo], identity) -> list[SourceInfo]:
-    """Keep the best source for each identity, preserving first-seen order."""
-    chosen: dict[str, tuple[tuple, SourceInfo]] = {}
-    for source in sources:
-        key = identity(source)
-        if not key:
-            key = f"key:{source.key}"
-        rank = _local_source_rank(source)
-        current = chosen.get(key)
-        if current is None or rank > current[0]:
-            chosen[key] = (rank, source)
-    return [source for _rank, source in chosen.values()]
-
-
-class _ProviderBackend:
-    """Adapter that lets a runtime call the core's working search paths.
-
-    Kept private: phase 01/02 move these implementations behind the providers
-    without teaching the core provider-specific operations.
-    """
-
-    def __init__(self, search: "Search") -> None:
-        self.search = search
-
-    def search_source(self, source: SourceInfo, request: SourceQuery) -> SourceResult:
-        return self.search._dispatch_source(source, request)
-
-    def suggest_source(self, source: SourceInfo, query: str, limit: int):
-        return self.search._suggest_source(source, query, limit)
-
-    def preview_source(
-        self,
-        source: SourceInfo,
-        document,
-        *,
-        max_chars: int,
-        max_bytes: int,
-        deadline: float | None,
-    ) -> tuple[str, str | None]:
-        return self.search._preview_source(
-            source,
-            document,
-            max_chars=max_chars,
-            max_bytes=max_bytes,
-            deadline=deadline,
-        )
-
-    def reload(self) -> None:
-        self.search.reload()
-
-
 class Search:
     cfg: dict[str, Any] = {}
     semantic: bool = False
     embedder: Any = None
-    catalog: ZimCatalog | None = None
     _defer_faiss: bool = False
+    runtimes: dict[str, Any] = {}
+    collections: dict[str, CollectionInfo] = {}
+    _library_source_index: dict[str, SourceInfo] = {}
+    _discovery_batches: tuple[Any, ...] = ()
+    _collection_snapshots: dict[str, CollectionSnapshot] = {}
+    runtime_config: RuntimeConfig | None = None
+    providers: dict[str, Any] = {}
+    _library_scan_at: float = 0.0
+    _library_version_at: float = 0.0
+    _library_scan_token: int = 0
     _model_fingerprint: str = ""
     _cache_generation: int = 0
     preview_cache: QueryCache | None = None
@@ -533,8 +273,9 @@ class Search:
     ):
         self.cfg = cfg
         self.embedder = embedder
-        # Tests pass ``object`` to keep the catalog from opening real archives.
-        self.archive_factory = Archive if archive_factory is None else archive_factory
+        # ``None`` lets the ZIM provider open libzim archives normally; tests
+        # may pass ``object`` to disable archive inspection.
+        self.archive_factory = archive_factory
         # Fast mode skips FAISS and the model.
         self.semantic = bool(semantic)
         self._defer_faiss = self.semantic
@@ -549,7 +290,6 @@ class Search:
         # probe list; compute them once per serve process.
         self._probe_cache: dict[tuple[str, ...], Any] = {}
         self._probe_cache_lock = threading.Lock()
-        self.indexes: dict[str, _LocalIndex] = {}
         self.sources: dict[str, SourceInfo] = {}
         # None until serve enables crash isolation; tests and library callers
         # keep using the in-process searcher.
@@ -610,8 +350,6 @@ class Search:
         self._inflight: dict[Any, Future] = {}
         self._inflight_lock = threading.Lock()
         self._cache_generation = 0
-        self._catalog_entries_cache: list[dict[str, str]] = []
-        self._catalog_server: str | None = None
         self.cache = QueryCache(
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
@@ -621,10 +359,7 @@ class Search:
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
         )
         self._library_scan_at = 0.0
-        self._catalog_initialized = True
-        # Provider/collection state. Discovery ownership still partly lives in
-        # Search in phase 00; these are the seams later phases move behind.
-        from .providers.config import RuntimeConfig
+        # Provider/collection state: every provider path goes through a runtime.
         from .providers.registry import get_provider
 
         self.providers = {kind: get_provider(kind) for kind in ("zim", "kiwix")}
@@ -632,7 +367,7 @@ class Search:
         self.collections: dict[str, CollectionInfo] = {}
         self._discovery_batches: list[Any] = []
         self._collection_snapshots: dict[str, CollectionSnapshot] = {}
-        self._source_index: dict[str, str] = {}
+        self._library_source_index: dict[str, SourceInfo] = {}
         self._process_token = secrets.token_hex(8)
         self._aggregate_revision = 0
         runtime_config = cfg.get("runtime_config")
@@ -648,589 +383,15 @@ class Search:
             )
         self.runtime_config = runtime_config
         self.search_timeout_seconds = float(runtime_config.search_timeout_seconds)
-        self.catalog = self._ensure_catalog()
-        if self.catalog.zim_dir is not None and self.catalog.zim_dir.is_dir():
-            try:
-                self.catalog.scan()
-            except (OSError, sqlite3.Error) as error:
-                # An unmounted ZIM directory must not discard cached metadata.
-                logger.warning(
-                    "zimantic: catalog scan failed (%s); keeping the previous catalog",
-                    error,
-                )
-            else:
-                self._library_scan_at = time.monotonic()
-        self._load_indexes(refresh_catalog=False)
-        # Local indexes are ready immediately; the optional Kiwix catalog is
-        # refreshed in the background so an unreachable Kiwix server cannot
-        # delay startup (see start_catalog_refresh).
-        self.refresh_local_sources()
+        # Provider runtimes discover sources synchronously.  The optional Kiwix
+        # catalog still refreshes in the background so an unreachable server
+        # cannot delay startup (see start_catalog_refresh).
         self.refresh_collections()
 
     @property
     def web_base_path(self) -> str:
         """Normalized URL prefix for generated links (reverse-proxy support)."""
         return normalize_web_base_path(self.cfg.get("web_base_path"))
-
-    @property
-    def _catalog(self) -> ZimCatalog | None:
-        """Tolerate Search instances built without ``__init__`` (tests)."""
-        return self.catalog
-
-    def _ensure_catalog(self) -> ZimCatalog:
-        """Return the shared catalog, creating an in-memory one when needed."""
-        cfg = self.cfg or {}
-        zim_dir = cfg.get("zim_dir")
-        catalog = self.catalog
-        if catalog is not None:
-            catalog.zim_dir = Path(zim_dir).absolute() if zim_dir else None
-            return catalog
-
-        index_dir = cfg.get("index_dir")
-        initialized = getattr(self, "_catalog_initialized", False)
-        archive_factory = (
-            getattr(self, "archive_factory", None) if initialized else object
-        )
-        persist = initialized and archive_factory is not object
-        db_path = (
-            catalog_path(index_dir)
-            if persist and index_dir and archive_factory is not object
-            else None
-        )
-        try:
-            catalog = ZimCatalog(
-                db_path,
-                zim_dir=zim_dir,
-                archive_factory=archive_factory,
-            )
-        except Exception as error:
-            if db_path is None:
-                raise
-            logger.warning(
-                "zimantic: catalog unavailable (%s); using an in-memory catalog",
-                error,
-            )
-            catalog = ZimCatalog(
-                None,
-                zim_dir=zim_dir,
-                archive_factory=archive_factory,
-            )
-        self.catalog = catalog
-        return catalog
-
-    @staticmethod
-    def _index_uri(db_path: Path) -> str:
-        return db_path.resolve().as_uri() + "?mode=ro"
-
-    def _scan_catalog(self, *, force: bool = True) -> bool:
-        """Refresh catalog records, throttling library requests to the scan TTL."""
-        catalog = self._ensure_catalog()
-        if catalog.zim_dir is None or not catalog.zim_dir.is_dir():
-            return False
-        lock = self._library_cache_lock()
-        with lock:
-            now = time.monotonic()
-            scanned_at = getattr(self, "_library_scan_at", 0.0)
-            if not force and now - scanned_at < LIBRARY_SCAN_TTL_SECONDS:
-                return True
-            try:
-                catalog.scan()
-            except (OSError, sqlite3.Error) as error:
-                logger.error("zimantic: catalog scan failed (%s)", error)
-                self._library_scan_at = 0.0
-                return False
-            self._library_scan_at = time.monotonic()
-            self._library_version_at = 0.0
-        return True
-
-    def _find_zim_path(
-        self,
-        stem: str,
-        source_size: int | None,
-        *,
-        refresh: bool = True,
-    ) -> Path | None:
-        """Best archive for ``stem``: an exact-size match, else the largest."""
-        if refresh:
-            if not self._scan_catalog(force=True):
-                return None
-        return self._ensure_catalog().find_path(stem, source_size)
-
-    def _match_zim_path(
-        self,
-        stem: str,
-        source_size: int | None,
-        *,
-        refresh: bool = True,
-    ) -> tuple[Path | None, bool]:
-        """Return the matching archive and whether its size matches the index."""
-        path = self._find_zim_path(stem, source_size, refresh=refresh)
-        if path is None:
-            return None, False
-        if source_size is None:
-            return path, True
-        try:
-            return path, path.stat().st_size == source_size
-        except OSError:
-            return path, False
-
-    def _scan_zim_paths(
-        self,
-        *,
-        refresh: bool = True,
-        records: list[Any] | None = None,
-    ) -> dict[str, Path]:
-        """Return one catalogued archive per stem, preferring the largest copy."""
-        catalog = self._ensure_catalog()
-        if catalog.zim_dir is None or not catalog.zim_dir.is_dir():
-            return {}
-        if refresh and not self._scan_catalog(force=True):
-            return {}
-        if records is None:
-            records = catalog.rows()
-        sizes_by_path = {Path(record.path): record.size for record in records}
-        found = largest_zims_by_stem(sizes_by_path)
-        sizes_by_stem: dict[str, set[int]] = {}
-        for record in records:
-            sizes_by_stem.setdefault(record.stem, set()).add(record.size)
-        for stem, sizes in sizes_by_stem.items():
-            if len(sizes) > 1:
-                logger.warning(
-                    "zimantic: %r has ZIM files of different sizes; "
-                    "using the largest %s",
-                    stem,
-                    found[stem],
-                )
-        return found
-
-    @staticmethod
-    def _read_index_meta(db: sqlite3.Connection) -> tuple[bool, str, int | None, str]:
-        """Read ``(finished, done_value, source_size, model_fingerprint)`` in one query."""
-        rows = dict(
-            db.execute(
-                "SELECT key, value FROM meta WHERE key IN ('done', 'filesize', 'model_fingerprint')"
-            ).fetchall()
-        )
-        done_raw = rows.get("done")
-        done_value = str(done_raw) if done_raw is not None else ""
-        finished = done_value in {"1", "fast"}
-        size_raw = rows.get("filesize")
-        try:
-            source_size = int(size_raw) if size_raw is not None else None
-        except (TypeError, ValueError):
-            source_size = None
-        fingerprint_raw = rows.get("model_fingerprint")
-        stored_fingerprint = str(fingerprint_raw) if fingerprint_raw is not None else ""
-        return finished, done_value, source_size, stored_fingerprint
-
-    @staticmethod
-    def _read_index_state(db_path: Path) -> tuple[bool, int | None]:
-        """Return ``(finished, recorded_source_size)`` for one SQLite index.
-
-        An index still being written, or one that cannot be opened, reports
-        ``False`` so its archive's native full-text index keeps the source
-        searchable until the database is ready. The recorded source size is
-        ``None`` when absent or unparsable.
-        """
-        try:
-            db = sqlite3.connect(
-                Search._index_uri(db_path), uri=True, check_same_thread=False
-            )
-        except sqlite3.Error:
-            return False, None
-        try:
-            finished, _done_value, source_size, _fp = Search._read_index_meta(db)
-        except sqlite3.Error:
-            return False, None
-        finally:
-            db.close()
-        return finished, source_size
-
-    def _stale_zim_archive(
-        self, stem: str, source_size: int | None, scanned: Path
-    ) -> Path | None:
-        """Archive to serve unindexed when an index is stale, else ``None``.
-
-        ``scanned`` is the scan's chosen (largest) same-stem archive. A size
-        match there, or a missing recorded size, means the index still matches.
-        Only a mismatch triggers the extra walk that checks the stem's other
-        files, so a valid library pays no extra directory scan.
-        """
-        if source_size is None:
-            return None
-        try:
-            if scanned.stat().st_size == source_size:
-                return None
-        except OSError:
-            pass
-        archive, exact = self._match_zim_path(
-            stem, source_size, refresh=False
-        )
-        return None if archive is None or exact else archive
-
-    def _discover_local_indexes(
-        self, *, refresh_catalog: bool = True
-    ) -> dict[str, tuple[str, Path]]:
-        """Return finished SQLite indexes plus filesystem-only ZIM fallbacks.
-
-        A SQLite stem is authoritative only once its build is finished and its
-        recorded source size still matches a same-stem archive. An in-progress
-        build, one whose ZIM is gone, or one whose ZIM was replaced (size
-        changed) is ignored so the archive's native full-text index keeps the
-        source searchable instead of a stale or unopenable index.
-        """
-        index_dir = self.cfg.get("index_dir")
-        db_paths = sorted(Path(index_dir).glob("*.sqlite")) if index_dir else []
-        finished: dict[str, Path] = {}
-        recorded_sizes: dict[str, int | None] = {}
-        for path in db_paths:
-            done, source_size = self._read_index_state(path)
-            if done:
-                finished[path.stem] = path
-                recorded_sizes[path.stem] = source_size
-
-        catalog = self._ensure_catalog()
-        if refresh_catalog and catalog.zim_dir is not None and catalog.zim_dir.is_dir():
-            if not self._scan_catalog(force=True):
-                return {}
-        records = catalog.rows()
-        zim_paths = self._scan_zim_paths(refresh=False, records=records)
-        found: dict[str, tuple[str, Path]] = {}
-        for stem, db_path in finished.items():
-            scanned = zim_paths.get(stem)
-            if scanned is None:
-                # The archive this index was built from is gone. Without a local
-                # ZIM the index cannot serve articles, so ignore it. A book that
-                # is only available remotely is discovered separately as a
-                # kiwix source by the catalog refresh.
-                logger.info(
-                    "zimantic: %s index has no local ZIM; ignoring it",
-                    stem,
-                )
-                continue
-            stale = self._stale_zim_archive(stem, recorded_sizes[stem], scanned)
-            if stale is None:
-                found[stem] = ("sqlite", db_path)
-                continue
-            logger.warning(
-                "zimantic: %s index (recorded source %s bytes) does not match %s; "
-                "using the ZIM unindexed until the index is rebuilt",
-                stem,
-                recorded_sizes[stem],
-                stale,
-            )
-            found[stem] = ("zim", stale)
-        for stem, path in zim_paths.items():
-            if stem not in finished:
-                found[stem] = ("zim", path)
-
-        # The UUID is the book identity. Two copies of the same ZIM (same
-        # UUID, different filename/path) must not appear as two sources. Keep
-        # one deterministic copy: readable first, then one that can serve a
-        # search, then the larger file, then the shorter path.
-        # catalog.rows() is ordered by (stem, size DESC, path ASC), so the first
-        # row per stem is identical to catalog.get_stem(stem).
-        stem_records: dict[str, Any] = {}
-        for record in records:
-            stem_records.setdefault(record.stem, record)
-        chosen: dict[str, tuple[tuple, str]] = {}
-        for stem, (kind, _path) in found.items():
-            record = stem_records.get(stem)
-            if record is None and not records:
-                record = catalog.get_stem(stem)
-                if record is not None:
-                    stem_records[stem] = record
-            uuid_value = record.uuid if record is not None else ""
-            if not uuid_value:
-                continue
-            usable = kind == "sqlite" or bool(record.has_fulltext_index)
-            rank = (
-                bool(record.available),
-                usable,
-                record.size,
-                -len(record.path),
-            )
-            current = chosen.get(uuid_value)
-            if (
-                current is None
-                or rank > current[0]
-                or (rank == current[0] and stem < current[1])
-            ):
-                if current is not None:
-                    logger.warning(
-                        "zimantic: %s duplicates %s (UUID %s); using %s",
-                        stem,
-                        current[1],
-                        uuid_value,
-                        stem,
-                    )
-                chosen[uuid_value] = (rank, stem)
-            else:
-                logger.warning(
-                    "zimantic: %s duplicates %s (UUID %s); skipping %s",
-                    stem,
-                    current[1],
-                    uuid_value,
-                    stem,
-                )
-        keep = {stem for _rank, stem in chosen.values()}
-        for stem in list(found):
-            record = stem_records.get(stem)
-            if record is not None and record.uuid and stem not in keep:
-                del found[stem]
-        return found
-
-    def _model_probes_compatible(self, db, db_path: Path) -> tuple[bool, str]:
-        """Compare an index's stored probes with the current embedding model.
-
-        A mismatched file fingerprint is not necessarily a different model:
-        FP32 and int8 exports of the same encoder are different files but
-        produce nearly identical vectors. The probes stored by a full build let
-        serving distinguish that case from a genuinely different model.
-        """
-        rows = dict(
-            db.execute(
-                "SELECT key, value FROM meta WHERE key IN (?, ?, ?)",
-                (
-                    MODEL_PROBE_TEXTS_KEY,
-                    MODEL_PROBE_VECTORS_KEY,
-                    MODEL_PROBE_SHAPE_KEY,
-                ),
-            ).fetchall()
-        )
-        if not rows:
-            return False, "no compatibility probes"
-        # Probe comparisons need the current model. Wait for `start_embedder`
-        # so an FP32-built index can be accepted when serving with the int8
-        # export of the same encoder. The server is already answering title and
-        # full-text searches on other threads.
-        ready = getattr(self, "_embedder_ready", None)
-        if getattr(self, "_embedder_started", False) and ready is not None:
-            if not ready.wait(timeout=60):
-                return False, "timed out waiting for the embedding model"
-        # Imported lazily: fast mode never needs the ONNX Runtime model stack.
-        from .embed import embed_probe_texts, load_model_probes, model_probes_match
-
-        probes = load_model_probes(rows)
-        if probes is None:
-            return False, "unreadable compatibility probes"
-        embedder = self.embedder
-        if embedder is None:
-            return False, "embedding model is unavailable"
-        texts, stored_vectors = probes
-        key = tuple(texts)
-        cache = self._probe_cache
-        lock = self._probe_cache_lock
-        current = None
-        if cache is not None and lock is not None:
-            with lock:
-                current = cache.get(key)
-                if current is None:
-                    try:
-                        current = embed_probe_texts(embedder, texts)
-                    except Exception as error:  # a broken probe must not hide the index
-                        return False, f"probe embedding failed: {error}"
-                    cache[key] = current
-        elif current is None:
-            try:
-                current = embed_probe_texts(embedder, texts)
-            except Exception as error:  # a broken probe must not hide the index
-                return False, f"probe embedding failed: {error}"
-        try:
-            compatible, mean_cosine, min_cosine = model_probes_match(
-                texts, stored_vectors, current=current
-            )
-        except Exception as error:  # a broken probe must not hide the index
-            return False, f"probe comparison failed: {error}"
-        return compatible, (
-            f"mean cosine {mean_cosine:.4f}, minimum {min_cosine:.4f}"
-        )
-
-    def _open_index(self, db_path: Path) -> _LocalIndex | None:
-        """Open one finished index. Missing or unreadable vectors degrade the
-        index to title + full-text only instead of failing the whole server."""
-        try:
-            uri = self._index_uri(db_path)
-            db = sqlite3.connect(uri, uri=True, check_same_thread=False)
-        except sqlite3.Error:
-            return None
-
-        try:
-            finished, done_value, source_size, stored_fingerprint = (
-                self._read_index_meta(db)
-            )
-            if not finished:
-                db.close()
-                return None
-
-            faiss_index = None
-            faiss_path = db_path.with_suffix(".faiss")
-            defer_faiss = self._defer_faiss
-            if (
-                self.semantic
-                and not defer_faiss
-                and done_value == "1"
-                and faiss_path.exists()
-            ):
-                current_fingerprint = self._model_fingerprint
-                model_changed = bool(
-                    stored_fingerprint
-                    and current_fingerprint
-                    and stored_fingerprint != current_fingerprint
-                )
-                if model_changed:
-                    compatible, detail = self._model_probes_compatible(db, db_path)
-                    if compatible:
-                        logger.warning(
-                            "%s: vectors were built with a different model file, "
-                            "but embedding probes match (%s); using them",
-                            db_path.stem,
-                            detail,
-                        )
-                        model_changed = False
-                    else:
-                        logger.warning(
-                            "%s: vectors were built with a different model; "
-                            "falling back to title and full-text (lexical) search until it is rebuilt "
-                            "(%s)",
-                            db_path.stem,
-                            detail,
-                        )
-                if not model_changed:
-                    try:
-                        # Fast mode does not need the FAISS import.
-                        import faiss
-
-                        faiss_index = faiss.read_index(
-                            str(faiss_path),
-                            faiss.IO_FLAG_MMAP_IFC | faiss.IO_FLAG_READ_ONLY,
-                        )
-                        if hasattr(faiss_index, "nprobe"):
-                            faiss_index.nprobe = _nprobe(faiss_index, self.cfg)
-                    except Exception as error:  # corrupt/unreadable vectors: keep going
-                        logger.warning(
-                            "%s: vectors unavailable (%s); falling back to title and full-text (lexical) search",
-                            db_path.stem,
-                            error,
-                        )
-                        faiss_index = None
-
-            catalog = self._ensure_catalog()
-            record = catalog.get_stem_size(db_path.stem, source_size)
-            if record is not None:
-                # Keep a valid SQLite index usable for title search even if the
-                # archive is currently unreadable; opening is lazy and reports
-                # the failure only for operations that need the archive.
-                zim_path = Path(record.path)
-                if source_size is None:
-                    source_size = record.size
-            else:
-                zim_path = self._find_zim_path(
-                    db_path.stem, source_size, refresh=False
-                )
-            # The archive and its libzim Searcher are opened on first use. A
-            # 5000-ZIM library therefore no longer opens 5000 archives (or
-            # creates 5000 Searchers) at startup.
-            db.close()
-            return _LocalIndex(
-                None,
-                faiss_index,
-                None,
-                None,
-                threading.Lock(),
-                db_path=uri,
-                db_signature=_file_signature(db_path),
-                faiss_signature=(
-                    _file_signature(faiss_path)
-                    if self.semantic and not defer_faiss
-                    else None
-                ),
-                done=done_value,
-                source_size=source_size,
-                zim_path=str(zim_path) if zim_path is not None else None,
-                zim_signature=_file_signature(zim_path) if zim_path is not None else None,
-                has_fulltext_index=(
-                    bool(record.has_fulltext_index) if record is not None else None
-                ),
-            )
-        except sqlite3.Error:
-            db.close()
-            return None
-
-    def _open_zim_index(self, zim_path: Path) -> _LocalIndex | None:
-        """Open an unindexed ZIM using only its native full-text index.
-
-        A ZIM with no native full-text index has nothing to offer a search
-        source (no SQLite title index either), so it is skipped rather than
-        advertised as an available-but-empty source.
-        """
-        record = self._ensure_catalog().get_stem(zim_path.stem)
-        if record is not None:
-            if not record.available:
-                return None
-            if not record.has_fulltext_index:
-                logger.debug(
-                    "%s: no SQLite or native full-text index; skipping",
-                    zim_path.stem,
-                )
-                return None
-            archive = None
-            source_size = record.size
-        else:
-            try:
-                archive = Archive(zim_path)
-                if not archive.has_fulltext_index:
-                    logger.debug(
-                        "%s: no SQLite or native full-text index; skipping",
-                        zim_path.stem,
-                    )
-                    return None
-                source_size = zim_path.stat().st_size
-            except Exception as error:  # a corrupt archive must not abort discovery
-                logger.warning(
-                    "%s: ZIM fallback unavailable (%s)",
-                    zim_path.stem,
-                    error,
-                )
-                return None
-        return _LocalIndex(
-            None,
-            None,
-            archive,
-            None,
-            threading.Lock(),
-            done="filesystem",
-            source_size=source_size,
-            zim_path=str(zim_path),
-            zim_signature=_file_signature(zim_path),
-            has_fulltext_index=True,
-        )
-
-    def _load_indexes(self, *, refresh_catalog: bool = True) -> None:
-        found = self._discover_local_indexes(refresh_catalog=refresh_catalog)
-        if not found:
-            return
-        workers = min(8, len(found))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            opened = executor.map(
-                lambda item: (
-                    item[0],
-                    item[1],
-                    self._open_index(item[2])
-                    if item[1] == "sqlite"
-                    else self._open_zim_index(item[2]),
-                ),
-                sorted(
-                    (
-                        (stem, kind, path)
-                        for stem, (kind, path) in found.items()
-                    ),
-                    key=lambda item: item[0],
-                ),
-            )
-            for stem, _kind, index in opened:
-                if index:
-                    self.indexes[stem] = index
 
     def start_embedder(self, factory) -> None:
         """Build the embedding model on a background thread.
@@ -1262,6 +423,36 @@ class Search:
 
         threading.Thread(target=_load, name="zimantic-embedder", daemon=True).start()
 
+    def _bind_runtime(self, runtime: Any) -> None:
+        """Give a provider runtime the core-owned search services it needs."""
+        bind = getattr(runtime, "bind_search", None)
+        if not callable(bind):
+            return
+        bind(
+            semantic=self.semantic,
+            defer_faiss=self._defer_faiss,
+            embedder_getter=lambda: self.embedder,
+            embedder_ready_getter=lambda: (
+                getattr(self, "_embedder_ready", None),
+                getattr(self, "_embedder_started", False),
+            ),
+            model_fingerprint_getter=lambda: self._model_fingerprint,
+            preview_cache=self.preview_cache,
+            fulltext_pool=self.fulltext_pool,
+            candidate_count=self.candidate_count,
+            preview_chars=self.preview_chars,
+            max_html_bytes=self.max_html_bytes,
+            max_article_bytes=self.max_article_bytes,
+            min_cosine_similarity=_float_config(
+                self.cfg,
+                "min_cosine_similarity",
+                DEFAULT_MIN_COSINE_SIMILARITY,
+                -1.0,
+                1.0,
+            ),
+            cfg=self.cfg,
+        )
+
     def start_faiss(self) -> None:
         """Load FAISS and vector indexes off the server startup path."""
         if not self.semantic or not self._defer_faiss:
@@ -1291,23 +482,31 @@ class Search:
                         error,
                     )
 
-            self._defer_faiss = False
-            try:
-                # __init__ just scanned the catalog and built the source set;
-                # this reload only reopens index handles to attach their
-                # vectors. Rescanning here would duplicate both at startup.
-                self.reload(scan_catalog=False, refresh=False)
-            except Exception as error:
-                logger.warning(
-                    "zimantic: semantic search disabled: FAISS indexes "
-                    "unavailable (%s); falling back to title and full-text "
-                    "(lexical) search",
-                    error,
-                )
-                return
+            with self._state_lock:
+                self._defer_faiss = False
+                runtimes = list(self.runtimes.values())
+                for runtime in runtimes:
+                    self._bind_runtime(runtime)
+            for runtime in runtimes:
+                starter = getattr(runtime, "start_faiss", None)
+                if callable(starter):
+                    try:
+                        starter()
+                    except Exception as error:
+                        logger.warning(
+                            "zimantic: semantic search disabled for %s (%s); "
+                            "falling back to title and full-text",
+                            getattr(runtime.collection, "label", "collection"),
+                            error,
+                        )
             with self._state_lock:
                 semantic_indexes = sum(
-                    index.semantic for index in self.indexes.values()
+                    sum(
+                        1
+                        for index in getattr(runtime, "indexes", {}).values()
+                        if index.semantic
+                    )
+                    for runtime in runtimes
                 )
             logger.info(
                 "zimantic: FAISS ready; semantic search enabled for %d index(es)",
@@ -1317,337 +516,102 @@ class Search:
         threading.Thread(target=_load, name="zimantic-faiss", daemon=True).start()
 
     def start_fulltext_isolation(self) -> None:
-        """Run native full-text searches in helper processes.
-
-        python-libzim aborts the interpreter when a ZIM full-text index points
-        at a missing entry, so the server must not iterate those results in its
-        own process. The helpers are lazy (they open archives on demand) and only
-        serve native full-text lookups; title, semantic and article paths stay
-        in the main process.
-        """
-        if self.fulltext_pool is not None:
-            return
-        from .fulltext import DEFAULT_WORKERS, FulltextPool
+        """Run native full-text searches in helper processes, per runtime."""
+        from .fulltext import DEFAULT_WORKERS
 
         workers = min(DEFAULT_WORKERS, max(1, self.source_workers))
-        self.fulltext_pool = FulltextPool(workers)
+        with self._state_lock:
+            runtimes = list(self.runtimes.values())
+        for runtime in runtimes:
+            starter = getattr(runtime, "start_fulltext_isolation", None)
+            if callable(starter):
+                starter(workers)
 
     def reload(
         self, *, scan_catalog: bool = True, refresh: bool = True
     ) -> dict[str, Any]:
-        """Rescan local indexes and ZIM files without restarting.
+        """Rescan provider sources without restarting.
 
-        Picks up new finished indexes and unindexed archives, forgets removed
-        sources, upgrades fast indexes that gained vectors, and refreshes the
-        Kiwix catalog. Cheap enough for systemd.path to trigger.
-
-        ``start_faiss`` passes ``scan_catalog=False`` and ``refresh=False``
-        because it runs moments after ``__init__`` scanned the catalog and built
-        the source set; only the index handles need reopening for their vectors.
+        Runtimes reconcile cheap path stats, revalidate catalog locators, and
+        preserve open indexes whose files did not change.  Cached answers are
+        invalidated when the published source set or an index changed.
         """
-        with self._reload_lock:
-            if scan_catalog:
-                self._scan_catalog(force=True)
-            found = self._discover_local_indexes(refresh_catalog=False)
+        def _index_tokens() -> dict[str, tuple[Any, ...]]:
             with self._state_lock:
-                current_names = set(self.indexes)
-            removed = sorted(current_names - set(found))
-            added = []
-            upgraded = []
-            any_changed = False
-
-            for name in removed:
-                with self._state_lock:
-                    current = self.indexes.pop(name, None)
-                if current is not None:
-                    self._close_index(current)
-                    any_changed = True
-
-            for name, (kind, path) in found.items():
-                with self._state_lock:
-                    current = self.indexes.get(name)
-                db_signature = _file_signature(path) if kind == "sqlite" else None
-                defer_faiss = self._defer_faiss
-                faiss_signature = (
-                    _file_signature(path.with_suffix(".faiss"))
-                    if kind == "sqlite" and self.semantic and not defer_faiss
-                    else None
-                )
-                zim_signature = (
-                    _file_signature(path)
-                    if kind == "zim"
-                    else None
-                )
-                expected_db_path = (
-                    self._index_uri(path) if kind == "sqlite" else None
-                )
-                matching_zim = (
-                    self._find_zim_path(
-                        name, current.source_size, refresh=False
+                return {
+                    key: (
+                        getattr(index, "generation", None),
+                        index.db_signature,
+                        index.zim_signature,
+                        index.done,
                     )
-                    if kind == "sqlite" and current is not None
-                    else None
-                )
-                expected_zim_path = (
-                    str(path)
-                    if kind == "zim"
-                    else str(matching_zim) if matching_zim is not None else None
-                )
-                changed = (
-                    current is not None
-                    and (
-                        current.db_path != expected_db_path
-                        or current.db_signature != db_signature
-                        or (
-                            self.semantic
-                            and kind == "sqlite"
-                            and not defer_faiss
-                            and current.faiss_signature != faiss_signature
-                        )
-                        or (
-                            current.zim_path != expected_zim_path
-                        )
-                        or (
-                            kind == "zim"
-                            and current.zim_signature != zim_signature
-                        )
-                    )
-                )
-                if current is not None and not changed:
-                    # A failed archive open is not part of the index signature
-                    # (it may have been transient), so give retained indexes
-                    # another chance instead of latching the failure forever.
-                    current.allow_reopen()
-                    continue
+                    for runtime in self.runtimes.values()
+                    for key, index in getattr(runtime, "indexes", {}).items()
+                }
 
-                fresh = (
-                    self._open_index(path)
-                    if kind == "sqlite"
-                    else self._open_zim_index(path)
-                )
-                if fresh is None:
-                    continue
-
-                old = None
-                close_fresh = False
+        with self._reload_lock:
+            with self._state_lock:
+                old_keys = set(self.sources)
+                old_indexes = set(_index_tokens())
+            old_tokens = _index_tokens()
+            if refresh or scan_catalog:
                 with self._state_lock:
-                    existing = self.indexes.get(name)
-                    if existing is None:
-                        self.indexes[name] = fresh
-                        added.append(name)
-                        any_changed = True
-                    elif existing is current:
-                        self.indexes[name] = fresh
-                        old = existing
-                        if self.semantic and not existing.semantic and fresh.semantic:
-                            upgraded.append(name)
-                        any_changed = True
-                    else:
-                        close_fresh = True
-                if old is not None:
-                    self._close_index(old)
-                if close_fresh:
-                    self._close_index(fresh)
-
-            if any_changed:
-                # Index content, and therefore what is searchable, changed;
-                # cached answers under the same names can no longer be fresh.
+                    runtimes = list(self.runtimes.values())
+                for runtime in runtimes:
+                    try:
+                        runtime.refresh(wait=True)
+                    except Exception as error:
+                        logger.warning(
+                            "zimantic: collection refresh failed for %s (%s)",
+                            getattr(runtime.collection, "label", "collection"),
+                            error,
+                        )
+            self._publish_runtime_sources()
+            with self._state_lock:
+                new_keys = set(self.sources)
+                new_indexes = set(_index_tokens())
+            new_tokens = _index_tokens()
+            added = sorted(new_keys - old_keys)
+            removed = sorted(old_keys - new_keys)
+            upgraded = sorted(new_indexes - old_indexes)
+            if added or removed or upgraded or new_tokens != old_tokens:
                 self._invalidate_library_cache()
-                with self._state_lock:
-                    self._cache_generation += 1
                 self.cache.clear()
                 preview_cache = self.preview_cache
                 if preview_cache is not None:
                     preview_cache.clear()
-            if refresh:
-                self.refresh_collections()
-                self.refresh_sources()
             if self.fulltext_pool is not None:
-                # A reload is the natural moment to retry an archive that was
-                # repaired in place after its full-text helper aborted.
                 self.fulltext_pool.clear_broken()
-            with self._state_lock:
-                indexes = sorted(self.indexes)
             return {
-                "indexes": indexes,
-                "added": sorted(added),
+                "indexes": sorted(new_indexes),
+                "added": added,
                 "removed": removed,
-                "upgraded": sorted(upgraded),
+                "upgraded": upgraded,
             }
 
-    @staticmethod
-    def _close_index(index: _LocalIndex) -> None:
-        with index._lifecycle:
-            index._retired = True
-            if index._active_searches or index._closed:
-                return
-            index._closed = True
-            connections = [index.db, *index._conns]
-            Search._release_native_resources(index)
-        Search._close_connections(connections)
-
-    @staticmethod
-    def _release_native_resources(index: _LocalIndex) -> None:
-        """Drop references to native handles held by a closed index.
-
-        libzim archives and FAISS indexes close when their last Python
-        reference disappears. Clearing them here matters on Windows, where an
-        open file cannot be deleted or replaced.
-        """
-        index.searcher = None
-        index.archive = None
-        index.faiss_index = None
-        index.random_article_ids = None
-
-    @staticmethod
-    def _close_connections(connections: list[sqlite3.Connection | None]) -> None:
-        for conn in connections:
-            if conn is None:
-                continue
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
-
-    @staticmethod
-    def _acquire_index(index: _LocalIndex) -> None:
-        with index._lifecycle:
-            if index._retired:
-                raise RuntimeError("index was retired during reload")
-            index._active_searches += 1
-
-    @staticmethod
-    def _release_index(index: _LocalIndex) -> None:
-        with index._lifecycle:
-            index._active_searches -= 1
-            should_close = (
-                index._retired
-                and index._active_searches == 0
-                and not index._closed
-            )
-            if should_close:
-                index._closed = True
-                connections = [index.db, *index._conns]
-                Search._release_native_resources(index)
-            else:
-                connections = []
-        if connections:
-            Search._close_connections(connections)
-
-    def _db_for(self, index: _LocalIndex) -> sqlite3.Connection | None:
-        """A read-only SQLite connection per worker thread, so concurrent
-        searches on the same index do not share one connection."""
-        if index.db_path is None:
-            return index.db
-        conn = getattr(index._thread, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(index.db_path, uri=True, check_same_thread=False)
-            index._thread.conn = conn
-            with index.lock:
-                index._conns.append(conn)
-        return conn
-
-    def refresh_local_sources(self) -> list[dict[str, Any]]:
-        """Rebuild the source set from local indexes only (never touches the network)."""
-        return self._rebuild_sources([])
-
     def refresh_sources(self) -> list[dict[str, Any]]:
-        """Refresh source metadata without making local indexes unavailable.
-
-        Configured Kiwix collections refresh their own runtime caches; the
-        legacy internal ``kiwix_server`` path remains for direct callers.
-        """
-        from .providers.config import KiwixConfig, RuntimeConfig
-
-        runtime_config = getattr(self, "runtime_config", None)
-        configured = (
-            [
-                entry
-                for entry in runtime_config.collections
-                if isinstance(entry, KiwixConfig)
-            ]
-            if isinstance(runtime_config, RuntimeConfig)
-            else []
-        )
-        if configured:
-            entries: list[dict[str, str]] = []
-            for config in configured:
-                provider = self.providers.get("kiwix")
-                if provider is None:
-                    continue
-                context = None
-                try:
-                    from .providers.base import ProviderContext
-
-                    context = ProviderContext(
-                        config=runtime_config,
-                        index_dir=Path(self.cfg.get("index_dir") or "."),
-                        web_base_path=self.web_base_path,
-                        logger=logger,
-                    )
-                    batch = provider.discover(config, context)
-                    runtime = batch.open(batch.collections[0])
-                    runtime.refresh(wait=True)
-                    with self._state_lock:
-                        self.runtimes[runtime.collection.key] = runtime
-                        self.collections[runtime.collection.key] = runtime.collection
-                        self._collection_snapshots[runtime.collection.key] = (
-                            runtime.snapshot
-                        )
-                    for source in runtime.sources:
-                        book = getattr(source, "_kiwix_book", source.key)
-                        entries.append(
-                            {"name": source.title or book, "book": book}
-                        )
-                except Exception as error:
-                    logger.warning(
-                        "zimantic: Kiwix collection %s refresh failed (%s)",
-                        config.name,
-                        error,
-                    )
-            return self._rebuild_sources(entries)
-        server = str(self.cfg.get("kiwix_server") or "").strip().rstrip("/")
-        if not server:
-            with self._state_lock:
-                self._catalog_entries_cache = []
-                self._catalog_server = None
-            entries = []
-        else:
-            fetched = self._catalog_entries(server)
-            if fetched is None:
-                with self._state_lock:
-                    cached_entries = getattr(self, "_catalog_entries_cache", [])
-                    entries = (
-                        list(cached_entries)
-                        if getattr(self, "_catalog_server", None) == server
-                        else []
-                    )
+        """Refresh every provider runtime and republish the source set."""
+        with self._state_lock:
+            runtimes = list(self.runtimes.values())
+        for runtime in runtimes:
+            try:
+                runtime.refresh(wait=True)
+            except Exception as error:
                 logger.warning(
-                    "zimantic: catalog unavailable; preserving %d cached source(s)",
-                    len(entries),
+                    "zimantic: source refresh failed for %s (%s)",
+                    getattr(runtime.collection, "label", "collection"),
+                    error,
                 )
-            else:
-                with self._state_lock:
-                    self._catalog_entries_cache = [dict(entry) for entry in fetched]
-                    self._catalog_server = server
-                entries = fetched
-        return self._rebuild_sources(entries)
+        return self._publish_runtime_sources()
 
     def start_catalog_refresh(self) -> None:
-        """Fetch the optional Kiwix catalog off the startup path.
-
-        Catalog sources are only needed for books without a local index, so the
-        server must not wait (up to ``source_timeout``) for Kiwix to answer.
-        """
-        from .providers.config import KiwixConfig, RuntimeConfig
-
-        runtime_config = getattr(self, "runtime_config", None)
-        has_configured = isinstance(runtime_config, RuntimeConfig) and any(
-            isinstance(entry, KiwixConfig)
-            for entry in runtime_config.collections
-        )
-        server = str(self.cfg.get("kiwix_server") or "").strip()
-        if not server and not has_configured:
+        """Fetch optional remote catalogs off the startup path."""
+        with self._state_lock:
+            remote = any(
+                getattr(runtime.collection, "provider", None) == "kiwix"
+                for runtime in self.runtimes.values()
+            )
+        if not remote:
             return
 
         def _refresh() -> None:
@@ -1656,225 +620,17 @@ class Search:
             except Exception as error:  # a catalog failure must not affect serving
                 logger.warning("zimantic: catalog refresh failed (%s)", error)
                 return
-            logger.info("zimantic: Kiwix catalog ready (%d source(s))", len(sources))
+            logger.info("zimantic: catalog refresh ready (%d source(s))", len(sources))
 
         threading.Thread(target=_refresh, name="zimantic-catalog", daemon=True).start()
-
-    def _configured_collection(self, kind: str) -> tuple[str, str]:
-        """Return ``(collection_key, label)`` for the first configured kind."""
-        runtime_config = getattr(self, "runtime_config", None)
-        entries = getattr(runtime_config, "collections", ())
-        for entry in entries:
-            if entry.kind == kind:
-                if kind == "zim":
-                    from .providers.zim import zim_collection_key
-
-                    return zim_collection_key(entry.name), entry.label or entry.name
-                if kind == "kiwix":
-                    from .providers.kiwix import kiwix_collection_key
-
-                    return kiwix_collection_key(entry.name), entry.label or "Kiwix"
-        if kind == "zim":
-            return "zim:library", "Library"
-        return "kiwix:library", "Kiwix"
-
-    def _zim_source_key(self, local_name: str, path: str | Path | None = None) -> str:
-        from .providers.zim import zim_source_key
-
-        collection_key, _label = self._configured_collection("zim")
-        collection_name = collection_key.split(":", 1)[-1]
-        relative = local_name + ".zim"
-        root_entry = next(
-            (
-                entry
-                for entry in getattr(
-                    getattr(self, "runtime_config", None), "collections", ()
-                )
-                if getattr(entry, "kind", None) == "zim"
-            ),
-            None,
-        )
-        if path is not None and root_entry is not None:
-            root = Path(root_entry.path)
-            archive = Path(path)
-            if root.is_file():
-                relative = archive.name
-            else:
-                try:
-                    relative = archive.resolve().relative_to(root.resolve()).as_posix()
-                except (OSError, ValueError):
-                    relative = archive.name
-        # The digest derives from the logical root-relative archive identity,
-        # not the absolute path, so relocating a root preserves the key.
-        return zim_source_key(collection_name, relative)
-
-    def _index_name(self, source: SourceInfo) -> str | None:
-        """Resolve a source to its internal local index name, if any."""
-        mapped = getattr(self, "_source_index", {}).get(source.key)
-        if mapped is not None:
-            return mapped
-        # Legacy/manual test sources carry a local_name matching the index key.
-        legacy = getattr(source, "local_name", None)
-        if legacy and legacy in self.indexes:
-            return legacy
-        if source.key in self.indexes:
-            return source.key
-        if legacy:
-            return legacy
-        return None
-
-    def _source_from_catalog(
-        self,
-        record,
-        *,
-        key: str,
-        local_name: str,
-        searchable: bool | None = None,
-    ) -> SourceInfo:
-        """Build one canonical local ``SourceInfo`` from a catalog row."""
-        meta = record.to_source_metadata()
-        collection_key, collection_label = self._configured_collection("zim")
-        if searchable is None:
-            searchable = True
-        icon_url = _source_icon_url(
-            key,
-            bool(record.favicon or meta.get("icon_path")),
-            self.web_base_path,
-        )
-        return _source_info_from_metadata(
-            meta,
-            key=key,
-            provider="zim",
-            collection_key=collection_key,
-            collection_label=collection_label,
-            searchable=bool(searchable),
-            icon_url=icon_url,
-            title=meta.get("title") or meta.get("name") or local_name,
-            homepage=meta.get("homepage"),
-            media_types=classify_mime_counts(meta.get("mime_counts")),
-            item_count=meta.get("entry_count") or meta.get("article_count"),
-            provider_id=meta.get("provider_id") or meta.get("uuid"),
-        )
-
-    def _rebuild_sources(self, entries: list[dict[str, str]]) -> list[dict[str, Any]]:
-        with self._state_lock:
-            collection_key, collection_label = self._configured_collection("zim")
-            local: dict[str, SourceInfo] = {}
-            index_by_key: dict[str, str] = {}
-            for local_name in self.indexes:
-                index = self.indexes[local_name]
-                record = self._ensure_catalog().get_stem_size(
-                    local_name, index.source_size
-                )
-                key = self._zim_source_key(
-                    local_name, record.path if record is not None else None
-                )
-                suffix = 2
-                while key in local:
-                    key = f"{self._zim_source_key(local_name)}-{suffix}"
-                    suffix += 1
-                if record is not None:
-                    source = self._source_from_catalog(
-                        record, key=key, local_name=local_name
-                    )
-                else:
-                    source = SourceInfo(
-                        key=key,
-                        provider="zim",
-                        title=local_name,
-                        collection_key=collection_key,
-                        collection_label=collection_label,
-                        searchable=True,
-                        intent_phrases=_intent_phrases(local_name),
-                        size=index.source_size,
-                    )
-                local[key] = source
-                index_by_key[key] = local_name
-
-            if local:
-                initial_index = dict(index_by_key)
-                chosen = _choose_sources(
-                    list(local.values()),
-                    lambda source: _book_identity(
-                        index_by_key.get(source.key, source.key)
-                    ),
-                )
-                local = {}
-                index_by_key = {}
-                used_keys: set[str] = set()
-                for source in chosen:
-                    local_name = initial_index.get(source.key) or source.title or source.key
-                    key = source.key
-                    suffix = 2
-                    while key in used_keys:
-                        key = f"{source.key}-{suffix}"
-                        suffix += 1
-                    used_keys.add(key)
-                    local[key] = replace(source, key=key)
-                    index_by_key[key] = local_name
-
-            merged = dict(local)
-            local_identities = {
-                _book_identity(index_by_key.get(source.key, source.key))
-                for source in local.values()
-            }
-            remote_identities: set[str] = set()
-            remote_collection_key, remote_label = self._configured_collection("kiwix")
-            remote_name = remote_collection_key.split(":", 1)[-1]
-            from .providers.kiwix import kiwix_source_key
-
-            for entry in entries:
-                identity = _book_identity(entry["book"])
-                key = kiwix_source_key(remote_name, entry["book"])
-                if identity in local_identities or identity in remote_identities:
-                    continue
-                remote_identities.add(identity)
-                merged[key] = SourceInfo(
-                    key=key,
-                    provider="kiwix",
-                    title=entry.get("name") or entry["book"],
-                    collection_key=remote_collection_key,
-                    collection_label=remote_label,
-                    searchable=True,
-                )
-
-            old_sources = self.sources
-            self.sources = dict(
-                sorted(
-                    merged.items(),
-                    key=lambda pair: (_source_title(pair[1]).casefold(), pair[1].key),
-                )
-            )
-            self._source_index = index_by_key
-            changed = self.sources != old_sources
-            if changed:
-                self._cache_generation += 1
-                self._aggregate_revision = (
-                    getattr(self, "_aggregate_revision", 0) + 1
-                )
-            sources = self.source_dicts()
-        if changed:
-            self._invalidate_library_cache()
-            self._remote_limit_warned = False
-            self.cache.clear()
-            preview_cache = self.preview_cache
-            if preview_cache is not None:
-                preview_cache.clear()
-        return sources
-
-    def _catalog_entries(self, server: str) -> list[dict[str, str]] | None:
-        return catalog_entries(
-            self.cfg,
-            server,
-            self.source_timeout,
-            urlopen_fn=urlopen,
-            sleep_fn=time.sleep,
-        )
 
     def resolve_source(self, identifier: str) -> SourceInfo | None:
         """Resolve an exact canonical source key; no aliases or fallbacks."""
         with self._state_lock:
-            return getattr(self, "sources", {}).get(str(identifier))
+            source = self.sources.get(str(identifier))
+            if source is not None:
+                return source
+            return self._library_source_index.get(str(identifier))
 
     def _configured_provider_entries(self) -> tuple[ProviderConfig, ...]:
         runtime_config = getattr(self, "runtime_config", None)
@@ -1905,19 +661,18 @@ class Search:
 
     def refresh_collections(self, *, wait: bool = False) -> list[dict[str, Any]]:
         """Rerun provider discovery for configured entries and publish snapshots."""
-        from .providers.base import ProviderContext
-
         runtime_config = getattr(self, "runtime_config", None)
         if runtime_config is None:
             # Lightweight test doubles intentionally skip __init__; there is no
             # configured entry set to rediscover.
             return self.source_dicts()
-        backend = _ProviderBackend(self)
         ctx = ProviderContext(
             config=runtime_config,
             index_dir=Path(self.cfg.get("index_dir") or "."),
             web_base_path=self.web_base_path,
             logger=logger,
+            archive_factory=getattr(self, "archive_factory", None),
+            persist_catalog=bool(self.cfg.get("index_dir")),
         )
         new_runtimes: dict[str, Any] = {}
         new_collections: dict[str, CollectionInfo] = {}
@@ -1934,14 +689,11 @@ class Search:
                 diagnostics.append(f"{entry.name}: {entry.kind} discovery failed: {error}")
                 continue
             try:
-                opened = []
                 for collection in batch.collections:
                     runtime = batch.open(collection)
-                    if hasattr(runtime, "_backend"):
-                        runtime._backend = backend
+                    self._bind_runtime(runtime)
                     new_runtimes[collection.key] = runtime
                     new_collections[collection.key] = collection
-                    opened.append(runtime)
                 new_batches.append(batch)
             except Exception as error:
                 diagnostics.append(f"{entry.name}: {entry.kind} open failed: {error}")
@@ -1950,6 +702,14 @@ class Search:
                         runtime.close()
                     except Exception:
                         pass
+                for opened_batch in new_batches:
+                    try:
+                        opened_batch.close()
+                    except Exception:
+                        pass
+                new_runtimes.clear()
+                new_collections.clear()
+                new_batches.clear()
                 batch.close()
         with self._state_lock:
             old_runtimes = self.runtimes
@@ -1957,11 +717,8 @@ class Search:
             self.runtimes = new_runtimes
             self.collections = new_collections
             self._discovery_batches = new_batches
-            self._collection_snapshots = {
-                key: runtime.snapshot for key, runtime in new_runtimes.items()
-            }
             self._aggregate_revision = getattr(self, "_aggregate_revision", 0) + 1
-            sources = self.source_dicts()
+        sources = self._publish_runtime_sources()
         for runtime in old_runtimes.values():
             try:
                 runtime.close()
@@ -1977,6 +734,43 @@ class Search:
                 logger.warning("zimantic: collection discovery: %s", message)
         return sources
 
+    def _publish_runtime_sources(self) -> list[dict[str, Any]]:
+        with self._state_lock:
+            sources: dict[str, SourceInfo] = {}
+            library: dict[str, SourceInfo] = {}
+            for runtime in self.runtimes.values():
+                for source in runtime.sources:
+                    sources[source.key] = source
+                for source in runtime.library_sources():
+                    library[source.key] = source
+            ordered = dict(
+                sorted(
+                    sources.items(),
+                    key=lambda pair: (_source_title(pair[1]).casefold(), pair[1].key),
+                )
+            )
+            old_sources = self.sources
+            changed = ordered != old_sources
+            self.sources = ordered
+            self._library_source_index = library
+            self._collection_snapshots = {
+                key: runtime.snapshot for key, runtime in self.runtimes.items()
+            }
+            if changed:
+                self._cache_generation += 1
+                self._aggregate_revision = (
+                    getattr(self, "_aggregate_revision", 0) + 1
+                )
+            result = self.source_dicts()
+        if changed:
+            self._invalidate_library_cache()
+            self._remote_limit_warned = False
+            self.cache.clear()
+            preview_cache = self.preview_cache
+            if preview_cache is not None:
+                preview_cache.clear()
+        return result
+
     def collection_dicts(self) -> list[dict[str, Any]]:
         """Serialize the current collection snapshots."""
         with self._state_lock:
@@ -1990,57 +784,6 @@ class Search:
         """Process-instance identity plus aggregate publication revision."""
         with self._state_lock:
             return self._process_token, self._aggregate_revision
-
-    def _suggest_source(self, source: SourceInfo, query: str, limit: int):
-        # Reuse the core title-prefix path without recursing through the full
-        # suggestion merge.
-        if source.provider != "zim":
-            return []
-        index_name = self._index_name(source)
-        if not index_name:
-            return []
-        with self._state_lock:
-            index = self.indexes.get(index_name)
-        if index is None:
-            return []
-        try:
-            self._acquire_index(index)
-        except RuntimeError:
-            return []
-        try:
-            db = self._db_for(index)
-            if db is None:
-                return []
-            rows = db.execute(
-                "SELECT rowid FROM docs WHERE docs MATCH ? ORDER BY rank LIMIT ?",
-                (_title_prefix_query(query), max(1, limit)),
-            ).fetchall()
-            docs = self._fetch_docs(source, db, {int(row[0]) for row in rows})
-            return [docs[int(row[0])] for row in rows if int(row[0]) in docs]
-        except sqlite3.Error:
-            return []
-        finally:
-            self._release_index(index)
-
-    def _preview_source(
-        self,
-        source: SourceInfo,
-        document,
-        *,
-        max_chars: int,
-        max_bytes: int,
-        deadline: float | None,
-    ) -> tuple[str, str | None]:
-        path = str(document.get("path") or "")
-        if source.provider != "zim" or not path:
-            return str(document.get("lead") or ""), document.get("mimetype")
-        previews = self._extract_previews(
-            self._index_name(source) or "", [dict(document)]
-        )
-        lead = previews.get(document.get("id", ""), "")
-        if max_chars > 0:
-            lead = lead[:max_chars]
-        return lead, document.get("mimetype")
 
     def source_dicts(self) -> list[dict[str, Any]]:
         with self._state_lock:
@@ -2069,100 +812,49 @@ class Search:
             self._library_scan_token = getattr(self, "_library_scan_token", 0) + 1
 
     def library_dicts(self) -> list[dict[str, Any]]:
-        """Return metadata for every local/document library source.
+        """Return metadata for every document-library source.
 
-        Includes readable-but-unsearchable archives and Kiwix books.  Discovery
-        failures are collection-level diagnostics, not per-source availability
-        state.
+        ZIM runtimes include readable-but-unsearchable and unreadable archives
+        that are not in the searchable source set.  Discovery failures remain
+        collection-level diagnostics, not per-source state.
         """
         with self._state_lock:
-            indexed = {
-                self._index_name(source): source
-                for source in self.sources.values()
-                if source.provider == "zim" and self._index_name(source)
-            }
-            searchable_names = set(self.indexes)
-            external = [
-                source
-                for source in self.sources.values()
-                if source.provider != "zim"
-            ]
-        self._scan_catalog(force=False)
-        catalog = self._ensure_catalog()
-        all_sources: list[SourceInfo] = []
-        for zim_name, _zim_path in sorted(
-            self._scan_zim_paths(refresh=False).items()
-        ):
-            record = catalog.get_stem(zim_name)
-            source = (
-                self._source_from_catalog(
-                    record,
-                    key=self._zim_source_key(
-                        zim_name, record.path if record is not None else None
-                    ),
-                    local_name=zim_name,
-                    searchable=zim_name in searchable_names,
-                )
-                if record is not None
-                else indexed.get(zim_name)
-            )
-            if source is None:
-                continue
-            all_sources.append(source)
-        all_sources.extend(external)
-        chosen = _choose_sources(
-            all_sources,
-            lambda source: (
-                f"uuid:{source.provider_id or getattr(source, 'uuid', None)}"
-                if (source.provider_id or getattr(source, 'uuid', None))
-                else f"key:{source.key}"
-            ),
-        )
-        chosen = _choose_sources(
-            chosen,
-            lambda source: _book_identity(source.title or source.key),
-        )
+            runtimes = list(self.runtimes.values())
+        for runtime in runtimes:
+            stale = getattr(runtime, "refresh_if_stale", None)
+            if callable(stale):
+                try:
+                    stale()
+                except Exception:
+                    pass
+        with self._state_lock:
+            runtimes = list(self.runtimes.values())
+            fallback = list(self.sources.values())
+        library: dict[str, SourceInfo] = {}
+        for runtime in runtimes:
+            for source in runtime.library_sources():
+                library[source.key] = source
+        if not library:
+            for source in fallback:
+                if source.provider in {"zim", "files", "kolibri"}:
+                    library[source.key] = source
         return [
             source.to_dict(include_metadata=True)
-            for source in chosen
+            for source in sorted(
+                library.values(),
+                key=lambda item: (_source_title(item).casefold(), item.key),
+            )
         ]
 
-    def library_version(
-        self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int], ...]]:
+    def library_version(self) -> tuple[Any, ...]:
         """Return a cheap token that changes when the library contents change."""
-        self._scan_catalog(force=False)
-        lock = self._library_cache_lock()
-        now = time.monotonic()
-        with lock:
-            cached = getattr(self, "_library_version_cache", None)
-            cached_at = getattr(self, "_library_version_at", 0.0)
-            token = getattr(self, "_library_scan_token", 0)
-            if cached is not None and now - cached_at < LIBRARY_SCAN_TTL_SECONDS:
-                return cached
-        catalog = self._ensure_catalog()
-        records_by_path = {
-            Path(record.path): record for record in catalog.rows()
-        }
-        selected = largest_zims_by_stem(
-            {path: record.size for path, record in records_by_path.items()}
-        )
-        signatures = tuple(
-            (
-                name,
-                records_by_path[path].size,
-                int(records_by_path[path].mtime * 1_000_000_000),
+        with self._state_lock:
+            runtime_versions = tuple(
+                (key, runtime.snapshot_version)
+                for key, runtime in sorted(self.runtimes.items())
             )
-            for name, path in sorted(selected.items())
-        )
-        version = (self.source_version(), catalog.version(), signatures)
-        with lock:
-            # A reload during the scan already invalidated the previous token;
-            # do not let this older signature set be cached under the new one.
-            if getattr(self, "_library_scan_token", 0) == token:
-                self._library_version_cache = version
-                self._library_version_at = time.monotonic()
-        return version
+            generation = self._cache_generation
+        return (generation, runtime_versions)
 
     def source_version(self) -> tuple[int, ...]:
         """Token that changes whenever the source set or its metadata changes."""
@@ -2170,7 +862,7 @@ class Search:
             return (self._cache_generation,)
 
     def close(self) -> None:
-        """Release the search thread pool and every open index."""
+        """Release the search thread pool and every provider runtime."""
         pool = self.fulltext_pool
         self.fulltext_pool = None
         if pool is not None:
@@ -2179,16 +871,14 @@ class Search:
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
         with self._state_lock:
-            indexes = list(self.indexes.values())
-            self.indexes.clear()
             runtimes = list(getattr(self, "runtimes", {}).values())
             batches = list(getattr(self, "_discovery_batches", []))
             self.runtimes = {}
             self.collections = {}
             self._collection_snapshots = {}
             self._discovery_batches = []
-        for index in indexes:
-            self._close_index(index)
+            self._library_source_index = {}
+            self.sources = {}
         for runtime in runtimes:
             try:
                 runtime.close()
@@ -2199,60 +889,21 @@ class Search:
                 batch.close()
             except Exception:
                 pass
-        catalog = self.catalog
-        if catalog is not None:
-            catalog.close()
-            self.catalog = None
 
-    def local_names(self) -> list[str]:
+    def source_keys(self) -> list[str]:
+        """Canonical keys of the currently searchable sources."""
         with self._state_lock:
-            return list(self.indexes)
+            return sorted(self.sources)
 
-    @staticmethod
-    def _article_path(path: str) -> str:
-        return normalize_article_path(path)
-
-    @staticmethod
-    def _resolve_article_entry(archive: Archive, path: str | None = None):
-        return resolve_article_entry(archive, path)
-
-    def _read_archive_article(
-        self,
-        archive: Archive,
-        zim_name: str,
-        path: str | None,
-        head_only: bool,
-    ) -> dict[str, Any]:
-        return read_archive_article(
-            archive,
-            zim_name,
-            path,
-            head_only,
-            self.max_article_bytes,
-        )
-
-    def _local_lookup(self, identifier: str) -> tuple[SourceInfo | None, str]:
-        """Resolve a route identifier to a source and internal index name."""
+    def _runtime_lookup(self, identifier: str) -> tuple[SourceInfo, Any]:
+        source = self.resolve_source(identifier)
+        if source is None:
+            raise ArticleSourceNotFoundError("source not found")
         with self._state_lock:
-            source = self.resolve_source(identifier)
-        if source is not None and source.provider == "zim":
-            name = self._index_name(source)
-            if name:
-                return source, name
-        # Phase 03 renames the public route parameter; until then an index name
-        # (archive stem) remains accepted as the route identifier.
-        if identifier in self.indexes:
-            with self._state_lock:
-                source = next(
-                    (
-                        candidate
-                        for candidate in self.sources.values()
-                        if self._index_name(candidate) == identifier
-                    ),
-                    None,
-                )
-            return source, identifier
-        return None, identifier
+            runtime = self.runtimes.get(source.collection_key)
+        if runtime is None:
+            raise ArticleUnavailableError("source is unavailable")
+        return source, runtime
 
     def read_article(
         self,
@@ -2260,265 +911,78 @@ class Search:
         path: str | None = None,
         head_only: bool = False,
     ) -> dict[str, Any]:
-        """Read one local ZIM entry without changing indexes or search state.
-
-        ``head_only`` returns just the leading bytes of the entry, which is all
-        the ``/content/`` shell needs to read a title and favicon from the
-        ``<head>``; the shell's iframe fetches the full entry separately, so
-        loading the whole (possibly tens-of-MB) article for the shell would be
-        a wasted read.
-        """
-        _source, index_name = self._local_lookup(zim_name)
-        with self._state_lock:
-            index = self.indexes.get(index_name)
-        if index is None:
-            record = self._ensure_catalog().get_stem(index_name)
-            zim_path = (
-                Path(record.path)
-                if record is not None and getattr(record, "available", 1)
-                else self._scan_zim_paths().get(index_name)
-            )
-            if zim_path is None:
-                raise ArticleSourceNotFoundError("ZIM not found")
-            try:
-                archive = Archive(zim_path)
-            except (OSError, RuntimeError, ValueError) as error:
-                raise ArticleUnavailableError("ZIM archive is unavailable") from error
-            return self._read_archive_article(archive, index_name, path, head_only)
-        archive = index.ensure_open()
-        if archive is None:
-            raise ArticleUnavailableError("ZIM archive is unavailable")
-
-        acquired = False
-        try:
-            try:
-                self._acquire_index(index)
-            except RuntimeError as error:
-                raise ArticleUnavailableError("ZIM is being reloaded") from error
-            acquired = True
-            with index.read_lock:
-                return self._read_archive_article(
-                    archive,
-                    index_name,
-                    path,
-                    head_only,
-                )
-        finally:
-            if acquired:
-                self._release_index(index)
+        """Read one source entry through its runtime content store."""
+        source, runtime = self._runtime_lookup(zim_name)
+        reader = getattr(runtime, "read_article", None)
+        if not callable(reader):
+            raise ArticleNotFoundError("source content is unavailable")
+        return reader(source.key, path, head_only)
 
     def read_article_head(
         self, zim_name: str, path: str | None = None
     ) -> dict[str, Any]:
-        """Read only the leading bytes of one entry (see ``read_article``)."""
         return self.read_article(zim_name, path, head_only=True)
 
     def article_path_exists(self, zim_name: str, path: str) -> bool:
-        """Whether ``path`` resolves to a local ZIM entry.
-
-        The article toolbar uses this to avoid linking breadcrumb containers
-        such as ``A`` in ``A/Article``: those path segments are namespaces or
-        directories, not articles, so opening them would show a 404.
-        """
+        """Whether ``path`` resolves to a source entry."""
         try:
-            requested_path = self._article_path(path)
-            _source, index_name = self._local_lookup(zim_name)
-            with self._state_lock:
-                index = self.indexes.get(index_name)
-            if index is None:
-                record = self._ensure_catalog().get_stem(index_name)
-                zim_path = (
-                    Path(record.path)
-                    if record is not None and getattr(record, "available", 1)
-                    else self._scan_zim_paths().get(index_name)
-                )
-                if zim_path is None:
-                    return False
-                try:
-                    archive = Archive(zim_path)
-                except (OSError, RuntimeError, ValueError):
-                    return False
-                self._resolve_article_entry(archive, requested_path)
-                return True
-            archive = index.ensure_open()
-            if archive is None:
-                return False
-
-            acquired = False
-            try:
-                try:
-                    self._acquire_index(index)
-                except RuntimeError:
-                    return False
-                acquired = True
-                with index.read_lock:
-                    self._resolve_article_entry(archive, requested_path)
-                    return True
-            finally:
-                if acquired:
-                    self._release_index(index)
+            _source, runtime = self._runtime_lookup(zim_name)
+        except (ArticleSourceNotFoundError, ArticleUnavailableError):
+            return False
+        checker = getattr(runtime, "article_path_exists", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(zim_name, path))
         except (ArticleNotFoundError, ArticleUnavailableError):
             return False
 
-    def _read_archive_icon(
-        self,
-        archive: Archive,
-        zim_name: str,
-        icon_path: str | None,
-    ) -> dict[str, Any]:
-        return read_archive_icon(
-            archive,
-            zim_name,
-            icon_path,
-            self.max_article_bytes,
-        )
-
     def read_source_icon(self, zim_name: str) -> dict[str, Any]:
-        """Read the illustration selected for a local ZIM."""
-        source, index_name = self._local_lookup(zim_name)
-        # Consult the catalog even when the ZIM has no search source (for
-        # example a library-only archive or a duplicate removed from search).
-        # The favicon BLOB is the same illustration selected during discovery.
-        data, mime = self._ensure_catalog().favicon(index_name)
-        if data:
-            return {
-                "zim": index_name,
-                "path": None,
-                "title": (
-                    source.title if source is not None and source.title else index_name
-                ),
-                "mimetype": (mime or "application/octet-stream")
-                .split(";", 1)[0]
-                .strip()
-                .lower(),
-                "content": data,
-            }
-        record = self._ensure_catalog().get_stem(index_name)
-        icon_path = (
-            record.icon_path
-            if record is not None and getattr(record, "icon_path", "")
-            else None
-        )
-        if source is not None and source.provider == "zim" and icon_path:
-            return self.read_article(index_name, icon_path)
-        if source is None:
-            zim_path = self._scan_zim_paths().get(index_name)
-            if zim_path is None:
-                raise ArticleNotFoundError("source icon not found")
-            try:
-                archive = Archive(zim_path)
-            except (OSError, RuntimeError, ValueError) as error:
-                raise ArticleUnavailableError("source icon unavailable") from error
-            try:
-                homepage = self._resolve_article_entry(archive).path
-            except (ArticleNotFoundError, ArticleUnavailableError, RuntimeError, ValueError):
-                homepage = None
-            icon_path = _find_archive_icon_path(archive, homepage)
-            return self._read_archive_icon(archive, index_name, icon_path)
-        if source.provider != "zim":
+        """Read the illustration selected for a source."""
+        source, runtime = self._runtime_lookup(zim_name)
+        reader = getattr(runtime, "read_source_icon", None)
+        if not callable(reader):
             raise ArticleNotFoundError("source icon not found")
-        with self._state_lock:
-            index = self.indexes.get(index_name)
-        if index is None:
-            raise ArticleUnavailableError("source icon unavailable")
-        archive = index.ensure_open()
-        if archive is None:
-            raise ArticleUnavailableError("source icon unavailable")
-        acquired = False
-        try:
-            try:
-                self._acquire_index(index)
-            except RuntimeError as error:
-                raise ArticleUnavailableError("ZIM is being reloaded") from error
-            acquired = True
-            with index.read_lock:
-                return self._read_archive_icon(archive, index_name, None)
-        finally:
-            if acquired:
-                self._release_index(index)
-
-    @staticmethod
-    def _is_random_article_entry(entry: Any) -> bool:
-        return is_random_article_entry(entry)
-
-    def _random_indexed_article(self, index: _LocalIndex, db: sqlite3.Connection) -> str | None:
-        return random_indexed_article(
-            index,
-            db,
-            attempts=RANDOM_ARTICLE_ATTEMPTS,
-        )
-
-    def _random_fallback_article(self, index: _LocalIndex) -> str | None:
-        return random_fallback_article(
-            index,
-            attempts=RANDOM_ARTICLE_ATTEMPTS,
-            get_entry_fn=get_entry_by_id,
-        )
+        return reader(source.key)
 
     def random_local_source(self) -> SourceInfo:
-        """Return a random readable local source that has a homepage.
-
-        Used by the article toolbar's alt-click Random action and by the library
-        fallback for archives without a main entry. The caller redirects to the
-        chosen source's homepage.
-        """
+        """Return a random readable local source that has a homepage."""
         with self._state_lock:
-            candidates = [
-                source
-                for source in self.sources.values()
-                if source.provider == "zim"
-                and source.searchable
-                and source.homepage
-                and self._index_name(source)
+            runtimes = [
+                runtime
+                for runtime in self.runtimes.values()
+                if getattr(runtime.collection, "provider", None) == "zim"
             ]
+        candidates: list[SourceInfo] = []
+        for runtime in runtimes:
+            chooser = getattr(runtime, "random_source", None)
+            if not callable(chooser):
+                continue
+            try:
+                candidates.append(chooser())
+            except ArticleNotFoundError:
+                continue
         if not candidates:
             raise ArticleNotFoundError("no local source has a homepage")
         return secrets.choice(candidates)
 
     def random_article_path(self, zim_name: str) -> str:
         """Return a random indexed article path without changing search state."""
-        _source, index_name = self._local_lookup(zim_name)
-        with self._state_lock:
-            index = self.indexes.get(index_name)
-        if index is None:
-            raise ArticleSourceNotFoundError("ZIM not found")
-        if index.ensure_open() is None:
-            raise ArticleUnavailableError("ZIM archive is unavailable")
-
-        acquired = False
-        try:
-            try:
-                self._acquire_index(index)
-            except RuntimeError as error:
-                raise ArticleUnavailableError("ZIM is being reloaded") from error
-            acquired = True
-            db = self._db_for(index)
-            with index.read_lock:
-                try:
-                    if db is None:
-                        path = self._random_fallback_article(index)
-                    else:
-                        path = self._random_indexed_article(index, db)
-                except (sqlite3.Error, KeyError, RuntimeError, TypeError, ValueError, IndexError) as error:
-                    raise ArticleUnavailableError(
-                        "random article selection is unavailable"
-                    ) from error
-            if not path:
-                raise ArticleNotFoundError("ZIM has no available articles")
-            return self._article_path(path)
-        finally:
-            if acquired:
-                self._release_index(index)
+        source, runtime = self._runtime_lookup(zim_name)
+        chooser = getattr(runtime, "random_article_path", None)
+        if not callable(chooser):
+            raise ArticleNotFoundError("random articles unavailable")
+        return chooser(source.key)
 
     def health(self) -> dict[str, Any]:
         """Return read-only index, archive, and capability diagnostics."""
         now = time.monotonic()
         with self._state_lock:
-            indexes = sorted(self.indexes.items())
             source_count = len(self.sources)
             embedder_loaded = self.embedder is not None
             generation = self._cache_generation
             deferred_faiss = self._defer_faiss
+            runtimes = list(self.runtimes.values())
             cached = getattr(self, "_health_cache", None)
         if (
             cached is not None
@@ -2534,90 +998,18 @@ class Search:
             return report
 
         reports: list[dict[str, Any]] = []
-        for name, index in indexes:
-            reasons: list[str] = []
-            index_dir = self.cfg.get("index_dir")
-            db_path = Path(index_dir) / f"{name}.sqlite" if index_dir else None
-            db_current = (
-                index.db_path is None
-                or db_path is None
-                or _file_signature(db_path) == index.db_signature
-            )
-            if not db_current:
-                reasons.append("index file changed since load")
-
-            record = self._ensure_catalog().get_stem_size(name, index.source_size)
-            archive_path = (
-                Path(index.zim_path)
-                if index.zim_path
-                else self._find_zim_path(name, index.source_size)
-            )
-            archive_current = (
-                archive_path is not None
-                and archive_path.exists()
-                and (record is None or bool(record.available))
-            )
-            if not archive_current:
-                reasons.append("ZIM archive unavailable")
-
-            vectors_expected = (
-                self.semantic
-                and index.done == "1"
-                and not self._defer_faiss
-            )
-            vectors_loaded = index.faiss_index is not None
-            if vectors_expected and not vectors_loaded:
-                reasons.append("semantic vectors unavailable")
-
-            fulltext_capability = (
-                bool(record.has_fulltext_index) and bool(record.available)
-                if record is not None
-                else index.ensure_searcher() is not None
-            )
-            report: dict[str, Any] = {
-                "name": name,
-                "status": "ok" if not reasons else "degraded",
-                "index_file": index.db_path is not None and db_current,
-                "archive": archive_current,
-                "capabilities": {
-                    "title": index.db_path is not None,
-                    "fulltext": fulltext_capability,
-                    "semantic": vectors_loaded,
-                    "article": archive_current,
-                },
-            }
-            if reasons:
-                report["issues"] = reasons
-
-            if record is not None:
-                report["entry_count"] = record.entry_count
-                report["homepage"] = record.homepage or None
-                report["article_count"] = record.article_count
-                report["media_count"] = record.media_count
-                if record.last_error:
-                    report["issues"] = [*reasons, record.last_error]
-                    report["status"] = "degraded"
-            elif archive_current:
-                acquired = False
-                try:
-                    self._acquire_index(index)
-                    acquired = True
-                    with index.read_lock:
-                        archive = index.ensure_open()
-                        if archive is not None:
-                            report["entry_count"] = int(archive.entry_count)
-                            try:
-                                report["homepage"] = self._resolve_article_entry(archive).path
-                            except (ArticleNotFoundError, ArticleUnavailableError):
-                                report["homepage"] = None
-                except (RuntimeError, ValueError):
-                    report["status"] = "degraded"
-                    report.setdefault("issues", []).append("archive check failed")
-                finally:
-                    if acquired:
-                        self._release_index(index)
-            reports.append(report)
-
+        for runtime in runtimes:
+            reporter = getattr(runtime, "health", None)
+            if not callable(reporter):
+                continue
+            try:
+                reports.extend(reporter())
+            except Exception as error:
+                logger.warning(
+                    "zimantic: health report failed for %s (%s)",
+                    getattr(runtime.collection, "label", "collection"),
+                    error,
+                )
         status = "ok"
         if not reports or any(report["status"] != "ok" for report in reports):
             status = "degraded"
@@ -2718,19 +1110,7 @@ class Search:
         self, available: list[SourceInfo], zim: list[str]
     ) -> list[SourceInfo]:
         wanted = set(zim)
-        selected = [source for source in available if source.key in wanted]
-        if selected:
-            return selected
-        # Until phase 03 renames the route parameter, an archive-stem/index
-        # identifier remains accepted as an internal selection fallback.
-        by_index: dict[str, SourceInfo] = {}
-        for source in available:
-            index_name = self._index_name(source)
-            if index_name:
-                by_index[index_name] = source
-        return [
-            by_index[name] for name in wanted if name in by_index
-        ]
+        return [source for source in available if source.key in wanted]
 
     def _search_scope(
         self, zim: list[str] | None
@@ -2902,12 +1282,6 @@ class Search:
             # like an absent display filter instead of returning an empty page.
             with self._state_lock:
                 known = {item.key for item in self.sources.values()}
-                by_index = {
-                    self._index_name(item): item.key
-                    for item in self.sources.values()
-                    if self._index_name(item)
-                }
-            selected = {by_index.get(item, item) for item in selected}
             selected &= known
         scoped = pool if not selected else [
             doc for doc in pool if doc.get("source_key") in selected
@@ -2990,27 +1364,32 @@ class Search:
         return list(cached.get("pool", [])), list(cached.get("sources", []))
 
     def _query_vector(self, sources: list[SourceInfo], query: str):
-        """Embed the query only when a selected local index actually has vectors.
-        A failed embedding degrades to title + full-text rather than failing."""
-        # Read once: start_embedder may swap this in from a worker thread.
+        """Embed the query only when a selected source actually has vectors.
+
+        A failed embedding degrades to title + full-text rather than failing.
+        """
         embedder = self.embedder
         if embedder is None or not self.semantic:
             return None
         with self._state_lock:
-            indexes = dict(self.indexes)
-        wants_semantic = any(
-            source.provider == "zim"
-            and self._index_name(source) in indexes
-            and indexes[self._index_name(source)].semantic
-            for source in sources
-        )
+            runtimes = dict(self.runtimes)
+        wants_semantic = False
+        for source in sources:
+            runtime = runtimes.get(source.collection_key)
+            if runtime is None:
+                continue
+            index = getattr(runtime, "indexes", {}).get(source.key)
+            if index is not None and index.semantic:
+                wants_semantic = True
+                break
         if not wants_semantic:
             return None
         try:
             return embedder.embed([f"query: {query}"])
         except Exception as error:
             logger.warning(
-                "zimantic: query embedding failed (%s); falling back to title and full-text (lexical) search",
+                "zimantic: query embedding failed (%s); falling back to title "
+                "and full-text (lexical) search",
                 error,
             )
             return None
@@ -3033,18 +1412,11 @@ class Search:
             limit = max(1, min(int(limit), 50))
         except (TypeError, ValueError):
             limit = 8
-        prefix_query = _title_prefix_query(query)
-        exact_query = _title_query(query)
-        if not prefix_query:
-            return []
         with self._state_lock:
             available = [
                 source for source in self.sources.values() if source.searchable
             ]
-        # Honor the requested ZIM scope directly instead of going through
-        # `_search_scope`, which promotes small-library selections to every
-        # source for cache sharing and falls back to all sources when a name is
-        # unknown.
+            runtimes = dict(self.runtimes)
         sources = available if zim is None else self._select_sources(available, zim)
         suggestions: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -3052,67 +1424,24 @@ class Search:
             remaining = limit - len(suggestions)
             if remaining <= 0:
                 break
-            if source.provider != "zim":
-                continue
-            index_name = self._index_name(source)
-            if not index_name:
-                continue
-            with self._state_lock:
-                index = self.indexes.get(index_name)
-            if index is None:
+            runtime = runtimes.get(source.collection_key)
+            if runtime is None:
                 continue
             try:
-                self._acquire_index(index)
-            except RuntimeError:
-                continue
-            try:
-                db = self._db_for(index)
-                if db is None:
-                    continue
-                # Redirect rows and their targets both match the title query
-                # but resolve to the same article. Fetch extra candidates and
-                # widen the window until the limit is filled or the index runs
-                # out, so collapsing duplicates cannot leave the list short.
-                query_text = prefix_query
-                window = remaining
-                max_window = max(remaining * 8, 64)
-                while True:
-                    rows = db.execute(
-                        "SELECT rowid FROM docs WHERE docs MATCH ? "
-                        "ORDER BY rank LIMIT ?",
-                        (query_text, window),
-                    ).fetchall()
-                    if not rows and query_text == prefix_query:
-                        # Exact token matching catches truncated or base forms
-                        # only when the prefix form finds nothing.
-                        query_text = exact_query
-                        continue
-                    rowids = [int(row[0]) for row in rows]
-                    docs = self._fetch_docs(source, db, set(rowids))
-                    for rowid in rowids:
-                        doc = docs.get(rowid)
-                        if doc is None:
-                            continue
-                        doc_id = str(doc.get("id") or "")
-                        if doc_id in seen_ids:
-                            continue
-                        seen_ids.add(doc_id)
-                        suggestions.append(doc)
-                    if (
-                        len(rows) < window
-                        or len(suggestions) >= limit
-                        or window >= max_window
-                    ):
-                        break
-                    window = min(max_window, window * 2)
-            except sqlite3.Error as error:
+                items = runtime.suggest(source, query, remaining)
+            except Exception as error:
                 logger.warning(
                     "zimantic: title suggestions unavailable for %s: %s",
-                    index_name,
+                    source.key,
                     error,
                 )
-            finally:
-                self._release_index(index)
+                continue
+            for doc in items:
+                doc_id = str(doc.get("id") or "")
+                if doc_id in seen_ids:
+                    continue
+                seen_ids.add(doc_id)
+                suggestions.append(doc)
         return suggestions[:limit]
 
     def search_page(
@@ -3746,456 +2075,22 @@ class Search:
             limit=limit,
             deadline=deadline,
         )
-        runtime = getattr(self, "runtimes", {}).get(source.collection_key)
-        if runtime is not None:
-            try:
-                return runtime.search(source, request)
-            except Exception as error:  # provider failure is source-scoped
-                return SourceResult(
-                    source=source,
-                    error=f"search failed: {error}",
-                    status="error",
-                )
-        return self._dispatch_source(source, request)
-
-    def _dispatch_source(self, source: SourceInfo, request: SourceQuery) -> SourceResult:
-        """Provider-neutral dispatch used by the runtime adapter."""
-        if source.provider == "zim":
-            return self._search_local(
-                source,
-                request.query,
-                request.title_query,
-                request.fulltext_query,
-                request.query_vector,
-                request.limit,
-                request.deadline,
-            )
-        if source.provider == "kiwix":
-            return self._search_kiwix(
-                source,
-                request.fulltext_query or request.query,
-                request.limit,
-                request.deadline,
-            )
-        return SourceResult(
-            source=source,
-            error=f"unsupported provider {source.provider!r}",
-            status="error",
-        )
-
-    def _search_local(
-        self,
-        source: SourceInfo,
-        query: str,
-        title_query: str,
-        fulltext_query: str,
-        query_vector,
-        limit: int,
-        deadline: float | None = None,
-    ) -> SourceResult:
-        if deadline is not None and time.monotonic() >= deadline:
-            return SourceResult(
-                source=source, error="search deadline expired", status="cancelled"
-            )
-        index_name = self._index_name(source)
         with self._state_lock:
-            index = self.indexes.get(index_name) if index_name else None
-            if index is None:
-                return SourceResult(
-                    source=source,
-                    error="source is not indexed",
-                    status="error",
-                )
-            try:
-                self._acquire_index(index)
-            except RuntimeError as error:
-                return SourceResult(
-                    source=source, error=str(error), status="cancelled"
-                )
-        try:
-            return self._search_local_locked(
-                source,
-                query,
-                title_query,
-                fulltext_query,
-                query_vector,
-                limit,
-                index,
-            )
-        finally:
-            self._release_index(index)
-
-    def _search_local_locked(
-        self,
-        source: SourceInfo,
-        query: str,
-        title_query: str,
-        fulltext_query: str,
-        query_vector,
-        limit: int,
-        index: _LocalIndex,
-    ) -> SourceResult:
-        count = max(self.candidate_count, limit)
-        db = self._db_for(index)
-        semantic: list[tuple[float, dict[str, Any]]] = []
-        keyword: list[tuple[float, dict[str, Any]]] = []
-        fulltext: list[tuple[int, dict[str, Any]]] = []
-        rowids: set[int] = set()
-        archive_entries: dict[int, Any] = {}
-        fulltext_hits: list[tuple[int, dict[str, Any]]] = []
-        errors: list[str] = []
-
-        # FAISS search is read-only and thread-safe; skip it when this index has
-        # no vectors or the query could not be embedded (fast mode).
-        if query_vector is not None and index.faiss_index is not None:
-            try:
-                similarities, ids = index.faiss_index.search(query_vector, count)
-                semantic_ids = [
-                    (float(score), int(rowid))
-                    for score, rowid in zip(similarities[0], ids[0])
-                    if rowid >= 0
-                ]
-                rowids.update(rowid for _, rowid in semantic_ids)
-            except Exception as error:
-                errors.append(f"semantic search unavailable: {error}")
-                semantic_ids = []
-        else:
-            semantic_ids = []
-
-        if title_query and db is not None:
-            title_search = (
-                "SELECT rowid, bm25(docs) FROM docs "
-                "WHERE docs MATCH ? ORDER BY rank LIMIT ?"
-            )
-            title_rows = db.execute(title_search, (title_query, count)).fetchall()
-            if not title_rows:
-                # Exact title matching found nothing; retry with prefix tokens so a
-                # truncated or base-form word ("chang", "change" -> "Changes") still
-                # surfaces its title without broadening the common full-word case.
-                title_rows = db.execute(
-                    title_search, (_title_prefix_query(query), count)
-                ).fetchall()
-            for rowid, bm25 in title_rows:
-                rowids.add(int(rowid))
-                keyword.append((float(bm25), {"rowid": int(rowid)}))
-
-        fulltext_rows: list[tuple[int, int]] = []
-        searcher = None
-        helper_results = (
-            self.fulltext_pool is not None
-            and callable(getattr(self.fulltext_pool, "search_results", None))
-        )
-        archive = None if helper_results else index.ensure_open()
-        if helper_results:
-            # The helper already validates the native archive and returns the
-            # result title. Avoid opening a second copy in the server process.
-            fulltext_capable = bool(
-                index.zim_path and index.has_fulltext_index is not False
-            )
-        elif self.fulltext_pool is not None:
-            fulltext_capable = bool(
-                archive is not None
-                and index.zim_path
-                and index.has_fulltext_index is not False
-                and getattr(archive, "has_fulltext_index", False)
-            )
-        else:
-            searcher = index.ensure_searcher()
-            fulltext_capable = searcher is not None and archive is not None
-        if db is None and not fulltext_capable and index.faiss_index is None:
-            # Nothing can answer this source: no SQLite index, no libzim
-            # full-text searcher and no vectors. Report an error instead of a
-            # successful empty result so a missing/corrupt archive is visible.
+            runtime = self.runtimes.get(source.collection_key)
+        if runtime is None:
             return SourceResult(
                 source=source,
-                error=index.error or "ZIM archive is unavailable",
+                error=f"no runtime for collection {source.collection_key!r}",
                 status="error",
             )
-        if fulltext_capable:
-            paths: list[str] = []
-            if helper_results:
-                # Native libzim iteration aborts the interpreter on some
-                # corrupt full-text indexes, so it runs in a helper process.
-                native_results = self.fulltext_pool.search_results(
-                    index.zim_path or "",
-                    fulltext_query or query,
-                    count,
-                    index.zim_signature,
-                )
-                if native_results is None:
-                    errors.append("full-text search unavailable")
-                else:
-                    for rank, result in enumerate(native_results, 1):
-                        if not isinstance(result, dict):
-                            continue
-                        path = str(result.get("path") or "")
-                        if not path:
-                            continue
-                        fulltext_hits.append(
-                            (
-                                rank,
-                                self._result_doc(
-                                    source,
-                                    path,
-                                    str(result.get("title") or path),
-                                ),
-                            )
-                        )
-            elif self.fulltext_pool is not None:
-                # Compatibility with lightweight test doubles and older pool
-                # implementations that only return paths.
-                native_paths = self.fulltext_pool.search(
-                    index.zim_path or "",
-                    fulltext_query or query,
-                    count,
-                    index.zim_signature,
-                )
-                if native_paths is None:
-                    errors.append("full-text search unavailable")
-                else:
-                    paths = native_paths
-            elif searcher is not None:
-                # libzim's Searcher is not documented as thread-safe: serialize it.
-                with index.lock:
-                    try:
-                        search = searcher.search(
-                            Query().set_query(fulltext_query or query)
-                        )
-                        paths = search_paths(search, 0, count)
-                    except (RuntimeError, ValueError) as error:
-                        errors.append(f"full-text search unavailable: {error}")
-            if archive is not None:
-                for rank, path in enumerate(paths, 1):
-                    try:
-                        entry = archive.get_entry_by_path(path)
-                        rowid = entry._index
-                        rowids.add(rowid)
-                        archive_entries[rowid] = entry
-                        fulltext_rows.append((rank, rowid))
-                    except (KeyError, RuntimeError, ValueError):
-                        continue
-
-        docs = (
-            self._fetch_docs(source, db, rowids)
-            if db is not None
-            else self._fetch_archive_docs(source, archive, archive_entries)
-        )
-        keyword = [(score, docs[row["rowid"]]) for score, row in keyword if row["rowid"] in docs]
-        for rank, rowid in fulltext_rows:
-            doc = docs.get(rowid)
-            if doc:
-                fulltext.append((rank, doc))
-        fulltext.extend(fulltext_hits)
-        # Keep weak meaning matches only when this source has no lexical
-        # candidates. With title or full-text hits the cosine floor removes
-        # noise; without them it used to turn a meaning-only query into an
-        # empty result list, because every semantic candidate was discarded.
-        if keyword or fulltext:
-            minimum_similarity = _float_config(
-                self.cfg,
-                "min_cosine_similarity",
-                DEFAULT_MIN_COSINE_SIMILARITY,
-                -1.0,
-                1.0,
+        try:
+            return runtime.search(source, request)
+        except Exception as error:  # provider failure is source-scoped
+            return SourceResult(
+                source=source,
+                error=f"search failed: {error}",
+                status="error",
             )
-            semantic_ids = [
-                (score, rowid)
-                for score, rowid in semantic_ids
-                if score >= minimum_similarity
-            ]
-        for score, rowid in semantic_ids:
-            doc = docs.get(rowid)
-            if doc:
-                semantic.append((score, doc))
-
-        items = self._source_items(semantic, keyword, fulltext)
-        return SourceResult(
-            source=source,
-            items=items,
-            semantic=semantic,
-            keyword=keyword,
-            fulltext=fulltext,
-            error="; ".join(errors) or None,
-            status="partial" if errors else "ok",
-        )
-
-    def _result_doc(
-        self, source: SourceInfo, path: str, title: str | None
-    ) -> dict[str, Any]:
-        """One local result document shared by indexed and archive fallbacks."""
-        return {
-            "id": encode_document_id(source.key, path),
-            "source_key": source.key,
-            "source": _source_title(source),
-            "source_icon": source.icon_url,
-            "title": title or path,
-            "lead": "",
-            "path": path,
-            "mimetype": None,
-            "url": (
-                f"{self.web_base_path}/content/"
-                f"{quote(source.key, safe='')}/"
-                f"{quote(path, safe='/')}"
-            ),
-        }
-
-    def _fetch_archive_docs(
-        self,
-        source: SourceInfo,
-        archive: Archive | None,
-        entries: dict[int, Any],
-    ) -> dict[int, dict[str, Any]]:
-        """Build result documents directly from native ZIM search hits."""
-        if archive is None:
-            return {}
-        docs: dict[int, dict[str, Any]] = {}
-        for rowid, entry in entries.items():
-            try:
-                target = self._resolve_article_entry(archive, entry.path)
-            except (ArticleNotFoundError, ArticleUnavailableError):
-                continue
-            page_path = target.path
-            title = getattr(target, "title", None) or page_path
-            docs[rowid] = self._result_doc(source, page_path, title)
-        return docs
-
-    def _fetch_docs(
-        self,
-        source: SourceInfo,
-        db: sqlite3.Connection,
-        rowids: set[int],
-    ) -> dict[int, dict[str, Any]]:
-        if not rowids:
-            return {}
-        rows: dict[int, tuple[Any, ...]] = {}
-        def fetch(ids) -> None:
-            values = list(ids)
-            for start in range(0, len(values), 900):
-                batch = values[start:start + 900]
-                placeholders = ",".join("?" for _ in batch)
-                query = (
-                    "SELECT rowid, title, path, target FROM docs "
-                    f"WHERE rowid IN ({placeholders})"
-                )
-                rows.update({int(row[0]): row for row in db.execute(query, batch)})
-
-        values = list(rowids)
-        fetch(values)
-        # Older indexes may contain redirect-to-redirect rows, so follow every
-        # target chain before rendering the result. Indexing now stores the
-        # final target, but this keeps existing indexes correct too.
-        pending = {
-            int(row[3]) for row in rows.values() if row[3] is not None
-        } - set(rows)
-        seen: set[int] = set()
-        for _ in range(32):
-            if not pending:
-                break
-            fetch(pending)
-            seen.update(pending)
-            pending = {
-                int(row[3]) for row in rows.values() if row[3] is not None
-            } - set(rows) - seen
-
-        def final_row(rowid: int):
-            current_id = rowid
-            visited: set[int] = set()
-            for _ in range(32):
-                row = rows.get(current_id)
-                if row is None:
-                    return None
-                if row[3] is None:
-                    return current_id, row
-                visited.add(current_id)
-                next_id = int(row[3])
-                if next_id in visited:
-                    return None
-                current_id = next_id
-            return None
-
-        docs: dict[int, dict[str, Any]] = {}
-        for rowid in values:
-            resolved = final_row(rowid)
-            if not resolved:
-                continue
-            _, (_, title, path, _) = resolved
-            docs[rowid] = self._result_doc(source, path, title)
-        return docs
-
-    def _extract_previews(
-        self,
-        local_name: str,
-        docs: list[dict[str, Any]],
-    ) -> dict[str, str]:
-        """Extract previews for one local source while holding its archive lock."""
-        with self._state_lock:
-            index = self.indexes.get(local_name)
-        if index is None:
-            return {doc["id"]: "" for doc in docs}
-        archive = index.ensure_open()
-        if archive is None:
-            return {doc["id"]: "" for doc in docs}
-
-        try:
-            self._acquire_index(index)
-        except RuntimeError:
-            return {doc["id"]: "" for doc in docs}
-
-        previews: dict[str, str] = {}
-        try:
-            with index.read_lock:
-                preview_bytes = min(self.max_html_bytes, PREVIEW_HTML_BYTES)
-                for doc in docs:
-                    try:
-                        entry = archive.get_entry_by_path(doc["path"])
-                        try:
-                            item = entry.get_item()
-                            entry_size = int(getattr(item, "size", 0) or 0)
-                            if not doc.get("mimetype"):
-                                doc["mimetype"] = (
-                                    getattr(item, "mimetype", None)
-                                    or "application/octet-stream"
-                                ).split(";", 1)[0].strip().lower()
-                        except (AttributeError, TypeError, ValueError):
-                            entry_size = 0
-                        row = read_entry(
-                            archive,
-                            entry._index,
-                            max_html_bytes=preview_bytes,
-                            max_entry_bytes=self.max_article_bytes,
-                            max_preview_chars=self.preview_chars,
-                            timeout=DEFAULT_PARSE_TIMEOUT,
-                        )
-                        excerpt = _entry_excerpt(row)
-                        if (
-                            not excerpt
-                            and entry_size > preview_bytes
-                            and preview_bytes < self.max_html_bytes
-                        ):
-                            # The bounded prefix had no readable text; fall
-                            # back to the full parser limit for this page.
-                            row = read_entry(
-                                archive,
-                                entry._index,
-                                max_html_bytes=self.max_html_bytes,
-                                max_entry_bytes=self.max_article_bytes,
-                                max_preview_chars=self.preview_chars,
-                                timeout=DEFAULT_PARSE_TIMEOUT,
-                            )
-                            excerpt = _entry_excerpt(row)
-                    except (KeyError, OSError, RuntimeError, ValueError) as error:
-                        logger.warning(
-                            "%s: preview unavailable for %s (%s)",
-                            local_name,
-                            doc["path"],
-                            error,
-                        )
-                        previews[doc["id"]] = ""
-                        continue
-                    previews[doc["id"]] = self._preview(excerpt)
-        finally:
-            self._release_index(index)
-        return previews
 
     def _hydrate_results(
         self,
@@ -4207,6 +2102,7 @@ class Search:
         docs = docs[: self.preview_limit]
         with self._state_lock:
             sources = dict(self.sources)
+            runtimes = dict(self.runtimes)
         preview_cache = self.preview_cache
         if preview_cache is None:
             preview_cache = QueryCache(0, 0)
@@ -4215,37 +2111,54 @@ class Search:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for doc in docs:
             source = sources.get(doc.get("source_key"))
-            if source is None or source.provider != "zim":
+            if source is None:
                 continue
-            index_name = self._index_name(source)
-            if not index_name:
-                continue
-            key = (source.key, doc["path"])
-            cached = preview_cache.get(key)
+            cached = preview_cache.get((source.key, doc["path"]))
             if cached is not None:
                 doc["lead"] = cached
                 continue
             if doc.get("lead"):
                 continue
-            grouped.setdefault(index_name, []).append(doc)
+            grouped.setdefault(source.key, []).append(doc)
+
+        def _preview_group(source_key: str, source_docs: list[dict[str, Any]]):
+            source = sources.get(source_key)
+            runtime = runtimes.get(source.collection_key) if source else None
+            if source is None or runtime is None:
+                return source_key, source_docs, {}
+            previews: dict[str, tuple[str, str | None]] = {}
+            for doc in source_docs:
+                try:
+                    lead, mimetype = runtime.preview(
+                        source,
+                        doc,
+                        max_chars=self.preview_chars,
+                        max_bytes=PREVIEW_HTML_BYTES,
+                        deadline=None,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "%s: preview extraction failed (%s)", source.key, error
+                    )
+                    lead, mimetype = "", doc.get("mimetype")
+                previews[doc["id"]] = (lead, mimetype)
+            return source_key, source_docs, previews
 
         futures = {
-            self._executor.submit(
-                self._extract_previews, local_name, source_docs
-            ): (local_name, source_docs)
-            for local_name, source_docs in grouped.items()
+            self._executor.submit(_preview_group, source_key, source_docs): (
+                source_key,
+                source_docs,
+            )
+            for source_key, source_docs in grouped.items()
         }
         for future in as_completed(futures):
-            local_name, source_docs = futures[future]
-            try:
-                previews = future.result()
-            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
-                logger.warning("%s: preview extraction failed (%s)", local_name, error)
-                previews = {doc["id"]: "" for doc in source_docs}
+            source_key, source_docs, previews = future.result()
+            source = sources.get(source_key)
             for doc in source_docs:
-                lead = previews.get(doc["id"], "")
+                lead, mimetype = previews.get(doc["id"], ("", doc.get("mimetype")))
                 doc["lead"] = lead
-                source = sources.get(doc.get("source_key"))
+                if mimetype:
+                    doc["mimetype"] = mimetype
                 if source is not None:
                     preview_cache.put((source.key, doc["path"]), lead)
 
@@ -4256,26 +2169,14 @@ class Search:
         pool: list[dict[str, Any]],
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Fill MIME types and run the content-phrase check in one archive pass.
-
-        Reading each local pool entry once (instead of a phrase pass followed
-        by a separate MIME pass) is what keeps a multi-word search from
-        re-reading the same articles. Metadata and the phrase flag are written
-        onto the source-level docs too, so a re-rank triggered by a phrase hit
-        inherits them without touching the archive again. Returns a re-ranked
-        pool when any phrase matched, otherwise the pool unchanged.
-        """
+        """Fill MIME types and run the content-phrase check through runtimes."""
         phrase_words = _phrase_words(query)
         query_terms = _query_terms(query)
         phrase_active = len(phrase_words) >= 2 and bool(pool)
         _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
-        max_html_bytes = self.max_html_bytes
-        max_phrase_bytes = self.max_article_bytes
-        indexes = getattr(self, "indexes", {})
+        with self._state_lock:
+            runtimes = dict(self.runtimes)
 
-        # Check the phrase in article text for the highest-ranked candidates,
-        # whichever retrieval list found them. Previously only full-text hits
-        # were checked, so an exact phrase in a semantic/title hit was ignored.
         phrase_ids: set[str] = set()
         if phrase_active:
             for result in pool:
@@ -4284,17 +2185,13 @@ class Search:
                 source = source_by_key.get(result.get("source_key"))
                 if source is None:
                     continue
-                index_name = self._index_name(source)
-                if not index_name:
+                runtime = runtimes.get(source.collection_key)
+                if runtime is None:
+                    continue
+                index = getattr(runtime, "indexes", {}).get(source.key)
+                if index is None or index.ensure_open() is None:
                     continue
                 if _phrase(query_terms, _content_terms(result["title"])):
-                    # The title already carries the phrase; that signal is
-                    # already in the ranking, so skip the content read.
-                    continue
-                index = indexes.get(index_name)
-                if index is None:
-                    continue
-                if index.ensure_open() is None:
                     continue
                 phrase_ids.add(result["id"])
 
@@ -4303,104 +2200,45 @@ class Search:
             source = source_by_key.get(result.get("source_key"))
             if source is None:
                 continue
-            index_name = self._index_name(source)
-            if not index_name:
-                continue
-            grouped.setdefault(index_name, []).append(result)
+            grouped.setdefault(source.key, []).append(result)
 
-        def enrich_source(local_name: str, result_docs: list[dict[str, Any]]) -> bool:
-            index = indexes.get(local_name)
-            if index is None:
+        def enrich_source(source_key: str, result_docs: list[dict[str, Any]]) -> bool:
+            source = source_by_key.get(source_key)
+            if source is None:
                 return False
-            archive = index.ensure_open()
-            if archive is None:
+            runtime = runtimes.get(source.collection_key)
+            if runtime is None:
                 return False
-            try:
-                self._acquire_index(index)
-            except RuntimeError:
+            enricher = getattr(runtime, "enrich", None)
+            if not callable(enricher):
                 return False
-            source_found = False
-            try:
-                with index.read_lock:
-                    for result in result_docs:
-                        is_phrase_candidate = result["id"] in phrase_ids
-                        if not is_phrase_candidate and result.get("mimetype"):
-                            continue  # nothing left to learn about this doc
-                        try:
-                            item = archive.get_entry_by_path(result["path"]).get_item()
-                            mimetype = (
-                                item.mimetype or "application/octet-stream"
-                            ).split(";", 1)[0].strip().lower()
-                        except (KeyError, RuntimeError, ValueError):
-                            continue
-                        source_doc = docs.get(result["id"])
-                        result["mimetype"] = mimetype
-                        if source_doc is not None:
-                            source_doc["mimetype"] = mimetype
-                        if not is_phrase_candidate or mimetype not in _PHRASE_MIMETYPES:
-                            continue
-                        # libzim decompresses the whole item when .content is
-                        # read; slice after that is too late. Honor the same
-                        # serving limit as /article so one huge entry cannot
-                        # monopolize memory during a phrase check.
-                        if int(getattr(item, "size", 0) or 0) > max_phrase_bytes:
-                            continue
-                        try:
-                            raw = bytes(item.content[:max_html_bytes])
-                        except (KeyError, RuntimeError, TypeError, ValueError):
-                            continue
-                        hit = _phrase_in_word_stream(
-                            raw.decode("utf-8", "ignore").casefold(), phrase_words
-                        )
-                        if source_doc is not None:
-                            source_doc["_content_phrase"] = hit
-                        if hit:
-                            source_found = True
-            finally:
-                self._release_index(index)
-            return source_found
+            return bool(
+                enricher(
+                    source,
+                    result_docs,
+                    docs,
+                    phrase_ids=phrase_ids,
+                    phrase_words=phrase_words,
+                    max_html_bytes=self.max_html_bytes,
+                    max_article_bytes=self.max_article_bytes,
+                )
+            )
 
         executor = getattr(self, "_executor", None)
         found = False
         if executor is not None and len(grouped) > 1:
             futures = [
-                executor.submit(enrich_source, local_name, result_docs)
-                for local_name, result_docs in grouped.items()
+                executor.submit(enrich_source, source_key, result_docs)
+                for source_key, result_docs in grouped.items()
             ]
             for future in as_completed(futures):
                 if future.result():
                     found = True
         else:
-            for local_name, result_docs in grouped.items():
-                if enrich_source(local_name, result_docs):
+            for source_key, result_docs in grouped.items():
+                if enrich_source(source_key, result_docs):
                     found = True
         return self._rank_results(source_results, query, limit) if found else pool
-
-    def _preview(self, text: str) -> str:
-        return truncate_at_word_boundary(text, self.preview_chars)
-
-    @staticmethod
-    def _source_items(
-        semantic: list[tuple[float, dict[str, Any]]],
-        keyword: list[tuple[float, dict[str, Any]]],
-        fulltext: list[tuple[int, dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
-        return source_items(semantic, keyword, fulltext)
-
-    def _search_kiwix(
-        self, source: SourceInfo, query: str, limit: int, deadline: float | None = None
-    ) -> SourceResult:
-        return search_kiwix(
-            source,
-            query,
-            limit,
-            self.cfg,
-            self.candidate_count,
-            self.source_timeout,
-            self._preview,
-            urlopen_fn=urlopen,
-            deadline=deadline,
-        )
 
     def _rank_results(
         self,

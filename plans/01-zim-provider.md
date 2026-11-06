@@ -1,6 +1,6 @@
 # Phase 01 — ZIM provider
 
-Status: proposed.
+Status: implemented.
 
 ## Goal
 

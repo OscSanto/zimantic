@@ -51,6 +51,9 @@ class _LocalIndex:
     has_fulltext_index: bool | None = None
     error: str | None = None
     open_failed: bool = field(default=False, repr=False, compare=False)
+    # Immutable generation lease pinned for the lifetime of this index handle.
+    lease: Any | None = field(default=None, repr=False, compare=False)
+    generation: str | None = None
 
     def ensure_open(self) -> Archive | None:
         """Open the archive on first use, not at server startup."""
@@ -109,6 +112,84 @@ class _LocalIndex:
     def semantic(self) -> bool:
         """True when vectors are loaded and semantic search can run."""
         return self.faiss_index is not None
+
+    def acquire(self) -> None:
+        """Pin this index for one active reader."""
+        with self._lifecycle:
+            if self._retired:
+                raise RuntimeError("index was retired during reload")
+            self._active_searches += 1
+
+    def release(self) -> None:
+        """Release one active reader, closing a retired index when idle."""
+        with self._lifecycle:
+            self._active_searches -= 1
+            should_close = (
+                self._retired
+                and self._active_searches == 0
+                and not self._closed
+            )
+            if should_close:
+                self._closed = True
+                connections = [self.db, *self._conns]
+                self._release_native_resources()
+            else:
+                connections = []
+        if connections:
+            self._close_connections(connections)
+            self._release_lease()
+
+    def close(self) -> None:
+        """Retire and close this index after active readers finish."""
+        with self._lifecycle:
+            self._retired = True
+            if self._active_searches or self._closed:
+                return
+            self._closed = True
+            connections = [self.db, *self._conns]
+            self._release_native_resources()
+        self._close_connections(connections)
+        self._release_lease()
+
+    def _release_native_resources(self) -> None:
+        """Drop native handles so Windows can replace the files."""
+        self.searcher = None
+        self.archive = None
+        self.faiss_index = None
+        self.random_article_ids = None
+
+    @staticmethod
+    def _close_connections(connections: list[sqlite3.Connection | None]) -> None:
+        for conn in connections:
+            if conn is None:
+                continue
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+    def _release_lease(self) -> None:
+        lease = self.lease
+        self.lease = None
+        if lease is not None:
+            try:
+                lease.close()
+            except Exception:
+                pass
+
+    def db_for_thread(self) -> sqlite3.Connection | None:
+        """A read-only SQLite connection per worker thread."""
+        if self.db_path is None:
+            return self.db
+        conn = getattr(self._thread, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                self.db_path, uri=True, check_same_thread=False
+            )
+            self._thread.conn = conn
+            with self.lock:
+                self._conns.append(conn)
+        return conn
 
 
 def _nprobe(faiss_index: Any, cfg: dict) -> int:

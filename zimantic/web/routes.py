@@ -17,7 +17,6 @@ from ..search import (
     SearchQueryError,
 )
 from ..searching.query import MAX_QUERY_LENGTH, STOPWORDS
-from ..searching.sources import _book_identity, _zim_key
 from . import app as web_app
 
 
@@ -319,7 +318,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             )
         return {
             "status": "ok",
-            "indexes": search_class.local_names(),
+            "indexes": search_class.source_keys(),
             "sources": len(search_class.source_dicts()),
             "cache": search_class.cache.stats(),
         }

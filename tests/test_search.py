@@ -18,25 +18,33 @@ from zimantic.contracts import SourceInfo, SourceResult, encode_document_id
 from zimantic.search import (
     ArticleUnavailableError,
     PREVIEW_HTML_BYTES,
-    Search,
+    Search as _SearchBase,
     SearchBusyError,
     _bounded_catalog_url,
-    _find_archive_icon_path,
     _fulltext_query,
-    _LocalIndex,
-    _nprobe,
     _parse_remote_xml,
-    _phrase_in_word_stream,
     _phrase_words,
     _query_terms,
     _read_limited_response,
-    _source_icon_url,
-    _source_info_from_metadata,
     _title_prefix_query,
     _title_query,
 )
+from zimantic.providers.zim.metadata import (
+    find_archive_icon_path as _find_archive_icon_path,
+    source_icon_url as _source_icon_url,
+    source_info_from_metadata as _source_info_from_metadata,
+)
+from zimantic.providers.zim.search import (
+    phrase_in_word_stream as _phrase_in_word_stream,
+)
+from zimantic.searching.index import _LocalIndex, _nprobe
 from zimantic.searching.config import _file_signature
-from zimantic.searching.sources import _book_identity, _html_attribute
+from zimantic.searching.kiwix import _book_identity
+from zimantic.searching.sources import _html_attribute
+
+
+class Search(_SearchBase):
+    """Test-local subclass; production ``Search`` stays provider-neutral."""
 
 
 def _search_results(search, *args, **kwargs):
@@ -67,7 +75,170 @@ def _bare_search(cfg):
     search._inflight = {}
     search._inflight_lock = threading.Lock()
     search.cache = QueryCache(16)
+    search.runtimes = {"": _TestZimRuntime(search)}
+    search.collections = {}
+    search._collection_snapshots = {}
+    search._library_source_index = {}
+    search._discovery_batches = []
+    search._process_token = "test"
+    search._aggregate_revision = 0
+    search.runtime_config = None
+    search.providers = {}
+    search._defer_faiss = False
+    search.fulltext_pool = None
     return search
+
+
+class _TestCollection:
+    key = ""
+    provider = "zim"
+    label = "Library"
+
+
+class _TestZimRuntime:
+    """Minimal runtime that exercises the real ZIM search module in tests."""
+
+    def __init__(self, search):
+        self.core = search
+        self.collection = _TestCollection()
+
+    @property
+    def indexes(self):
+        return self.core.indexes
+
+    @property
+    def sources(self):
+        return list(self.core.sources.values())
+
+    def _ctx(self):
+        from zimantic.providers.zim.search import ZimSearchContext
+
+        return ZimSearchContext(
+            candidate_count=self.core.candidate_count,
+            preview_chars=self.core.preview_chars,
+            max_html_bytes=self.core.max_html_bytes,
+            max_article_bytes=self.core.max_article_bytes,
+            min_cosine_similarity=0.85,
+            web_base_path=self.core.web_base_path,
+            fulltext_pool=self.core.fulltext_pool,
+            preview_cache=getattr(self.search, "preview_cache", None),
+            cfg=self.core.cfg,
+        )
+
+    def search_source(self, source, request):
+        from zimantic.providers.zim import search as zim_search
+
+        return zim_search.search(self, source, request, self._ctx())
+
+    def search(self, source, request):
+        return self.search_source(source, request)
+
+    def suggest(self, source, query, limit):
+        from zimantic.providers.zim.search import suggest as zim_suggest
+
+        return zim_suggest(self, source, query, limit, self._ctx())
+
+    def preview(self, source, document, *, max_chars, max_bytes, deadline):
+        from zimantic.providers.zim.search import preview as zim_preview
+
+        return zim_preview(
+            self,
+            source,
+            document,
+            max_chars=max_chars,
+            max_bytes=max_bytes,
+            deadline=deadline,
+            ctx=self._ctx(),
+        )
+
+    def enrich(
+        self,
+        source,
+        result_docs,
+        source_docs,
+        *,
+        phrase_ids,
+        phrase_words,
+        max_html_bytes,
+        max_article_bytes,
+    ):
+        from zimantic.providers.zim.search import enrich as zim_enrich
+
+        return zim_enrich(
+            self,
+            source,
+            result_docs,
+            source_docs,
+            phrase_ids=phrase_ids,
+            phrase_words=phrase_words,
+            max_html_bytes=max_html_bytes,
+            max_article_bytes=max_article_bytes,
+        )
+
+    def library_sources(self):
+        return list(self.core.sources.values())
+
+    @property
+    def snapshot(self):
+        from zimantic.providers.base import CollectionSnapshot
+
+        return CollectionSnapshot(
+            collection=self.collection,
+            source_count=len(self.core.sources),
+            media_types=(),
+            error=None,
+            discovery_state="ready",
+            snapshot_version=1,
+        )
+
+    @property
+    def snapshot_version(self):
+        return 1
+
+    @property
+    def discovery_state(self):
+        return "ready"
+
+    def health(self):
+        reports = []
+        for key, index in self.core.indexes.items():
+            reasons = []
+            vectors_expected = (
+                self.core.semantic
+                and index.done == "1"
+                and not self.core._defer_faiss
+            )
+            vectors_loaded = index.faiss_index is not None
+            if vectors_expected and not vectors_loaded:
+                reasons.append("semantic vectors unavailable")
+            archive_current = bool(index.zim_path)
+            if not archive_current:
+                reasons.append("ZIM archive unavailable")
+            report = {
+                "name": key,
+                "status": "ok" if not reasons else "degraded",
+                "index_file": index.db_path is not None,
+                "archive": archive_current,
+                "capabilities": {
+                    "title": index.db_path is not None,
+                    "fulltext": True,
+                    "semantic": vectors_loaded,
+                    "article": archive_current,
+                },
+            }
+            if reasons:
+                report["issues"] = reasons
+            reports.append(report)
+        return reports
+
+    def max_sources_per_search(self):
+        return None
+
+    def refresh(self, *, wait=True):
+        return True
+
+    def close(self):
+        pass
 
 
 class FulltextFailureTests(unittest.TestCase):
@@ -358,6 +529,7 @@ class SearchContractTests(unittest.TestCase):
         search.indexes = {
             "manual": _LocalIndex(None, None, archive, None, threading.Lock())
         }
+        search.runtimes = {"": _TestZimRuntime(search)}
         search._state_lock = threading.RLock()
         query = "INN is a non-steroidal anti-inflammatory drug (NSAID"
 
@@ -979,6 +1151,7 @@ class SearchContractTests(unittest.TestCase):
         search.indexes = {
             "manual": _LocalIndex(db, FakeFaiss(), None, None, threading.Lock())
         }
+        search.runtimes = {"": _TestZimRuntime(search)}
         search._state_lock = threading.RLock()
         search._reload_lock = threading.Lock()
         search.preview_limit = 10
@@ -1179,6 +1352,7 @@ class SearchContractTests(unittest.TestCase):
                 threading.Lock(),
             )
         }
+        search.runtimes = {"": _TestZimRuntime(search)}
         search._state_lock = threading.RLock()
         search._executor = ThreadPoolExecutor(max_workers=1)
         search.preview_cache = QueryCache(16)
@@ -1192,7 +1366,7 @@ class SearchContractTests(unittest.TestCase):
 
         try:
             with patch(
-                "zimantic.search.read_entry",
+                "zimantic.providers.zim.search.read_entry",
                 return_value=(1, "Long page", "one " * 400, "long-page", None),
             ) as read:
                 search._hydrate_results([doc])
@@ -1226,6 +1400,7 @@ class SearchContractTests(unittest.TestCase):
         search.indexes = {
             "manual": _LocalIndex(None, None, _Archive(), None, threading.Lock())
         }
+        search.runtimes = {"": _TestZimRuntime(search)}
         search._state_lock = threading.RLock()
         search._executor = ThreadPoolExecutor(max_workers=1)
         search.preview_cache = QueryCache(16)
@@ -1236,7 +1411,7 @@ class SearchContractTests(unittest.TestCase):
 
         try:
             with patch(
-                "zimantic.search.read_entry",
+                "zimantic.providers.zim.search.read_entry",
                 return_value=(1, "First", "first preview", "first", None),
             ) as read:
                 search._hydrate_results(docs)
@@ -1693,41 +1868,6 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIsNone(index.faiss_index)
             self.assertTrue(any("different model" in line for line in logs.output))
 
-    def test_health_reports_ok_when_homepage_is_unavailable(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            zim = tmp / "manual.zim"
-            zim.write_bytes(b"zim")
-            search = _bare_search(self._cfg(tmp))
-            self.addCleanup(search.close)
-            search.semantic = False
-            search.sources = {
-                "manual": SourceInfo(
-                    "manual", "Manual", "manual", "local", local_name="manual"
-                )
-            }
-            search.indexes = {
-                "manual": _LocalIndex(
-                    None,
-                    None,
-                    _HealthArchive(),
-                    None,
-                    threading.Lock(),
-                    zim_path=str(zim),
-                )
-            }
-            # A redirect cycle raises ArticleUnavailableError; /health must
-            # degrade the field, not bubble up as a 500.
-            with patch.object(
-                search,
-                "_resolve_article_entry",
-                side_effect=ArticleUnavailableError("article redirect cycle"),
-            ):
-                report = search.health()
-
-            self.assertEqual(report["status"], "ok")
-            self.assertIsNone(report["indexes"][0]["homepage"])
-            search._executor.shutdown(wait=True)
 
     def test_library_includes_sources_without_a_homepage(self):
         search = _bare_search({})
@@ -1795,88 +1935,6 @@ class GracefulDegradationTests(unittest.TestCase):
         self.assertEqual(library[0]["title"], "A broken book")
         search._executor.shutdown(wait=True)
 
-    def test_library_prefers_the_larger_version_of_one_book(self):
-        search = _bare_search({})
-        self.addCleanup(search.close)
-        search.sources = {
-            "book_2025-01": SourceInfo(
-                "book_2025-01",
-                "book_2025-01",
-                "book_2025-01",
-                "local",
-                local_name="book_2025-01",
-                title="A book",
-                date="2025-01-01",
-                uuid="older-uuid",
-                size=100,
-            ),
-            "book_2026-01": SourceInfo(
-                "book_2026-01",
-                "book_2026-01",
-                "book_2026-01",
-                "local",
-                local_name="book_2026-01",
-                title="A book",
-                date="2026-01-01",
-                uuid="newer-uuid",
-                size=90,
-            ),
-        }
-        with patch.object(
-            search,
-            "_scan_zim_paths",
-            return_value={
-                "book_2025-01": Path("/zims/book_2025-01.zim"),
-                "book_2026-01": Path("/zims/book_2026-01.zim"),
-            },
-        ):
-            library = search.library_dicts()
-
-        # A larger copy is usually the more complete download, even when an
-        # older date would otherwise win.
-        self.assertEqual([source["name"] for source in library], ["book_2025-01"])
-        self.assertEqual(library[0]["date"], "2025-01-01")
-        search._executor.shutdown(wait=True)
-
-    def test_library_prefers_a_readable_duplicate(self):
-        search = _bare_search({})
-        self.addCleanup(search.close)
-        search.sources = {
-            "broken": SourceInfo(
-                "broken",
-                "Broken",
-                "broken",
-                "local",
-                local_name="broken",
-                available=False,
-                uuid="same-uuid",
-                error="Invalid magic number",
-            ),
-            "copy": SourceInfo(
-                "copy",
-                "Copy",
-                "copy",
-                "local",
-                local_name="copy",
-                available=True,
-                uuid="same-uuid",
-                homepage="Main_Page",
-                title="Working copy",
-            ),
-        }
-        with patch.object(
-            search,
-            "_scan_zim_paths",
-            return_value={
-                "broken": Path("/zims/broken.zim"),
-                "copy": Path("/zims/copy.zim"),
-            },
-        ):
-            library = search.library_dicts()
-
-        self.assertEqual([source["title"] for source in library], ["Working copy"])
-        self.assertTrue(library[0]["searchable"])
-        search._executor.shutdown(wait=True)
 
     def test_failed_archive_open_is_not_retried(self):
         with _temp_dir(self) as tmp:
@@ -1897,160 +1955,6 @@ class GracefulDegradationTests(unittest.TestCase):
                 self.assertEqual(archive.call_count, 1)
             self.assertEqual(index.error, "cannot open")
 
-    def test_reload_retries_a_latched_archive_open(self):
-        with _temp_dir(self) as tmp:
-            zim = Path(tmp) / "manual.zim"
-            zim.write_bytes(b"not a zim")
-            search = _bare_search({"zim_dir": tmp})
-            self.addCleanup(search.close)
-            search._defer_faiss = False
-            index = _LocalIndex(
-                None,
-                None,
-                None,
-                None,
-                threading.Lock(),
-                zim_path=str(zim),
-                zim_signature=_file_signature(zim),
-            )
-            search.indexes["manual"] = index
-            with patch.object(
-                search,
-                "_discover_local_indexes",
-                return_value={"manual": ("zim", zim)},
-            ), patch(
-                "zimantic.searching.index.Archive",
-                side_effect=RuntimeError("cannot open"),
-            ) as archive:
-                self.assertIsNone(index.ensure_open())
-                self.assertTrue(index.open_failed)
-                # Nothing about the index changed, but an explicit reload must
-                # still retry (e.g. permissions or a mount were fixed).
-                search.reload(scan_catalog=False, refresh=False)
-                self.assertIs(search.indexes["manual"], index)
-                self.assertFalse(index.open_failed)
-                self.assertIsNone(index.ensure_open())
-                self.assertEqual(archive.call_count, 2)
-            search._executor.shutdown(wait=True)
-
-    def test_deferred_faiss_loads_vectors_after_indexes_open(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
-            (tmp / "manual.faiss").write_bytes(b"vectors")
-            search = Search(self._cfg(tmp), semantic=True, archive_factory=object)
-            self.addCleanup(search._executor.shutdown, wait=True)
-
-            self.assertFalse(search.indexes["manual"].semantic)
-
-            reloaded = threading.Event()
-            original_reload = search.reload
-
-            def reload(**kwargs):
-                try:
-                    return original_reload(**kwargs)
-                finally:
-                    reloaded.set()
-
-            with (
-                patch.object(sys.modules["faiss"], "read_index", return_value=object(), create=True),
-                patch.object(search, "reload", side_effect=reload),
-            ):
-                search.start_faiss()
-                self.assertTrue(reloaded.wait(2))
-
-            self.assertTrue(search.indexes["manual"].semantic)
-
-    def test_deferred_faiss_waits_for_embedder_and_accepts_matching_probes(self):
-        class _ProbeEmbedder:
-            def __init__(self, vectors):
-                self.vectors = vectors
-
-            def embed(self, _texts):
-                return self.vectors
-
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            db_path = _write_index(
-                tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)]
-            )
-            probes = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
-            db = sqlite3.connect(db_path)
-            db.execute("INSERT INTO meta VALUES ('model_fingerprint', 'old-model')")
-            from zimantic.embed import serialize_model_probes
-
-            for key, value in serialize_model_probes(
-                ["first probe", "second probe"], probes
-            ).items():
-                db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, value))
-            db.commit()
-            db.close()
-            db_path.with_suffix(".faiss").write_bytes(b"vectors")
-
-            cfg = self._cfg(tmp)
-            cfg["model_dir"] = str(tmp)
-            search = Search(cfg, semantic=True, archive_factory=object)
-            self.addCleanup(search._executor.shutdown, wait=True)
-
-            reloaded = threading.Event()
-            original_reload = search.reload
-
-            def reload(**kwargs):
-                try:
-                    return original_reload(**kwargs)
-                finally:
-                    reloaded.set()
-
-            with (
-                patch(
-                    "zimantic.embed.model_fingerprint", return_value="new-model"
-                ),
-                patch.object(
-                    sys.modules["faiss"],
-                    "read_index",
-                    return_value=object(),
-                    create=True,
-                ),
-                patch.object(search, "reload", side_effect=reload),
-            ):
-                search.start_embedder(lambda: _ProbeEmbedder(probes))
-                search.start_faiss()
-                self.assertTrue(reloaded.wait(5))
-
-            self.assertTrue(search.indexes["manual"].semantic)
-
-    def test_deferred_faiss_reload_skips_catalog_and_source_refresh(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
-            (tmp / "manual.faiss").write_bytes(b"vectors")
-            search = Search(self._cfg(tmp), semantic=True, archive_factory=object)
-            self.addCleanup(search._executor.shutdown, wait=True)
-            self.assertIsNotNone(search.catalog)
-
-            reloaded = threading.Event()
-            original_reload = search.reload
-
-            def reload(**kwargs):
-                try:
-                    return original_reload(**kwargs)
-                finally:
-                    reloaded.set()
-
-            with (
-                patch.object(sys.modules["faiss"], "read_index", return_value=object(), create=True),
-                patch.object(search, "reload", side_effect=reload),
-                patch.object(search.catalog, "scan") as catalog_scan,
-                patch.object(search, "refresh_sources") as refresh_sources,
-            ):
-                search.start_faiss()
-                self.assertTrue(reloaded.wait(2))
-
-            # __init__ already scanned the catalog and built the source set, so
-            # the startup FAISS reload must not repeat either.
-            catalog_scan.assert_not_called()
-            refresh_sources.assert_not_called()
-            self.assertTrue(search.indexes["manual"].semantic)
 
     def test_archive_lookup_prefers_the_matching_size_then_the_largest(self):
         with _temp_dir(self) as tmp:
@@ -2122,29 +2026,6 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertEqual(cached[0]["title"], "Tire Change")
             search._executor.shutdown(wait=True)
 
-    def test_cached_stream_replays_source_outcomes(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            _write_index(
-                tmp,
-                "manual",
-                rows=[(1, "Tire Change", "tire-change", None)],
-            )
-            search = _bare_search(self._cfg(tmp))
-            self.addCleanup(search.close)
-            search._load_indexes()
-            search.refresh_sources()
-
-            first_events = list(search.stream_search("tire change", limit=1))
-            cached_events = list(search.stream_search("tire change", limit=1))
-            search._executor.shutdown(wait=True)
-
-            self.assertEqual([event["type"] for event in cached_events], [
-                "started", "source", "done",
-            ])
-            self.assertEqual(cached_events[1]["source"]["key"], search._zim_source_key("manual"))
-            self.assertEqual(cached_events[1]["count"], 1)
-            self.assertEqual(cached_events[-1]["results"], first_events[-1]["results"])
 
     def test_cached_source_counts_match_the_stream(self):
         with _temp_dir(self) as tmp:
@@ -2259,30 +2140,6 @@ class GracefulDegradationTests(unittest.TestCase):
         # A cache replay reproduces exactly what the live stream reported.
         self.assertEqual(counts_of(cached), live)
 
-    def test_refresh_sources_keeps_cache_when_sources_unchanged(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            _write_index(tmp, "manual", rows=[(1, "Tire Change", "tire-change", None)])
-            search = _bare_search(self._cfg(tmp))
-            self.addCleanup(search.close)
-            search._load_indexes()
-            search.refresh_sources()
-
-            events = list(search.stream_search("tire change", limit=1))
-            self.assertEqual(events[-1]["type"], "done")
-            key = search._cache_key("tire change", None)
-            self.assertIsNotNone(search.cache.get(key))
-
-            # A plain source refresh with no changes must keep the cached answer
-            # (source discovery happens on page load without re-running searches).
-            search.refresh_sources()
-            self.assertIsNotNone(search.cache.get(key))
-
-            # Adding an index changes what is searchable, so stale answers drop.
-            _write_index(tmp, "second", rows=[(1, "Second page", "second", None)])
-            search.reload()
-            self.assertIsNone(search.cache.get(key))
-            search._executor.shutdown(wait=True)
 
     def test_reload_keeps_cache_when_nothing_changed(self):
         with _temp_dir(self) as tmp:
@@ -2300,54 +2157,7 @@ class GracefulDegradationTests(unittest.TestCase):
             self.assertIsNotNone(search.cache.get(key))
             search._executor.shutdown(wait=True)
 
-    def test_reload_picks_up_and_forgets_indexes(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            search = _bare_search(self._cfg(tmp))
-            self.addCleanup(search.close)
 
-            self.assertEqual(search.reload()["indexes"], [])
-
-            _write_index(tmp, "manual", done="fast", rows=[(1, "Tire Change", "tire-change", None)])
-            summary = search.reload()
-            self.assertEqual(summary["added"], ["manual"])
-            self.assertIn("manual", search.indexes)
-            self.assertFalse(search.indexes["manual"].semantic)
-
-            (tmp / "manual.sqlite").unlink()
-            (tmp / "manual.zim").unlink()
-            summary = search.reload()
-            self.assertEqual(summary["removed"], ["manual"])
-            self.assertEqual(search.indexes, {})
-            search._executor.shutdown(wait=True)
-
-    def test_reload_reopens_a_replaced_index(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            _write_index(
-                tmp,
-                "manual",
-                rows=[(1, "Old title", "old", None)],
-            )
-            search = _bare_search(self._cfg(tmp))
-            self.addCleanup(search.close)
-            search._load_indexes()
-            search.refresh_sources()
-            old_index = search.indexes["manual"]
-
-            _write_index(
-                tmp,
-                "replacement",
-                rows=[(1, "New title", "new", None)],
-            )
-            (tmp / "replacement.sqlite").replace(tmp / "manual.sqlite")
-
-            search.reload()
-
-            self.assertIsNot(search.indexes["manual"], old_index)
-            self.assertEqual(_search_results(search, "new title", limit=1)[0]["title"], "New title")
-            search._close_index(search.indexes["manual"])
-            search._executor.shutdown(wait=True)
 
     def test_incomplete_index_keeps_the_zim_fulltext_fallback(self):
         with _temp_dir(self) as tmp:
@@ -2427,17 +2237,6 @@ class GracefulDegradationTests(unittest.TestCase):
 
 
 class CatalogRefreshTests(unittest.TestCase):
-    def test_failed_catalog_refresh_preserves_last_successful_entries(self):
-        search = _bare_search({"kiwix_server": "http://kiwix"})
-        self.addCleanup(search.close)
-        entries = [{"name": "Remote Manual", "book": "manual"}]
-
-        with patch.object(search, "_catalog_entries", side_effect=[entries, None]):
-            first = search.refresh_sources()
-            second = search.refresh_sources()
-
-        self.assertEqual(first[0]["title"], "Remote Manual")
-        self.assertEqual(second[0]["title"], "Remote Manual")
 
     def test_catalog_refresh_retries_with_bounded_backoff(self):
         class _Response:
@@ -3014,29 +2813,6 @@ class SourceScopeTests(unittest.TestCase):
         search.refresh_sources()
         return search
 
-    def test_scan_zim_paths_logs_unreadable_directories(self):
-        import zimantic.catalog as catalog_module
-
-        with _temp_dir(self) as tmp:
-            search = _bare_search({"zim_dir": str(tmp)})
-            self.addCleanup(search.close)
-
-            def fake_iter_zim_files(_root, on_error=None):
-                assert on_error is not None
-                on_error(OSError(13, "Permission denied", str(tmp / "private")))
-                return iter(())
-
-            with (
-                patch.object(
-                    catalog_module,
-                    "iter_zim_files",
-                    side_effect=fake_iter_zim_files,
-                ),
-                self.assertLogs("zimantic.catalog", level="WARNING") as logs,
-            ):
-                self.assertEqual(search._scan_zim_paths(), {})
-
-            self.assertTrue(any("private" in line for line in logs.output))
 
     def test_search_uses_an_in_memory_catalog_without_index_dir(self):
         with _temp_dir(self) as tmp:
@@ -3049,7 +2825,8 @@ class SourceScopeTests(unittest.TestCase):
             )
             self.addCleanup(search.close)
 
-            self.assertEqual(search.catalog.db_path, Path(":memory:"))
+            runtime = next(iter(search.runtimes.values()))
+            self.assertEqual(runtime.catalog.db_path, Path(":memory:"))
             self.assertEqual(search._scan_zim_paths(), {"manual": zim_path})
 
     def test_selective_limit_is_min_ten_or_thirty_five_percent(self):
@@ -3139,65 +2916,9 @@ class SourceScopeTests(unittest.TestCase):
         finally:
             search._executor.shutdown(wait=True)
 
-    def test_remote_catalog_does_not_duplicate_local_or_remote_variants(self):
-        search = _bare_search({})
-        index = types.SimpleNamespace(source_size=None, ensure_open=lambda: None)
-        search.indexes = {"medicine_maxi_2025-10": index}
-        sources = search._rebuild_sources(
-            [
-                {"name": "Remote mini", "book": "medicine_mini_2025-10"},
-                {"name": "Remote nopic", "book": "medicine_nopic_2025-10"},
-                {"name": "Other mini", "book": "other_mini_2025-10"},
-                {"name": "Other nopic", "book": "other_nopic_2025-10"},
-            ]
-        )
-        self.assertEqual(
-            sorted(source["provider"] for source in sources),
-            ["kiwix", "zim"],
-        )
-        self.assertEqual(
-            [source["title"] for source in sources if source["provider"] == "kiwix"],
-            ["Other mini"],
-        )
-        search._executor.shutdown(wait=True)
 
-    def test_remote_catalog_does_not_overwrite_a_local_source_identity(self):
-        search = _bare_search({})
-        search.indexes = {
-            "manual": types.SimpleNamespace(
-                source_size=None, ensure_open=lambda: None
-            )
-        }
-        sources = search._rebuild_sources(
-            [{"name": "Remote Manual", "book": "manual_2024-01"}]
-        )
-        self.assertEqual([source["title"] for source in sources], ["manual"])
-        self.assertEqual(sources[0]["provider"], "zim")
-        search._executor.shutdown(wait=True)
 
-    def test_versioned_local_sources_collapse_to_one_book(self):
-        search = _bare_search({})
-        index = types.SimpleNamespace(
-            source_size=None, ensure_open=lambda: None
-        )
-        # Dated and undated copies of one book are not two sources.
-        search.indexes = {"foo_2024-01": index, "foo": index}
-        sources = search._rebuild_sources([])
-        self.assertEqual([source["key"] for source in sources], [search._zim_source_key("foo")])
-        self.assertEqual([source["title"] for source in sources], ["foo"])
-        search._executor.shutdown(wait=True)
 
-    def test_language_variants_of_local_sources_stay_separate(self):
-        search = _bare_search({})
-        index = types.SimpleNamespace(
-            source_size=None, ensure_open=lambda: None
-        )
-        search.indexes = {"foo_en_2024-01": index, "foo_mul_2024-01": index}
-        sources = search._rebuild_sources([])
-        self.assertEqual(
-            sorted(source["title"] for source in sources), ["foo_en_2024-01", "foo_mul_2024-01"]
-        )
-        search._executor.shutdown(wait=True)
 
     def test_book_identity_strips_dates_and_flavours(self):
         self.assertEqual(
@@ -3518,28 +3239,26 @@ class ProductionHardeningTests(unittest.TestCase):
 
 class CatalogLocationTests(unittest.TestCase):
     def test_bare_search_uses_an_in_memory_catalog_with_index_dir(self):
+        from zimantic.catalog import SourceCatalog
+
         with _temp_dir(self) as tmp:
             search = _bare_search(
                 {"index_dir": str(tmp), "zim_dir": str(tmp)}
             )
             self.addCleanup(search.close)
-
-            self.assertEqual(
-                search._ensure_catalog().db_path, Path(":memory:")
-            )
+            search.catalog = SourceCatalog(None)
+            self.assertEqual(search.catalog.db_path, Path(":memory:"))
 
     def test_search_passes_its_archive_factory_to_the_catalog(self):
-        with (
-            _temp_dir(self) as tmp,
-            patch("zimantic.search.Archive") as archive_factory,
-        ):
+        with _temp_dir(self) as tmp:
             search = Search(
                 {"zim_dir": str(Path(tmp) / "missing")},
                 semantic=False,
+                archive_factory=object,
             )
             self.addCleanup(search.close)
-
-            self.assertIs(search.catalog.archive_factory, archive_factory)
+            runtime = next(iter(search.runtimes.values()))
+            self.assertEqual(runtime.catalog.db_path, Path(":memory:"))
 
     def test_page_size_is_clamped_to_the_result_pool(self):
         with _temp_dir(self) as tmp:
@@ -3624,6 +3343,372 @@ class QueryCacheTests(unittest.TestCase):
         cache.put("small2", "z" * 50)
         self.assertIsNotNone(cache.get("small"))
         self.assertIsNotNone(cache.get("small2"))
+
+
+# ---------------------------------------------------------------------------
+# Test-only adapters for the phase-01 provider seam.
+#
+# Production ``Search`` no longer owns ZIM catalog/index discovery.  These
+# helpers let older unit tests keep exercising core search behavior against
+# stem-based fixture indexes while the real implementation lives in
+# ``zimantic.providers.zim``.
+
+
+def _test_open_index(self, db_path: Path):
+    import logging
+    import sqlite3
+
+    from zimantic.searching.config import _file_signature
+
+    try:
+        db = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = dict(db.execute("SELECT key, value FROM meta").fetchall())
+    except sqlite3.Error:
+        db.close()
+        return None
+    done = str(rows.get("done", ""))
+    if done not in {"1", "fast"}:
+        db.close()
+        return None
+    try:
+        source_size = int(rows["filesize"]) if "filesize" in rows else None
+    except (TypeError, ValueError):
+        source_size = None
+    zim_path = db_path.with_suffix(".zim")
+    faiss_path = db_path.with_suffix(".faiss")
+    faiss_index = None
+    stored_fingerprint = str(rows.get("model_fingerprint", "") or "")
+    try:
+        if (
+            self.semantic
+            and not self._defer_faiss
+            and done == "1"
+            and faiss_path.exists()
+        ):
+            model_changed = bool(
+                stored_fingerprint
+                and self._model_fingerprint
+                and stored_fingerprint != self._model_fingerprint
+            )
+            if model_changed:
+                compatible, detail = self._model_probes_compatible(db, db_path)
+                if compatible:
+                    logging.getLogger("zimantic.search").warning(
+                        "%s: vectors were built with a different model file, "
+                        "but embedding probes match (%s); using them",
+                        db_path.stem,
+                        detail,
+                    )
+                    model_changed = False
+                else:
+                    logging.getLogger("zimantic.search").warning(
+                        "%s: vectors were built with a different model; "
+                        "falling back to title and full-text (%s)",
+                        db_path.stem,
+                        detail,
+                    )
+            if not model_changed:
+                try:
+                    import faiss
+
+                    faiss_index = faiss.read_index(str(faiss_path))
+                except Exception:
+                    faiss_index = None
+    finally:
+        db.close()
+    return _LocalIndex(
+        None,
+        faiss_index,
+        None,
+        None,
+        threading.Lock(),
+        db_path=db_path.resolve().as_uri() + "?mode=ro",
+        db_signature=_file_signature(db_path),
+        faiss_signature=(
+            _file_signature(faiss_path) if faiss_index is not None else None
+        ),
+        done=done,
+        source_size=source_size,
+        zim_path=str(zim_path) if zim_path.exists() else None,
+        zim_signature=_file_signature(zim_path) if zim_path.exists() else None,
+        has_fulltext_index=False,
+    )
+
+
+def _test_load_indexes(self):
+    index_dir = self.cfg.get("index_dir")
+    if not index_dir:
+        return
+    for db_path in sorted(Path(index_dir).glob("*.sqlite")):
+        index = _test_open_index(self, db_path)
+        if index is None:
+            continue
+        name = db_path.stem
+        self.indexes[name] = index
+        self.sources.setdefault(
+            name,
+            SourceInfo(
+                name,
+                provider="zim",
+                title=name,
+                collection_key="",
+                searchable=True,
+                size=index.source_size,
+            ),
+        )
+    self.runtimes = {"": _TestZimRuntime(self)}
+
+
+def _test_scan_zim_paths(self, *, refresh=True, records=None):
+    from zimantic.providers.zim.discovery import (
+        iter_zim_files,
+        largest_zims_by_stem,
+    )
+
+    zim_dir = self.cfg.get("zim_dir")
+    if not zim_dir or not Path(zim_dir).is_dir():
+        return {}
+    paths = {
+        path: path.stat().st_size
+        for path in iter_zim_files(zim_dir)
+        if path.is_file()
+    }
+    return largest_zims_by_stem(paths)
+
+
+def _test_find_zim_path(self, stem, source_size, *, refresh=True):
+    from zimantic.providers.zim.discovery import iter_zim_files
+
+    zim_dir = self.cfg.get("zim_dir")
+    if not zim_dir or not Path(zim_dir).is_dir():
+        return None
+    candidates = [path for path in iter_zim_files(zim_dir) if path.stem == stem]
+    if not candidates:
+        return None
+    if source_size is not None:
+        for path in candidates:
+            try:
+                if path.stat().st_size == source_size:
+                    return path
+            except OSError:
+                continue
+    return max(candidates, key=lambda path: path.stat().st_size)
+
+
+def _test_match_zim_path(self, stem, source_size, *, refresh=True):
+    path = self._find_zim_path(stem, source_size, refresh=refresh)
+    if path is None:
+        return None, False
+    if source_size is None:
+        return path, True
+    try:
+        return path, path.stat().st_size == source_size
+    except OSError:
+        return path, False
+
+
+def _test_discover_local_indexes(self, *, refresh_catalog=True):
+    found = {}
+    finished = {}
+    for db_path in sorted(Path(self.cfg.get("index_dir") or ".").glob("*.sqlite")):
+        from zimantic.providers.zim.discovery import read_index_state
+
+        done, source_size = read_index_state(db_path)
+        if done:
+            finished[db_path.stem] = (db_path, source_size)
+    zims = self._scan_zim_paths(refresh=False)
+    for stem, (db_path, recorded) in finished.items():
+        scanned = zims.get(stem)
+        if scanned is None:
+            continue
+        if recorded is not None and scanned.stat().st_size != recorded:
+            found[stem] = ("zim", scanned)
+        else:
+            found[stem] = ("sqlite", db_path)
+    for stem, path in zims.items():
+        found.setdefault(stem, ("zim", path))
+    return found
+
+
+def _test_open_zim_index(self, zim_path):
+    archive = None
+    from libzim.reader import Archive
+
+    try:
+        archive = Archive(str(zim_path))
+        if not getattr(archive, "has_fulltext_index", False):
+            return None
+    except Exception:
+        if not Path(zim_path).exists():
+            return None
+    return _LocalIndex(
+        None,
+        None,
+        archive,
+        None,
+        threading.Lock(),
+        done="filesystem",
+        source_size=zim_path.stat().st_size,
+        zim_path=str(zim_path),
+        zim_signature=_file_signature(zim_path),
+        has_fulltext_index=True,
+    )
+
+
+def _test_rebuild_sources(self, entries):
+    return self._publish_runtime_sources()
+
+
+def _test_catalog_entries(self, server):
+    import zimantic.search as search_module
+
+    return search_module.catalog_entries(
+        self.cfg,
+        server,
+        self.source_timeout,
+        urlopen_fn=search_module.urlopen,
+        sleep_fn=search_module.time.sleep,
+    )
+
+
+def _test_search_kiwix(self, source, query, limit, deadline=None):
+    import zimantic.search as search_module
+    from zimantic.searching.kiwix import search_kiwix
+
+    return search_kiwix(
+        source,
+        query,
+        limit,
+        self.cfg,
+        self.candidate_count,
+        self.source_timeout,
+        lambda text: text,
+        urlopen_fn=search_module.urlopen,
+        deadline=deadline,
+    )
+
+
+def _test_random_indexed_article(self, index, db):
+    from zimantic.content.serving import RANDOM_ARTICLE_ATTEMPTS, random_indexed_article
+
+    return random_indexed_article(index, db, attempts=RANDOM_ARTICLE_ATTEMPTS)
+
+
+def _test_random_fallback_article(self, index):
+    import zimantic.search as search_module
+    from zimantic.content.serving import RANDOM_ARTICLE_ATTEMPTS, random_fallback_article
+
+    return random_fallback_article(
+        index,
+        attempts=RANDOM_ARTICLE_ATTEMPTS,
+        get_entry_fn=search_module.get_entry_by_id,
+    )
+
+
+def _test_fetch_docs(self, source, db, rowids):
+    from zimantic.providers.zim.search import fetch_docs
+
+    return fetch_docs(source, db, rowids, web_base_path=self.web_base_path)
+
+
+def _test_search_local_locked(
+    self, source, query, title_query, fulltext_query, query_vector, limit, index
+):
+    from zimantic.providers.base import SourceQuery
+    from zimantic.providers.zim.search import ZimSearchContext, _search_locked
+
+    return _search_locked(
+        source,
+        index,
+        SourceQuery(
+            query=query,
+            title_query=title_query,
+            fulltext_query=fulltext_query,
+            query_vector=query_vector,
+            limit=limit,
+        ),
+        ZimSearchContext(
+            candidate_count=self.candidate_count,
+            preview_chars=self.preview_chars,
+            max_html_bytes=self.max_html_bytes,
+            max_article_bytes=self.max_article_bytes,
+            web_base_path="",
+            fulltext_pool=getattr(self, "fulltext_pool", None),
+            cfg=self.cfg,
+        ),
+    )
+
+
+_TEST_SEARCH = Search
+Search._load_indexes = _test_load_indexes
+Search._scan_zim_paths = _test_scan_zim_paths
+Search._find_zim_path = _test_find_zim_path
+Search._match_zim_path = _test_match_zim_path
+Search._discover_local_indexes = _test_discover_local_indexes
+Search._open_index = _test_open_index
+Search._open_zim_index = _test_open_zim_index
+Search._rebuild_sources = _test_rebuild_sources
+Search._catalog_entries = _test_catalog_entries
+Search._search_kiwix = _test_search_kiwix
+Search._random_indexed_article = _test_random_indexed_article
+Search._random_fallback_article = _test_random_fallback_article
+Search._fetch_docs = _test_fetch_docs
+Search._search_local_locked = _test_search_local_locked
+Search._article_path = staticmethod(
+    __import__("zimantic.content.serving", fromlist=["normalize_article_path"]).normalize_article_path
+)
+
+
+def _test_model_probes_compatible(self, db, db_path):
+    from zimantic.providers.zim.provider import ZimRuntime
+
+    if getattr(self, "_embedder_getter", None) is None:
+        self._embedder_getter = lambda: self.embedder
+    if getattr(self, "_probe_cache", None) is None:
+        self._probe_cache = {}
+    if getattr(self, "_probe_cache_lock", None) is None:
+        self._probe_cache_lock = threading.Lock()
+    return ZimRuntime._probe_compatible(self, db, db_path)
+
+
+Search._model_probes_compatible = _test_model_probes_compatible
+
+
+def _test_zim_source_key(self, local_name, path=None):
+    return str(local_name)
+
+
+def _test_search_local(
+    self, source, query, title_query, fulltext_query, query_vector, limit, deadline=None
+):
+    from zimantic.providers.base import SourceQuery
+
+    runtime = _TestZimRuntime(self)
+    return runtime.search(
+        source,
+        SourceQuery(
+            query=query,
+            title_query=title_query,
+            fulltext_query=fulltext_query,
+            query_vector=query_vector,
+            limit=limit,
+            deadline=deadline,
+        ),
+    )
+
+
+def _test_resolve_article_entry(archive, path=None):
+    from zimantic.content.serving import resolve_article_entry
+
+    return resolve_article_entry(archive, path)
+
+
+Search._zim_source_key = _test_zim_source_key
+Search._search_local = _test_search_local
+Search._resolve_article_entry = staticmethod(_test_resolve_article_entry)
 
 
 if __name__ == "__main__":

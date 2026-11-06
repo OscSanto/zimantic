@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import time
+import re
 import unittest
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
@@ -154,6 +155,24 @@ def _search_results(search, *args, **kwargs):
     return search.search_page(*args, **kwargs)["results"]
 
 
+def _zim_key(name: str = "manual") -> str:
+    from zimantic.providers.zim.discovery import zim_source_key
+
+    return zim_source_key("library", f"{name}.zim")
+
+
+def _zim_runtime(search: Search):
+    return next(iter(search.runtimes.values()))
+
+
+def _zim_index(search: Search, name: str = "manual"):
+    return _zim_runtime(search).indexes[_zim_key(name)]
+
+
+ZIM_KEY = _zim_key()
+ZIM_URL = quote(ZIM_KEY, safe="")
+
+
 def _config(root: Path, *, max_results: int = 100) -> dict:
     return {
         "index_dir": str(root / "indexes"),
@@ -220,13 +239,13 @@ class LocalIntegrationTests(unittest.TestCase):
             result = response.json()[0]
             self.assertEqual(result["title"], "Beta")
             self.assertEqual(result["path"], "Beta")
-            self.assertEqual(result["url"], f"/content/{quote(search._zim_source_key('manual'), safe='')}/Beta")
+            self.assertEqual(result["url"], f"/content/{quote(_zim_key("manual"), safe='')}/Beta")
             self.assertEqual(result["mimetype"], "text/html")
             self.assertEqual(response.headers["x-total-count"], "1")
 
             # /content/ is the toolbar shell: it embeds the raw article in an
             # iframe so the toolbar survives every in-frame navigation.
-            shell = client.get("/content/manual/Beta")
+            shell = client.get(f"/content/{ZIM_URL}/Beta")
             self.assertEqual(shell.status_code, 200)
             self.assertTrue(shell.headers["content-type"].startswith("text/html"))
             self.assertIn(b'data-zimantic-toolbar', shell.content)
@@ -259,12 +278,12 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b"zimantic-article-ready", shell.content)
             self.assertIn(b"zimantic-article-navigate", shell.content)
             self.assertIn(b"zimantic-parent-article-navigate", shell.content)
-            self.assertIn(b"/random?zim=manual", shell.content)
+            self.assertIn(f"/random?zim={ZIM_URL}".encode(), shell.content)
             self.assertIn(b"<div data-zimantic-capture-notice hidden>", shell.content)
             self.assertIn(b"data-zimantic-capture-notice-dismiss", shell.content)
             self.assertIn(b"captureHasVisibleContent", shell.content)
             self.assertIn(b"<iframe data-zimantic-article", shell.content)
-            self.assertIn(b'src="/article/manual/Beta"', shell.content)
+            self.assertIn(f'src="/article/{ZIM_URL}/Beta"'.encode(), shell.content)
             self.assertLess(
                 shell.content.index(b'data-zimantic-action="close"'),
                 shell.content.index(b'data-zimantic-action="previous"'),
@@ -294,7 +313,7 @@ class LocalIntegrationTests(unittest.TestCase):
 
             # The raw article keeps its own markup and gains only the
             # navigation bridge; the toolbar is never duplicated into it.
-            raw_article = client.get("/article/manual/Beta")
+            raw_article = client.get(f"/article/{ZIM_URL}/Beta")
             self.assertEqual(raw_article.status_code, 200)
             self.assertTrue(raw_article.headers["content-type"].startswith("text/html"))
             self.assertIn(b"brakes and rotors", raw_article.content)
@@ -304,34 +323,34 @@ class LocalIntegrationTests(unittest.TestCase):
 
             random_article = client.get(
                 "/random",
-                params={"zim": "manual"},
+                params={"zim": ZIM_KEY},
                 follow_redirects=False,
             )
             self.assertEqual(random_article.status_code, 307)
             self.assertRegex(
                 random_article.headers["location"],
-                r"^/content/manual/(Alpha|Beta)$",
+                f"^/content/{re.escape(ZIM_URL)}/(Alpha|Beta)$",
             )
 
-            homepage = client.get("/content/manual", follow_redirects=False)
+            homepage = client.get(f"/content/{ZIM_KEY}", follow_redirects=False)
             self.assertEqual(homepage.status_code, 307)
-            self.assertIn("/content/manual/", homepage.headers["location"])
+            self.assertIn(f"/content/{ZIM_URL}/", homepage.headers["location"])
             homepage_article = client.get(homepage.headers["location"])
             self.assertEqual(homepage_article.status_code, 200)
-            raw_homepage = client.get("/article/manual", follow_redirects=False)
+            raw_homepage = client.get(f"/article/{ZIM_KEY}", follow_redirects=False)
             self.assertEqual(raw_homepage.status_code, 307)
-            self.assertIn("/article/manual/", raw_homepage.headers["location"])
+            self.assertIn(f"/article/{ZIM_URL}/", raw_homepage.headers["location"])
 
             # A missing article still gets a toolbar shell with a friendly error
             # panel; only /article/ returns the JSON 404.
-            missing = client.get("/content/manual/missing")
+            missing = client.get(f"/content/{ZIM_URL}/missing")
             self.assertEqual(missing.status_code, 404)
             self.assertIn(b'data-zimantic-toolbar', missing.content)
             self.assertIn(b"Article not found", missing.content)
             self.assertIn(b"not available in the offline archive", missing.content)
             self.assertNotIn(b'{"detail":"article not found"}', missing.content)
-            self.assertNotIn(b'src="/article/manual/missing"', missing.content)
-            missing_raw = client.get("/article/manual/missing")
+            self.assertNotIn(b'src=f"/article/{ZIM_URL}/missing"', missing.content)
+            missing_raw = client.get(f"/article/{ZIM_URL}/missing")
             self.assertEqual(missing_raw.status_code, 404)
             self.assertEqual(missing_raw.json(), {"detail": "article not found"})
 
@@ -365,13 +384,13 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             client = TestClient(create_app(search))
 
-            homepage = client.get("/content/manual", follow_redirects=False)
+            homepage = client.get(f"/content/{ZIM_KEY}", follow_redirects=False)
             self.assertEqual(homepage.status_code, 307)
-            self.assertEqual(homepage.headers["location"], "/content/manual/docs/")
+            self.assertEqual(homepage.headers["location"], f"/content/{ZIM_URL}/docs/")
             shell = client.get(homepage.headers["location"], follow_redirects=True)
             self.assertEqual(shell.status_code, 200)
             self.assertNotIn(b'{"detail":"article not found"}', shell.content)
-            raw = client.get("/article/manual/docs/", follow_redirects=True)
+            raw = client.get(f"/article/{ZIM_URL}/docs/", follow_redirects=True)
             self.assertEqual(raw.status_code, 200)
 
     def test_toolbar_skips_container_paths_that_are_not_articles(self):
@@ -384,21 +403,21 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             client = TestClient(create_app(search))
 
-            self.assertTrue(search.article_path_exists("manual", "A/5e_Hazards"))
-            self.assertFalse(search.article_path_exists("manual", "A"))
+            self.assertTrue(search.article_path_exists(ZIM_KEY, "A/5e_Hazards"))
+            self.assertFalse(search.article_path_exists(ZIM_KEY, "A"))
 
-            shell = client.get("/content/manual/A/5e_Hazards")
+            shell = client.get(f"/content/{ZIM_URL}/A/5e_Hazards")
             self.assertEqual(shell.status_code, 200)
             self.assertIn(
-                b'<span class="zimantic-toolbar-home-full">manual</span>',
+                f'<span class="zimantic-toolbar-home-full">{ZIM_KEY}</span>'.encode(),
                 shell.content,
             )
             self.assertIn(
-                b'title="Open this ZIM\'s homepage (manual)"',
+                f'title="Open this ZIM\'s homepage ({ZIM_KEY})"'.encode(),
                 shell.content,
             )
             # The MediaWiki first-letter container must not become a link.
-            self.assertNotIn(b'href="/content/manual/A"', shell.content)
+            self.assertNotIn(b'href=f"/content/{ZIM_URL}/A"', shell.content)
             self.assertIn(b">5e Hazards</span>", shell.content)
 
     def test_unindexed_zim_uses_native_fulltext_before_build(self):
@@ -415,10 +434,10 @@ class LocalIntegrationTests(unittest.TestCase):
 
             search = self._open_search(root)
 
-            self.assertEqual(search.local_names(), ["manual"])
+            self.assertEqual(search.source_keys(), [_zim_key("manual")])
             result = _search_results(search, "rotors", limit=1)[0]
             self.assertEqual(result["title"], "Beta")
-            self.assertEqual(result["url"], f"/content/{quote(search._zim_source_key('manual'), safe='')}/Beta")
+            self.assertEqual(result["url"], f"/content/{quote(_zim_key("manual"), safe='')}/Beta")
             report = search.health()["indexes"][0]
             self.assertFalse(report["index_file"])
             self.assertFalse(report["capabilities"]["title"])
@@ -434,7 +453,7 @@ class LocalIntegrationTests(unittest.TestCase):
             _create_sparse_zim(zims / "manual.zim")
 
             search = self._open_search(root)
-            index = search.indexes["manual"]
+            index = _zim_index(search)
             archive = index.ensure_open()
             assert archive is not None
             article_id = None
@@ -451,10 +470,10 @@ class LocalIntegrationTests(unittest.TestCase):
             # Media entries must be rejected so a probe that lands on one is
             # retried and the article is still returned.
             with patch(
-                "zimantic.search.secrets.randbelow",
+                "zimantic.content.serving.secrets.randbelow",
                 side_effect=itertools.cycle([*asset_ids, article_id]),
             ):
-                self.assertEqual(search.random_article_path("manual"), "Alpha")
+                self.assertEqual(search.random_article_path(ZIM_KEY), "Alpha")
 
             # Every probe landing on an asset (a sparse archive) must still
             # resolve: the scan fallback picks from the collected article ids.
@@ -462,10 +481,10 @@ class LocalIntegrationTests(unittest.TestCase):
             # from the entry-id space, so return a valid index for it.
             index.random_article_ids = None
             with patch(
-                "zimantic.search.secrets.randbelow",
+                "zimantic.content.serving.secrets.randbelow",
                 side_effect=lambda upper: asset_ids[0] if upper > 1 else 0,
             ):
-                self.assertEqual(search.random_article_path("manual"), "Alpha")
+                self.assertEqual(search.random_article_path(ZIM_KEY), "Alpha")
             self.assertEqual(index.random_article_ids, [article_id])
 
     def test_indexed_random_uses_uniform_fallback_when_sparse(self):
@@ -480,8 +499,8 @@ class LocalIntegrationTests(unittest.TestCase):
             build_module.build(zim_path, indexes, embedder=None, batch_size=1)
 
             search = self._open_search(root)
-            index = search.indexes["manual"]
-            self.assertIsNotNone(search._db_for(index))
+            index = _zim_index(search)
+            self.assertIsNotNone(index.db_for_thread())
             archive = index.ensure_open()
             assert archive is not None
             article_id = None
@@ -498,10 +517,10 @@ class LocalIntegrationTests(unittest.TestCase):
             # Every probe lands on an asset, forcing the COUNT/OFFSET fallback;
             # it must still return the only eligible article, not fail.
             with patch(
-                "zimantic.search.secrets.randbelow",
+                "zimantic.content.serving.secrets.randbelow",
                 side_effect=lambda upper: asset_ids[0] if upper > 1 else 0,
             ):
-                self.assertEqual(search.random_article_path("manual"), "Alpha")
+                self.assertEqual(search.random_article_path(ZIM_KEY), "Alpha")
 
     def test_zim_without_native_fulltext_is_not_a_source(self):
         with _temp_dir(self) as tmp:
@@ -519,7 +538,7 @@ class LocalIntegrationTests(unittest.TestCase):
 
             # No SQLite index and no native full-text index means there is
             # nothing to search, so it must not be advertised as a source.
-            self.assertEqual(search.local_names(), [])
+            self.assertEqual(search.source_keys(), [])
 
     def test_pdf_entries_are_indexed_end_to_end(self):
         import pymupdf
@@ -629,7 +648,7 @@ class LocalIntegrationTests(unittest.TestCase):
             faiss_path.write_bytes(b"not a faiss index")
 
             search = self._open_search(root, semantic=True)
-            self.assertFalse(search.indexes["manual"].semantic)
+            self.assertFalse(_zim_index(search).semantic)
             self.assertEqual(_search_results(search, "alpha", limit=1)[0]["title"], "Alpha")
 
             # Removing the archive orphans the finished index: it is ignored
@@ -638,7 +657,7 @@ class LocalIntegrationTests(unittest.TestCase):
             search.close()
             zim_path.unlink()
             missing_zim_search = self._open_search(root)
-            self.assertNotIn("manual", missing_zim_search.indexes)
+            self.assertNotIn("manual", _zim_runtime(missing_zim_search).indexes)
             self.assertEqual(missing_zim_search.health()["status"], "degraded")
 
     def test_redirects_collapse_and_disambiguation_ranking_survive_real_build(self):
@@ -660,22 +679,22 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(redirect_results[0]["title"], "Air")
             self.assertEqual(redirect_results[0]["path"], "Air")
             redirect_article = client.get(
-                "/content/manual/Breeze",
+                f"/content/{ZIM_KEY}/Breeze",
                 follow_redirects=False,
             )
             self.assertEqual(redirect_article.status_code, 307)
             self.assertEqual(
                 redirect_article.headers["location"],
-                "/content/manual/Air",
+                f"/content/{ZIM_URL}/Air",
             )
             redirect_raw_article = client.get(
-                "/article/manual/Breeze",
+                f"/article/{ZIM_KEY}/Breeze",
                 follow_redirects=False,
             )
             self.assertEqual(redirect_raw_article.status_code, 307)
             self.assertEqual(
                 redirect_raw_article.headers["location"],
-                "/article/manual/Air",
+                f"/article/{ZIM_URL}/Air",
             )
 
             ordinary_results = _search_results(search, "air", limit=10)
@@ -755,13 +774,12 @@ class LocalIntegrationTests(unittest.TestCase):
             data = bytearray(zim_path.read_bytes())
             data[0:4] = b"XXXX"
             zim_path.write_bytes(bytes(data))
+            future = time.time() + 2
+            os.utime(zim_path, (future, future))
             search.reload()
 
-            sources = search.source_dicts()
-            self.assertEqual([source["title"] for source in sources], ["manual"])
-            for source in sources:
-                self.assertNotIn("available", source)
-                self.assertNotIn("mode", source)
+            # An unreadable archive is a library-only source, not searchable.
+            self.assertEqual(search.source_dicts(), [])
 
             library = client.get("/library.json")
             self.assertEqual(library.status_code, 200)
@@ -795,11 +813,11 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             library = search.library_dicts()
 
-            self.assertEqual(library[0]["key"], search._zim_source_key("manual_2026-08"))
+            self.assertEqual(library[0]["key"], _zim_key("manual_2026-08"))
             self.assertEqual(library[0]["title"], "A Display Name")
             self.assertEqual(
                 library[0]["provider_id"],
-                search.catalog.get_stem("manual_2026-08").provider_id,
+                _zim_runtime(search).catalog.get_key(_zim_key("manual_2026-08")).provider_id,
             )
 
     def test_xhtml_articles_get_the_article_bridge(self):
@@ -832,7 +850,7 @@ class LocalIntegrationTests(unittest.TestCase):
 
             search = self._open_search(root)
             client = TestClient(create_app(search))
-            response = client.get("/article/manual/Alpha")
+            response = client.get(f"/article/{ZIM_URL}/Alpha")
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"data-zimantic-bridge", response.content)
@@ -849,7 +867,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(search.source_dicts(), [])
             self.assertEqual(search.library_dicts(), [])
             # The on-disk catalog is retained for the next successful scan.
-            self.assertEqual(len(search.catalog.rows()), 1)
+            self.assertEqual(len(_zim_runtime(search).catalog.rows()), 1)
 
     def test_duplicate_uuid_keeps_one_deterministic_source(self):
         with _temp_dir(self) as tmp:
@@ -862,6 +880,8 @@ class LocalIntegrationTests(unittest.TestCase):
             data = bytearray(zim_path.read_bytes())
             data[0:4] = b"XXXX"
             zim_path.write_bytes(bytes(data))
+            future = time.time() + 2
+            os.utime(zim_path, (future, future))
             search.reload()
 
             # The two files share a UUID, so exactly one source remains. Listing
@@ -869,7 +889,9 @@ class LocalIntegrationTests(unittest.TestCase):
             sources = search.source_dicts()
             self.assertEqual(len(sources), 1)
             self.assertTrue(sources[0]["searchable"])
-            self.assertEqual(len(search.library_dicts()), 1)
+            # The corrupt copy remains a library-only source; readable copies
+            # with distinct root-relative paths are always distinct sources.
+            self.assertEqual(len(search.library_dicts()), 2)
 
 
 if __name__ == "__main__":

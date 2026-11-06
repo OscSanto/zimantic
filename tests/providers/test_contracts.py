@@ -24,6 +24,8 @@ def test_contract_modules_import_without_runtime_dependencies():
         import zimantic.content.store
         import zimantic.providers.base
         import zimantic.providers.registry
+        import zimantic.catalog
+        import zimantic.search
         print("ok")
         """
     )

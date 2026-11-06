@@ -1,21 +1,8 @@
-"""Source discovery, icon lookup, and bounded remote-response helpers."""
+"""Bounded remote-response helpers used by the Kiwix provider."""
 
-import logging
-import posixpath
 import re
 import xml.etree.ElementTree as ET
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
-
-from libzim.reader import Archive
-
-from ..catalog import perma_ref
-from ..content.reader import resolve_archive_href
-from .query import INTENT_RULES
-
-ICON_METADATA_PATH = "-/icon"
-ICON_MAX_BYTES = 1 << 20
-ICON_DISCOVERY_HTML_BYTES = 512 << 10
-logger = logging.getLogger(__name__)
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def _html_attribute(tag: str, name: str) -> str:
@@ -27,92 +14,6 @@ def _html_attribute(tag: str, name: str) -> str:
     if not match:
         return ""
     return next((value for value in match.groups() if value is not None), "")
-
-
-def _archive_path_from_href(base: str, href: str) -> str | None:
-    return resolve_archive_href(base, href)
-
-
-def _icon_entry_path(archive: Archive, path: str) -> str | None:
-    try:
-        entry = archive.get_entry_by_path(path)
-        item = entry.get_item()
-        mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
-        size = int(getattr(item, "size", 0) or 0)
-    except (KeyError, RuntimeError, ValueError):
-        return None
-    if size > ICON_MAX_BYTES:
-        return None
-    if mimetype.startswith("image/") or (
-        path.casefold().endswith(".ico")
-        and mimetype in {"application/octet-stream", "binary/octet-stream"}
-    ):
-        return path
-    return None
-
-
-def _find_archive_icon_path(archive: Archive, homepage: str | None) -> str | None:
-    """Find a small image that represents a local ZIM source."""
-    metadata_icon = _icon_entry_path(archive, ICON_METADATA_PATH)
-    if metadata_icon:
-        return metadata_icon
-
-    linked_paths: list[str] = []
-    if homepage:
-        try:
-            entry = (
-                archive.main_entry
-                if homepage == archive.main_entry.path
-                else archive.get_entry_by_path(homepage)
-            )
-            item = entry.get_item()
-            mimetype = (item.mimetype or "").split(";", 1)[0].strip().lower()
-            size = int(getattr(item, "size", 0) or 0)
-            if (
-                mimetype in {"text/html", "application/xhtml+xml"}
-                and size <= ICON_DISCOVERY_HTML_BYTES
-            ):
-                html = bytes(item.content).decode("utf-8", "ignore")
-                for match in re.finditer(r"<link\b[^>]*>", html, re.IGNORECASE):
-                    tag = match.group(0)
-                    rel = _html_attribute(tag, "rel").casefold()
-                    href = _html_attribute(tag, "href")
-                    if "icon" in rel and href:
-                        path = _archive_path_from_href(homepage, href)
-                        if path:
-                            linked_paths.append(path)
-        except (KeyError, RuntimeError, ValueError) as error:
-            logger.debug("could not inspect ZIM homepage %s for an icon: %s", homepage, error)
-
-    candidates = linked_paths + [
-        "favicon.ico",
-        "favicon.png",
-        "apple-touch-icon.png",
-    ]
-    if homepage:
-        base = posixpath.dirname(homepage)
-        candidates.extend(
-            posixpath.join(base, name)
-            for name in ("favicon.ico", "favicon.png", "apple-touch-icon.png")
-            if base
-        )
-    seen: set[str] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        icon = _icon_entry_path(archive, candidate)
-        if icon:
-            return icon
-    return None
-
-
-def _source_icon_url(
-    zim_name: str, has_icon: bool, base_path: str = ""
-) -> str | None:
-    if not has_icon:
-        return None
-    return f"{base_path}/source-icon/{quote(zim_name, safe='')}"
 
 
 def _bounded_catalog_url(url: str, limit: int) -> str:
@@ -173,47 +74,11 @@ def _decode_remote_xml(payload: bytes) -> str:
 
 
 def _parse_remote_xml(payload: bytes) -> ET.Element:
-    """Parse trusted-shaped XML while rejecting DTD/entity expansion inputs.
-
-    The check runs on decoded text, so UTF-16 and UTF-32 declarations cannot
-    bypass the byte-pattern guard used by older callers.
-    """
+    """Parse trusted-shaped XML while rejecting DTD/entity expansion inputs."""
     text = _decode_remote_xml(payload)
     if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
         raise ValueError("DTD and entity declarations are not supported")
     return ET.fromstring(text)
-
-
-
-def _zim_key(book: str) -> str:
-    return perma_ref(book)
-
-
-_FLAVOUR_SUFFIX = re.compile(r"_(?:maxi|mini|nopic)$", re.IGNORECASE)
-
-
-def _book_identity(book: str) -> str:
-    """Return the identity shared by versions/flavours of one local book.
-
-    ``perma_ref`` removes a trailing ZIM date, and the loop also removes a
-    trailing archive flavour (``mini``, ``nopic``, ``maxi``). This collapses
-    dated and flavour variants such as
-    ``wikipedia_en_medicine_mini_2025-10`` and
-    ``wikipedia_en_medicine_nopic_2025-10`` while keeping language variants
-    (``phet_en_all`` vs ``phet_mul_all``) separate.
-    """
-    base = perma_ref(str(book or "").strip())
-    while _FLAVOUR_SUFFIX.search(base):
-        base = _FLAVOUR_SUFFIX.sub("", base)
-    return base.casefold()
-
-
-def _intent_phrases(book: str) -> tuple[str, ...]:
-    key = _zim_key(book)
-    for pattern, phrases in INTENT_RULES:
-        if pattern.search(key):
-            return phrases
-    return ()
 
 
 def _local_name(element: ET.Element) -> str:
@@ -225,3 +90,14 @@ def _child_text(element: ET.Element, name: str) -> str:
         if _local_name(child) == name:
             return "".join(child.itertext()).strip()
     return ""
+
+
+__all__ = [
+    "_bounded_catalog_url",
+    "_child_text",
+    "_decode_remote_xml",
+    "_html_attribute",
+    "_local_name",
+    "_parse_remote_xml",
+    "_read_limited_response",
+]

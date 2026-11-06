@@ -21,13 +21,31 @@ from ..contracts import SourceInfo, SourceResult, encode_document_id
 from .config import _int_config
 from .sources import (
     _bounded_catalog_url,
-    _book_identity,
     _child_text,
     _local_name,
     _parse_remote_xml,
     _read_limited_response,
-    _zim_key,
 )
+
+
+def _perma_ref(stem: str) -> str:
+    match = re.search(r"_\d{4}-\d{2}(?:-\d{2})?$", stem)
+    return stem[: match.start()] if match else stem
+
+
+def _zim_key(book: str) -> str:
+    return _perma_ref(book)
+
+
+_FLAVOUR_SUFFIX = re.compile(r"_(?:maxi|mini|nopic)$", re.IGNORECASE)
+
+
+def _book_identity(book: str) -> str:
+    """Return the identity shared by versions/flavours of one remote book."""
+    base = _perma_ref(str(book or "").strip())
+    while _FLAVOUR_SUFFIX.search(base):
+        base = _FLAVOUR_SUFFIX.sub("", base)
+    return base.casefold()
 
 DEFAULT_MAX_KIWIX_RESPONSE_BYTES = 64 << 20
 DEFAULT_KIWIX_CATALOG_LIMIT = 1_000

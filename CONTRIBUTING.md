@@ -84,6 +84,8 @@ the seam in `zimantic/providers/`:
 - Content contracts live in `zimantic/content/store.py`. `providers.base`
   re-exports them. `ContentStore` is frozen in phase 00, including
   `read_range`, even when a runtime returns `None` until its store lands.
+- `zimantic/providers/zim/` is the reference provider. New providers implement
+  the seam independently and must not import the ZIM package.
 - Provider-private metadata and filesystem locators must not be serialized.
   Only the approved `SourceInfo.to_dict(include_metadata=...)` fields and the
   collection descriptor/snapshot payloads reach clients.

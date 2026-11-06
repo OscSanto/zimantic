@@ -1,4 +1,4 @@
-"""Tests for the single-file ZIM catalog."""
+"""Tests for the provider-neutral catalog and the ZIM scanner."""
 
 import sqlite3
 import tempfile
@@ -10,10 +10,15 @@ from libzim.reader import Archive
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.catalog import (
-    _SCHEMA_COLUMNS,
     SCHEMA_VERSION,
-    ZimCatalog,
+    SOURCE_COLUMNS,
+    SourceCatalog,
     catalog_path,
+)
+from zimantic.providers.config import ZimConfig
+from zimantic.providers.zim.discovery import scan_collection, zim_source_key
+from zimantic.providers.zim.metadata import (
+    metadata_from_archive,
     normalize_counter,
     normalize_tags,
     perma_ref,
@@ -59,6 +64,16 @@ def _create_zim(path, *, creator_metadata=None):
         zim_creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
 
 
+def _scan(catalog, zims, *, name="library", force=False):
+    return scan_collection(
+        catalog,
+        ZimConfig(name=name, path=str(zims)),
+        collection_key=f"zim:{name}",
+        archive_factory=Archive,
+        force=force,
+    )
+
+
 class CatalogTests(unittest.TestCase):
     def test_scan_populates_and_skips_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,38 +81,42 @@ class CatalogTests(unittest.TestCase):
             zims = root / "zims"
             zims.mkdir()
             _create_zim(zims / "manual.zim")
-            catalog = ZimCatalog(root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive)
+            catalog = SourceCatalog(root / "indexes" / "catalog.sqlite")
 
-            first = catalog.scan()
-            self.assertEqual(first["added"], 1)
-            record = catalog.get_stem("manual")
+            first = _scan(catalog, zims)
+            self.assertEqual(first.stats["added"], 1)
+            record = catalog.get_path(zims / "manual.zim")
             self.assertIsNotNone(record)
-            self.assertEqual(catalog.find_path("manual", record.size), zims / "manual.zim")
-            self.assertEqual(record.article_count, 1)
-            self.assertGreaterEqual(record.entry_count, 1)
+            self.assertEqual(
+                record.key, zim_source_key("library", "manual.zim")
+            )
+            self.assertEqual(record.provider, "zim")
+            self.assertEqual(record.item_count, 1)
             self.assertIn(record.homepage, {"Alpha", "mainPage"})
-            self.assertEqual(record.has_fulltext_index, 1)
-            self.assertEqual(record.uuid, str(Archive(zims / "manual.zim").uuid))
+            self.assertIs(record.native_fulltext_available, 1)
+            self.assertEqual(
+                record.provider_id, str(Archive(zims / "manual.zim").uuid)
+            )
             self.assertIn("_ftindex:no", record.tags)
             self.assertIn("_pictures:yes", record.tags)
             self.assertEqual(record.public_tags, "")
-            self.assertIn("text/html", record.counter)
-            self.assertIsNone(record.favicon)
+            self.assertIn("text/html", record.mime_counts)
+            self.assertIsNone(record.icon_data)
 
             catalog.db.execute(
                 "UPDATE sources SET icon_data = ?, icon_mime_type = 'image/png' "
-                "WHERE path LIKE '%/manual.zim'",
-                (b"x" * 2048,),
+                "WHERE key = ?",
+                (b"x" * 2048, record.key),
             )
             catalog.db.commit()
-            light = catalog.get_stem("manual")
-            full = catalog.get_stem("manual", include_favicon=True)
-            self.assertEqual(light.favicon, b"\x01")
-            self.assertEqual(full.favicon, b"x" * 2048)
+            light = catalog.rows()[0]
+            full = catalog.get_key(record.key)
+            self.assertEqual(light.icon_data, b"\x01")
+            self.assertEqual(full.icon_data, b"x" * 2048)
 
-            second = catalog.scan()
-            self.assertEqual(second["skipped"], 1)
-            self.assertEqual(second["added"], 0)
+            second = _scan(catalog, zims)
+            self.assertEqual(second.stats["skipped"], 1)
+            self.assertEqual(second.stats["added"], 0)
             catalog.close()
 
     def test_database_open_failure_deletes_and_recreates_database(self):
@@ -122,7 +141,7 @@ class CatalogTests(unittest.TestCase):
                 return real_connect(database, *args, **kwargs)
 
             with mock.patch("zimantic.catalog.sqlite3.connect", side_effect=connect):
-                catalog = ZimCatalog(db_path)
+                catalog = SourceCatalog(db_path)
 
             try:
                 self.assertTrue(failed)
@@ -153,7 +172,7 @@ class CatalogTests(unittest.TestCase):
                 side_effect=sqlite3.OperationalError("database is locked"),
             ):
                 with self.assertRaises(sqlite3.OperationalError):
-                    ZimCatalog(db_path)
+                    SourceCatalog(db_path)
 
             db = sqlite3.connect(db_path)
             try:
@@ -171,20 +190,20 @@ class CatalogTests(unittest.TestCase):
             zims.mkdir()
             _create_zim(zims / "manual.zim")
             (zims / "broken.zim").write_bytes(b"not a zim")
-            catalog = ZimCatalog(root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive)
+            catalog = SourceCatalog(root / "indexes" / "catalog.sqlite")
 
-            stats = catalog.scan()
-            self.assertEqual(stats["added"], 1)
-            self.assertEqual(stats["invalid"], 1)
-            broken = catalog.get_stem("broken")
+            stats = _scan(catalog, zims)
+            self.assertEqual(stats.stats["added"], 1)
+            self.assertEqual(stats.stats["invalid"], 1)
+            broken = catalog.get_path(zims / "broken.zim")
             self.assertIsNotNone(broken)
             self.assertIsNone(broken.item_count)
             self.assertIsNone(broken.native_fulltext_available)
 
             # Routine refreshes stat paths and do not reopen an unchanged
             # archive; the failure is reported by the operation that hits it.
-            again = catalog.scan()
-            self.assertEqual(again["skipped"], 2)
+            again = _scan(catalog, zims)
+            self.assertEqual(again.stats["skipped"], 2)
             catalog.close()
 
     def test_upsert_from_archive(self):
@@ -194,10 +213,18 @@ class CatalogTests(unittest.TestCase):
             zims.mkdir()
             zim_path = zims / "manual.zim"
             _create_zim(zim_path)
-            with ZimCatalog(root / "indexes" / "catalog.sqlite") as catalog:
-                record = catalog.upsert_from_archive(Archive(zim_path), zim_path)
-                self.assertEqual(record.stem, "manual")
-                self.assertEqual(record.article_count, 1)
+            key = zim_source_key("library", "manual.zim")
+            with SourceCatalog(root / "indexes" / "catalog.sqlite") as catalog:
+                record = catalog.upsert(
+                    metadata_from_archive(
+                        Archive(zim_path),
+                        zim_path,
+                        key=key,
+                        collection_key="zim:library",
+                    )
+                )
+                self.assertEqual(record.key, key)
+                self.assertEqual(record.item_count, 1)
                 self.assertIsNotNone(record)
                 self.assertEqual(len(catalog.rows()), 1)
 
@@ -209,9 +236,9 @@ class CatalogTests(unittest.TestCase):
             zim_path = zims / "manual.zim"
             _create_zim(zim_path, creator_metadata="-")
 
-            with ZimCatalog(root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive) as catalog:
-                catalog.scan()
-                record = catalog.get_stem("manual")
+            with SourceCatalog(root / "indexes" / "catalog.sqlite") as catalog:
+                _scan(catalog, zims)
+                record = catalog.get_path(zim_path)
 
             self.assertIsNotNone(record)
             self.assertEqual(record.creator, "")
@@ -247,8 +274,8 @@ class CatalogTests(unittest.TestCase):
             zims.mkdir()
             _create_zim(zims / "manual.zim")
             db_path = root / "indexes" / "catalog.sqlite"
-            catalog = ZimCatalog(db_path, zims, archive_factory=Archive)
-            catalog.scan()
+            catalog = SourceCatalog(db_path)
+            _scan(catalog, zims)
             catalog.close()
 
             db = sqlite3.connect(db_path)
@@ -256,7 +283,7 @@ class CatalogTests(unittest.TestCase):
             db.commit()
             db.close()
 
-            catalog = ZimCatalog(db_path, zims, archive_factory=Archive)
+            catalog = SourceCatalog(db_path)
             self.assertEqual(catalog.rows(), [])
             catalog.close()
 
@@ -271,13 +298,13 @@ class CatalogTests(unittest.TestCase):
             db.commit()
             db.close()
 
-            with ZimCatalog(db_path) as catalog:
+            with SourceCatalog(db_path) as catalog:
                 self.assertEqual(catalog.rows(), [])
                 columns = {
                     row["name"]
                     for row in catalog.db.execute("PRAGMA table_info(sources)")
                 }
-            self.assertEqual(columns, set(_SCHEMA_COLUMNS))
+            self.assertEqual(columns, set(SOURCE_COLUMNS))
 
     def test_missing_directory_keeps_the_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,21 +313,20 @@ class CatalogTests(unittest.TestCase):
             zims.mkdir()
             _create_zim(zims / "manual.zim")
             db_path = root / "indexes" / "catalog.sqlite"
-            with ZimCatalog(db_path, zims, archive_factory=Archive) as catalog:
-                catalog.scan()
+            with SourceCatalog(db_path) as catalog:
+                _scan(catalog, zims)
                 self.assertEqual(len(catalog.rows()), 1)
 
             # The drive is not mounted: the scan must fail without deleting the
             # cache that the mounted directory will populate again.
-            missing = ZimCatalog(db_path, root / "unmounted", archive_factory=Archive)
-            with self.assertRaises(FileNotFoundError):
-                missing.scan()
-            self.assertEqual(len(missing.rows()), 1)
-            missing.close()
+            with SourceCatalog(db_path) as missing:
+                result = _scan(missing, root / "unmounted")
+                self.assertFalse(result.complete)
+                self.assertEqual(len(missing.rows()), 1)
 
-            with ZimCatalog(db_path, zims, archive_factory=Archive) as catalog:
+            with SourceCatalog(db_path) as catalog:
                 self.assertEqual(len(catalog.rows()), 1)
-                self.assertEqual(catalog.scan()["skipped"], 1)
+                self.assertEqual(_scan(catalog, zims).stats["skipped"], 1)
 
     def test_version_token_tracks_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -308,12 +334,12 @@ class CatalogTests(unittest.TestCase):
             zims = root / "zims"
             zims.mkdir()
             _create_zim(zims / "manual.zim")
-            with ZimCatalog(root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive) as catalog:
+            with SourceCatalog(root / "indexes" / "catalog.sqlite") as catalog:
                 before = catalog.version()
-                catalog.scan()
+                _scan(catalog, zims)
                 self.assertNotEqual(catalog.version(), before)
                 after_scan = catalog.version()
-                catalog.scan()
+                _scan(catalog, zims)
                 self.assertEqual(catalog.version(), after_scan)
 
     def test_uppercase_extension_is_scanned(self):
@@ -322,12 +348,10 @@ class CatalogTests(unittest.TestCase):
             zims = root / "zims"
             zims.mkdir()
             _create_zim(zims / "MANUAL.ZIM")
-            with ZimCatalog(
-                root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive
-            ) as catalog:
-                stats = catalog.scan()
-                self.assertEqual(stats["added"], 1)
-                self.assertIsNotNone(catalog.get_stem("MANUAL"))
+            with SourceCatalog(root / "indexes" / "catalog.sqlite") as catalog:
+                stats = _scan(catalog, zims)
+                self.assertEqual(stats.stats["added"], 1)
+                self.assertIsNotNone(catalog.get_path(zims / "MANUAL.ZIM"))
 
     def test_unreadable_subdirectory_keeps_its_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,36 +359,47 @@ class CatalogTests(unittest.TestCase):
             zims = root / "zims"
             unreadable = zims / "private"
             unreadable.mkdir(parents=True)
-            with ZimCatalog(
-                root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive
-            ) as catalog:
-                catalog.mark_error(unreadable / "hidden.zim", "permission denied")
+            with SourceCatalog(root / "indexes" / "catalog.sqlite") as catalog:
+                catalog.upsert(
+                    {
+                        "provider": "zim",
+                        "collection_key": "zim:library",
+                        "key": zim_source_key("library", "private/hidden.zim"),
+                        "path": str(unreadable / "hidden.zim"),
+                        "size": 10,
+                        "mtime": 1,
+                        "title": "hidden",
+                    }
+                )
 
                 def fake_walk(_top, onerror=None):
                     onerror(PermissionError(13, "denied", str(unreadable)))
                     return iter([(str(zims), [], [])])
 
-                with mock.patch("zimantic.catalog.os.walk", fake_walk):
-                    stats = catalog.scan()
-                self.assertEqual(stats["removed"], 0)
-                self.assertIsNotNone(catalog.get_stem("hidden"))
+                with mock.patch(
+                    "zimantic.providers.zim.discovery.os.walk", fake_walk
+                ):
+                    stats = _scan(catalog, zims)
+                self.assertEqual(stats.stats["removed"], 0)
+                self.assertIsNotNone(catalog.get_path(unreadable / "hidden.zim"))
 
     def test_unreadable_root_aborts_the_scan(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             zims = root / "zims"
             zims.mkdir()
-            with ZimCatalog(
-                root / "indexes" / "catalog.sqlite", zims, archive_factory=Archive
-            ) as catalog:
+            with SourceCatalog(root / "indexes" / "catalog.sqlite") as catalog:
 
                 def fake_walk(top, onerror=None):
                     onerror(PermissionError(13, "denied", str(top)))
                     return iter(())
 
-                with mock.patch("zimantic.catalog.os.walk", fake_walk):
-                    with self.assertRaises(PermissionError):
-                        catalog.scan()
+                with mock.patch(
+                    "zimantic.providers.zim.discovery.os.walk", fake_walk
+                ):
+                    result = _scan(catalog, zims)
+                    self.assertFalse(result.complete)
+                    self.assertTrue(result.errors)
 
     def test_normalize_counter_sorts_by_count(self):
         self.assertEqual(

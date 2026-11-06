@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from libzim.reader import Archive
 from tqdm import tqdm
 
-from .catalog import ZimCatalog, catalog_path
+from .catalog import SourceCatalog, catalog_path
 from .content.reader import (
     DEFAULT_MAX_ENTRY_BYTES,
     DEFAULT_MAX_HTML_BYTES,
@@ -471,15 +471,32 @@ def build(
         return
     try:
         zim = Archive(zim_path)
+        from .providers.zim.discovery import (
+            relative_archive,
+            zim_collection_key,
+            zim_source_key,
+        )
+        from .providers.zim.metadata import metadata_from_archive
+
+        root = Path(collection_root) if collection_root else zim_path
+        relative = (
+            zim_path.name
+            if root.is_file()
+            else relative_archive(root, zim_path)
+        )
+        key = zim_source_key(collection_name, relative)
         # The archive is already open: store its catalog metadata now, so serve
         # can list sources without reopening every ZIM at startup.
         try:
-            with ZimCatalog(
-                catalog_path(index_dir),
-                collection_name=collection_name,
-                collection_root=collection_root,
-            ) as catalog:
-                catalog.upsert_from_archive(zim, zim_path)
+            with SourceCatalog(catalog_path(index_dir)) as catalog:
+                catalog.upsert(
+                    metadata_from_archive(
+                        zim,
+                        zim_path,
+                        key=key,
+                        collection_key=zim_collection_key(collection_name),
+                    )
+                )
         except Exception as error:
             logger.warning(
                 "catalog metadata update failed for %s (%s)", zim_path, error
@@ -529,17 +546,23 @@ def build(
         try:
             from .indexes import IndexLocator
 
-            with ZimCatalog(catalog_path(index_dir)) as catalog:
-                record = catalog.get_path(zim_path)
+            with SourceCatalog(catalog_path(index_dir)) as catalog:
+                record = catalog.get_key(
+                    zim_source_key(collection_name, relative)
+                )
             if record is not None:
                 locator = IndexLocator(index_dir)
+                source_mtime = round(zim_path.stat().st_mtime_ns / 1_000_000_000)
                 lease = locator.publish(
                     record,
                     db_path,
                     None if fast else faiss_path,
                     metadata={
                         "schema_version": 1,
-                        "source_fingerprint": f"{state.filesize}:{int(zim_path.stat().st_mtime)}",
+                        "source_fingerprint": f"{state.filesize}:{source_mtime}",
+                        "source_size": state.filesize,
+                        "source_mtime": source_mtime,
+                        "provider_id": record.provider_id,
                     },
                 )
                 lease.close()
