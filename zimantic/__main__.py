@@ -49,9 +49,10 @@ def main() -> None:
 
         from .hardware import detect
         hw = detect()
-        workers, threads, batch_size = build_settings(cfg, hw)
+        workers, threads, batch_size, note = build_settings(cfg, hw)
         print(f"hardware: {hw.describe()}")
-        print(f"settings: {workers} embedding workers x {threads or 'default'} threads, batch_size {batch_size}")
+        print(f"settings: {workers} embedding workers ({note}) x {threads or 'default'} threads, "
+              f"batch_size {batch_size}")
 
         embedder = Embedder(cfg["model_dir"], threads=threads or None)
         for zim in zims:

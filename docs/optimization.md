@@ -163,18 +163,63 @@ The build prints what it detected at start, for example
 |---|---|---|
 | 8 cores / 16 threads PC | 15 | 8 would be about as fast with half the worker memory |
 | Raspberry Pi 5 (4 cores, no hyperthreads) | 3 | on a 4-thread test, 23.9 → 44.8 articles/s (1.9×); a Pi CPU is slower in absolute terms |
-| Raspberry Pi Zero 2 W (4 cores, 512 MB) | 3, **set 1–2** | RAM is the limit; large ZIMs are best built on a PC and copied over |
+| Raspberry Pi Zero 2 W (4 cores, 512 MB) | 1 (capped by free RAM, see 7) | RAM is the limit; large ZIMs are best built on a PC and copied over |
 | 1–2 threads | 1 | still gets sorting, small batches, storage order and overlap |
 
-## 7. Settings
+## 7. RAM
+
+Worker threads share one copy of the model, but each running call needs its own working memory. Peak RAM
+during a build (`bench_embed.py`, 15,000 entries, Windows):
+
+| Worker threads | batch_size | Peak RAM |
+|---|---|---|
+| — (model, tokenizer, ZIM open) | — | 0.30 GB |
+| 1 | 8 | 0.33 GB |
+| 4 | 8 | 0.48 GB |
+| 8 | 8 | 0.59 GB |
+| 15 | 8 | 0.67 GB |
+| 15 | 32 | **1.39 GB** |
+
+```mermaid
+xychart-beta
+    title "Peak build RAM (GB) by worker threads, batch_size 8"
+    x-axis ["model only", "1", "4", "8", "15"]
+    y-axis "GB" 0 --> 1
+    line [0.30, 0.33, 0.48, 0.59, 0.67]
+```
+
+So `embedding_workers: auto` also checks the RAM **free when the build starts**:
+
+```
+workers = min(hardware threads - 1,  (free RAM - 300 MB model - 128 MB reserve) / (4 MB x batch_size))
+```
+
+- **Cost per worker:** 4 MB × `batch_size` is 32 MB at batch 8, on the cautious side of the 25–45 MB measured.
+- **The reserve:** 128 MB is left for the OS and a search server on the same machine.
+- **When even one worker doesn't fit:** the build prints a warning, for example on a Pi Zero 2 W with other
+  programs running.
+
+The build start line says why it chose its worker count, for example:
+
+```
+settings: 8 embedding workers (limited by free RAM (700 MB free, ~32 MB per worker)) x 1 threads, batch_size 8
+```
+
+After each ZIM, `release_memory()` gives freed memory back to the OS. On Linux, glibc otherwise keeps it reserved
+for the process (`malloc_trim`). Windows and macOS do this on their own. The ONNX Runtime memory pool ("arena")
+stays off: same speed, about 600 MB less held after a build.
+
+Batch 8 also saves RAM. At 15 worker threads, batch 32 needed 2.1× the peak RAM of batch 8 and was slower.
+
+## 8. Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `batch_size` | 8 | articles with text per model call |
-| `embedding_workers` | auto = hardware threads − 1 | model calls running at once while building |
+| `embedding_workers` | auto = hardware threads − 1, capped by free RAM | model calls running at once while building |
 | `embed_threads` | auto = 1 with several workers, else all cores | threads inside one model call |
 
-## 8. Measure your machine
+## 9. Measure your machine
 
 ```
 python scripts/bench_embed.py wikipedia_en_top_nopic_2026-09

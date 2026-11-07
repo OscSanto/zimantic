@@ -62,7 +62,7 @@ def main() -> None:
         if value is not None:
             cfg[key] = value
     hw = detect()
-    workers, threads, batch_size = build_settings(cfg, hw)
+    workers, threads, batch_size, note = build_settings(cfg, hw)
 
     path = Path(args.zim) if args.zim.endswith(".zim") else Path(cfg["zim_dir"]) / f"{args.zim}.zim"
     zim = Archive(str(path))
@@ -82,7 +82,7 @@ def main() -> None:
     embedder.embed(["passage: warm up"])
     print(f"hardware: {hw.describe()}", file=sys.stderr)
     print(f"reading entries {start:,}-{stop:,} of {zim.entry_count:,}, {workers} workers x "
-          f"{threads or 'default'} threads, batch {batch_size}, {order_name} order", file=sys.stderr)
+          f"{threads or 'default'} threads ({note}), batch {batch_size}, {order_name} order", file=sys.stderr)
 
     began = time.perf_counter()
     articles = sum(len(vectors) for _, vectors, _ in

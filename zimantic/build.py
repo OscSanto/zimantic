@@ -32,11 +32,21 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
 WINDOW = 512
 
 
-def build_settings(cfg: dict, hw) -> tuple[int, int, int]:
-    """(embedding_workers, embed_threads, batch_size) from config.yaml, with "auto" filled in from the hardware.
+# Peak RAM measured during builds (batch 8, Windows, 2026-11-07): ~300 MB before any embedding (model,
+# tokenizer, ZIM open), then ~25-45 MB per worker thread; batch 32 needed ~3x as much per worker.
+BASE_RAM = 300 << 20
+RAM_PER_WORKER_PER_TEXT = 4 << 20   # x batch_size: 32 MB per worker at batch 8, on the cautious side
+RAM_RESERVE = 128 << 20             # left for the OS and a search server running on the same machine
+MB = 1 << 20
 
-    auto workers: one per hardware thread, minus one left for the main thread, which reads the ZIM.
+
+def build_settings(cfg: dict, hw) -> tuple[int, int, int, str]:
+    """(embedding_workers, embed_threads, batch_size, note) from config.yaml, with "auto" filled in.
+
+    auto workers: one per hardware thread, minus one left for the main thread (it reads the ZIM),
+                  and no more than fit in the RAM free right now.
     auto threads: 1 per call when several calls run at once; ONNX Runtime's default (all cores) for one call.
+    note: why the worker count is what it is, printed at build start.
     """
     def setting(name, auto):
         value = cfg.get(name, "auto")
@@ -46,9 +56,24 @@ def build_settings(cfg: dict, hw) -> tuple[int, int, int]:
             raise SystemExit(f"zimantic: {name} must be auto or a whole number of at least 1, not {value!r}")
         return value
 
-    workers = setting("embedding_workers", max(1, hw.threads - 1))
+    batch_size = setting("batch_size", 8)
+    per_worker = RAM_PER_WORKER_PER_TEXT * batch_size
+    spare = hw.ram_available - BASE_RAM - RAM_RESERVE
+    fit = max(1, spare // per_worker)
+    by_threads = max(1, hw.threads - 1)
+    workers = setting("embedding_workers", min(by_threads, fit))
+
+    if cfg.get("embedding_workers", "auto") not in (None, "auto"):
+        note = "set in config.yaml"
+    elif fit < by_threads:
+        note = f"limited by free RAM ({hw.ram_available // MB} MB free, ~{per_worker // MB} MB per worker)"
+    else:
+        note = "one per hardware thread, minus one for reading"
+    if spare < per_worker:
+        note += (f". WARNING: only {hw.ram_available // MB} MB free, about {(BASE_RAM + RAM_RESERVE + per_worker) // MB}"
+                 " MB is needed; the build may run out of memory. Close other programs or build on another machine")
     threads = setting("embed_threads", 1 if workers > 1 else 0)  # 0 = ONNX Runtime's default
-    return workers, threads, setting("batch_size", 8)
+    return workers, threads, batch_size, note
 
 
 def build(zim_path: Path, index_dir, embedder, batch_size: int, workers: int) -> None:
@@ -86,6 +111,26 @@ def build(zim_path: Path, index_dir, embedder, batch_size: int, workers: int) ->
         db.execute("INSERT OR REPLACE INTO meta VALUES ('done', 1)")
     db.execute("VACUUM")
     db.close()
+    release_memory()
+
+
+def release_memory() -> None:
+    """Hand memory freed after a build back to the operating system (Linux with glibc only).
+
+    glibc keeps freed memory reserved for this process in case it is needed again, so after a build the
+    process can look hundreds of MB bigger than it is. On a Raspberry Pi that is RAM a search server or the
+    next ZIM's build can't use. malloc_trim(0) returns it. Windows and macOS give memory back on their own;
+    other C libraries (e.g. musl on Alpine Linux) don't have malloc_trim, so this does nothing there.
+    """
+    import ctypes
+    import ctypes.util
+    import gc
+    gc.collect()
+    try:
+        trim = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6").malloc_trim
+    except (OSError, AttributeError, TypeError):
+        return
+    trim(0)
 
 
 def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, workers: int, progress=None):
