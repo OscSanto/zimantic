@@ -989,6 +989,12 @@ summary {
     cursor: pointer;
     font-size: 0.88rem;
 }
+.settings > label {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
 .result-enter {
     opacity: 0;
     transform: translateY(8px);

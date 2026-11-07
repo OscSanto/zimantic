@@ -7,6 +7,7 @@
             "Primary": "Principal",
             "Search": "Buscar",
             "Library": "Biblioteca",
+            "Settings": "Configuración",
             "Search your offline library": "Busca en tu biblioteca sin conexión",
             "how to change a lightbulb": "cómo cambiar una bombilla",
             "Search query": "Consulta de búsqueda",

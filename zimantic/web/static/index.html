@@ -21,13 +21,6 @@
                     <a href="./" data-i18n="Search">Search</a>
                     <a href="library" data-i18n="Library">Library</a>
                 </nav>
-                <label>
-                    <span data-i18n="Language">Language</span>
-                    <select id="localePicker" aria-label="Language" data-i18n-aria-label="Language">
-                        <option value="en">English</option>
-                        <option value="es">Español</option>
-                    </select>
-                </label>
             </header>
 
             <main id="searchView">
@@ -133,6 +126,17 @@
                 </div>
                 <div id="libraryGrid" class="library-grid"></div>
             </section>
+
+            <details id="settingsDetails" class="settings">
+                <summary data-i18n="Settings">Settings</summary>
+                <label>
+                    <span data-i18n="Language">Language</span>
+                    <select id="localePicker" aria-label="Language" data-i18n-aria-label="Language">
+                        <option value="en">English</option>
+                        <option value="es">Español</option>
+                    </select>
+                </label>
+            </details>
         </div>
 
         <div id="libraryInfoModal" class="library-info-modal" hidden>

@@ -3502,6 +3502,11 @@
                 return false;
             }
 
+            function setSettingsOpen(open) {
+                const settings = $("settingsDetails");
+                if (settings) settings.open = Boolean(open);
+            }
+
             async function runSearch(
                 question,
                 selectedSources = [],
@@ -3511,6 +3516,7 @@
             ) {
                 question = question.trim();
                 if (!question) return;
+                setSettingsOpen(false);
                 sourceFilterShowAll = false;
                 sourceFilterShowOther = false;
                 if (requestController) requestController.abort();
@@ -4295,6 +4301,7 @@
                 resultList = null;
                 announceSearchStatus();
                 document.body.classList.remove("search-active");
+                setSettingsOpen(true);
                 $("searchSummary").hidden = true;
                 $("sourceFilterToolbar").hidden = true;
                 $("status").textContent = "";
@@ -4330,6 +4337,7 @@
 
             function toggleHeadingSearch() {
                 if (location.pathname === appPath("/library")) {
+                    setSettingsOpen(true);
                     history.pushState(null, "", appPath("/"));
                     initialize();
                     return;
@@ -4348,7 +4356,10 @@
                     clearSearch(true);
                     return;
                 }
-                if (!previousHeadingSearch) return;
+                if (!previousHeadingSearch) {
+                    setSettingsOpen(true);
+                    return;
+                }
                 const previous = previousHeadingSearch;
                 $("question").value = previous.question;
                 commitAutoSearchHistory();
@@ -4857,6 +4868,7 @@
                 $("searchView").hidden = libraryView;
                 $("libraryView").hidden = !libraryView;
                 document.body.classList.toggle("library-active", libraryView);
+                setSettingsOpen(!libraryView && !state.question && !state.modal);
                 for (const link of document.querySelectorAll(".view-nav a")) {
                     const isLibraryLink = link.getAttribute("href") === "library";
                     if (isLibraryLink === libraryView) {
