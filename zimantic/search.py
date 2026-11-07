@@ -81,6 +81,7 @@ __all__ = [
     "RRF_K",
     "SEMANTIC_WEIGHT",
     "Search",
+    "SourceNavigation",
     "_RankedAssessment",
     "_assess_ranked_document",
     "_collect_ranked_candidates",
@@ -142,6 +143,14 @@ class SearchBusyError(Exception):
 
 
 @dataclass(frozen=True)
+class SourceNavigation:
+    """One adjacent source in a scoped ``open`` process."""
+
+    key: str
+    title: str
+
+
+@dataclass(frozen=True)
 class _ResolvedScope:
     """One immutable search-scope resolution and its publication generation."""
 
@@ -160,6 +169,7 @@ def _source_title(source: SourceInfo) -> str:
 class Search:
     cfg: dict[str, Any] = {}
     semantic: bool = False
+    open_scope: Any | None = None
     embedder: Any = None
     _defer_faiss: bool = False
     runtimes: dict[str, Any] = {}
@@ -248,9 +258,13 @@ class Search:
         embedder=None,
         semantic: bool = True,
         archive_factory: Any | None = None,
+        scope: Any | None = None,
     ):
         self.cfg = cfg
         self.embedder = embedder
+        # An explicit, process-scoped ZIM selection for ``zimantic open``.
+        # ``serve`` passes None and keeps configured-library discovery.
+        self.open_scope = scope
         # ``None`` lets the ZIM provider open libzim archives normally; tests
         # may pass ``object`` to disable archive inspection.
         self.archive_factory = archive_factory
@@ -647,6 +661,8 @@ class Search:
 
     def refresh_collections(self, *, wait: bool = False) -> list[dict[str, Any]]:
         """Rerun provider discovery for configured entries and publish snapshots."""
+        if self.open_scope is not None:
+            return self._refresh_open_scope(wait=wait)
         runtime_config = getattr(self, "runtime_config", None)
         if runtime_config is None:
             # Lightweight test doubles intentionally skip __init__; there is no
@@ -782,6 +798,68 @@ class Search:
             self._start_background_discovery(deferred_entries)
         return sources
 
+    def _refresh_open_scope(self, *, wait: bool = False) -> list[dict[str, Any]]:
+        """Publish only the archives named by an ``open`` process scope."""
+        from .providers.zim.provider import open_zim_scope_batch
+
+        ctx = ProviderContext(
+            config=self.runtime_config,
+            index_dir=Path(self.cfg.get("index_dir") or "."),
+            web_base_path=self.web_base_path,
+            logger=logger,
+            archive_factory=getattr(self, "archive_factory", None),
+            persist_catalog=False,
+            on_sources_changed=self._publish_runtime_sources,
+            open_scope=self.open_scope,
+        )
+        batch = None
+        new_runtimes: dict[str, Any] = {}
+        new_collections: dict[str, CollectionInfo] = {}
+        try:
+            batch = open_zim_scope_batch(self.open_scope, ctx, self.cfg)
+            for collection in batch.collections:
+                runtime = batch.open(collection)
+                self._bind_runtime(runtime)
+                new_runtimes[collection.key] = runtime
+                new_collections[collection.key] = collection
+        except Exception as error:
+            if batch is not None:
+                try:
+                    batch.close()
+                except Exception:
+                    pass
+            for runtime in new_runtimes.values():
+                try:
+                    runtime.close()
+                except Exception:
+                    pass
+            logger.warning(
+                "zimantic: open scope discovery failed (%s)",
+                self.public_error(error),
+            )
+            logger.debug("open scope discovery error: %s", error)
+            return self.source_dicts()
+
+        with self._state_lock:
+            old_runtimes = dict(self.runtimes)
+            old_batches = list(getattr(self, "_discovery_batches", []))
+            self.runtimes = new_runtimes
+            self.collections = new_collections
+            self._discovery_batches = [batch] if batch is not None else []
+            self._aggregate_revision = getattr(self, "_aggregate_revision", 0) + 1
+        sources = self._publish_runtime_sources()
+        for runtime in old_runtimes.values():
+            try:
+                runtime.close()
+            except Exception:
+                pass
+        for old_batch in old_batches:
+            try:
+                old_batch.close()
+            except Exception:
+                pass
+        return sources
+
     def _start_background_discovery(
         self, entries: tuple[ProviderConfig, ...]
     ) -> None:
@@ -858,12 +936,31 @@ class Search:
                     sources[source.key] = source
                 for source in runtime.library_sources():
                     library[source.key] = source
-            ordered = dict(
-                sorted(
-                    sources.items(),
-                    key=lambda pair: (_source_title(pair[1]).casefold(), pair[1].key),
+            if self.open_scope is not None:
+                position = {
+                    key: index
+                    for index, key in enumerate(self.open_scope.keys)
+                }
+                ordered = dict(
+                    sorted(
+                        sources.items(),
+                        key=lambda pair: (
+                            position.get(pair[0], len(position)),
+                            _source_title(pair[1]).casefold(),
+                            pair[1].key,
+                        ),
+                    )
                 )
-            )
+            else:
+                ordered = dict(
+                    sorted(
+                        sources.items(),
+                        key=lambda pair: (
+                            _source_title(pair[1]).casefold(),
+                            pair[1].key,
+                        ),
+                    )
+                )
             old_sources = self.sources
             changed = ordered != old_sources
             old_snapshots = self._collection_snapshots
@@ -1000,6 +1097,21 @@ class Search:
             for source in fallback:
                 if source.provider in {"zim", "files", "kolibri"}:
                     library[source.key] = source
+        if self.open_scope is not None:
+            position = {
+                key: index for index, key in enumerate(self.open_scope.keys)
+            }
+            return [
+                source.to_dict(include_metadata=True)
+                for source in sorted(
+                    library.values(),
+                    key=lambda item: (
+                        position.get(item.key, len(position)),
+                        _source_title(item).casefold(),
+                        item.key,
+                    ),
+                )
+            ]
         return [
             source.to_dict(include_metadata=True)
             for source in sorted(
@@ -1007,6 +1119,75 @@ class Search:
                 key=lambda item: (_source_title(item).casefold(), item.key),
             )
         ]
+
+    def source_order(self) -> dict[str, int] | None:
+        """Explicit open-process source order, or None for a normal server."""
+        scope = self.open_scope
+        if scope is None:
+            return None
+        return {key: index for index, key in enumerate(scope.keys)}
+
+    def source_neighbors(
+        self, key: str
+    ) -> tuple[SourceNavigation, SourceNavigation] | None:
+        """Previous and next scoped sources, wrapping at both ends."""
+        scope = self.open_scope
+        if scope is None or len(scope.keys) < 2:
+            return None
+        keys = list(scope.keys)
+        try:
+            position = keys.index(str(key))
+        except ValueError:
+            return None
+
+        def navigation(target: str) -> SourceNavigation:
+            with self._state_lock:
+                source = self.sources.get(target) or self._library_source_index.get(
+                    target
+                )
+            return SourceNavigation(
+                key=target,
+                title=_source_title(source) if source is not None else target,
+            )
+
+        return (
+            navigation(keys[position - 1]),
+            navigation(keys[(position + 1) % len(keys)]),
+        )
+
+    def source_homepage_path(self, key: str) -> str | None:
+        """A navigable entry path for one scoped source, if one exists."""
+        source = self.resolve_source(str(key))
+        if source is not None and source.homepage:
+            return source.homepage
+        try:
+            store = self.content_store(str(key))
+        except (
+            ArticleNotFoundError,
+            ArticleSourceNotFoundError,
+            ArticleTooLargeError,
+            ArticleUnavailableError,
+        ):
+            store = None
+        if store is not None:
+            try:
+                path = store.main_path()
+            except Exception:
+                path = None
+            finally:
+                store.close()
+            if path:
+                return path
+        try:
+            return self.random_article_path(str(key))
+        except (
+            ArticleNotFoundError,
+            ArticleSourceNotFoundError,
+            ArticleTooLargeError,
+            ArticleUnavailableError,
+            ValueError,
+        ):
+            return None
 
     def library_dicts(self) -> list[dict[str, Any]]:
         """Return metadata for every document-library source."""

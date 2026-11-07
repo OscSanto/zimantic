@@ -68,6 +68,10 @@ class ProviderContext:
     archive_factory: Any | None = None
     persist_catalog: bool = True
     on_sources_changed: Callable[[], Any] | None = None
+    # A process-scoped ZIM selection.  Providers that support an ephemeral
+    # scope (currently ZIM) resolve only these sources and never scan a
+    # configured collection.  Other providers ignore it.
+    open_scope: Any | None = None
 
 
 @dataclass(frozen=True)

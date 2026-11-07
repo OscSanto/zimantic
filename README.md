@@ -411,6 +411,11 @@ zimantic serve --fast                 # start without a model or vectors
 zimantic serve --device cuda          # keep a CUDA GPU for query embedding
 zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
 zimantic serve --dev                  # alias for --debug
+zimantic open zims/a.zim              # throwaway read-only server for one named ZIM
+zimantic open zims/                   # every .zim in a folder (recursively)
+zimantic open a.zim b.zim             # switch between the selected ZIMs in the toolbar
+zimantic open a.zim --no-browser      # print the URL without launching a browser
+zimantic open a.zim --port 9000       # pin a loopback port; default is OS-assigned
 zimantic reload                       # ask a running server to rescan indexes and ZIMs
 zimantic model                        # download the int8 export (CPU default)
 zimantic model fp16                   # download fp16; recommended with a GPU
@@ -428,7 +433,25 @@ An unmatched positional path is atomically appended as a new ZIM `[[collections]
 
 `zimantic reload` sends SIGHUP and reports that the signal was delivered, not that the background refresh has finished. A normal server rescans every startup-configured provider (ZIM, files, Kolibri, and Kiwix) but does not reread config; restart after adding, removing, or editing a collection entry or any other setting. A second signal during a refresh is ignored. A `serve --debug` process instead restarts and rereads config on SIGHUP, as before; on platforms without SIGHUP the server is restarted the same way.
 
-Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
+Logging defaults to warnings, except that `serve`, `open`, and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
+
+### Opening named ZIMs
+
+`zimantic open` is an inspection command for a named set of archives, not a replacement for `zimantic serve`:
+
+```bash
+zimantic open zims/phet_en_all_2026-08.zim
+zimantic open zims/a.zim zims/b.zim
+zimantic open zims/ --max-sources 32
+```
+
+It starts a temporary server on `127.0.0.1` and opens the first selected ZIM. The port is assigned by the operating system unless `--port` pins one. Only the ZIM files named on the command line (after folder expansion) are visible to `/sources`, `/library.json`, search, suggestions, random articles, and the browser; configured collections are not scanned and Kiwix catalogs are ignored. Use `--no-browser` on a headless machine or when the desktop browser cannot be launched.
+
+The scope is read-only and process-scoped. `open` never builds, resumes, publishes, or prunes an index; it never writes `catalog.sqlite`, an index, `zimantic.pid`, a build lock, or config. It may read the persistent catalog once to identify a selected archive, then opens any matching finished index read-only. A uniquely matched catalogued archive keeps its normal source key and `/content/<key>/` URL, so links match a `serve` process using the same catalog. An unmatched, ambiguous, or unreadable archive gets an ephemeral `zim:open:<name>-<position>` key that never locates a persistent index. If a finished index is missing, stale, or mismatched, the archive's native full-text index is used; a ZIM with neither remains readable and navigable but is not searchable.
+
+When more than one ZIM is selected, the article toolbar gains a separate previous/next ZIM arrow group. It switches to the adjacent archive's homepage in command-line order and wraps at both ends. These arrows are independent of the search-result and parent-page arrows, and they appear in error shells too so a bad article cannot strand the reader. `--fast` disables the model and FAISS for this process, just like `serve --fast`; without it, title and full-text search work immediately while semantic search may become available when the model is ready.
+
+`zimantic serve` continues to use the persistent catalog, configured collections, PID file, and SIGHUP reload behavior. Stop the `open` process with Ctrl-C or SIGTERM; it closes its indexes and removes nothing from the user's library.
 
 ### Build behavior and locking
 

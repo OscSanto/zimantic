@@ -55,6 +55,11 @@ class ArticleNavigationScriptTests(unittest.TestCase):
             "const handleArticleLink = data =>",
             '\n    window.addEventListener("message", event => {\n      if (!articleFrame',
         )
+        cls.source_action_source = _section(
+            toolbar,
+            '} else if (action === "source-previous"',
+            '} else if (action === "previous"',
+        )
 
     def _bridge_redirect(self, href, base_path="", framed=False):
         script = f"""
@@ -397,6 +402,56 @@ console.log(JSON.stringify({{calls, href: location.href}}));
                 "parent": "/zimantic/content/manual/example.com/page?x=1",
             },
         ]])
+
+    def test_source_arrows_navigate_directly_or_through_the_modal(self):
+        def run(action, embedded):
+            script = f"""
+const run = () => {{
+const location = {{href: "http://example.test/content/one/Alpha"}};
+const articleUrl = new URL("http://example.test/article/one/Alpha");
+const articleRoute = () => ({{url: articleUrl}});
+const currentContentUrl = () => "/content/one/Alpha";
+const calls = [];
+let offlineRequest = 0;
+const event = {{preventDefault() {{ calls.push(["prevent"]); }}}};
+const control = {{
+  dataset: {{zimanticUrl: "http://example.test/content/two/Alpha"}},
+}};
+const action = {json.dumps(action)};
+const parent = {{postMessage(data) {{ calls.push(["post", data]); }}}};
+const window = {json.dumps(embedded)} ? {{parent}} : {{}};
+if (!window.parent) window.parent = window;
+const execute = () => {{
+if (action === "__never__") {{
+{self.source_action_source}
+}}
+}};
+execute();
+console.log(JSON.stringify({{calls, href: location.href, offlineRequest}}));
+}};
+run();
+"""
+            return _run_node(script)
+
+        direct = run("source-next", embedded=False)
+        self.assertEqual(direct["href"], "http://example.test/content/two/Alpha")
+        self.assertEqual(direct["offlineRequest"], 1)
+        self.assertEqual(direct["calls"], [["prevent"]])
+
+        modal = run("source-previous", embedded=True)
+        self.assertEqual(modal["href"], "http://example.test/content/one/Alpha")
+        self.assertEqual(modal["offlineRequest"], 0)
+        self.assertEqual(modal["calls"], [
+            ["prevent"],
+            [
+                "post",
+                {
+                    "type": "zimantic-article-follow",
+                    "url": "http://example.test/content/two/Alpha",
+                    "parent": "/content/one/Alpha",
+                },
+            ],
+        ])
 
     def test_host_navigates_same_origin_app_links_only(self):
         source = APP_JS.read_text(encoding="utf-8")

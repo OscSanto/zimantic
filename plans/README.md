@@ -1,6 +1,6 @@
 # Source extensibility plans
 
-Status: reviewed for implementation. Implementation has not started.
+Status: phases 00–10 are implemented; the phase-09 hardware benchmark remains pending.
 
 This directory turns Zimantic from a ZIM search engine with a Kiwix remote
 special case into a search engine whose core is source-agnostic, with in-tree

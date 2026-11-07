@@ -5,8 +5,11 @@ import logging
 import os
 import re
 import signal
+import socket
 import sys
 import threading
+import time
+from contextlib import contextmanager
 from html import escape as html_escape
 from html import unescape as html_unescape
 from pathlib import Path
@@ -420,6 +423,8 @@ def _article_toolbar(
     path_exists=None,
     error: dict | None = None,
     show_zim_search: bool = True,
+    source_previous: dict | None = None,
+    source_next: dict | None = None,
 ) -> str:
     zim_url = _content_url(zim, base_path=base_path)
     random_url = f"{base_path}/random?source={quote_path(zim, safe='')}"
@@ -537,6 +542,49 @@ def _article_toolbar(
                 'data-zimantic-zim-suggestions hidden></div>'
                 "</form>"
             )
+    source_nav_html = ""
+    if source_previous is not None and source_next is not None:
+        def source_button(
+            action: str,
+            attribute: str,
+            label: str,
+            title_prefix: str,
+            target: dict,
+            arrow: str,
+        ) -> str:
+            title = html_escape(
+                f"{title_prefix}: {target.get('title') or target.get('key') or ''}",
+                quote=True,
+            )
+            url = html_escape(str(target.get("url") or ""), quote=True)
+            return (
+                f'<button type="button" data-zimantic-action="{action}" '
+                f'{attribute} data-zimantic-url="{url}" '
+                f'aria-label="{label}" data-i18n-aria-label="{label}" '
+                f'title="{title}">{arrow}</button>'
+            )
+
+        source_nav_html = (
+            '<span class="zimantic-toolbar-source-nav" role="group" '
+            'aria-label="Selected ZIMs" data-i18n-aria-label="Selected ZIMs">'
+            + source_button(
+                "source-previous",
+                "data-zimantic-source-previous",
+                "Previous ZIM",
+                "Previous ZIM",
+                source_previous,
+                "←",
+            )
+            + source_button(
+                "source-next",
+                "data-zimantic-source-next",
+                "Next ZIM",
+                "Next ZIM",
+                source_next,
+                "→",
+            )
+            + "</span>"
+        )
     return f"""<nav data-zimantic-toolbar aria-label="Article navigation">
   <div class="zimantic-toolbar-nav">
     <button type="button" data-zimantic-action="close" title="Close article"
@@ -554,6 +602,7 @@ def _article_toolbar(
         title="Open the next search result"
         data-i18n-title="Open the next search result">→</button>
     </span>
+    {source_nav_html}
     {random_html}
     {home_html}
     <span class="zimantic-toolbar-breadcrumbs">{breadcrumb_html}</span>
@@ -772,6 +821,8 @@ def _content_shell(
     error: dict | None = None,
     secure_browsing: bool = False,
     show_zim_search: bool = True,
+    source_previous: dict | None = None,
+    source_next: dict | None = None,
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -801,6 +852,8 @@ def _content_shell(
         path_exists,
         error=error,
         show_zim_search=show_zim_search,
+        source_previous=source_previous,
+        source_next=source_next,
     )
     entry_title = str((error or {}).get("title") or article.get("title") or article_path or zim)
     parsed_title = None
@@ -1030,10 +1083,35 @@ def _handle_restart_request(_signum, _frame) -> None:
     )
 
 
-def serve(searchClass, port: int, debug: bool = False) -> None:
-    app = create_app(searchClass, debug=debug)
-    warm_static_cache()
-    pid_file = server_pid_path()
+def _install_sighup_handlers(searchClass, debug: bool) -> None:
+    """Install reload/restart handlers for a normal ``serve`` process."""
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is None:
+        return
+    if debug:
+        signal.signal(sighup, _handle_restart_request)
+    else:
+        guard = threading.Lock()
+        signal.signal(
+            sighup,
+            lambda _signum, _frame: _handle_reload_request(searchClass, guard),
+        )
+
+
+def _close_search(searchClass) -> None:
+    shutdown = getattr(searchClass, "close", None)
+    if not callable(shutdown):
+        return
+    try:
+        shutdown()
+    except Exception as error:  # never mask the original shutdown path
+        logger.warning(
+            "zimantic: search shutdown failed (%s)", public_cause(error)
+        )
+        logger.debug("search shutdown error: %s", error)
+
+
+def _write_pid_file(pid_file: Path) -> None:
     try:
         pid_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -1044,24 +1122,89 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
         )
         logger.debug("could not write PID file %s: %s", pid_file, error)
 
+
+def bind_local_socket(host: str = "127.0.0.1", port: int = 0) -> socket.socket:
+    """Pre-bind a listening socket so the OS-assigned port is known up front."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, int(port)))
+        sock.listen(2048)
+        sock.setblocking(False)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+_DEFAULT_PID = object()
+
+
+class _GracefulSignalServer(uvicorn.Server):
+    """Uvicorn server whose captured stop signal is not re-raised.
+
+    ``zimantic open`` is a foreground command. A Ctrl-C or SIGTERM should run
+    cleanup and return status 0; uvicorn's default restores the default handler
+    and re-raises the signal, which turns a clean stop into shell status 143.
+    ``serve`` keeps uvicorn's native behavior.
+    """
+
+    @contextmanager
+    def capture_signals(self):
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+        original_handlers = {
+            captured: signal.signal(captured, self.handle_exit)
+            for captured in uvicorn.server.HANDLED_SIGNALS
+        }
+        try:
+            yield
+        finally:
+            for captured, handler in original_handlers.items():
+                signal.signal(captured, handler)
+
+
+def run_server(
+    searchClass,
+    *,
+    host: str = "0.0.0.0",
+    port: int = 0,
+    debug: bool = False,
+    pid_path: Path | object | None = _DEFAULT_PID,
+    prebound_socket: socket.socket | None = None,
+    on_listening=None,
+    install_sighup: bool = True,
+    announce: bool = True,
+) -> None:
+    """Run the web app and close search resources on every exit path.
+
+    ``serve`` keeps its historical defaults (all interfaces, configured port,
+    PID file, SIGHUP reload/restart).  ``open`` passes a pre-bound loopback
+    socket, no PID file, no SIGHUP handlers, and a startup callback.
+    """
+    app = create_app(searchClass, debug=debug)
+    warm_static_cache()
+    if pid_path is _DEFAULT_PID:
+        pid_path = server_pid_path()
+    if pid_path is not None:
+        _write_pid_file(Path(pid_path))
+
     # Provider runtimes start their own bounded discovery in the background;
     # an unreachable Kiwix server cannot delay binding the port.
-    sighup = getattr(signal, "SIGHUP", None)
-    if sighup is not None:
-        if debug:
-            signal.signal(sighup, _handle_restart_request)
-        else:
-            guard = threading.Lock()
-            signal.signal(
-                sighup,
-                lambda _signum, _frame: _handle_reload_request(searchClass, guard),
-            )
+    if install_sighup:
+        _install_sighup_handlers(searchClass, debug)
 
     server_mode = " (debug)" if debug else ""
-    logger.info(
-        f"zimantic: server{server_mode} loaded at http://localhost:{port}\n"
-        f"zimantic: PID {os.getpid()}; reload with `zimantic reload` "
-    )
+    actual_port = int(port)
+    if prebound_socket is not None:
+        actual_port = int(prebound_socket.getsockname()[1])
+    if announce:
+        logger.info(
+            f"zimantic: server{server_mode} loaded at "
+            f"http://localhost:{actual_port}\n"
+            f"zimantic: PID {os.getpid()}; reload with `zimantic reload` "
+        )
     start_faiss = getattr(searchClass, "start_faiss", None)
     if callable(start_faiss):
         start_faiss()
@@ -1069,18 +1212,52 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
     if callable(start_fulltext):
         start_fulltext()
     try:
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
-    finally:
-        shutdown = getattr(searchClass, "close", None)
-        if callable(shutdown):
+        if prebound_socket is not None:
+            config = uvicorn.Config(
+                app,
+                host=host,
+                port=actual_port,
+                log_level="warning",
+            )
+            server = _GracefulSignalServer(config)
+
+            def _notify_listening() -> None:
+                while not server.started and not server.should_exit:
+                    time.sleep(0.02)
+                if not server.started or on_listening is None:
+                    return
+                try:
+                    on_listening(actual_port)
+                except Exception as error:  # a browser failure must not stop serving
+                    logger.warning(
+                        "zimantic: startup callback failed (%s)",
+                        public_cause(error),
+                    )
+                    logger.debug("startup callback error: %s", error)
+
+            threading.Thread(
+                target=_notify_listening,
+                name="zimantic-listening",
+                daemon=True,
+            ).start()
             try:
-                shutdown()
-            except Exception as error:  # never mask the original shutdown path
-                logger.warning(
-                    "zimantic: search shutdown failed (%s)", public_cause(error)
-                )
-                logger.debug("search shutdown error: %s", error)
-        try:
-            pid_file.unlink()
-        except OSError:
-            pass
+                server.run(sockets=[prebound_socket])
+            finally:
+                try:
+                    prebound_socket.close()
+                except OSError:
+                    pass
+        else:
+            uvicorn.run(app, host=host, port=actual_port, log_level="warning")
+    finally:
+        _close_search(searchClass)
+        if pid_path is not None:
+            try:
+                Path(pid_path).unlink()
+            except OSError:
+                pass
+
+
+def serve(searchClass, port: int, debug: bool = False) -> None:
+    """Run a normal long-lived server over the configured library."""
+    run_server(searchClass, host="0.0.0.0", port=port, debug=debug)

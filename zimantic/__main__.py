@@ -5,9 +5,11 @@ import signal
 import sys
 import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote as quote_path
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +109,7 @@ def _add_device_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _get_log_level(command: str, verbosity: int) -> int:
-    if command in {"serve", "model"} and verbosity == 0 and sys.stderr.isatty():
+    if command in {"serve", "open", "model"} and verbosity == 0 and sys.stderr.isatty():
         return logging.INFO
     return (logging.WARNING, logging.INFO, logging.DEBUG)[min(verbosity, 2)]
 
@@ -185,6 +187,56 @@ def _make_parser() -> argparse.ArgumentParser:
         help="include ranking scores in results; in this mode SIGHUP restarts",
     )
     _add_device_argument(serve_cmd)
+
+    open_cmd = commands.add_parser(
+        "open",
+        help=(
+            "open named ZIM files in a read-only local server "
+            "(no catalog, index, PID, or config writes)"
+        ),
+    )
+    _add_verbosity_argument(open_cmd)
+    open_cmd.add_argument(
+        "paths",
+        nargs="+",
+        type=Path,
+        metavar="PATH",
+        help="ZIM file or folder containing *.zim; folders are searched recursively",
+    )
+    open_cmd.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        metavar="PORT",
+        help="bind a fixed loopback port (default: an OS-assigned port)",
+    )
+    open_cmd.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print the URL without launching a browser",
+    )
+    open_cmd.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "disable the model and FAISS for this process "
+            "(title and ZIM full-text results only)"
+        ),
+    )
+    open_cmd.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        help="include ranking scores in results",
+    )
+    _add_device_argument(open_cmd)
+    open_cmd.add_argument(
+        "--max-sources",
+        type=int,
+        default=64,
+        metavar="N",
+        help="refuse folder expansion above N archives (default: 64)",
+    )
 
     build = commands.add_parser(
         "build", help="index configured collections or ZIM files"
@@ -1607,6 +1659,116 @@ def _run_prune(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         build_lock.release()
 
 
+def _launch_browser(url: str) -> None:
+    """Open ``url`` on a daemon thread; a missing desktop browser is harmless."""
+    from .diagnostics import public_cause
+
+    try:
+        opened = webbrowser.open(url)
+        if opened is False:
+            logger.warning(
+                "zimantic: no browser was available; open %s manually", url
+            )
+    except Exception as error:
+        logger.warning(
+            "zimantic: could not open a browser (%s); open %s manually",
+            public_cause(error),
+            url,
+        )
+
+
+def _run_open(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
+    """Serve only the ZIM files named on the command line, in memory."""
+    from .open_scope import OpenScopeError, build_open_scope, expand_open_paths
+    from .search import Search
+    from .web.app import bind_local_socket, run_server
+
+    if args.max_sources < 1:
+        parser.error("--max-sources must be a positive integer")
+    if not (0 <= args.port <= 65535):
+        parser.error("--port must be between 0 and 65535")
+    if args.fast and getattr(args, "device", None):
+        logger.warning(
+            "zimantic: --device is ignored with --fast (no embeddings are computed)"
+        )
+
+    try:
+        paths = expand_open_paths(args.paths, max_sources=args.max_sources)
+        # An open process is a direct loopback server, not a reverse-proxied
+        # deployment. Generated links therefore start at the server root.
+        open_cfg = dict(cfg)
+        open_cfg["web_base_path"] = ""
+        scope = build_open_scope(paths, open_cfg)
+    except OpenScopeError as error:
+        parser.error(str(error))
+
+    print(
+        f"zimantic: opening {len(scope.paths)} ZIM file"
+        f"{'' if len(scope.paths) == 1 else 's'}",
+        flush=True,
+    )
+
+    # Model loading must not contact the network, write caches, or emit
+    # telemetry from an ephemeral process.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
+    search = Search(open_cfg, semantic=not args.fast, scope=scope)
+    try:
+        if not args.fast:
+            def _make_embedder():
+                from .embed import Embedder
+
+                return Embedder(
+                    open_cfg["model_dir"],
+                    threads=open_cfg.get("embed_threads"),
+                    device=getattr(args, "device", None) or open_cfg.get("embed_device"),
+                )
+
+            search.start_embedder(_make_embedder)
+        if args.fast:
+            logger.info(
+                "zimantic: fast mode: semantic search disabled; using title and "
+                "ZIM full-text (lexical) search"
+            )
+
+        sock = bind_local_socket("127.0.0.1", args.port)
+
+        def _listening(port: int) -> None:
+            base_url = f"http://127.0.0.1:{port}"
+            initial_url = (
+                f"{base_url}/content/{quote_path(scope.keys[0], safe='')}/"
+            )
+            print(f"zimantic: server listening at {base_url}/", flush=True)
+            print(f"zimantic: opening {initial_url}", flush=True)
+            if args.no_browser:
+                return
+            threading.Thread(
+                target=_launch_browser,
+                args=(initial_url,),
+                name="zimantic-browser",
+                daemon=True,
+            ).start()
+
+        run_server(
+            search,
+            host="127.0.0.1",
+            port=args.port,
+            debug=args.debug,
+            pid_path=None,
+            prebound_socket=sock,
+            on_listening=_listening,
+            install_sighup=False,
+            announce=False,
+        )
+    finally:
+        try:
+            search.close()
+        except Exception:
+            pass
+
+
 def _run_serve(args, cfg: dict) -> None:
     from .search import Search
     from .web.app import serve
@@ -1773,7 +1935,7 @@ def main(argv: list[str] | None = None) -> None:
     _configure_logging(log_level)
 
     # `reload` only needs the PID file, and `model --list` only needs the registry.
-    if args.command in {"build", "serve", "sources", "prune"} or (
+    if args.command in {"build", "serve", "open", "sources", "prune"} or (
         args.command == "model" and not args.list
     ):
         from .providers.config import ConfigValidationError
@@ -1796,6 +1958,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_build_locked(args, cfg, parser)
     elif args.command == "serve":
         _run_serve(args, cfg)
+    elif args.command == "open":
+        _run_open(args, cfg, parser)
     elif args.command == "sources":
         _run_sources(args, cfg)
     elif args.command == "prune":

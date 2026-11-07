@@ -791,6 +791,22 @@
         event.preventDefault();
         const randomZimUrl = control.dataset.zimanticRandomZimUrl;
         if (randomZimUrl) location.href = randomZimUrl;
+      } else if (action === "source-previous" || action === "source-next") {
+        // ZIM switching is independent of search-result and parent navigation.
+        const url = control.dataset.zimanticUrl;
+        if (!url) return;
+        event.preventDefault();
+        if (window.parent !== window) {
+          const route = articleUrl ? articleRoute(articleUrl.href) : null;
+          window.parent.postMessage({
+            type: "zimantic-article-follow",
+            url,
+            parent: route ? currentContentUrl(route) : null,
+          }, "*");
+          return;
+        }
+        offlineRequest += 1;
+        location.href = url;
       } else if (action === "previous" || action === "next") {
         const url = control.dataset.zimanticUrl;
         if (control.disabled || window.parent === window) return;

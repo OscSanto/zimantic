@@ -525,6 +525,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         snapshot_token = _token_string(
             snapshot.get("token") or _snapshot_version()
         )
+        order_of = getattr(search_class, "source_order", None)
+        source_order = order_of() if callable(order_of) else None
         filtered = filter_sources_fn(
             records,
             provider=providers_filter,
@@ -532,6 +534,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             collection=collection,
             query=query,
             collections=snapshot.get("collections") or (),
+            order=source_order,
         )
         cacheable = not any(
             (providers_filter, media_type, collection, query)
@@ -1015,6 +1018,37 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         read_head = getattr(search_class, "read_article_head", None)
         check_path = getattr(search_class, "article_path_exists", None)
 
+        source_previous = None
+        source_next = None
+        neighbors_of = getattr(search_class, "source_neighbors", None)
+        if callable(neighbors_of):
+            try:
+                neighbors = neighbors_of(source)
+            except Exception:
+                neighbors = None
+            if neighbors is not None:
+                homepage_of = getattr(search_class, "source_homepage_path", None)
+
+                def navigation_target(entry) -> dict:
+                    key = str(getattr(entry, "key", entry))
+                    title = str(getattr(entry, "title", "") or key)
+                    entry_path = None
+                    if callable(homepage_of):
+                        try:
+                            entry_path = homepage_of(key)
+                        except Exception:
+                            entry_path = None
+                    url = (
+                        web_app._content_url(key, entry_path, base_path)
+                        if entry_path
+                        else web_app._content_url(key, base_path=base_path)
+                    )
+                    return {"key": key, "title": title, "url": url}
+
+                source_previous, source_next = (
+                    navigation_target(entry) for entry in neighbors
+                )
+
         def path_exists(parent_path: str) -> bool:
             """True when the path is a real entry, so breadcrumbs do not link to containers."""
             try:
@@ -1074,6 +1108,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 error=error_info,
                 secure_browsing=secure_browsing,
                 show_zim_search=show_source_search,
+                source_previous=source_previous,
+                source_next=source_next,
             )
 
         if requested_path != article_dict["path"]:
@@ -1089,6 +1125,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             path_exists=path_exists,
             secure_browsing=secure_browsing,
             show_zim_search=show_source_search,
+            source_previous=source_previous,
+            source_next=source_next,
         )
 
     def _safe_content_request(request: Request) -> bool:
@@ -1104,8 +1142,16 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             request=request,
         )
 
+    @app.get("/content/{source}/", include_in_schema=False)
+    def content_homepage_slash(source: str, request: Request):
+        return content_homepage(source, request)
+
     @app.head("/content/{source}")
     def content_homepage_head(source: str, request: Request):
+        return content_homepage(source, request)
+
+    @app.head("/content/{source}/", include_in_schema=False)
+    def content_homepage_slash_head(source: str, request: Request):
         return content_homepage(source, request)
 
     @app.get("/content/{source}/{path:path}")

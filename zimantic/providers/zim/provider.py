@@ -14,9 +14,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Sequence
 
-from ...diagnostics import public_cause
 from ...catalog import SourceCatalog, SourceRecord, catalog_path
 from ...content.serving import MAX_ICON_BYTES
 from ...content.store import (
@@ -24,6 +24,7 @@ from ...content.store import (
     ArticleUnavailableError,
 )
 from ...contracts import SourceInfo, SourceResult
+from ...diagnostics import public_cause
 from ...indexes.locator import IndexLocator
 from ...media_types import ordered_media_types
 from ...model_meta import (
@@ -31,6 +32,7 @@ from ...model_meta import (
     MODEL_PROBE_TEXTS_KEY,
     MODEL_PROBE_VECTORS_KEY,
 )
+from ...open_scope import OPEN_COLLECTION_KEY, OPEN_COLLECTION_LABEL, ZimOpenScope
 from ...searching.config import _file_signature
 from ...searching.index import _LocalIndex
 from ..base import (
@@ -49,6 +51,7 @@ from .discovery import (
     ZimIndexOptions,
     discover_source_indexes,
     scan_collection,
+    scan_scope_collection,
     zim_collection_key,
     zim_source_key,
 )
@@ -75,6 +78,9 @@ class ZimRuntime(CollectionRuntime):
         self.web_base_path = ctx.web_base_path
         self._logger = ctx.logger
         self._archive_factory = ctx.archive_factory
+        self._open_scope: ZimOpenScope | None = getattr(ctx, "open_scope", None)
+        self._open_entries: tuple[tuple[Path, str], ...] | None = None
+        self._unsearchable_logged: set[str] = set()
         catalog_db = (
             catalog_path(self.index_dir)
             if (ctx.persist_catalog and ctx.archive_factory is not object)
@@ -450,6 +456,10 @@ class ZimRuntime(CollectionRuntime):
         return True
 
     def refresh_if_stale(self, ttl: float = DEFAULT_LIBRARY_SCAN_TTL) -> bool:
+        # An open scope is fixed for the process lifetime. It has nothing new to
+        # discover and must not re-read archives or reopen indexes periodically.
+        if self._open_entries is not None:
+            return True
         with self._lock:
             scanned_at = self._scanned_at
         if scanned_at and time.monotonic() - scanned_at < ttl:
@@ -463,13 +473,21 @@ class ZimRuntime(CollectionRuntime):
             if self._closed:
                 return False
             try:
-                scan = scan_collection(
-                    self._catalog,
-                    self.config,
-                    collection_key=self.collection.key,
-                    archive_factory=self._archive_factory,
-                    force=False,
-                )
+                if self._open_entries is not None:
+                    scan = scan_scope_collection(
+                        self._catalog,
+                        list(self._open_entries),
+                        collection_key=self.collection.key,
+                        archive_factory=self._archive_factory,
+                    )
+                else:
+                    scan = scan_collection(
+                        self._catalog,
+                        self.config,
+                        collection_key=self.collection.key,
+                        archive_factory=self._archive_factory,
+                        force=False,
+                    )
             except Exception as error:
                 with self._lock:
                     self._error = f"ZIM catalog scan failed: {public_cause(error)}"
@@ -517,6 +535,15 @@ class ZimRuntime(CollectionRuntime):
             model_fingerprint=self._model_fingerprint,
             cfg=self._cfg,
             probe_compatible=self._probe_compatible,
+            read_only=self._open_scope is not None,
+        )
+        order = (
+            {
+                key: position
+                for position, key in enumerate(self._open_scope.keys)
+            }
+            if self._open_scope is not None
+            else None
         )
         sources, library_sources, discovered = discover_source_indexes(
             records,
@@ -527,6 +554,7 @@ class ZimRuntime(CollectionRuntime):
             options=options,
             archive_factory=self._archive_factory,
             unreadable=scan.unreadable,
+            order=order,
         )
         with self._lock:
             by_key = {source.key: source for source in library_sources}
@@ -589,6 +617,16 @@ class ZimRuntime(CollectionRuntime):
                 index.close()
             except Exception:
                 pass
+        if self._open_scope is not None:
+            for source in library_sources:
+                if source.key in discovered or source.key in self._unsearchable_logged:
+                    continue
+                self._unsearchable_logged.add(source.key)
+                self._logger.warning(
+                    "zimantic: %s has no finished index and no native full-text "
+                    "index; it is readable but not searchable",
+                    source.key,
+                )
         if reopen:
             self._logger.info(
                 "zimantic: ZIM collection %s ready (%d source(s))",
@@ -848,6 +886,100 @@ class ZimDiscoveryBatch(DiscoveryBatch):
         self._closed = True
 
 
+def _scope_collection_key(source_key: str) -> str:
+    return str(source_key).rsplit(":", 1)[0] or OPEN_COLLECTION_KEY
+
+
+def _scope_collection_label(
+    collection_key: str, cfg: dict[str, Any]
+) -> str:
+    if collection_key == OPEN_COLLECTION_KEY:
+        return OPEN_COLLECTION_LABEL
+    name = collection_key.split(":", 1)[-1]
+    for entry in cfg.get("collections") or ():
+        if getattr(entry, "kind", None) != "zim":
+            continue
+        if getattr(entry, "name", None) == name:
+            return getattr(entry, "label", None) or name
+    return name or collection_key
+
+
+class ZimOpenRuntime(ZimRuntime):
+    """A read-only ZIM runtime over an explicit, ordered archive selection."""
+
+    def __init__(
+        self,
+        collection: CollectionInfo,
+        entries: list[tuple[Path, str]],
+        ctx: ProviderContext,
+    ) -> None:
+        config = SimpleNamespace(
+            name=collection.key.split(":", 1)[-1] or "open",
+            path=str(entries[0][0].parent) if entries else ".",
+            label=collection.label,
+            max_entries=None,
+        )
+        super().__init__(collection, config, ctx)  # type: ignore[arg-type]
+        self._open_entries = tuple(entries)
+
+
+class ZimOpenDiscoveryBatch(DiscoveryBatch):
+    """One discovery batch containing an open process's ordered ZIM groups."""
+
+    def __init__(
+        self,
+        groups: list[tuple[CollectionInfo, list[tuple[Path, str]]]],
+        ctx: ProviderContext,
+    ) -> None:
+        self._groups = groups
+        self._ctx = ctx
+        self._closed = False
+
+    @property
+    def collections(self) -> Sequence[CollectionInfo]:
+        return tuple(collection for collection, _entries in self._groups)
+
+    def open(self, collection: CollectionInfo) -> CollectionRuntime:
+        if self._closed:
+            raise RuntimeError("discovery batch is closed")
+        for candidate, entries in self._groups:
+            if candidate.key != collection.key:
+                continue
+            runtime = ZimOpenRuntime(candidate, entries, self._ctx)
+            runtime.refresh(wait=True)
+            return runtime
+        raise KeyError(collection.key)
+
+    def close(self) -> None:
+        self._closed = True
+
+
+def open_zim_scope_batch(
+    scope: ZimOpenScope,
+    ctx: ProviderContext,
+    cfg: dict[str, Any],
+) -> ZimOpenDiscoveryBatch:
+    """Group an open scope by canonical collection, preserving CLI order."""
+    grouped: dict[str, list[tuple[Path, str]]] = {}
+    for path, key in zip(scope.paths, scope.keys):
+        grouped.setdefault(_scope_collection_key(key), []).append((path, key))
+    groups: list[tuple[CollectionInfo, list[tuple[Path, str]]]] = []
+    for collection_key, entries in grouped.items():
+        label = _scope_collection_label(collection_key, cfg)
+        groups.append(
+            (
+                CollectionInfo(
+                    key=collection_key,
+                    provider="zim",
+                    label=label,
+                    title=label,
+                ),
+                entries,
+            )
+        )
+    return ZimOpenDiscoveryBatch(groups, ctx)
+
+
 class ZimProvider:
     kind = "zim"
 
@@ -869,8 +1001,11 @@ class ZimProvider:
 __all__ = [
     "DEFAULT_LIBRARY_SCAN_TTL",
     "ZimDiscoveryBatch",
+    "ZimOpenDiscoveryBatch",
+    "ZimOpenRuntime",
     "ZimProvider",
     "ZimRuntime",
+    "open_zim_scope_batch",
     "zim_collection_key",
     "zim_source_key",
 ]

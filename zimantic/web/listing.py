@@ -113,6 +113,7 @@ def filter_sources(
     collection: str | None = None,
     query: str | None = None,
     collections: Iterable[Mapping[str, Any]] = (),
+    order: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     descriptors = {
         str(record.get("key")): record
@@ -136,6 +137,15 @@ def filter_sources(
             collection_record=descriptors.get(collection_key or ""),
         ):
             records.append(dict(source))
+    if order is not None:
+        fallback = len(order)
+        return sorted(
+            records,
+            key=lambda record: (
+                order.get(str(record.get("key") or ""), fallback),
+                _source_sort_key(record),
+            ),
+        )
     return sorted(records, key=_source_sort_key)
 
 

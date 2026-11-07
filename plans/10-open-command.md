@@ -1,6 +1,6 @@
 # Phase 10 — Ephemeral open command
 
-Status: proposed, 2026-11-05.
+Status: implemented, 2026-11-06.
 
 ## Goal
 

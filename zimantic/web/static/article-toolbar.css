@@ -60,6 +60,23 @@ script[data-zimantic-toolbar] { display: none !important; }
   flex: 0 0 auto !important;
   gap: 6px !important;
 }
+[data-zimantic-toolbar] .zimantic-toolbar-source-nav {
+  align-items: center !important;
+  display: flex !important;
+  flex: 0 0 auto !important;
+  gap: 6px !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-source-nav button {
+  flex: 0 0 auto !important;
+  font-size: 16px !important;
+  line-height: 1 !important;
+  min-width: 30px !important;
+  padding: 4px 7px !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-source-nav button:focus-visible {
+  outline: 2px solid #4f9cf9 !important;
+  outline-offset: 1px !important;
+}
 [data-zimantic-toolbar] .zimantic-toolbar-context-nav button:disabled {
   cursor: default !important;
   opacity: .45 !important;

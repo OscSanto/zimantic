@@ -409,6 +409,71 @@ def _safe_display(root: Path, path: Path) -> str:
         return path.name or "<unknown>"
 
 
+def scan_scope_collection(
+    catalog: SourceCatalog,
+    entries: list[tuple[Path, str]],
+    *,
+    collection_key: str,
+    archive_factory: Any | None = None,
+) -> ScanResult:
+    """Populate an in-memory catalog from an explicit, ordered open scope.
+
+    The scope already names every archive and its resolved key.  This function
+    never walks a configured root and never deletes catalog rows: it either
+    refreshes metadata for the named files or records why one is unreadable.
+    """
+    from libzim.reader import Archive
+
+    archive_type = Archive if archive_factory is None else archive_factory
+    if archive_type is object:
+        archive_type = None
+
+    stats = ScanResult(complete=True)
+    for path, key in entries:
+        try:
+            stat = path.stat()
+        except OSError as error:
+            stats.errors.append(f"cannot stat selected ZIM: {public_cause(error)}")
+            stats.unreadable[str(absolute_path(path))] = str(error)
+            continue
+        if archive_type is None:
+            stored = catalog.upsert(
+                _minimal_record(
+                    path, stat, key=key, collection_key=collection_key
+                )
+            )
+            stats.records[str(absolute_path(path))] = stored
+            stats.stats["added"] += 1
+            continue
+        try:
+            archive = archive_type(str(path))
+            values = metadata_from_archive(
+                archive, path, key=key, collection_key=collection_key
+            )
+            stored = catalog.upsert(values)
+            if stored.icon_data:
+                stored.icon_data = b"\x01"
+            stats.records[str(absolute_path(path))] = stored
+            stats.stats["added"] += 1
+        except Exception as error:
+            logger.warning(
+                "zimantic: cannot read selected ZIM %s (%s); it remains in the "
+                "library but is not searchable",
+                path.name,
+                public_cause(error),
+            )
+            logger.debug("zimantic: selected ZIM %s: %s", path, error)
+            stored = catalog.upsert(
+                _minimal_record(
+                    path, stat, key=key, collection_key=collection_key
+                )
+            )
+            stats.records[str(absolute_path(path))] = stored
+            stats.unreadable[str(absolute_path(path))] = str(error)
+            stats.stats["invalid"] += 1
+    return stats
+
+
 # --------------------------------------------------------------------- indexes
 
 
@@ -462,6 +527,7 @@ class ZimIndexOptions:
     model_fingerprint: str = ""
     cfg: dict[str, Any] = field(default_factory=dict)
     probe_compatible: Callable[[sqlite3.Connection, Path], tuple[bool, str]] | None = None
+    read_only: bool = False
 
 
 def open_generation_index(
@@ -488,6 +554,24 @@ def open_generation_index(
         return None
     if lease is None:
         return None
+    db_path = lease.sqlite_path
+    if options.read_only:
+        # Published generations are sealed and sidecar-free. A live WAL/SHM or
+        # rollback journal means this artifact was not published by the phase-04
+        # pipeline (or is still being written), so it cannot be reopened
+        # safely without creating or repairing files.
+        sidecars = [
+            Path(f"{db_path}{suffix}")
+            for suffix in ("-wal", "-shm", "-journal")
+        ]
+        if any(path.exists() for path in sidecars):
+            logger.warning(
+                "%s: index has SQLite sidecars and cannot be reused read-only; "
+                "using native full-text",
+                source.key,
+            )
+            lease.close()
+            return None
     manifest_meta = (lease.manifest.get("metadata") or {}) if lease.manifest else {}
     try:
         recorded_size = manifest_meta.get("source_size")
@@ -518,7 +602,6 @@ def open_generation_index(
             return None
     except (TypeError, ValueError):
         pass
-    db_path = lease.sqlite_path
     try:
         db = sqlite3.connect(
             _index_uri(db_path), uri=True, check_same_thread=False
@@ -625,6 +708,7 @@ def open_generation_index(
             lease=lease,
             generation=lease.generation,
             index_meta=index_meta,
+            read_only=options.read_only,
         )
     except sqlite3.Error:
         db.close()
@@ -720,11 +804,13 @@ def discover_source_indexes(
     options: ZimIndexOptions,
     archive_factory: Any | None = None,
     unreadable: dict[str, str] | None = None,
+    order: dict[str, int] | None = None,
 ) -> tuple[list[Any], list[Any], dict[str, _LocalIndex]]:
     """Build searchable/library sources and open their indexes.
 
     Returns ``(sources, library_sources, indexes)``.  A source is searchable
-    only when it has a finished index or a native full-text index.
+    only when it has a finished index or a native full-text index.  ``order``
+    preserves an explicit command-line scope instead of title order.
     """
     unreadable = unreadable or {}
     sources = []
@@ -733,9 +819,10 @@ def discover_source_indexes(
     for record in records:
         path_str = record.path or ""
         readable = path_str not in unreadable
+        record_collection_key = record.collection_key or collection_key
         placeholder = source_info_from_record(
             record,
-            collection_key=collection_key,
+            collection_key=record_collection_key,
             collection_label=collection_label,
             icon_url=None,
             searchable=False,
@@ -770,7 +857,7 @@ def discover_source_indexes(
                 )
             searchable_source = source_info_from_record(
                 record,
-                collection_key=collection_key,
+                collection_key=record_collection_key,
                 collection_label=collection_label,
                 icon_url=None,
                 searchable=True,
@@ -782,10 +869,27 @@ def discover_source_indexes(
             indexes[searchable_source.key] = index
         else:
             library_sources.append(library_source)
-    sources.sort(key=lambda source: ((source.title or "").casefold(), source.key))
-    library_sources.sort(
-        key=lambda source: ((source.title or "").casefold(), source.key)
-    )
+    if order is not None:
+        fallback = len(order)
+        sources.sort(
+            key=lambda source: (
+                order.get(source.key, fallback),
+                (source.title or "").casefold(),
+                source.key,
+            )
+        )
+        library_sources.sort(
+            key=lambda source: (
+                order.get(source.key, fallback),
+                (source.title or "").casefold(),
+                source.key,
+            )
+        )
+    else:
+        sources.sort(key=lambda source: ((source.title or "").casefold(), source.key))
+        library_sources.sort(
+            key=lambda source: ((source.title or "").casefold(), source.key)
+        )
     return sources, library_sources, indexes
 
 
@@ -804,6 +908,7 @@ __all__ = [
     "read_index_state",
     "relative_archive",
     "scan_collection",
+    "scan_scope_collection",
     "zim_collection_key",
     "zim_source_key",
 ]
