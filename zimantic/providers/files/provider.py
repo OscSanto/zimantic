@@ -32,7 +32,7 @@ from ...content.store import (
     ArticleUnavailableError,
 )
 from ...diagnostics import public_cause
-from ...indexes.locator import IndexLocator
+from ...indexing.locator import IndexLocator
 from ...indexing import search as generic_search
 from ...indexing.derived import derived_text_preview
 from ...model_meta import (
@@ -501,7 +501,8 @@ class FilesRuntime(CollectionRuntime):
         )
 
     def start_faiss(self) -> None:
-        if not self._semantic or not self._defer_faiss:
+        # bind_search(defer_faiss=False) runs before this, so do not gate on it.
+        if not self._semantic:
             return
         try:
             import faiss  # noqa: F401
@@ -761,9 +762,9 @@ class FilesRuntime(CollectionRuntime):
             self._refresh_once(wait=True)
         finally:
             with self._lock:
-                live = set(self.indexes.values())
+                live = {id(index) for index in self.indexes.values()}
             for index in old.values():
-                if index not in live:
+                if id(index) not in live:
                     try:
                         index.close()
                     except Exception:

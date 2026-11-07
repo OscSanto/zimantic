@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from zimantic.__main__ import _build_files_collections
-from zimantic.indexes.locator import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.providers.files.discovery import discover_sources
 
 from .helpers import build_tree, files_config, runtime_config

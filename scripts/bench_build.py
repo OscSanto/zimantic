@@ -65,7 +65,7 @@ def main():
         parser.error("threads, workers, batch size and token budget must be positive")
     sys.path.insert(0, str(args.source_root or Path(__file__).resolve().parent.parent))
     from zimantic.embed import Embedder
-    from zimantic.indexes import IndexLocator
+    from zimantic.indexing.locator import IndexLocator
     from zimantic.indexing import pipeline
     from zimantic.providers.zim.entries import ArchiveEntryProducer
 

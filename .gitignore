@@ -219,9 +219,9 @@ __marimo__/
 .streamlit/secrets.toml
 zims/
 model/
-indexes/
+/indexes/
 evaluation.zims/
-evaluation.indexes/
+/evaluation.indexes/
 evaluation/results/
 /.build.lock
 /.catalog.lock

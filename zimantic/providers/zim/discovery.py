@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterator
 
 from ...catalog import SourceCatalog, SourceRecord, absolute_path
 from ...diagnostics import public_cause
-from ...indexes.locator import IndexLocator, IndexLocatorError
+from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...model_meta import (
     MODEL_PROBE_SHAPE_KEY,
     MODEL_PROBE_TEXTS_KEY,

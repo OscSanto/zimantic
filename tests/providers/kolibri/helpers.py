@@ -350,7 +350,7 @@ def open_runtime(index_dir: Path, config: KolibriConfig):
 
 
 def build_sources(runtime, index_dir: Path, *, cfg: dict | None = None, fast: bool = False):
-    from zimantic.indexes.locator import IndexLocator
+    from zimantic.indexing.locator import IndexLocator
     from zimantic.indexing.pipeline import build_index
 
     locator = IndexLocator(index_dir)

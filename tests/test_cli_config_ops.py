@@ -18,7 +18,7 @@ from zimantic.__main__ import (
     main,
 )
 from zimantic.config_writer import ConfigWriteError, append_collection
-from zimantic.indexes.locator import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.prune import collect_inventory, delete_candidates
 from zimantic.providers.config import (
     ConfigIssue,

@@ -2,7 +2,7 @@
 
 Pruning is intentionally conservative.  A directory is eligible only when its
 ``current`` manifest is valid, its identity fields match the directory layout
-that :class:`~zimantic.indexes.locator.IndexLocator` would compute, and its
+that :class:`~zimantic.indexing.locator.IndexLocator` would compute, and its
 collection namespace is not configured by a complete, validated discovery
 snapshot.  Unknown files and partially recognizable legacy layouts are reported
 for manual inspection and never deleted by extension or filename.
@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - Windows
     import msvcrt
 
 from .discovery import DiscoveryResult
-from .indexes.locator import MANIFEST_VERSION, IndexLocator
+from .indexing.locator import MANIFEST_VERSION, IndexLocator
 from .providers.config import BUILTIN_PROVIDERS, ConfigIssue
 
 __all__ = [

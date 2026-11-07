@@ -25,7 +25,7 @@ from ...content.store import (
 )
 from ...contracts import SourceInfo, SourceResult
 from ...diagnostics import public_cause
-from ...indexes.locator import IndexLocator
+from ...indexing.locator import IndexLocator
 from ...media_types import ordered_media_types
 from ...model_meta import (
     MODEL_PROBE_SHAPE_KEY,
@@ -407,7 +407,9 @@ class ZimRuntime(CollectionRuntime):
 
     def start_faiss(self) -> None:
         """Load deferred FAISS vectors for this runtime's indexes."""
-        if not self._semantic or not self._defer_faiss:
+        # The core calls bind_search(defer_faiss=False) before this method, so
+        # gating on _defer_faiss would skip the load entirely.
+        if not self._semantic:
             return
         try:
             import faiss  # noqa: F401
@@ -684,9 +686,9 @@ class ZimRuntime(CollectionRuntime):
             self._publish(scan, reopen=False)
         finally:
             with self._lock:
-                live = set(self.indexes.values())
+                live = {id(index) for index in self.indexes.values()}
             for index in old.values():
-                if index not in live:
+                if id(index) not in live:
                     try:
                         index.close()
                     except Exception:

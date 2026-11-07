@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from zimantic.indexes.locator import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.derived import (
     DerivedTextConfig,
     SourceDerivedOperations,

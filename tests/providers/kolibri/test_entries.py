@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from zimantic.indexes.locator import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.derived import DerivedTextConfig, SourceDerivedOperations
 from zimantic.indexing.pipeline import build_index
 from zimantic.providers.kolibri.discovery import (

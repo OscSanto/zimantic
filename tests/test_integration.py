@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic import build as build_module
-from zimantic.indexes import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.libzim_compat import get_entry_by_id
 from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
 from zimantic.providers.zim.entries import ArchiveEntryProducer

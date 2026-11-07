@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 from ...contracts import SourceInfo
 from ...diagnostics import public_cause
-from ...indexes.locator import IndexLocator, IndexLocatorError
+from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
 

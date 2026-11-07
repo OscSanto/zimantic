@@ -218,6 +218,12 @@ class BodyBudget:
             return self._reserved
 
     def reserve(self, size: int) -> int:
+        """Block until ``size`` bytes are available.
+
+        A caller that already holds reservations and then waits here can stall
+        every other build.  The indexing loop therefore tries
+        :meth:`try_reserve` first and flushes/drains before blocking.
+        """
         requested = max(0, int(size))
         with self._condition:
             if requested > self.capacity:

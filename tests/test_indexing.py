@@ -13,7 +13,7 @@ from zimantic.indexing.pipeline import BodyBudget, build_index
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.search import AmbiguousPathError, SearchLimits, search
 from zimantic.indexing.types import EntryRecord
-from zimantic.indexes import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.providers.base import SourceQuery
 from zimantic.searching.index import IndexHandle
 

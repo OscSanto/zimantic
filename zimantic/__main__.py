@@ -615,7 +615,7 @@ def _build_files_collections(
     """Build every configured files collection through the generic pipeline."""
     from .build import build_index
     from .diagnostics import public_cause
-    from .indexes import IndexLocator
+    from .indexing.locator import IndexLocator
     from .providers.base import ProviderContext
     from .providers.files import FilesProvider
     from .settings import normalize_web_base_path
@@ -707,7 +707,7 @@ def _build_kolibri_collections(
     """Build every configured Kolibri channel through the generic pipeline."""
     from .build import build_index
     from .diagnostics import public_cause
-    from .indexes import IndexLocator
+    from .indexing.locator import IndexLocator
     from .providers.base import ProviderContext
     from .providers.kolibri import KolibriProvider
     from .settings import normalize_web_base_path
@@ -1092,7 +1092,7 @@ def _build_tasks(
 ) -> None:
     """Build one or more already-discovered sources through the generic pipeline."""
     from .build import EmbeddingPipeline, build_index
-    from .indexes import IndexLocator
+    from .indexing.locator import IndexLocator
 
     workers = args.workers
     if workers is None:
@@ -1286,7 +1286,7 @@ def _run_positional_zim_build(
     parser: argparse.ArgumentParser,
 ) -> None:
     from .build import build_index
-    from .indexes import IndexLocator
+    from .indexing.locator import IndexLocator
 
     zims = _collect_zims([Path(path) for path in args.paths], ".")
     try:

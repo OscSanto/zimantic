@@ -248,7 +248,7 @@ def test_store_reads_articles_and_the_homepage(tmp_path):
 def test_built_generation_is_discovered_and_searchable(tmp_path):
     from types import SimpleNamespace
 
-    from zimantic.indexes import IndexLocator
+    from zimantic.indexing.locator import IndexLocator
     from zimantic.indexing.pipeline import build_index
     from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
     from zimantic.providers.zim.entries import ArchiveEntryProducer
@@ -279,6 +279,70 @@ def test_built_generation_is_discovered_and_searchable(tmp_path):
         index = runtime.indexes[source.key]
         assert index.generation is not None
         assert index.db_path is not None
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_start_faiss_loads_after_core_binds_defer_false(tmp_path, caplog):
+    """The core binds defer_faiss=False before calling runtime.start_faiss().
+
+    start_faiss() used to require _defer_faiss to still be True and therefore
+    returned immediately, leaving every semantic index unloaded.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import faiss
+    import numpy as np
+
+    from zimantic.indexing import pipeline
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
+
+    class _Embedder:
+        def truncate(self, text, prefix=""):
+            return text
+
+        def embed(self, texts):
+            return np.ones((len(texts), 4), dtype=np.float32)
+
+    zims = tmp_path / "zims"
+    zims.mkdir()
+    archive = zims / "manual.zim"
+    _create_zim(archive)
+    indexes = tmp_path / "indexes"
+    source = SimpleNamespace(
+        key=zim_source_key("library", archive.name),
+        provider="zim",
+        collection_key=zim_collection_key("library"),
+        provider_id=None,
+        path=str(archive),
+    )
+    with patch.object(
+        pipeline, "_write_faiss", side_effect=lambda db, path: path.write_bytes(b"vectors")
+    ):
+        pipeline.build_index(
+            ArchiveEntryProducer(source, archive),
+            IndexLocator(indexes),
+            _Embedder(),
+            {"batch_size": 2},
+        )
+
+    config, batch, runtime = _open(tmp_path, zims, index_dir=indexes)
+    try:
+        runtime.bind_search(semantic=True, defer_faiss=False)
+        with (
+            patch.object(faiss, "read_index", return_value=object()),
+            caplog.at_level(logging.WARNING),
+        ):
+            runtime.start_faiss()
+        assert runtime.indexes
+        assert all(
+            index.faiss_index is not None for index in runtime.indexes.values()
+        )
+        assert "FAISS indexes unavailable" not in caplog.text
     finally:
         runtime.close()
         batch.close()

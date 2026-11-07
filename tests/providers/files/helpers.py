@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from zimantic.indexes.locator import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.providers.base import ProviderContext
 from zimantic.providers.config import FilesConfig, RuntimeConfig

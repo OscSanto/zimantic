@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from zimantic.__main__ import _build_kolibri_collections
-from zimantic.indexes.locator import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 
 from .helpers import kolibri_config, make_two_channel_fixture, runtime_config
 

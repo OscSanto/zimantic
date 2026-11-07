@@ -11,7 +11,7 @@ import pytest
 from zimantic.catalog import SourceCatalog
 from zimantic.contracts import SourceInfo
 from zimantic.diagnostics import private_locators, public_cause, sanitize_public_text
-from zimantic.indexes import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.indexing.types import EntryRecord
 

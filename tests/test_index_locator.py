@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from zimantic.indexes import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 
 
 class _Source:

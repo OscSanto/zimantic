@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from zimantic.indexes import IndexLocator
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.schema import (
     BODY_TRUNCATED_COUNT,
@@ -447,6 +447,64 @@ class BodyBudgetTests(unittest.TestCase):
                     )
                 self.assertEqual(len(_docs(locator, _source())), 4)
                 self.assertEqual(budget.reserved, 0)
+        finally:
+            pipeline.close()
+
+    def test_concurrent_builds_make_progress_with_a_tiny_shared_budget(self):
+        """Four builds sharing 10 bytes must flush/drain instead of all blocking.
+
+        This reproduces the original deadlock: each build held an unflushed
+        batch in reserve(), so no thread could release the budget.  The build
+        threads are daemon threads so a regression fails the assertion rather
+        than hanging the test run.
+        """
+        rows = [
+            EntryRecord(i, f"T{i}", "excerpt", f"p{i}", None, "123456")
+            for i in range(4)
+        ]
+        budget = build_module.BodyBudget(10)
+        pipeline = build_module.EmbeddingPipeline(_Embedder(), workers=2)
+        failures: list[BaseException] = []
+
+        def run(number: int) -> None:
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    _build(
+                        Producer(
+                            rows,
+                            source=_source(f"files:test:source-{number}"),
+                        ),
+                        tmp,
+                        {
+                            "batch_size": 32,
+                            "body_budget": budget,
+                            "embedding_pipeline": pipeline,
+                        },
+                        embedder=_Embedder(),
+                    )
+            except BaseException as error:  # noqa: BLE001 - surfaced below
+                failures.append(error)
+
+        threads = [
+            threading.Thread(target=run, args=(number,), daemon=True)
+            for number in range(4)
+        ]
+        try:
+            # Patch once around every thread: concurrent patch.object()
+            # enter/exit is not thread-safe and would leak the mock.
+            with patch.object(
+                build_module, "_write_faiss", side_effect=_write_fake_faiss
+            ):
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+            self.assertFalse(
+                [thread for thread in threads if thread.is_alive()],
+                "concurrent builds deadlocked on the shared body budget",
+            )
+            self.assertEqual(failures, [])
+            self.assertEqual(budget.reserved, 0)
         finally:
             pipeline.close()
 
