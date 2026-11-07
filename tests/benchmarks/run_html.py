@@ -29,7 +29,6 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,14 +52,6 @@ class Page:
     html: bytes
 
 
-class LegacyTextExtractor(reader._TextExtractor, HTMLParser):
-    """Keep the pre-Lexbor streaming baseline with the same selection rules."""
-
-    def __init__(self):
-        reader._TextExtractor.__init__(self)
-        HTMLParser.__init__(self)
-
-
 class Target:
     def __init__(self):
         self.extractor = reader._TextExtractor()
@@ -82,7 +73,7 @@ def blocks(engine: str, html: bytes, limit: int) -> list[str]:
     if engine == "lexbor":
         return list(reader.iter_text_blocks(html, max_chars=limit))
     if engine == "stdlib":
-        parser = LegacyTextExtractor()
+        parser = reader._StreamingTextExtractor()
         cleaned = reader._SCRIPT_STYLE.sub(b" ", html)
         decoder = codecs.getincrementaldecoder("utf-8")("ignore")
         for offset in range(0, len(cleaned), CHUNK):

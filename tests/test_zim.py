@@ -1,8 +1,13 @@
 import json
+import subprocess
 import sys
+import tomllib
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+from packaging.requirements import Requirement
 
 try:
     import libzim.reader
@@ -15,6 +20,7 @@ except ImportError:
     sys.modules["libzim"] = libzim
     sys.modules["libzim.reader"] = reader
 
+from zimantic.content import reader as content_reader
 from zimantic.content.reader import (
     DEFAULT_MAX_HTML_BYTES,
     DEFAULT_PREVIEW_CHARS,
@@ -213,6 +219,7 @@ def _phet_archive(html: bytes, script: bytes, *, path: str, title: str):
 
 
 class TextExtractionTests(unittest.TestCase):
+    @unittest.skipUnless(content_reader.LexborHTMLParser, "requires Lexbor HTML5 recovery")
     def test_omitted_paragraph_end_tags_do_not_duplicate_prose(self):
         first = "The first paragraph contains useful readable prose that should appear only once."
         second = "The second paragraph also contains useful readable prose without duplicated text."
@@ -224,6 +231,7 @@ class TextExtractionTests(unittest.TestCase):
         html = f"<nav><a>Home</a><div>Menu</nav><p>{text}</p>".encode()
         self.assertEqual(list(iter_text_blocks(html)), [text])
 
+    @unittest.skipUnless(content_reader.LexborHTMLParser, "requires Lexbor DOM recovery")
     def test_deep_valid_containers_retain_prose_without_duplicates(self):
         text = "Useful article prose inside deeply nested containers should remain readable."
         html = ("<div>" * 260 + f"<p>{text}</p>" + "</div>" * 260).encode()
@@ -240,7 +248,7 @@ class TextExtractionTests(unittest.TestCase):
     def test_traversal_deadline_retains_collected_paragraph(self):
         first = "The first paragraph contains useful readable prose before the deadline expires."
         second = "The second paragraph must not be traversed after the deadline has expired."
-        html = f"<p>{first}</p><p>{second}</p>".encode()
+        html = f"<p>{first}</p>".encode() + b" " * 8192 + f"<p>{second}</p>".encode()
         now = [0.0]
         original_end = _TextExtractor.handle_endtag
 
@@ -254,6 +262,87 @@ class TextExtractionTests(unittest.TestCase):
             patch.object(_TextExtractor, "handle_endtag", finish_block),
         ):
             self.assertEqual(list(iter_text_blocks(html, deadline=1.0)), [first])
+
+    def test_stdlib_fallback_preserves_visibility_language_and_utf8(self):
+        text = "Useful article prose with inline formatting and a nonbreaking space & symbol."
+        html = (
+            '<div hidden><p>Hidden article text must never be included in a preview.</p></div>'
+            '<nav><p>Navigation links are not useful article prose for indexing.</p></nav>'
+            f'<p class="lang-fr">Translated prose must not displace the default language: {text}</p>'
+            '<p class="lang-default">Useful article prose with <b>inline formatting</b>'
+            ' and a nonbreaking&nbsp;space &amp; symbol.</p>'
+        ).encode()
+        boundary_text = "word " * 1636 + "a\U0001f4a1"
+        with patch("zimantic.content.reader.LexborHTMLParser", None):
+            self.assertEqual(list(iter_text_blocks(html)), [text])
+            self.assertEqual(
+                list(iter_text_blocks(f"<div><p>{boundary_text}</p></div>".encode())),
+                [boundary_text],
+            )
+            self.assertEqual(extract_excerpt(b""), "")
+
+    def test_stdlib_fallback_stops_before_large_preview_tail(self):
+        first = "Useful first paragraph with enough visible prose for the opening preview."
+        html = f"<div><p>{first}</p>".encode() + b" " * 8192 + b"<p>" + b"tail " * 3000 + b"</p></div>"
+        with patch("zimantic.content.reader.LexborHTMLParser", None):
+            self.assertEqual(list(iter_text_blocks(html, max_chars=50)), [first])
+
+    def test_stdlib_fallback_returns_partial_text_on_deadline(self):
+        first = "Useful first paragraph with enough visible prose before the deadline expires."
+        html = f"<p>{first}</p>".encode() + b" " * 8192 + b"<p>" + b"tail " * 3000 + b"</p>"
+        with (
+            patch("zimantic.content.reader.LexborHTMLParser", None),
+            patch("zimantic.content.reader.time.monotonic", side_effect=[0.0, 0.0, 2.0]),
+        ):
+            self.assertEqual(list(iter_text_blocks(html, deadline=1.0)), [first])
+
+    def test_reader_imports_without_selectolax(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; sys.modules['selectolax'] = None; "
+                    "from zimantic.content.reader import LexborHTMLParser, extract_excerpt; "
+                    "assert LexborHTMLParser is None; "
+                    "text = 'Useful article prose with enough visible text for the fallback extractor.'; "
+                    "assert extract_excerpt(('<p>' + text + '</p>').encode()) == text"
+                ),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_selectolax_dependency_skips_platforms_without_wheels(self):
+        config = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+        requirements = [
+            Requirement(value) for value in config["project"]["dependencies"]
+            if Requirement(value).name == "selectolax"
+        ]
+        for platform, machine, implementation, expected in (
+            ("linux", "armv7l", "cpython", False),
+            ("linux", "i686", "cpython", False),
+            ("linux", "ppc64le", "cpython", False),
+            ("freebsd", "x86_64", "cpython", False),
+            ("linux", "x86_64", "pypy", False),
+            ("linux", "aarch64", "cpython", True),
+            ("linux", "x86_64", "cpython", True),
+            ("darwin", "arm64", "cpython", True),
+            ("win32", "AMD64", "cpython", True),
+        ):
+            with self.subTest(platform=platform, machine=machine, implementation=implementation):
+                environment = {
+                    "sys_platform": platform,
+                    "platform_machine": machine,
+                    "implementation_name": implementation,
+                }
+                self.assertEqual(
+                    any(req.marker is None or req.marker.evaluate(environment) for req in requirements),
+                    expected,
+                )
 
     def test_extraction_prefers_first_substantial_paragraph(self):
         self.assertEqual(

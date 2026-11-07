@@ -241,11 +241,25 @@ taskset -c 0-2 python scripts/bench_threads.py \
 
 ## HTML parser comparison: November 7, 2026
 
-Text extraction now uses **selectolax's Lexbor HTML5 parser** for both body
-indexing and previews. Block priorities, hidden/navigation filtering,
+Text extraction prefers **selectolax's Lexbor HTML5 parser** for both body
+indexing and previews, falling back to stdlib `HTMLParser` when Lexbor cannot
+be imported. Block priorities, hidden/navigation filtering,
 boilerplate removal, primary-language selection and text caps remain unchanged.
 The small, marker-gated meta-refresh scan still uses stdlib `HTMLParser`.
 Existing indexes are not automatically rewritten.
+
+Automatic selectolax installation is restricted to the published CPython
+wheel OS/architecture families: Linux x86-64/AArch64, macOS x86-64/ARM64, and
+Windows x86/x64/ARM64. ARM32 and other unlisted targets do not require
+selectolax or a native source build. A separately installed selectolax is
+still used on any platform; `pip install 'zimantic[lexbor]'` explicitly opts
+into installing/building it outside the automatic platform list. Platform
+markers cannot distinguish every libc/OS-version/ABI wheel constraint.
+
+The fallback is the previous streaming extractor measured below. It retains
+the same visibility/language rules and capped text, and checks deadlines
+between input chunks. It is slower and lacks Lexbor's HTML5 malformed-markup
+recovery; the recorded legacy-page differences remain its known tradeoffs.
 
 The [recorded results](../tests/benchmarks/results/html-parsers-2026-11-07.json)
 compare the previous stdlib parser with native backends using the same

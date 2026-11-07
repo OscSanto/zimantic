@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import posixpath
@@ -11,8 +12,6 @@ from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
-from selectolax.lexbor import LexborHTMLParser
-
 if TYPE_CHECKING:
     from libzim.reader import Archive
 
@@ -22,6 +21,11 @@ from ..redirects import RedirectError, resolve_redirect_entry
 from .path import normalize_archive_path
 
 logger = logging.getLogger(__name__)
+
+try:
+    from selectolax.lexbor import LexborHTMLParser
+except ImportError:
+    LexborHTMLParser = None
 
 
 def resolve_archive_href(
@@ -451,6 +455,14 @@ class _TextExtractor:
         )
 
 
+class _StreamingTextExtractor(_TextExtractor, HTMLParser):
+    """Stdlib fallback using the same block-selection and visibility rules."""
+
+    def __init__(self):
+        _TextExtractor.__init__(self)
+        HTMLParser.__init__(self)
+
+
 def is_disambiguation(title: str, text: str, html: bytes = b"") -> bool:
     """True for a MediaWiki disambiguation page.
 
@@ -494,13 +506,27 @@ def iter_text_blocks(
 ) -> Iterator[str]:
     """Yield substantial article blocks, preferring paragraphs over fallbacks.
 
-    Lexbor constructs an HTML5 DOM before traversal. ``max_chars`` stops
+    Lexbor constructs an HTML5 DOM before traversal when available; otherwise
+    stdlib HTMLParser feeds incrementally. ``max_chars`` stops
     traversal once the opening blocks provably fill that budget (see
     ``_TextExtractor._can_stop``). ``deadline`` is a ``time.monotonic()`` budget:
     check it before DOM construction and between traversal events, yielding
     collected text on expiry. Native DOM construction cannot be interrupted.
     """
     if not html or (deadline is not None and time.monotonic() >= deadline):
+        return
+    if LexborHTMLParser is None:
+        parser = _StreamingTextExtractor()
+        html = _SCRIPT_STYLE.sub(b" ", html)
+        decoder = codecs.getincrementaldecoder("utf-8")("ignore")
+        for start in range(0, len(html), 8192):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            parser.feed(decoder.decode(html[start:start + 8192]))
+            if max_chars is not None and parser._can_stop(max_chars):
+                break
+        parser.feed(decoder.decode(b"", final=True))
+        yield from parser.candidates()
         return
     parser = _TextExtractor()
     text = _SCRIPT_STYLE.sub(b" ", html).decode("utf-8", "ignore")

@@ -18,9 +18,16 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pymupdf",
-    "selectolax",
+    # Published CPython wheel platforms; others use the stdlib HTML fallback.
+    "selectolax; implementation_name == 'cpython' and sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "selectolax; implementation_name == 'cpython' and sys_platform == 'darwin' and (platform_machine == 'x86_64' or platform_machine == 'arm64')",
+    "selectolax; implementation_name == 'cpython' and sys_platform == 'win32' and (platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'x86')",
     "puremagic>=1.30",
 ]
+
+[project.optional-dependencies]
+# Explicit opt-in for a separately installed/built Lexbor on other platforms.
+lexbor = ["selectolax"]
 
 [dependency-groups]
 # Development and test-only tools; the application does not need them at runtime.

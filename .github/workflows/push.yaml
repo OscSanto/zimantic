@@ -103,6 +103,7 @@ jobs:
                 python3-onnxruntime \
                 python3-sentencepiece
               PYTHONPATH=/app /usr/bin/python3 -c "import faiss, onnxruntime, sentencepiece; from libzim.reader import Archive; from libzim.search import Searcher; from zimantic.embed import Embedder; from zimantic.search import Search; print(onnxruntime.__version__)"
+              PYTHONPATH=/app /usr/bin/python3 -c "from zimantic.content.reader import LexborHTMLParser, extract_excerpt; assert LexborHTMLParser is None; text = b\"A readable article paragraph with enough useful text for the fallback extractor.\"; assert extract_excerpt(b\"<p>\" + text + b\"</p>\") == text.decode(); print(\"stdlib HTML fallback OK\")"
             '
 
   publish:
