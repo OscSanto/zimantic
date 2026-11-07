@@ -1,10 +1,4 @@
-"""Download and locate the Whisper checkpoints used by the ASR adapters.
-
-Zimantic invokes local Whisper executables rather than importing their Python
-packages.  This module mirrors the two checkpoint catalogs it needs:
-
-* ``openai-whisper`` ``.pt`` files, read by the ``whisper`` command.
-* ``whisper.cpp`` ``ggml-*.bin`` files, read by ``whisper-cli``.
+"""Download and locate the whisper.cpp checkpoints used by the ASR adapter.
 
 ``faster-whisper`` CTranslate2 snapshots are handled by
 ``faster_whisper_models`` instead.
@@ -26,9 +20,6 @@ from .model_files import DOWNLOAD_CHUNK_BYTES, DOWNLOAD_TIMEOUT_SECONDS, sha256_
 
 logger = logging.getLogger(__name__)
 
-OPENAI_WHISPER_BASE_URL = (
-    "https://openaipublic.azureedge.net/main/whisper/models"
-)
 WHISPER_CPP_BASE_URL = (
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 )
@@ -45,14 +36,6 @@ class WhisperModel:
     sha256: str
 
 
-def _model(filename: str, sha256: str) -> WhisperModel:
-    return WhisperModel(
-        filename=filename,
-        url=f"{OPENAI_WHISPER_BASE_URL}/{sha256}/{filename}",
-        sha256=sha256,
-    )
-
-
 def _ggml(name: str, sha256: str) -> WhisperModel:
     filename = f"ggml-{name}.bin"
     return WhisperModel(
@@ -61,68 +44,6 @@ def _ggml(name: str, sha256: str) -> WhisperModel:
         sha256=sha256,
     )
 
-
-# The official openai-whisper checkpoints, mirrored from
-# whisper/__init__.py::_MODELS.  The checksum is part of the download URL, so
-# verifying it is the same check the CLI performs.
-OPENAI_WHISPER_MODELS = {
-    "tiny.en": _model(
-        "tiny.en.pt",
-        "d3dd57d32accea0b295c96e26691aa14d8822fac7d9d27d5dc00b4ca2826dd03",
-    ),
-    "tiny": _model(
-        "tiny.pt",
-        "65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9",
-    ),
-    "base.en": _model(
-        "base.en.pt",
-        "25a8566e1d0c1e2231d1c762132cd20e0f96a85d16145c3a00adf5d1ac670ead",
-    ),
-    "base": _model(
-        "base.pt",
-        "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
-    ),
-    "small.en": _model(
-        "small.en.pt",
-        "f953ad0fd29cacd07d5a9eda5624af0f6bcf2258be67c92b79389873d91e0872",
-    ),
-    "small": _model(
-        "small.pt",
-        "9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794",
-    ),
-    "medium.en": _model(
-        "medium.en.pt",
-        "d7440d1dc186f76616474e0ff0b3b6b879abc9d1a4926b7adfa41db2d497ab4f",
-    ),
-    "medium": _model(
-        "medium.pt",
-        "345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1",
-    ),
-    "large-v1": _model(
-        "large-v1.pt",
-        "e4b87e7e0bf463eb8e6956e646f1e277e901512310def2c24bf0e11bd3c28e9a",
-    ),
-    "large-v2": _model(
-        "large-v2.pt",
-        "81f7c96c852ee8fc832187b0132e569d6c3065a3252ed18e56effd0b6a73e524",
-    ),
-    "large-v3": _model(
-        "large-v3.pt",
-        "e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb",
-    ),
-    "large": _model(
-        "large-v3.pt",
-        "e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb",
-    ),
-    "large-v3-turbo": _model(
-        "large-v3-turbo.pt",
-        "aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a",
-    ),
-    "turbo": _model(
-        "large-v3-turbo.pt",
-        "aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a",
-    ),
-}
 
 # whisper.cpp ggml models published by the upstream download-ggml-model.sh
 # script, plus the q5/q8 quantizations.  Checksums come from the Hugging Face
@@ -278,12 +199,6 @@ def _cache_root(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
-def openai_whisper_cache_root() -> Path:
-    """Return the cache directory the openai-whisper CLI reads."""
-
-    return _cache_root("whisper")
-
-
 def whisper_cpp_cache_root() -> Path:
     """Return Zimantic's cache directory for whisper.cpp checkpoints."""
 
@@ -401,32 +316,6 @@ def _ensure_model(
     return target
 
 
-def cached_openai_whisper_model(
-    model: str, cache_root: Path | None = None
-) -> Path | None:
-    """Return a locally cached openai-whisper checkpoint, or ``None``."""
-
-    root = cache_root or openai_whisper_cache_root()
-    return _cached_model(
-        model, OPENAI_WHISPER_MODELS, root, f"{model}.pt"
-    )
-
-
-def ensure_openai_whisper_model(
-    model: str, cache_root: Path | None = None
-) -> Path:
-    """Return an openai-whisper checkpoint, downloading it once if needed."""
-
-    root = cache_root or openai_whisper_cache_root()
-    return _ensure_model(
-        model,
-        OPENAI_WHISPER_MODELS,
-        root,
-        f"{model}.pt",
-        label="openai-whisper",
-    )
-
-
 def cached_whisper_cpp_model(
     model: str, cache_root: Path | None = None
 ) -> Path | None:
@@ -452,14 +341,10 @@ def ensure_whisper_cpp_model(model: str, cache_root: Path | None = None) -> Path
 
 
 __all__ = [
-    "OPENAI_WHISPER_MODELS",
     "WHISPER_CPP_MODELS",
     "WhisperModel",
     "WhisperModelError",
-    "cached_openai_whisper_model",
     "cached_whisper_cpp_model",
-    "ensure_openai_whisper_model",
     "ensure_whisper_cpp_model",
-    "openai_whisper_cache_root",
     "whisper_cpp_cache_root",
 ]

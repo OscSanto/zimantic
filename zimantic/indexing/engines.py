@@ -15,11 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..faster_whisper_models import ensure_faster_whisper_model
-from ..whisper_models import (
-    cached_openai_whisper_model,
-    ensure_openai_whisper_model,
-    ensure_whisper_cpp_model,
-)
+from ..whisper_models import ensure_whisper_cpp_model
 from .derived import ASR_ENGINES, parse_caption_bytes
 
 _DEFAULT_TIMEOUT = 7200
@@ -226,22 +222,14 @@ def _check_image_pixels(payload: bytes, max_pixels: int) -> None:
 ASR_EXECUTABLES = {
     "whisper.cpp": "whisper-cli",
     "faster-whisper": "whisper-ctranslate2",
-    "openai-whisper": "whisper",
 }
 
-# Edge-friendly whisper.cpp first, then the GPU-oriented faster-whisper, then
-# the reference openai-whisper CLI.  An explicit asr_engine bypasses this.
+# Edge-friendly whisper.cpp first, then the GPU-oriented faster-whisper.  An
+# explicit asr_engine bypasses this.
 _AUTO_ASR_ORDER = (
     ("whisper.cpp", ("ffmpeg",)),
     ("faster-whisper", ()),
-    ("openai-whisper", ("ffmpeg",)),
 )
-
-
-def _openai_whisper_model_path(model: str) -> Path | None:
-    """Return a locally cached openai-whisper checkpoint, or ``None``."""
-
-    return cached_openai_whisper_model(model)
 
 
 def _resolve_asr_engine(requested: str) -> tuple[str, str]:
@@ -257,8 +245,8 @@ def _resolve_asr_engine(requested: str) -> tuple[str, str]:
             if executable and all(shutil.which(tool) for tool in prerequisites):
                 return name, executable
         raise RuntimeError(
-            "ASR needs whisper-cli (with ffmpeg), whisper-ctranslate2, "
-            "or whisper (with ffmpeg) on PATH"
+            "ASR needs whisper-cli (with ffmpeg) or whisper-ctranslate2 "
+            "on PATH"
         )
 
     executable = shutil.which(ASR_EXECUTABLES[requested])
@@ -292,36 +280,6 @@ def _read_transcript(path: Path, label: str) -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError as error:
         raise RuntimeError(f"{label} produced no transcript: {error}") from error
-
-
-def _run_whisper_cli(
-    executable: str,
-    media: Path,
-    model: str,
-    output: Path,
-    timeout: int,
-    threads: int,
-    *,
-    label: str,
-) -> str:
-    if label == "openai-whisper" and not shutil.which("ffmpeg"):
-        raise RuntimeError("openai-whisper ASR needs the ffmpeg executable")
-    if label == "openai-whisper" and _openai_whisper_model_path(model) is None:
-        ensure_openai_whisper_model(model)
-    args = [
-        executable,
-        str(media),
-        "--model",
-        model,
-        "--output_format",
-        "txt",
-        "--output_dir",
-        str(output),
-    ]
-    if threads:
-        args.extend(["--threads", str(threads)])
-    _run_process(args, timeout, label)
-    return _read_transcript(output / f"{media.stem}.txt", label)
 
 
 def _run_faster_whisper(
@@ -412,6 +370,7 @@ def extract_asr(payload: bytes, **options: Any) -> str:
         str(options.get("asr_engine") or "auto")
     )
     model = str(options.get("asr_model") or "base.en")
+    # model = "base"  # Spanish or other multilingual audio.
     timeout = _positive_int(options, "task_timeout_seconds", _DEFAULT_TIMEOUT)
     max_bytes = _positive_int(options, "max_asr_bytes", 1 << 30)
     max_seconds = _positive_int(options, "max_asr_seconds", 3600)
@@ -442,7 +401,7 @@ def extract_asr(payload: bytes, **options: Any) -> str:
                 text = _run_whisper_cpp(
                     executable, media, model, output, timeout, threads
                 )
-            elif engine == "faster-whisper":
+            else:
                 text = _run_faster_whisper(
                     executable,
                     media,
@@ -451,16 +410,6 @@ def extract_asr(payload: bytes, **options: Any) -> str:
                     timeout,
                     threads,
                     batched=batched,
-                )
-            else:
-                text = _run_whisper_cli(
-                    executable,
-                    media,
-                    model,
-                    output,
-                    timeout,
-                    threads,
-                    label="openai-whisper",
                 )
         except Exception as error:
             raise RuntimeError(
@@ -480,10 +429,8 @@ def available_derived_engines() -> dict[str, Any]:
     engines: dict[str, Any] = {}
     if shutil.which("tesseract"):
         engines["ocr"] = extract_ocr
-    if (
-        (shutil.which("whisper-cli") and shutil.which("ffmpeg"))
-        or shutil.which("whisper-ctranslate2")
-        or (shutil.which("whisper") and shutil.which("ffmpeg"))
+    if (shutil.which("whisper-cli") and shutil.which("ffmpeg")) or (
+        shutil.which("whisper-ctranslate2")
     ):
         engines["asr"] = extract_asr
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):

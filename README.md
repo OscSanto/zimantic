@@ -145,11 +145,10 @@ the index.
 
 | Dependency | Enables | Without it |
 |---|---|---|
-| `ffmpeg` and `ffprobe` | Embedded text-caption extraction, and audio decoding for `whisper.cpp` and `openai-whisper` | Sidecar `.srt`/`.vtt` captions still work; embedded tracks and those ASR engines are unavailable |
+| `ffmpeg` and `ffprobe` | Embedded text-caption extraction and audio decoding for `whisper.cpp` | Sidecar `.srt`/`.vtt` captions still work; embedded tracks and whisper.cpp ASR are unavailable |
 | `tesseract` plus trained language data | `ocr = "tesseract"` on images and image-only PDF pages | OCR is unavailable |
 | `whisper-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | `asr = "whisper"` with `asr_engine = "whisper.cpp"` or `"auto"` | That backend is unavailable; `auto` falls through to another installed engine |
 | `whisper-ctranslate2` from [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `asr = "whisper"` with `asr_engine = "faster-whisper"` | That backend is unavailable; it is the fastest option on CUDA GPUs |
-| `whisper` from [openai-whisper](https://github.com/openai/whisper) | `asr = "whisper"` with `asr_engine = "openai-whisper"` | That backend is unavailable |
 | `lsar` (from `unar`) | Archive-container detection for files with a missing or unknown extension | Built-in signatures and `puremagic` are still used |
 | `kiwix-serve` | A remote `type = "kiwix"` collection | Remote Kiwix sources are unavailable; local ZIM, files, and Kolibri sources still work |
 | GPU ONNX Runtime wheel | Accelerated embedding during `build` and `serve` | Zimantic warns and embeds on the CPU; see [GPU acceleration](#gpu-acceleration) |
@@ -175,54 +174,91 @@ On Windows, install ffmpeg and Tesseract from their official builds and put
 `ffmpeg.exe`, `ffprobe.exe`, and `tesseract.exe` on `PATH`. `lsar` is optional
 on every platform.
 
-For a remote Kiwix collection, install `kiwix-serve` from
-[kiwix.org](https://kiwix.org/en/applications/) and point a `type = "kiwix"`
-collection's `server` at it; local ZIM, files, and Kolibri sources never use
-it. GPU ONNX Runtime wheels are covered in
+### Quick start: remote Kiwix
+
+Install `kiwix-serve` from [kiwix.org](https://kiwix.org/en/applications/) and
+start it with a library XML file:
+
+```bash
+kiwix-serve --port=8085 /path/to/library.xml
+```
+
+Then point a `type = "kiwix"` collection at it:
+
+```toml
+[[collections]]
+type = "kiwix"
+name = "remote"
+server = "http://127.0.0.1:8085"
+catalog_limit = 1000
+max_catalog_entries = 50000
+```
+
+Local ZIM, files, and Kolibri sources never use `kiwix-serve`.
+
+GPU ONNX Runtime wheels are covered in
 [GPU acceleration](#gpu-acceleration).
 
 ### Whisper ASR models
 
-`asr = "whisper"` uses a local Whisper engine. Three backends are supported:
+`asr = "whisper"` uses a local Whisper engine. Two backends are supported:
 
 | `asr_engine` | Executable | Best for |
 |---|---|---|
 | `whisper.cpp` | `whisper-cli` | CPU-only and low-memory devices, including a Raspberry Pi |
-| `faster-whisper` | `whisper-ctranslate2` | CUDA GPUs; up to 4× faster than openai-whisper, or up to 16× with batched inference |
-| `openai-whisper` | `whisper` | Reference implementation and existing installs |
-| `auto` | first available | Prefers whisper.cpp, then faster-whisper, then openai-whisper |
+| `faster-whisper` | `whisper-ctranslate2` | CUDA GPUs; up to 4× faster than the old openai-whisper backend, or up to 16× with batched inference |
+| `auto` | first available | Prefers whisper.cpp, then faster-whisper |
 
-Install at least one where its executable is on `PATH`:
+#### Quick start: whisper.cpp (CPU and edge devices)
 
 ```bash
-# whisper.cpp: CPU/edge default; build it and put whisper-cli on PATH
 git clone https://github.com/ggml-org/whisper.cpp
 cmake -B whisper.cpp/build -S whisper.cpp
 cmake --build whisper.cpp/build -j --config Release
 sudo install whisper.cpp/build/bin/whisper-cli /usr/local/bin/
-
-# faster-whisper: Python + CTranslate2; no system ffmpeg needed
-pipx install whisper-ctranslate2
-# or: uv pip install whisper-ctranslate2
-
-# openai-whisper: Python + PyTorch; needs system ffmpeg
-pipx install openai-whisper
-# or: uv pip install openai-whisper
+sudo apt install ffmpeg   # Debian/Ubuntu; whisper.cpp needs ffmpeg
 ```
 
-`uv sync` prunes packages that are not in the lockfile, so use `pipx` or
-reinstall the Python backends after syncing. `whisper.cpp` and
-`openai-whisper` need `ffmpeg` for audio decoding. `faster-whisper` uses PyAV
-instead. GPU execution with faster-whisper needs CUDA 12 cuBLAS and cuDNN 9
-libraries. faster-whisper has no official CLI, so Zimantic uses
-`whisper-ctranslate2`, its openai-whisper-compatible client.
+```toml
+[derived_text]
+asr_engine = "whisper.cpp"
+asr_model = "tiny.en-q5_1"   # ~31 MiB; good default for a Pi Zero 2 W
+# asr_model = "tiny-q5_1"    # Spanish / multilingual
+asr_threads = 2              # use 4-8 on a Pi 5 or desktop CPU
+```
+
+Use `base.en-q5_1` (~57 MiB) when accuracy matters more than size.
+For Spanish or other languages, use the multilingual `base-q5_1` checkpoint.
+
+#### Quick start: faster-whisper (NVIDIA GPU)
+
+```bash
+pipx install whisper-ctranslate2
+# GPU execution also needs CUDA 12 cuBLAS and cuDNN 9.
+```
+
+```toml
+[derived_text]
+asr_engine = "faster-whisper"
+asr_model = "base.en"   # or large-v3 / distil-large-v3 for higher accuracy
+# asr_model = "base"    # for Spanish / multilingual
+asr_batched = true      # extra 2-4x throughput on GPU
+```
+
+faster-whisper has no official CLI, so Zimantic uses `whisper-ctranslate2`,
+its openai-whisper-compatible client. It is the fastest backend on CUDA GPUs
+and does not need a system ffmpeg.
+
+Use `pipx` for faster-whisper, or reinstall it with `uv pip` after a `uv sync`,
+because `uv sync` prunes packages that are not in the lockfile.
 
 Select the backend and model under `[derived_text]`:
 
 ```toml
 [derived_text]
-asr_engine = "auto"   # auto, whisper.cpp, faster-whisper, or openai-whisper
+asr_engine = "auto"   # auto, whisper.cpp, faster-whisper
 asr_model = "base.en"
+# asr_model = "base"  # Spanish / multilingual
 asr_threads = 0       # 0 uses the engine default
 asr_batched = false   # faster-whisper: extra 2-4x speed, uses VAD
 ```
@@ -231,13 +267,16 @@ asr_batched = false   # faster-whisper: extra 2-4x speed, uses VAD
 CUDA host, set `asr_engine = "faster-whisper"` explicitly to get the GPU
 speedup, and set `asr_batched = true` for its additional throughput. In a mixed
 install, the same `asr_model` name works across backends:
-for example `base.en` maps to `ggml-base.en.bin`, the faster-whisper
-`Systran/faster-whisper-base.en` repository, or `base.en.pt`.
+for example `base.en` maps to `ggml-base.en.bin` or the faster-whisper
+`Systran/faster-whisper-base.en` repository. For Spanish or other languages,
+use `base`, which maps to `ggml-base.bin` or
+`Systran/faster-whisper-base`.
 
 For whisper.cpp, quantized models are supported by name:
 
 ```toml
 asr_model = "tiny.en-q5_1"   # about 31 MiB; smaller and faster than tiny.en
+# asr_model = "tiny-q5_1"    # Spanish / multilingual
 ```
 
 Approximate non-quantized sizes are 75 MB (`tiny`), 142 MB (`base`), 466 MB
@@ -254,7 +293,6 @@ the usual place:
 |---|---|
 | whisper.cpp | `$XDG_CACHE_HOME/zimantic/whisper-cpp` or `~/.cache/zimantic/whisper-cpp` |
 | faster-whisper | `$XDG_CACHE_HOME/zimantic/faster-whisper` or `~/.cache/zimantic/faster-whisper` |
-| openai-whisper | `$XDG_CACHE_HOME/whisper` or `~/.cache/whisper` |
 
 The host needs network access the first time a model is fetched. If it is
 offline or the download fails, only ASR is marked partial and the build exits
@@ -262,10 +300,24 @@ non-zero; a cached model is reused without a network request. To prepare a
 machine in advance, copy the backend's cache directory from another host or run
 a build that enables ASR while online.
 
-### OCR language data
+### Quick start: Tesseract OCR
 
-OCR reads the same trained-data files as the `tesseract` command. Enable it per
-source and list the languages in the derived-text config:
+```bash
+sudo apt install tesseract-ocr tesseract-ocr-eng
+# add tesseract-ocr-<lang> for every language you list
+```
+
+```toml
+[derived_text]
+ocr_languages = ["eng"]
+
+[[collections.sources]]
+key = "files:modules:root"   # find the exact key from /sources
+ocr = "tesseract"
+```
+
+OCR reads the same trained-data files as the `tesseract` command. List the
+languages in the derived-text config and enable OCR for an exact source:
 
 ```toml
 [derived_text]
@@ -617,7 +669,22 @@ Tuning keys in `config.toml` are commented out by default, so Zimantic selects m
 
 ### GPU acceleration
 
-Embedding can run on a GPU through ONNX Runtime's accelerated execution providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX Runtime build exposes, in CUDA, ROCm, DirectML, and OpenVINO order, and otherwise stays on the CPU.
+Quick start for an NVIDIA CUDA host:
+
+```bash
+uv sync --locked --no-dev
+uv pip install onnxruntime-gpu   # or -rocm, -directml, -openvino
+zimantic model fp16
+```
+
+```toml
+embed_device = "gpu"       # or "cuda"
+model_dir = "model/fp16"   # relative to the XDG data directory
+```
+
+Install the accelerated wheel after every `uv sync`, because the lockfile
+reinstalls the plain `onnxruntime` package. Embedding can run on a GPU through
+ONNX Runtime's accelerated execution providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX Runtime build exposes, in CUDA, ROCm, DirectML, and OpenVINO order, and otherwise stays on the CPU.
 
 Supported values are `auto`, `gpu` (require an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm` (AMD), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection), and `coreml` (Apple). `--device` overrides the setting for one `build` or `serve` run. CoreML is never selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be slower than the CPU for this model.
 

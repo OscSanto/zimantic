@@ -18,8 +18,8 @@ engines make only that operation unavailable.
 
 - Embedded caption tracks require a local `ffmpeg`/`ffprobe` pair.
 - OCR requires a local engine and model; pages, pixels, and output are bounded.
-- ASR requires a local engine (`whisper-cli`, `whisper-ctranslate2`, or
-  `whisper`); a missing checkpoint is downloaded and verified on first use, so
+- ASR requires a local engine (`whisper-cli` or `whisper-ctranslate2`); a
+  missing checkpoint is downloaded and verified on first use, so
   the first build needs network access unless the model is already cached.
   Media duration and bytes are bounded.
 - A partial requested enrichment publishes the available channels, reports the

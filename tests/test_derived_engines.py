@@ -23,7 +23,7 @@ def test_available_engines_requires_local_executables(monkeypatch):
     monkeypatch.setattr(engines_module.shutil, "which", lambda _name: None)
     assert available_derived_engines() == {}
 
-    tools = {"tesseract", "whisper", "ffmpeg", "ffprobe"}
+    tools = {"tesseract", "whisper-cli", "ffmpeg", "ffprobe"}
     monkeypatch.setattr(
         engines_module.shutil,
         "which",
@@ -86,41 +86,6 @@ def test_real_ocr_respects_the_pixel_cap():
         extract_ocr(image, ocr_languages=["eng"], max_ocr_pixels=1)
 
 
-def test_asr_adapter_reads_the_whisper_text_output(monkeypatch):
-    monkeypatch.setattr(
-        engines_module.shutil,
-        "which",
-        lambda name: (
-            f"/usr/bin/{name}"
-            if name in {"whisper", "ffmpeg"}
-            else None
-        ),
-    )
-    monkeypatch.setattr(
-        engines_module,
-        "_openai_whisper_model_path",
-        lambda _model: Path("/tmp/base.en.pt"),
-    )
-    calls = []
-
-    def fake_run(args, **_kwargs):
-        calls.append(args)
-        output = Path(args[args.index("--output_dir") + 1])
-        media = Path(args[1])
-        (output / f"{media.stem}.txt").write_text(
-            "hello from whisper\n", encoding="utf-8"
-        )
-        return subprocess.CompletedProcess(args, 0, "", "")
-
-    monkeypatch.setattr(engines_module.subprocess, "run", fake_run)
-
-    assert extract_asr(
-        b"fake audio", asr_engine="openai-whisper", asr_model="base.en"
-    ) == "hello from whisper"
-    assert calls and calls[0][0].endswith("whisper")
-    assert "--model" in calls[0]
-
-
 def test_asr_adapter_reports_a_missing_executable(monkeypatch):
     monkeypatch.setattr(engines_module.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError, match="whisper"):
@@ -131,7 +96,6 @@ def test_auto_asr_prefers_whisper_cpp(monkeypatch):
     available = {
         "whisper-cli",
         "whisper-ctranslate2",
-        "whisper",
         "ffmpeg",
         "ffprobe",
     }
@@ -261,39 +225,3 @@ def test_whisper_cpp_converts_to_wav_and_reads_txt(monkeypatch):
     assert cli[0] == "/usr/bin/whisper-cli"
     assert cli[cli.index("-m") + 1] == "/models/ggml-base.en.bin"
     assert "-otxt" in cli
-
-
-def test_asr_adapter_downloads_a_missing_model(monkeypatch):
-    monkeypatch.setattr(
-        engines_module.shutil,
-        "which",
-        lambda name: (
-            f"/usr/bin/{name}"
-            if name in {"whisper", "ffmpeg"}
-            else None
-        ),
-    )
-    monkeypatch.setattr(
-        engines_module, "_openai_whisper_model_path", lambda _model: None
-    )
-    downloaded = []
-    monkeypatch.setattr(
-        engines_module,
-        "ensure_openai_whisper_model",
-        lambda model: downloaded.append(model) or Path("/tmp/base.en.pt"),
-    )
-
-    def fake_run(args, **_kwargs):
-        output = Path(args[args.index("--output_dir") + 1])
-        media = Path(args[1])
-        (output / f"{media.stem}.txt").write_text(
-            "downloaded model transcript\n", encoding="utf-8"
-        )
-        return subprocess.CompletedProcess(args, 0, "", "")
-
-    monkeypatch.setattr(engines_module.subprocess, "run", fake_run)
-
-    assert extract_asr(
-        b"fake audio", asr_engine="openai-whisper", asr_model="base.en"
-    ) == "downloaded model transcript"
-    assert downloaded == ["base.en"]

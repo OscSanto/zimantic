@@ -157,7 +157,6 @@ ASR_ENGINES = (
     "auto",
     "whisper.cpp",
     "faster-whisper",
-    "openai-whisper",
 )
 
 
@@ -170,6 +169,7 @@ class DerivedTextConfig:
     max_ocr_output_bytes: int = 256 << 10
     asr_engine: str = "auto"
     asr_model: str = "base.en"
+    # asr_model = "base"  # Spanish or other multilingual audio.
     asr_threads: int = 0
     asr_batched: bool = False
     max_asr_seconds: int = 3600
