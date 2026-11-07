@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import codecs
 import json
 import logging
 import posixpath
@@ -11,6 +10,8 @@ from collections.abc import Iterator
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 from urllib.parse import unquote, urlsplit
+
+from selectolax.lexbor import LexborHTMLParser
 
 if TYPE_CHECKING:
     from libzim.reader import Archive
@@ -49,10 +50,10 @@ except ImportError:
 set_cluster_cache_max_size(1 << 20) # 1*2^20 = ~1MB
 
 # Best-effort budget for one entry parse (HTML or PDF). Parsers check a shared
-# deadline cooperatively between chunks/pages and return the partial result,
-# so an adversarial page slows a request down instead of hanging it. The
-# builder passes no timeout (offline; skipping entries would silently degrade
-# the index); the runtime preview path uses this default.
+# deadline cooperatively during DOM traversal/PDF pages and return the partial
+# result. Native HTML DOM construction is not interruptible. The builder passes
+# no timeout (offline; skipping entries would silently degrade the index); the
+# runtime preview path uses this default.
 DEFAULT_PARSE_TIMEOUT = 5.0
 
 # Parsing bookkeeping keeps one open block per candidate tag. Beyond this many
@@ -265,8 +266,8 @@ def _refresh_url(html: bytes):
     return parser.url
 
 
-class _TextExtractor(HTMLParser):
-    """Collect prioritized, visible text blocks from an HTML page."""
+class _TextExtractor:
+    """Collect prioritized, visible text blocks from HTML traversal events."""
 
     CANDIDATE_PRIORITIES = {
         "p": 0,
@@ -300,7 +301,6 @@ class _TextExtractor(HTMLParser):
     }
 
     def __init__(self):
-        super().__init__()
         self.skipping = []  # open tags whose contents are not article text
         self.blocks = []
         self.active = []
@@ -476,14 +476,8 @@ def disambiguation_title(title: str) -> str:
     return title if DISAMBIG_TITLE.search(title) else title + DISAMBIGUATION_SUFFIX
 
 
-# Bytes of HTML per feed() call. Small enough that early termination (see
-# _TextExtractor._can_stop) stops near the lead of a typical article, rather
-# than only after the whole page has already been fed.
-CHUNK = 8192
-
 # <script> and <style> content is never article text, and it can be tens of KB
-# of CSS/JS. Stripping it up front also sidesteps html.parser's CDATA handling,
-# which misbehaves when a single very large block is fed in small chunks.
+# of CSS/JS. Strip it before DOM construction to avoid retaining those bodies.
 _SCRIPT_STYLE = re.compile(rb"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 
 # <head> (and a stray <title>) carry metadata, not visible text. They are
@@ -500,25 +494,43 @@ def iter_text_blocks(
 ) -> Iterator[str]:
     """Yield substantial article blocks, preferring paragraphs over fallbacks.
 
-    When ``max_chars`` is given, parsing stops as soon as the opening blocks
-    provably fill that budget (see ``_TextExtractor._can_stop``), so a long page
-    costs only its lead rather than the whole document. ``deadline`` is a
-    ``time.monotonic()`` budget: parsing stops between chunks once it passes and
-    yields whatever text was collected, so a pathological page cannot hang a
-    request.
+    Lexbor constructs an HTML5 DOM before traversal. ``max_chars`` stops
+    traversal once the opening blocks provably fill that budget (see
+    ``_TextExtractor._can_stop``). ``deadline`` is a ``time.monotonic()`` budget:
+    check it before DOM construction and between traversal events, yielding
+    collected text on expiry. Native DOM construction cannot be interrupted.
     """
+    if not html or (deadline is not None and time.monotonic() >= deadline):
+        return
     parser = _TextExtractor()
-    html = _SCRIPT_STYLE.sub(b" ", html)
-
-    # "ignore" drops bytes that aren't valid UTF-8 rather than crashing.
-    decoder = codecs.getincrementaldecoder("utf-8")("ignore")
-    for start in range(0, len(html), CHUNK):
-        parser.feed(decoder.decode(html[start:start + CHUNK]))
+    text = _SCRIPT_STYLE.sub(b" ", html).decode("utf-8", "ignore")
+    if deadline is not None and time.monotonic() >= deadline:
+        return
+    tree = LexborHTMLParser(text)
+    node = tree.root
+    closing = False
+    while node is not None:
         if deadline is not None and time.monotonic() >= deadline:
             break
+        tag = node.tag
+        if not closing:
+            if tag == "-text":
+                parser.handle_data(node.text(deep=False))
+            elif not tag.startswith("-"):
+                parser.handle_starttag(tag, node.attributes.items())
+            if node.child is not None:
+                node = node.child
+                continue
+        if not tag.startswith("-"):
+            parser.handle_endtag(tag)
         if max_chars is not None and parser._can_stop(max_chars):
             break
-    parser.feed(decoder.decode(b"", final=True))
+        if node.next is not None:
+            node = node.next
+            closing = False
+        else:
+            node = node.parent
+            closing = True
     yield from parser.candidates()
 
 
@@ -581,8 +593,9 @@ def extract_excerpt(
 
     The returned text is used as the UI preview at query time and as the
     embedding input during indexing; the embedder truncates it to
-    ``embedding_tokens`` when it creates the vector. ``deadline`` bounds the
-    parse cooperatively (see ``iter_text_blocks``).
+    ``embedding_tokens`` when it creates the vector. ``deadline`` bounds
+    traversal cooperatively, not native DOM construction (see
+    ``iter_text_blocks``).
     """
     max_chars = max(1, int(max_preview_chars))
     candidates = list(iter_text_blocks(html, max_chars=max_chars, deadline=deadline))
@@ -1575,9 +1588,9 @@ def read_entry(
     fast=True stores the title and path without reading the article body, so no
     text (and therefore no vector or body posting) is produced.
 
-    ``timeout`` bounds the whole parse (HTML and PDF) cooperatively via a
-    shared ``time.monotonic()`` deadline; when it passes, the entry yields a
-    partial excerpt rather than hanging the caller. The builder passes no
+    ``timeout`` shares a ``time.monotonic()`` deadline between HTML traversal
+    and PDF pages. On expiry the entry yields the text collected so far;
+    native HTML DOM construction cannot be interrupted. The builder passes no
     timeout so nothing is silently dropped offline.
 
     ``max_body_text_bytes`` bounds the separately indexed lexical body; the

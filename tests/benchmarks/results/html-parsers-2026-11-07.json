@@ -1,0 +1,198 @@
+{
+  "date": "2026-11-07",
+  "selected_backend": "selectolax.lexbor.LexborHTMLParser",
+  "environment": {
+    "python": "3.13.12",
+    "platform": "Linux-7.2.15-300.fc45.x86_64-x86_64-with-glibc2.44",
+    "selectolax": "1.0.2",
+    "lxml": "6.1.3",
+    "libxml": "2.14.6",
+    "beautifulsoup4": "4.15.0",
+    "raspberry_pi_measurement": false
+  },
+  "method": {
+    "seed": 20261107,
+    "repeats": 5,
+    "timing": "Sum of per-page medians after warmup, randomized backend order per repetition; archive decompression, file I/O and model/index work excluded.",
+    "selection": "Same prioritized block, visibility, boilerplate and language rules; UTF-8 ignore decoding.",
+    "sampling": "Up to 12 pages per source, mixing random pages with the largest pages in a sampled pool of up to 36; not the largest pages in each entire archive.",
+    "max_html_bytes": 4194304,
+    "body_cap_bytes": 1048576,
+    "preview_cap_chars": 1000,
+    "real_pages": 242,
+    "nonempty_real_pages": 186,
+    "html_mib": 10.602562,
+    "stress_pages": 8,
+    "subjective_cases": 14,
+    "subjective_review": "Source-based AI review of blinded variants before revealing backend labels: all two real-page disagreements, four random nonempty real pages, eight stress cases. Not a human user study or a prevalence estimate.",
+    "production_verification": "Production Lexbor body/preview hashes match the measured prototype on all 250 pages; the preserved stdlib baseline also matches every recorded baseline hash.",
+    "memory": "Single fresh process per backend, eight largest corpus inputs, body and preview extraction, all backends pre-imported. Additional post-exec VmHWM over the preloaded input/import baseline; not whole-application RSS.",
+    "limitations": [
+      "Shared Linux x86-64 host; no CPU-affinity restriction or system-cache flushing.",
+      "Timings describe extraction prototypes, not complete builds or HTTP requests.",
+      "Small qualitative sample, intentionally enriched for disagreements.",
+      "Native DOM construction is not cooperatively interruptible."
+    ]
+  },
+  "corpus": {
+    "communitybuilding.stackexchange.com_en_all_2026-08.zim": 12,
+    "coreyms_en_sql-tutorials_2026-09.zim": 7,
+    "libretexts.org_en_stats_2026-01.zim": 12,
+    "osm-hawaii-2026-09-26.zim": 5,
+    "phet_en_all_2026-08.zim": 12,
+    "trashwiki.org_en_all_2026-09a.zim": 12,
+    "wikipedia_en_100_2026-08.zim": 12,
+    "wikipedia_en_comics_maxi_2026-07.zim": 12,
+    "wikipedia_en_geography_maxi_2026-07.zim": 12,
+    "wikipedia_en_top_mini_2026-09.zim": 12,
+    "wikiquote_en_all_nopic_2026-07.zim": 12,
+    "wikisource_en_all_nopic_2026-09.zim": 12,
+    "wiktionary_en_simple_all_nopic_2026-04.zim": 12,
+    "cooking.stackexchange.com_en_all_2026-07.zim": 12,
+    "ted_mul_ocean_2026-09.zim": 12,
+    "wikibooks_en_all_nopic_2026-01.zim": 12,
+    "wikipedia_en_astronomy_maxi_2025-11.zim": 12,
+    "wikipedia_en_medicine_maxi_2026-04.zim": 12,
+    "en-olpc": 12,
+    "en-iicba": 12,
+    "en-peacebuilding": 9,
+    "en-module_maker": 2,
+    "en-women-in-african-history": 1,
+    "en-teachertraining": 2
+  },
+  "excluded_input": {
+    "path": "zims/wikisource_en_all_nopic_2026-09_1.zim",
+    "reason": "libzim reports bad size or corruption; readable original archive included."
+  },
+  "results": {
+    "stdlib": {
+      "body_seconds": 1.096721,
+      "preview_seconds": 0.646231,
+      "body_speedup": 1.0,
+      "preview_speedup": 1.0,
+      "body_exact_matches": 242,
+      "preview_exact_matches": 242,
+      "lost_nonempty_real_pages": 0,
+      "additional_peak_rss_mib": 7.984375,
+      "subjective_preferred_or_tied": 10
+    },
+    "lxml-target": {
+      "body_seconds": 0.732683,
+      "preview_seconds": 0.433201,
+      "body_speedup": 1.496857,
+      "preview_speedup": 1.491757,
+      "body_exact_matches": 240,
+      "preview_exact_matches": 240,
+      "lost_nonempty_real_pages": 0,
+      "additional_peak_rss_mib": 17.171875,
+      "subjective_preferred_or_tied": 13
+    },
+    "lxml-dom": {
+      "body_seconds": 0.780694,
+      "preview_seconds": 0.355963,
+      "body_speedup": 1.404803,
+      "preview_speedup": 1.815445,
+      "body_exact_matches": 240,
+      "preview_exact_matches": 240,
+      "lost_nonempty_real_pages": 0,
+      "additional_peak_rss_mib": 21.070312,
+      "subjective_preferred_or_tied": 12
+    },
+    "lexbor": {
+      "body_seconds": 0.762502,
+      "preview_seconds": 0.313081,
+      "body_speedup": 1.438320,
+      "preview_speedup": 2.064101,
+      "body_exact_matches": 240,
+      "preview_exact_matches": 240,
+      "lost_nonempty_real_pages": 0,
+      "additional_peak_rss_mib": 24.808594,
+      "subjective_preferred_or_tied": 14
+    },
+    "bs4-lxml": {
+      "body_seconds": 1.749166,
+      "preview_seconds": 1.319998,
+      "body_speedup": 0.626997,
+      "preview_speedup": 0.489570,
+      "body_exact_matches": 240,
+      "preview_exact_matches": 240,
+      "lost_nonempty_real_pages": 0,
+      "additional_peak_rss_mib": 61.164062,
+      "subjective_preferred_or_tied": 13
+    }
+  },
+  "quality_cases": [
+    {
+      "case": "Human Rights Education material resources",
+      "source": "en-peacebuilding/Contents2/PEACEBUILDING/hrlibrary.umn.edu/edumat/index.html",
+      "preferred": ["lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Recover 862 characters of useful opening resource descriptions lost by stdlib with omitted paragraph end tags. Some footer and link-list noise remains in every backend."
+    },
+    {
+      "case": "Africa Response",
+      "source": "en-iicba/HIV_AIDS/cdrom materials/Africa Response.htm",
+      "preferred": ["lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Substantive prose agrees. Stdlib drops a conference banner and duplicates conference dates/copyright/webmaster footer; native backends retain one footer."
+    },
+    {
+      "case": "Dictionary of National Biography cross-reference",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie: short cross-reference retained without category navigation."
+    },
+    {
+      "case": "TED Black Sea description",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie: readable lang-default description without parallel translations; this is not a complete video transcript."
+    },
+    {
+      "case": "St. Louis Blues introduction",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie: readable introduction without obvious navigation/reference noise."
+    },
+    {
+      "case": "Historical Works of Venerable Bede contents",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie but poor quality: dot leaders dominate the preview. This shared extraction-policy issue is not fixed by changing parsers."
+    },
+    {
+      "case": "omitted-p-end-tags",
+      "preferred": ["lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Correct two-paragraph output; stdlib duplicates paragraph/container text."
+    },
+    {
+      "case": "unclosed-hidden-container",
+      "preferred": ["stdlib", "lexbor"],
+      "finding": "Preserve useful prose after navigation with an unclosed nested div. All lxml-backed variants return empty text."
+    },
+    {
+      "case": "invalid-p-div-nesting",
+      "preferred": ["lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Retain both authored prose runs; stdlib drops one. Common short-block filtering still omits the short trailing sentence."
+    },
+    {
+      "case": "entities-inline-breaks",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie: named entities, nonbreaking spaces, inline emphasis and br separation remain readable."
+    },
+    {
+      "case": "hidden-and-chrome",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie: hidden container/aside text excluded, useful prose retained."
+    },
+    {
+      "case": "parallel-translations",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie: primary language wins when the translated copy appears first."
+    },
+    {
+      "case": "deep-valid-containers",
+      "preferred": ["stdlib", "lxml-target", "lexbor", "bs4-lxml"],
+      "finding": "Retain useful prose through 260 valid nested divs; lxml DOM returns empty text."
+    },
+    {
+      "case": "large-preview-tail",
+      "preferred": ["stdlib", "lxml-target", "lxml-dom", "lexbor", "bs4-lxml"],
+      "finding": "Tie: capped opening preview and complete body agree. DOM backends still construct the complete DOM before traversal."
+    }
+  ]
+}

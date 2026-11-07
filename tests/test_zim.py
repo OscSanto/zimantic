@@ -2,6 +2,7 @@ import json
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 try:
     import libzim.reader
@@ -20,6 +21,7 @@ from zimantic.content.reader import (
     EntryRecord,
     _markdown_source,
     _phet_strings,
+    _TextExtractor,
     disambiguation_title,
     extract_excerpt,
     extract_pdf_excerpt,
@@ -211,6 +213,48 @@ def _phet_archive(html: bytes, script: bytes, *, path: str, title: str):
 
 
 class TextExtractionTests(unittest.TestCase):
+    def test_omitted_paragraph_end_tags_do_not_duplicate_prose(self):
+        first = "The first paragraph contains useful readable prose that should appear only once."
+        second = "The second paragraph also contains useful readable prose without duplicated text."
+        html = f"<div><p>{first}<p>{second}</div>".encode()
+        self.assertEqual(list(iter_text_blocks(html)), [first, second])
+
+    def test_malformed_navigation_does_not_hide_following_article(self):
+        text = "Useful article prose after malformed navigation must remain visible and searchable."
+        html = f"<nav><a>Home</a><div>Menu</nav><p>{text}</p>".encode()
+        self.assertEqual(list(iter_text_blocks(html)), [text])
+
+    def test_deep_valid_containers_retain_prose_without_duplicates(self):
+        text = "Useful article prose inside deeply nested containers should remain readable."
+        html = ("<div>" * 260 + f"<p>{text}</p>" + "</div>" * 260).encode()
+        self.assertEqual(list(iter_text_blocks(html)), [text])
+
+    def test_expired_deadline_skips_dom_construction(self):
+        with (
+            patch("zimantic.content.reader.time.monotonic", return_value=2.0),
+            patch("zimantic.content.reader.LexborHTMLParser") as parse,
+        ):
+            self.assertEqual(list(iter_text_blocks(HTML, deadline=1.0)), [])
+        parse.assert_not_called()
+
+    def test_traversal_deadline_retains_collected_paragraph(self):
+        first = "The first paragraph contains useful readable prose before the deadline expires."
+        second = "The second paragraph must not be traversed after the deadline has expired."
+        html = f"<p>{first}</p><p>{second}</p>".encode()
+        now = [0.0]
+        original_end = _TextExtractor.handle_endtag
+
+        def finish_block(extractor, tag):
+            original_end(extractor, tag)
+            if tag == "p":
+                now[0] = 2.0
+
+        with (
+            patch("zimantic.content.reader.time.monotonic", side_effect=lambda: now[0]),
+            patch.object(_TextExtractor, "handle_endtag", finish_block),
+        ):
+            self.assertEqual(list(iter_text_blocks(html, deadline=1.0)), [first])
+
     def test_extraction_prefers_first_substantial_paragraph(self):
         self.assertEqual(
             _read_entry(_Archive(), 0)[2],

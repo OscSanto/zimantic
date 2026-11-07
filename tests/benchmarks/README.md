@@ -32,3 +32,24 @@ the documented fixture and query set. Store results in
 
 `scripts/benchmark_body_fts.py` provides a synthetic comparison. It does not
 replace a measurement with the real providers.
+
+## HTML parsing
+
+`run_html.py` compares the previous stdlib streaming parser with the production
+Lexbor extractor, lxml's streaming target/DOM, and Beautiful Soup + lxml while
+retaining the same text-selection rules. Optional comparison dependencies do
+not become application requirements:
+
+```sh
+uv run --with lxml --with beautifulsoup4 python tests/benchmarks/run_html.py \
+    --zim zims/wikipedia_en_100_2026-08.zim --module modules/en-olpc \
+    --pages 12 --repeats 5 --output /tmp/zimantic-html
+```
+
+The output includes repeated body/preview timings, exact-output agreement,
+empty-result regressions, fresh-process native-memory probes, and blinded
+review samples with original source HTML. Record subjective preferences before
+opening `review-key.json`. Archive decompression and file I/O are excluded.
+
+See [the November 7 results](results/html-parsers-2026-11-07.json) and
+[quality/memory caveats](../../docs/build-performance.md#html-parser-comparison-november-7-2026).

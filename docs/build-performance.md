@@ -239,5 +239,81 @@ taskset -c 0-2 python scripts/bench_threads.py \
   --zim communitybuilding.stackexchange.com_en_all_2026-08.zim
 ```
 
+## HTML parser comparison: November 7, 2026
+
+Text extraction now uses **selectolax's Lexbor HTML5 parser** for both body
+indexing and previews. Block priorities, hidden/navigation filtering,
+boilerplate removal, primary-language selection and text caps remain unchanged.
+The small, marker-gated meta-refresh scan still uses stdlib `HTMLParser`.
+Existing indexes are not automatically rewritten.
+
+The [recorded results](../tests/benchmarks/results/html-parsers-2026-11-07.json)
+compare the previous stdlib parser with native backends using the same
+extraction rules: **242 real pages from 18 ZIMs and six module directories**
+(10.60 MiB HTML), plus eight stress cases. Up to 12 pages per input mix random
+pages with large pages from a sampled pool, not archive-wide maxima. There
+are 186 nonempty real pages; all backends return empty text on the same other
+56 HTML pages.
+
+Linux x86-64, Python 3.13.12, selectolax 1.0.2, lxml 6.1.3/libxml 2.14.6,
+Beautiful Soup 4.15.0. No CPU-affinity restriction or cache flushing on the
+shared host. These are **not Raspberry Pi measurements**. Five timed repeats
+follow warmup, with randomized backend order. Times are sums of per-page
+medians and exclude archive decompression, file I/O, embeddings and index
+writing; they are not complete-build or HTTP speedups.
+
+| Backend | Body speedup | Preview speedup | Additional peak RSS | Preferred/tied quality cases |
+|---|---:|---:|---:|---:|
+| Previous stdlib HTMLParser | 1.00x | 1.00x | 8.0 MiB | 10/14 |
+| lxml streaming target | 1.50x | 1.49x | 17.2 MiB | 13/14 |
+| lxml DOM | 1.40x | 1.82x | 21.1 MiB | 12/14 |
+| **Lexbor** | **1.44x** | **2.06x** | **24.8 MiB** | **14/14** |
+| Beautiful Soup + lxml | 0.63x | 0.49x | 61.2 MiB | 13/14 |
+
+The stdlib body/preview totals were 1.097/0.646 seconds; Lexbor took
+0.763/0.313 seconds. Memory is a separate single fresh-process probe on the
+eight largest corpus inputs, with all backends imported and inputs loaded
+before measuring additional post-exec `VmHWM`. It includes native allocations,
+but is not whole-application RSS or a concurrency/OOM guarantee.
+
+All native alternatives exactly matched **240/242 real body and preview
+outputs**, and none lost a previously nonempty real page. The two differences
+were improvements: useful opening paragraphs were recovered from an old
+resource-directory page, and repeated copyright/webmaster footer text was
+removed from another legacy document.
+The production Lexbor extractor was checked against the measured prototype:
+body and preview hashes match on all 250 real/stress pages, as do the preserved
+stdlib baseline's hashes against the original baseline.
+
+A **blinded, source-based AI review** covered those two disagreements, four
+random nonempty real pages and all eight stress cases. Lexbor was preferred or
+tied in all 14. lxml-backed variants lost prose after malformed navigation;
+lxml DOM also lost prose beyond its default nesting-depth limit. All backends
+still produce a noisy dot-leader preview for one Wikisource table of contents:
+that requires an extraction-policy fix, not another parser. This small,
+disagreement-enriched review is not a human user study, an estimate of defect
+prevalence, or proof of universal quality equivalence.
+
+The production traversal retains bounded text accumulation and checks the
+deadline before DOM construction and between traversal events. **Native DOM
+construction itself cannot be interrupted**, and early preview stopping avoids
+later traversal, not DOM allocation. The extra memory is the principal tradeoff
+for Lexbor's HTML5 recovery and speed.
+
+Reproduce with [the parser harness](../tests/benchmarks/run_html.py):
+
+```sh
+uv run --with lxml --with beautifulsoup4 python tests/benchmarks/run_html.py \
+  --zim zims/wikipedia_en_100_2026-08.zim \
+  --module modules/en-olpc --pages 12 --repeats 5 --seed 20261107 \
+  --output /tmp/zimantic-html
+```
+
+Supply each of the recorded corpus sources with another `--zim` or `--module`
+to reproduce the complete sample. The harness retains an explicit `stdlib`
+baseline and exercises the production Lexbor path. Review `review.json` and
+its source HTML before opening `review-key.json`; timings alone do not establish
+extraction quality.
+
 Without `--workers`, this measures query latency. In both benchmark scripts,
 `--workers` means embedding workers, unlike the CLI's source-reader `--workers`.

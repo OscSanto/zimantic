@@ -18,6 +18,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pymupdf",
+    "selectolax",
     "puremagic>=1.30",
 ]
 
