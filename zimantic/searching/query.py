@@ -1,17 +1,33 @@
 """Query parsing and deterministic ranking signals."""
 
 import re
+import unicodedata
 
 from ..contracts import SourceInfo
 
 MAX_QUERY_LENGTH = 4096
+SPANISH_STOPWORDS = {
+    "al", "algo", "alguna", "algunas", "alguno", "algunos", "ante", "antes",
+    "aquel", "aquella", "aquellas", "aquello", "aquellos", "aqui", "asi",
+    "como", "con", "contra", "cual", "cuales", "cuando", "de", "del",
+    "desde", "donde", "dos", "el", "ella", "ellas", "ello", "ellos", "en",
+    "entre", "era", "eran", "eras", "eres", "es", "esa", "esas", "ese",
+    "eso", "esos", "esta", "estas", "este", "esto", "estos", "fue",
+    "fueron", "ha", "habia", "han", "hasta", "hay", "la", "las", "le",
+    "les", "lo", "los", "mas", "me", "mi", "mis", "muy", "no", "nos",
+    "nosotras", "nosotros", "o", "otra", "otras", "otro", "otros", "para",
+    "pero", "por", "porque", "que", "quien", "quienes", "se", "sea", "sin",
+    "sobre", "son", "su", "sus", "tambien", "te", "tiene", "tienen", "todo",
+    "toda", "todas", "todos", "tu", "tus", "un", "una", "uno", "unos", "y",
+    "ya", "yo",
+}
 STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
     "how", "what", "where", "when", "why", "who", "which", "can", "could",
     "do", "does", "did", "i", "you", "my", "me", "to", "of", "in", "on",
     "at", "for", "with", "about", "find", "some", "any", "there", "it",
     "that", "this", "and", "or", "if", "so", "will", "would", "should",
-}
+} | SPANISH_STOPWORDS
 INTENT_RULES = (
     (
         re.compile(r"^wikihow", re.IGNORECASE),
@@ -23,6 +39,15 @@ USER_PAGE_PATH = re.compile(r"(?:^|/)users(?:/|$)", re.IGNORECASE)
 DEFAULT_DISAMBIGUATION_BOOST = 0.08
 DEFAULT_DISAMBIGUATION_PENALTY = 0.5
 DEFAULT_USER_PAGE_PENALTY = 0.25
+
+
+def _normalize_word(word: str) -> str:
+    """Case-fold and remove combining marks for accent-insensitive matching."""
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFD", word.casefold())
+        if unicodedata.category(char) != "Mn"
+    )
 
 
 def _exact_title_intent(query_words: list[str], title: str) -> bool:
@@ -47,6 +72,8 @@ def _user_page_intent(query_words: list[str]) -> bool:
 
 
 def _stem(word: str) -> str:
+    if len(word) > 4 and word.endswith("ces"):
+        return word[:-3] + "z"
     if len(word) > 4 and word.endswith("ies"):
         return word[:-3] + "y"
     if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
@@ -57,7 +84,10 @@ def _stem(word: str) -> str:
 def _content_terms(text: str) -> list[str]:
     return [
         _stem(word)
-        for word in re.findall(r"[^\W_]+", text.casefold(), re.UNICODE)
+        for word in (
+            _normalize_word(raw_word)
+            for raw_word in re.findall(r"[^\W_]+", text.casefold(), re.UNICODE)
+        )
         if word not in STOPWORDS | {"your", "their", "his", "her", "its", "our"}
     ]
 
@@ -73,11 +103,14 @@ def _query_terms(query: str) -> list[str]:
 
 
 def _query_words(query: str) -> list[str]:
-    words = re.findall(r"[^\W_]+", query.casefold(), re.UNICODE)
+    words = [
+        _normalize_word(word)
+        for word in re.findall(r"[^\W_]+", query.casefold(), re.UNICODE)
+    ]
     # One-letter tokens are mostly contraction fragments ("can't" -> "can",
     # "t") and do not exist as Xapian terms, so a query containing one used to
     # match nothing at all. Drop them when there is something else to search
-    # for; a query that is only stopwords or single letters is kept as typed.
+    # for; a query that is only stopwords or single letters is kept normalized.
     kept = [
         word for word in words
         if word not in STOPWORDS and len(word) > 1

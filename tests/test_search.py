@@ -619,6 +619,22 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(_fulltext_query("how to change tires"), "change tires")
         self.assertEqual(_query_terms("how to change tires"), ["change", "tire"])
 
+    def test_spanish_question_normalizes_stopwords_and_accents(self):
+        query = "¿qué es la química?"
+        self.assertEqual(_title_query(query), '"quimica"')
+        self.assertEqual(_fulltext_query(query), "quimica")
+        self.assertEqual(_query_terms(query), ["quimica"])
+
+    def test_spanish_query_normalizes_stopwords_and_common_inflections(self):
+        self.assertEqual(
+            _query_terms("impacto de la IA en la era moderna"),
+            ["impacto", "ia", "moderna"],
+        )
+        self.assertEqual(
+            _query_terms("tipos de peces beta"),
+            ["tipo", "pez", "beta"],
+        )
+
     def test_stopword_only_query_is_not_filtered_away(self):
         self.assertEqual(_title_query("how to"), '"how" AND "to"')
         self.assertEqual(_fulltext_query("how to"), "how to")
