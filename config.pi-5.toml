@@ -23,10 +23,14 @@ max_entry_bytes = 1073741824
 max_article_bytes = 33_554_432
 max_preview_chars = 1_000
 
-# Leave one core for search and the web server.
+# Serving/query threads: leave one core for search and the web server.
 embed_threads = 3
-# Only used when build_workers is greater than 1.
-# embedding_workers = 2
+# One three-thread build call used less RAM than 3x1 on a Pi 500, with similar
+# complete-build throughput. WARNING: benchmark before increasing threads or
+# forcing several model workers; synchronization and workspace memory trade off.
+build_embed_threads = 3
+# Model-call concurrency also applies to single-source builds; automatic = 1.
+# embedding_workers = 1
 
 # nprobe = 64
 min_cosine_similarity = 0.85

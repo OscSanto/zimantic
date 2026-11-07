@@ -1105,10 +1105,12 @@ def _build_tasks(
     if not args.fast:
         from .embed import Embedder
 
+        build_embed_threads = cfg.get("build_embed_threads") or 1
+
         def _make_embedder():
             return Embedder(
                 cfg["model_dir"],
-                threads=cfg.get("embed_threads") or 1,
+                threads=build_embed_threads,
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
             )
 
@@ -1119,14 +1121,14 @@ def _build_tasks(
         hw = detect()
         token_budget = int(cfg.get("embedding_batch_tokens", 1000))
         embedding_workers = int(cfg.get("embedding_workers") or default_embedding_workers(
-            embed_threads=cfg.get("embed_threads"), token_budget=token_budget
+            build_embed_threads=build_embed_threads, token_budget=token_budget
         ))
         if embedding_workers < 1 or token_budget < 1:
             parser.error("embedding_workers and embedding_batch_tokens must be at least 1")
         logger.info(
             "zimantic: build hardware: %s; %d embedding workers x %d threads, "
             "%d padded tokens per call",
-            hw.describe(), embedding_workers, cfg.get("embed_threads") or 1, token_budget,
+            hw.describe(), embedding_workers, build_embed_threads, token_budget,
         )
         embedding_pipeline = EmbeddingPipeline(
             embedder,

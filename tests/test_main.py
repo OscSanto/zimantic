@@ -302,15 +302,22 @@ class BuildWorkerTests(unittest.TestCase):
             "model_dir": "/unused/model",
             "embedding_workers": 3,
             "embedding_batch_tokens": 1000,
+            "embed_threads": 8,
+            "build_embed_threads": 2,
         }
         args = types.SimpleNamespace(workers=1, fast=False, force=False)
         with (
             patch.object(main_module, "_build_config", return_value=config.copy()),
             patch.object(build_module, "build_index") as build,
             patch.object(build_module, "EmbeddingPipeline") as pipeline,
+            patch("zimantic.embed.Embedder") as embedder,
         ):
             main_module._build_tasks(
                 [("one", runtime, object())], config, args, argparse.ArgumentParser()
+            )
+            pipeline.call_args.args[0].embed(["text"])
+            embedder.assert_called_once_with(
+                config["model_dir"], threads=2, device=None
             )
         self.assertEqual(pipeline.call_args.kwargs["workers"], 3)
         self.assertEqual(pipeline.call_args.kwargs["token_budget"], 1000)

@@ -4,7 +4,6 @@ import ctypes
 import hashlib
 import json
 import logging
-import os
 import sys
 import threading
 from pathlib import Path
@@ -13,6 +12,7 @@ import numpy as np
 import onnxruntime as ort
 import sentencepiece
 
+from .hardware import detect
 from .model_files import (
     DEFAULT_MODEL_CHECKSUMS,
     resolve_model_dir,
@@ -171,8 +171,8 @@ def _low_memory_host() -> bool:
 # not produce a checksum warning for a file this project downloaded itself.
 EXPECTED_CHECKSUMS = DEFAULT_MODEL_CHECKSUMS
 
-# Leave a core for search and the web server.
-DEFAULT_EMBED_THREADS = max(1, (os.cpu_count() or 1) - 1)
+# Leave a usable core for search; larger ORT pools hurt short-query latency.
+DEFAULT_EMBED_THREADS = min(4, max(1, detect().cores - 1))
 
 
 def _configured_tokenizer_class(model_dir) -> str:

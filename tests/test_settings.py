@@ -278,17 +278,50 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(cfg["build_workers"], 7)
             self.assertEqual(cfg["embedding_workers"], 6)
 
-    def test_embedding_default_uses_configured_embed_threads(self):
+    def test_embedding_default_uses_build_not_serving_threads(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
-            path.write_text("embed_threads = 3\n", encoding="utf-8")
-            with (
-                patch.object(settings, "profile_for_hardware", return_value="desktop"),
-                patch.object(settings, "default_build_workers", return_value=5),
-                patch.object(settings, "default_embedding_workers", return_value=2) as workers,
+            for profile, build_threads, expected in (
+                ("desktop", None, 1),
+                ("desktop", 3, 3),
+                ("mobile", None, 2),
+                ("supercomputer", None, 8),
             ):
-                load_config(path, warn=lambda _: None)
-        workers.assert_called_once_with(build_workers=5, embed_threads=3, token_budget=1000)
+                with self.subTest(profile=profile, build_threads=build_threads):
+                    text = "embed_threads = 8\n"
+                    if build_threads is not None:
+                        text += f"build_embed_threads = {build_threads}\n"
+                    path.write_text(text, encoding="utf-8")
+                    with (
+                        patch.object(settings, "profile_for_hardware", return_value=profile),
+                        patch.object(settings, "default_build_workers", return_value=5),
+                        patch.object(settings, "default_embedding_workers", return_value=2) as workers,
+                    ):
+                        cfg = load_config(path, warn=lambda _: None)
+                    self.assertEqual(cfg["embed_threads"], 8)
+                    self.assertEqual(cfg["build_embed_threads"], expected)
+                    workers.assert_called_once_with(
+                        build_workers=5,
+                        build_embed_threads=expected,
+                        token_budget=1000,
+                    )
+
+    def test_invalid_build_threads_fall_back_to_one(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(settings, "profile_for_hardware", return_value="desktop"),
+        ):
+            path = Path(tmp) / "config.toml"
+            for value in ("0", "-1", "true", '"two"'):
+                with self.subTest(value=value):
+                    path.write_text(f"build_embed_threads = {value}\n", encoding="utf-8")
+                    warnings = []
+                    cfg = load_config(path, warn=warnings.append)
+                    self.assertEqual(cfg["build_embed_threads"], 1)
+                    self.assertEqual(
+                        len([msg for msg in warnings if "build_embed_threads" in msg]),
+                        1,
+                    )
 
     def test_embed_device_defaults_to_auto_and_accepts_a_string(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -24,9 +24,13 @@ max_entry_bytes = 268435456
 max_article_bytes = 33_554_432
 max_preview_chars = 1_000
 
-# Leave CPU for search workers.
+# Serving/query threads: leave CPU for search workers.
 embed_threads = 2
-# Only used when build_workers is greater than 1.
+# RAM normally limits this profile to one model worker; retain two threads
+# inside that call rather than leaving the other CPU cores idle.
+# WARNING: more threads reduce independent workers when several fit in RAM.
+build_embed_threads = 2
+# Model-call concurrency also applies to single-source builds.
 # embedding_workers = 1
 
 # nprobe = 64

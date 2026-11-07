@@ -41,7 +41,13 @@ the workspace needed by padding. A single input exceeding the batch budget is
 admitted alone, still capped by the model's per-input limit.
 
 Workers share one model and can embed one source concurrently while its reader
-continues. Equal token budgets make workspace sizes and scheduling more even,
+continues. The default pending-window limit scales to workers + 1 (at least
+two), so even one-call short-text windows can feed the whole pool. Ordered
+commits still wait for earlier batches; read-ahead and the shared body budget
+remain bounded. A deterministic regression holds one worker's first call,
+requires all other workers to start, and verifies that a later batch finishes
+before the straggler is released without committing out of order.
+Equal token budgets make workspace sizes and scheduling more even,
 not identical-cost: attention depends on sequence length and call overhead
 still matters. Increase the token budget for GPU throughput.
 
@@ -55,7 +61,7 @@ that article ETA.
 ## Measurements: November 7, 2026
 
 Linux x86-64, Intel i5-13600KF, 31.2 GiB RAM; CPU affinity restricted to CPUs
-0–3 for every run. These are **not Raspberry Pi results**. Local filesystem
+0–3 (two physical/four logical cores) for every run. These are **not Raspberry Pi results**. Local filesystem
 cache was warm; no system caches were dropped on the shared host.
 
 Complete `communitybuilding.stackexchange.com_en_all_2026-08.zim`:
@@ -85,6 +91,12 @@ model loading/warm-up and quality evaluation are excluded.
 after: 23.792/24.071 s. An additional final-code run took 23.914 s and
 confirmed the same quality metrics using the actual published FAISS index.
 
+The figures above describe revision `e0670ea`, with its original two-window
+read-ahead limit. After scaling read-ahead with worker count, a sanity run took
+23.559 s with 475.9 MB peak RSS; vectors, postings and query rankings were
+identical to that revision. This single run is not a new median or evidence of
+a general speedup; the straggler regression demonstrates the scheduling fix.
+
 With the same native order, row window, sorting and 3×1 workers, fixed
 **eight-text** calls took 26.716/26.396 s (median 26.56 s), with 647.4 MB
 peak RSS. Token budgeting is **1.11× faster** and uses **27% less peak RSS**
@@ -98,7 +110,104 @@ is **85%**. These are real int8 batch-neighbour effects, not identical search
 results. The one-query decrease at rank 5 and increase at rank 10 do not
 establish a general accuracy improvement. Labels are one relevant question per
 query, not exhaustive relevance judgements; the measurement covers semantic
-FAISS retrieval, not hybrid ranking or UI latency.
+FAISS retrieval, not hybrid ranking or UI latency. Queries are embedded in one
+20-query batch, held constant across comparisons; int8 results can differ from
+single-query serving.
+
+## Separate build and query thread budgets
+
+Do not set one thread globally. `build_embed_threads` now controls build calls
+and automatic embedding-worker sizing; `embed_threads` controls query serving.
+Existing `embed_threads` overrides no longer affect builds. Both remain
+independently configurable.
+
+The following tuning used the same 6.33 MB archive and model. Desktop affinity
+was CPUs 0–7: **four physical/eight logical cores**. The Pi was a **Pi 500,
+four ARM Cortex-A76 cores, 8 GB RAM**, upgraded to zimantic 1.0.0 and libzim
+4.1.0 before benchmarking. Its affinity was CPUs 0–2, leaving one core available
+for other work, and benchmarks ran at lower priority. No caches were dropped.
+ONNX Runtime was 1.31.0 on desktop and 1.31.1 on Pi; compare configurations
+within each machine, not cross-platform accuracy gains.
+
+### Embedding-stage sweep
+
+Two repetitions of 512 evenly sampled, predecoded article excerpts, with
+32-row windows and 1,000 padded-token calls. Timing includes token preparation
+and the shared queue, but excludes archive reads, body extraction and index
+writing. RSS is the peak of the whole benchmark process.
+
+| Workers × threads | Desktop articles/s | Desktop RSS MB | Pi articles/s | Pi RSS MB |
+|---|---:|---:|---:|---:|
+| 1 × 1 | 39.16 | 341.0 | 7.09 | 340.7 |
+| 2 × 1 | — | — | 12.25 | 439.8 |
+| 3 × 1 | 103.12 | 469.2 | 13.85 | 468.2 |
+| 4 × 1 | 132.12 | 521.3 | — | — |
+| 8 × 1 | 137.27 | 654.6 | — | — |
+| 4 × 2 | 125.66 | 488.5 | — | — |
+| 2 × 3 | 130.70 | 434.8 | — | — |
+| 1 × 2 | — | — | 11.81 | 340.8 |
+| 1 × 3 | — | — | 14.02 | 340.3 |
+| 1 × 8 | 137.46 | 341.7 | — | — |
+
+This alone does **not** establish that independent calls are universally
+faster. Single multithreaded calls matched throughput at lower RSS.
+
+### Complete builds decide the tradeoff
+
+Two fresh-process runs per configuration, counterbalanced A/B/B/A, including
+reads, extraction, embeddings, SQLite/body postings and FAISS publication:
+
+| Machine | Workers × threads | Median build seconds | Median peak RSS MB |
+|---|---:|---:|---:|
+| Desktop | 1 × 4 | 20.34 | 368.5 |
+| Desktop | 4 × 1 | 16.26 | 503.4 |
+| Pi 500 | 1 × 3 | 117.16 | 365.8 |
+| Pi 500 | 3 × 1 | 115.28 | 471.0 |
+
+Desktop parallel calls gave **25% higher throughput** (20% less wall time),
+justifying the desktop build default of one thread per call. On Pi, the gain
+was only **1.6%**, costing **29% more RSS**. The Pi 5/500 preset therefore uses
+three build threads and one automatic model worker: approximately 105 MB less
+RAM for a two-second difference on this archive. The Pi 5 recommendation is
+based on the Pi 500's same CPU class, not a separate Pi 5 measurement.
+
+Within each machine, all four runs had **bit-identical vectors and vector
+ids**, identical lexical postings/title/path/redirect rows, and identical
+query rankings. Desktop recall@1/@5/@10 was 40%/60%/75%, MRR@10 0.5113;
+Pi was 50%/70%/75%, MRR@10 0.5631. The differing platform results are not a
+thread-policy accuracy improvement. Pi temperature reached 49.1°C;
+`vcgencmd get_throttled` remained `0x0`.
+
+### Query latency
+
+Four warm-ups per length, then 50 isolated queries on desktop or 30 on Pi.
+These measure embedding latency, not the HTTP/hybrid-search path. Median
+milliseconds with the affinities above:
+
+| Threads | Desktop 12 tokens | Desktop 27 | Desktop 245 | Pi 12 | Pi 27 | Pi 245 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 1.97 | 3.85 | 37.40 | 8.25 | 17.39 | 208.69 |
+| 2 | 1.79 | 3.03 | 21.24 | 6.48 | 11.93 | 125.11 |
+| 3 | 1.71 | 2.84 | 15.61 | 6.23 | 10.05 | 100.64 |
+| 4 | 1.43 | 2.36 | 12.77 | — | — | — |
+| 6 | 1.53 | 2.44 | 13.24 | — | — | — |
+| 8 | 1.69 | 2.49 | 12.75 | — | — | — |
+| 19 | 2.63 | 3.60 | 14.62 | — | — | — |
+
+An additional desktop control with all 14 physical/20 logical cores available
+confirmed the tradeoff: four threads took 1.60/2.39/13.20 ms, eight took
+1.66/2.64/11.72 ms, and the former default of 19 took 2.57/3.50/12.30 ms.
+Three threads were fastest on the shortest input (1.42 ms), but slower on the
+long input (15.56 ms). Choose a desktop automatic cap of **four usable physical
+cores, leaving one available** (minimum one thread), favoring typical short
+searches; this yields **three on a four-core Pi**. Override to eight for a
+near-limit-query workload. A blanket one-thread serving default is not supported.
+
+The mobile and supercomputer profiles retain their previous per-call budgets
+of two and eight, now separately named for builds and serving. Pi Zero 2 W and
+large-core servers were **not** benchmarked here; these are not newly claimed
+optima. A RAM-limited single model worker can still benefit from intra-call
+parallelism, as the Pi 1×1 versus 1×2 sweep illustrates.
 
 ## Reproduce
 
@@ -119,3 +228,16 @@ For the before checkout, pass `--source-root /path/to/before-checkout
 identical. `--fixed-batch 8` performs the fixed-size ablation on the port.
 The Linux harness rejects archives >=80 MB and records timings, peak RSS,
 canonical/posting digests, vectors, and retrieval quality in its output folder.
+
+Thread tuning, with a fresh process per configuration:
+
+```sh
+taskset -c 0-2 python scripts/bench_threads.py \
+  --model /library/zimantic/model --threads 3
+taskset -c 0-2 python scripts/bench_threads.py \
+  --model /library/zimantic/model --threads 1 --workers 3 \
+  --zim communitybuilding.stackexchange.com_en_all_2026-08.zim
+```
+
+Without `--workers`, this measures query latency. In both benchmark scripts,
+`--workers` means embedding workers, unlike the CLI's source-reader `--workers`.

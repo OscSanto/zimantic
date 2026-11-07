@@ -591,6 +591,73 @@ class BuildBatchTests(unittest.TestCase):
 
 
 class EmbeddingPipelineTests(unittest.TestCase):
+    def test_short_windows_feed_all_workers_past_a_straggler(self):
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        fourth_finished = threading.Event()
+        fast_workers_started = threading.Barrier(3)
+        worker_ids = set()
+        worker_lock = threading.Lock()
+        read_positions = []
+
+        class TrackingProducer(Producer):
+            def entry_at(self, index):
+                read_positions.append(index)
+                return super().entry_at(index)
+
+        class StragglerEmbedder(_Embedder):
+            def embed(self, texts):
+                if len(texts) == 1 and texts[0].startswith("passage: T"):
+                    entry_id = int(texts[0].split("\n", 1)[0].removeprefix("passage: T"))
+                    with worker_lock:
+                        worker_ids.add(threading.get_ident())
+                    if entry_id == 0:
+                        slow_started.set()
+                        if not release_slow.wait(timeout=5):
+                            raise TimeoutError("slow batch was not released")
+                    elif entry_id <= 3:
+                        fast_workers_started.wait(timeout=2)
+                    elif entry_id == 4:
+                        fourth_finished.set()
+                return super().embed(texts)
+
+        rows = [EntryRecord(i, f"T{i}", "short excerpt", f"p{i}", None, "body") for i in range(8)]
+        producer = TrackingProducer(rows)
+        embedder = StragglerEmbedder()
+        pipeline = build_module.EmbeddingPipeline(embedder, workers=4)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with (
+                    patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss),
+                    ThreadPoolExecutor(max_workers=1) as reader,
+                ):
+                    build = reader.submit(
+                        _build, producer, tmp,
+                        {"embedding_pipeline": pipeline},
+                        embedder=embedder,
+                    )
+                    try:
+                        self.assertTrue(slow_started.wait(timeout=2))
+                        self.assertTrue(fourth_finished.wait(timeout=2))
+                        self.assertEqual(len(worker_ids), 4)
+                        self.assertLessEqual(len(read_positions), pipeline.max_pending_per_build)
+                        directory = IndexLocator(tmp).source_directory(
+                            "files", "files:test", "files:test:manual-0123"
+                        )
+                        with sqlite3.connect(directory / "staging-full.sqlite") as db:
+                            self.assertEqual(db.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 0)
+                    finally:
+                        release_slow.set()
+                        if not fourth_finished.is_set():
+                            fast_workers_started.abort()
+                    locator = build.result(timeout=5)
+                self.assertEqual([row[0] for row in _docs(locator, _source())], list(range(8)))
+                self.assertEqual(_meta(locator, _source())["semantic_vector_count"], "8")
+        finally:
+            release_slow.set()
+            fast_workers_started.abort()
+            pipeline.close()
+
     def test_batches_use_capped_padded_tokens_and_keep_vector_ids(self):
         calls = []
 

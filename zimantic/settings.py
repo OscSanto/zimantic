@@ -48,6 +48,7 @@ _COMMON = {
     # Global request-work cap for an explicitly selected Kiwix collection.
     "max_explicit_collection_sources": 500,
     "embed_device": "auto",
+    "build_embed_threads": 1,
     "embedding_batch_tokens": 1000,
     "max_html_bytes": 4_194_304,
     "max_article_bytes": DEFAULT_MAX_ARTICLE_BYTES,
@@ -80,6 +81,7 @@ MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     "batch_size": 8,
     "max_entry_bytes": 256 * 1024 * 1024,
     "embed_threads": 2,
+    "build_embed_threads": 2,
     "search_workers": 2,
     "max_concurrent_searches": 2,
     "candidate_count": 16,
@@ -108,6 +110,7 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
     "batch_size": 128,
     "max_entry_bytes": 4 * 1024 * 1024 * 1024,
     "embed_threads": 8,
+    "build_embed_threads": 8,
     "search_workers": 16,
     "max_concurrent_searches": 8,
     "candidate_count": 32,
@@ -261,7 +264,7 @@ def default_embedding_workers(
     cores: int | None = None,
     memory_gb: float | None = None,
     build_workers: int | None = None,
-    embed_threads: int | None = None,
+    build_embed_threads: int | None = None,
     token_budget: int = 1000,
 ) -> int:
     """Bound model concurrency independently of the number of source readers."""
@@ -270,7 +273,9 @@ def default_embedding_workers(
     hw = detect() if cores is None or memory_gb is None else None
     cores = max(1, cores if cores is not None else hw.cores)
     available = int(memory_gb * (1 << 30)) if memory_gb is not None else hw.ram_available
-    thread_budget = embed_threads if embed_threads and embed_threads > 0 else 1
+    thread_budget = (
+        build_embed_threads if build_embed_threads and build_embed_threads > 0 else 1
+    )
     cpu_limit = max(1, (cores - 1) // thread_budget)
     # Conservative working-set allowance, not a guarantee for arbitrary models.
     per_worker = max(64 << 20, (64 << 20) * token_budget // 1000)
@@ -398,12 +403,12 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         cfg["embed_device"] = "auto"
     # Worker counts are intentionally computed at load time so missing config
     # keys adapt to the machine instead of inheriting fixed profile values.
-    # Apply this after user settings so embed_threads participates in the
+    # Apply this after user settings so build_embed_threads participates in the
     # automatic embedding concurrency calculation.
     # Use the validated values in ``cfg``, not the raw user mapping: an
     # invalid worker type is skipped above and must still get a computed
     # default instead of leaving the key missing.
-    for key in ("build_workers", "embedding_workers", "embedding_batch_tokens", "max_body_text_bytes", "max_derived_cache_bytes_per_source"):
+    for key in ("build_workers", "embedding_workers", "build_embed_threads", "embedding_batch_tokens", "max_body_text_bytes", "max_derived_cache_bytes_per_source"):
         if key in cfg and (not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1):
             if key in {"build_workers", "embedding_workers"}:
                 warn(
@@ -421,10 +426,10 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         cfg["build_workers"] = default_build_workers()
     if "embedding_workers" not in cfg:
         build_workers = cfg.get("build_workers")
-        embed_threads = cfg.get("embed_threads")
+        build_embed_threads = cfg.get("build_embed_threads")
         cfg["embedding_workers"] = default_embedding_workers(
             build_workers=build_workers if isinstance(build_workers, int) else None,
-            embed_threads=embed_threads if isinstance(embed_threads, int) else None,
+            build_embed_threads=build_embed_threads if isinstance(build_embed_threads, int) else None,
             token_budget=cfg["embedding_batch_tokens"],
         )
     # Every collection is explicit.  A missing or empty config is an explicitly

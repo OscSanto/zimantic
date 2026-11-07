@@ -118,13 +118,18 @@ class EmbeddingPipeline:
         embedder,
         workers: int = 1,
         queue_size: int = 8,
-        max_pending_per_build: int = 2,
+        max_pending_per_build: int | None = None,
         token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
     ) -> None:
         workers = int(workers)
         if workers < 1:
             raise ValueError("embedding workers must be at least 1")
-        self.max_pending_per_build = max(1, int(max_pending_per_build))
+        # Short windows may contain only one call; feed every worker plus read-ahead.
+        self.max_pending_per_build = (
+            max(2, workers + 1)
+            if max_pending_per_build is None
+            else max(1, int(max_pending_per_build))
+        )
         self._embedder = embedder
         self.token_budget = max(1, int(token_budget))
         self._requests: Queue[_EmbeddingRequest | None] = Queue(

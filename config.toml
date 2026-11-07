@@ -87,10 +87,17 @@ port = 8090
 # Values below 1 warn and fall back to the automatic default.
 # build_workers = 2
 
-# ONNX Runtime threads per embedding call. Unset uses one thread per build
-# worker; serving still leaves a core for search and the web server.
-# Mobile 2, supercomputer 8; explicit settings apply to both build and serve.
+# ONNX Runtime threads per serving/query embedding call, not index builds.
+# Mobile 2, supercomputer 8; desktop uses at most 4 usable physical cores,
+# leaving one for search and the web server (at least 1 thread).
 # embed_threads = 3
+
+# Threads per build model call, independent of serving (desktop default 1).
+# The Pi 5/500 preset uses 3 for lower RAM at similar throughput. Mobile retains
+# 2 when RAM limits the pool to one worker; supercomputer retains 8 (not retuned).
+# WARNING: more threads introduce intra-call synchronization and reduce
+# independent model workers when several fit. Benchmark changes.
+# build_embed_threads = 1
 
 # Embedding device. "auto" (the default) tries every accelerated provider the
 # installed ONNX Runtime build exposes (CUDA, ROCm, DirectML, OpenVINO) and
@@ -106,7 +113,7 @@ port = 8090
 # embed_device = "auto"
 
 # Maximum simultaneous embedding calls, including a single-source build.
-# When unset, physical cores (with affinity/cgroup limits), embed_threads and
+# When unset, physical cores (with affinity/cgroup limits), build_embed_threads and
 # available RAM bound the default. Each worker shares the same loaded model.
 # Values below 1 warn and fall back to the automatic default.
 # embedding_workers = 2

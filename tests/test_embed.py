@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import threading
 import time
@@ -142,7 +141,10 @@ class ModelProbeTests(unittest.TestCase):
 
 class ThreadConfigTests(unittest.TestCase):
     def test_default_thread_budget_leaves_at_least_one_thread(self):
-        self.assertEqual(embed.DEFAULT_EMBED_THREADS, max(1, (os.cpu_count() or 1) - 1))
+        self.assertEqual(
+            embed.DEFAULT_EMBED_THREADS,
+            min(4, max(1, embed.detect().cores - 1)),
+        )
 
 
 class LowMemoryArenaTests(unittest.TestCase):
