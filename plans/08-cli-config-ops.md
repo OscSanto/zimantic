@@ -1,6 +1,6 @@
 # Phase 08 — CLI, config, and operations
 
-Status: proposed.
+Status: implemented.
 
 ## Goal
 
@@ -430,112 +430,112 @@ safe while a server runs; its scoped catalog refresh cannot remove that entry.
 
 ## Work items
 
-- [ ] Complete `settings.py` from the phase-00 raw `[[collections]]` parser and
+- [x] Complete `settings.py` from the phase-00 raw `[[collections]]` parser and
       phase-05 files validation to a list of tables for every provider;
       validate `type`/`name`/duplicates and delegate provider keys.
-- [ ] Build a provider configuration registry with per-provider defaults and
+- [x] Build a provider configuration registry with per-provider defaults and
       validation functions.
-- [ ] Expose the phase-04 `[derived_text]` schema and validate per-source
+- [x] Expose the phase-04 `[derived_text]` schema and validate per-source
       `captions`, `ocr`, and `asr`; all default off, unknown engines are
       explicit errors, and missing engines degrade only that operation.
-- [ ] Expose phase 04's resource-derived `workers = "auto"` resolution and
+- [x] Expose phase 04's resource-derived `workers = "auto"` resolution and
       explicit override in CLI/config diagnostics; do not add a second resolver.
-- [ ] Refactor `__main__.py`:
+- [x] Refactor `__main__.py`:
       - `_run_build` into a provider-aware orchestrator;
       - retain phase 00's positional ZIM file/folder arguments and ad-hoc
         config persistence;
       - add `--provider`, `--collection`, `--source`, `--list`;
       - add `sources` and `prune` commands;
       - generalize the "no sources" warning.
-- [ ] Reuse phase 00's ad-hoc path matching, safe naming, locked config append,
+- [x] Reuse phase 00's ad-hoc path matching, safe naming, locked config append,
       and failure handling; add a non-writing `--list` preview.
-- [ ] Complete CLI/config wiring to phase 00's existing entry discovery and
+- [x] Complete CLI/config wiring to phase 00's existing entry discovery and
       background snapshot publication; do not postpone provider lifecycle
       correctness until this phase.
-- [ ] Make build/source inspection wait for discovery rather than operating on
+- [x] Make build/source inspection wait for discovery rather than operating on
       a partial background snapshot; keep signal-based reload asynchronous.
-- [ ] Expose the existing per-provider search budgets.
-- [ ] Add unit tests for config validation and CLI argument handling.
-- [ ] Update `config.toml`, `README.md`, `CONTRIBUTING.md`, and `deploy/`.
-- [ ] Add migration tests showing that old config is rejected, an old catalog
+- [x] Expose the existing per-provider search budgets.
+- [x] Add unit tests for config validation and CLI argument handling.
+- [x] Update `config.toml`, `README.md`, `CONTRIBUTING.md`, and `deploy/`.
+- [x] Add migration tests showing that old config is rejected, an old catalog
       is rebuilt, and only recognized old index layouts are imported; unknown
       indexes are rebuilt through the documented path.
 
 ## Tests
 
-- [ ] Config: `[[collections]]` entries parse with global keys in the correct
+- [x] Config: `[[collections]]` entries parse with global keys in the correct
       TOML scope; duplicate names, unknown types, bad
       types, and missing `path` produce clear warnings and do not crash. Flat
       provider keys fail with an actionable migration error, not an empty
       successful startup. A Kiwix entry accepts `max_remote_sources = 0`.
-- [ ] `build` no-arg builds all configured providers; positional ZIM paths
+- [x] `build` no-arg builds all configured providers; positional ZIM paths
       still expand files/folders and index ad hoc; a matching configured root
       supplies defaults, and an unmatched path is appended to config before
       build. Explicit CLI options override matched settings.
-- [ ] Ad-hoc path matching chooses the most-specific configured root and
+- [x] Ad-hoc path matching chooses the most-specific configured root and
       rejects ties; duplicate arguments build once; appending config is atomic
       and leaves the original unchanged on failure. A matched collection
       supplies settings without widening the selected input scope; `--list`
       previews pending config changes without writing them.
-- [ ] Generated collection names are safe, unique, and do not encode absolute
+- [x] Generated collection names are safe, unique, and do not encode absolute
       path data or use reserved `open`; concurrent appends cannot lose an
       intervening config update. CLI-relative paths and a config in a different
       directory still resolve to the original selected files after saving.
-- [ ] Appending to a config without a trailing newline and paths requiring TOML
+- [x] Appending to a config without a trailing newline and paths requiring TOML
       escaping produces valid config, preserves existing content and access
       permissions, and starts no build if safe replacement fails.
-- [ ] A symlinked config and its target use one lock and relative-path base;
+- [x] A symlinked config and its target use one lock and relative-path base;
       appending preserves the symlink. A hard-linked config is not silently
       detached by an automatic update.
-- [ ] A generated configuration entry for a single-file ZIM remains a
+- [x] A generated configuration entry for a single-file ZIM remains a
       single-file collection; a generated entry for a folder remains scoped to
       that folder. Serving either entry does not discover sibling archives.
-- [ ] An ad-hoc invocation does not mutate an existing matched collection's
+- [x] An ad-hoc invocation does not mutate an existing matched collection's
       options; only explicit CLI overrides affect that run. An unmatched path
       is persisted once as a new collection, then used for that invocation.
-- [ ] `--provider`,
+- [x] `--provider`,
       `--collection`, and `--source` filter correctly; `--list` does no work.
-- [ ] Repeatable values are ORed within a selector and intersected across
+- [x] Repeatable values are ORed within a selector and intersected across
       selector types; positional paths cannot be mixed with selectors.
-- [ ] Build failures for one provider/source do not block the others; exit
+- [x] Build failures for one provider/source do not block the others; exit
       code is non-zero.
-- [ ] Kiwix is reported as skipped in an all-provider build; an explicitly
+- [x] Kiwix is reported as skipped in an all-provider build; an explicitly
       selected remote-only scope fails rather than succeeding without a build.
-- [ ] `sources --json` has no absolute paths, uses the same collection/source
+- [x] `sources --json` has no absolute paths, uses the same collection/source
       record schemas as the HTTP APIs, and clearly documents its combined
       top-level shape.
-- [ ] `sources`, `build --list`, and `prune --dry-run` leave fresh and
+- [x] `sources`, `build --list`, and `prune --dry-run` leave fresh and
       existing config, catalog, SQLite sidecars, indexes, caches, PID, and lock
       files unchanged; private temporary snapshots are removed. A missing
       read-only lease is reported without creating one.
-- [ ] `prune --dry-run` reports only Zimantic-created orphan indexes; `--yes`
+- [x] `prune --dry-run` reports only Zimantic-created orphan indexes; `--yes`
       deletes only those, skipping pinned generations and uncertain configured
       namespaces. An offline/failed discovery is not evidence of orphanhood.
-- [ ] A missing/malformed config or an invalid entry with unknown scope never
+- [x] A missing/malformed config or an invalid entry with unknown scope never
       causes potentially configured indexes to be pruned.
-- [ ] Concurrent ad-hoc builds and `prune` follow one lock order, and a config
+- [x] Concurrent ad-hoc builds and `prune` follow one lock order, and a config
       or discovery change invalidates a stale deletion inventory.
-- [ ] `reload` picks up a new files directory, a new Kolibri channel, and a new
+- [x] `reload` picks up a new files directory, a new Kolibri channel, and a new
       ZIM; the CLI reports signal delivery without claiming the background
       refresh has already completed.
-- [ ] A normal reload does not reread an appended or changed collection entry;
+- [x] A normal reload does not reread an appended or changed collection entry;
       restarting loads it. Debug-mode SIGHUP retains restart semantics.
-- [ ] `captions`, `ocr`, and `asr` are independently off by default; setting
+- [x] `captions`, `ocr`, and `asr` are independently off by default; setting
       one does not enable the others; a missing engine marks only that operation
       unavailable and never crashes or blocks other builds.
-- [ ] Two sources in one collection can have different switches; duplicate and
+- [x] Two sources in one collection can have different switches; duplicate and
       stale overrides are reported, and collapse never transfers an opt-in.
-- [ ] `workers = "auto"` resolves to 1 on a simulated low-memory host and can
+- [x] `workers = "auto"` resolves to 1 on a simulated low-memory host and can
       exceed 4 on a simulated large host; CPU and memory binding limits are
       reported. The OCR/ASR pool is lazy and shared, and concurrent source
       builds do not multiply its size.
-- [ ] Changing a derived-text operation or engine/model changes the fingerprint
+- [x] Changing a derived-text operation or engine/model changes the fingerprint
       and forces a rebuild.
-- [ ] The one-time index importer adopts only recognized, validated old ZIM
+- [x] The one-time index importer adopts only recognized, validated old ZIM
       indexes; `prune` deletes only obsolete files whose Zimantic ownership can
       be established and leaves unknown files alone.
-- [ ] A slow provider does not delay ZIM startup beyond the configured budget.
-- [ ] The body-text cap is distinct from preview length and item truncation;
+- [x] A slow provider does not delay ZIM startup beyond the configured budget.
+- [x] The body-text cap is distinct from preview length and item truncation;
       sources and build reports expose the documented coverage count.
 
 ## Acceptance criteria

@@ -7,9 +7,22 @@
 #
 # Runs only between 01:00 and 06:00 in the machine's own local time. The timer
 # starts it at 01:00; the ExecCondition below also rejects manual or retried
-# starts outside the window. ZIMs that are already indexed are skipped (build is
-# idempotent), so the nightly run is near-instant once the library is complete
-# and does real work only for new or interrupted indexes.
+# starts outside the window. Sources that are already indexed are skipped (build
+# is idempotent), so the nightly run is near-instant once the library is
+# complete and does real work only for new or interrupted indexes.
+#
+# Mixed-library examples (the default `build` covers every configured ZIM,
+# files, and Kolibri collection and reports Kiwix as skipped):
+#   zimantic build --provider files
+#   zimantic build --collection modules
+#   zimantic build --source kolibri:kolibri:<channel_id>:root
+# A files or Kolibri collection whose content is mounted read-only still needs
+# only ReadOnlyPaths for that mount; indexes stay under index_dir.
+#
+# Use a companion .path unit to trigger a fast build when a non-ZIM tree changes,
+# for example PathChanged=/library/www/html/modules (files) or
+# PathChanged=/library/kolibri/content (Kolibri). Keep watching source roots,
+# never index_dir.
 
 [Unit]
 Description=Build full Zimantic indexes at night and rescan

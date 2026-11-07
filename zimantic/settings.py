@@ -44,6 +44,7 @@ _COMMON = {
     # UI display budget for source chips per collection group and the bounded
     # first page of preview sources loaded for one collection card.
     "source_filter_limit": 10,
+    "collection_source_limit": 10,
     # Global request-work cap for an explicitly selected Kiwix collection.
     "max_explicit_collection_sources": 500,
     "embed_device": "auto",
@@ -174,6 +175,10 @@ def _typed_user_values(
 ) -> dict:
     values = {}
     for key, value in user.items():
+        # Array-of-tables and the derived-text envelope are normalized by their
+        # parsers; never run flat scalar type coercion over them.
+        if key in {"collections", "derived_text"}:
+            continue
         if key not in KNOWN_KEYS:
             continue
         default = defaults.get(key)
@@ -329,7 +334,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # afterwards contradicts that message.
     if loaded and not user:
         warn(f"zimantic: warning: {config_path} is empty; using {profile} defaults")
-    from .providers.config import RuntimeConfig, ZimConfig, parse_collections
+    from .providers.config import RuntimeConfig, parse_collections
 
     config_dir = Path(config_path).resolve().parent
     parsed = (
@@ -347,6 +352,29 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
             if not configured_path.is_absolute():
                 configured_path = data_dir / configured_path
             cfg[key] = str(configured_path)
+    # Positive global request-work and body limits.  A zero or negative value
+    # would either disable a channel unintentionally or make every request fail,
+    # so fall back to the profile value with one clear warning.
+    for key in (
+        "max_explicit_collection_sources",
+        "search_timeout_seconds",
+        "source_timeout",
+        "collection_source_limit",
+    ):
+        value = cfg.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value <= 0
+        ):
+            warn(
+                f"zimantic: warning: config key {key!r} in {config_path} "
+                "must be a positive number; using the profile default"
+            )
+            cfg[key] = PROFILES[profile][key]
+        elif key != "search_timeout_seconds" and isinstance(value, float):
+            # Integers are integral; a float timeout is meaningful.
+            cfg[key] = int(value)
     # Validate embed_device here rather than in embed.py: a typo should not stay
     # hidden until the first embedding call (or forever in --fast mode).
     device = cfg.get("embed_device")
@@ -392,19 +420,16 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
             build_workers=build_workers if isinstance(build_workers, int) else None,
             embed_threads=embed_threads if isinstance(embed_threads, int) else None,
         )
+    # Every collection is explicit.  A missing or empty config is an explicitly
+    # empty library, not an implicit scan of the historical zim_dir default.
     collections = parsed.collections if parsed is not None else ()
-    if not collections and cfg.get("zim_dir"):
-        # A missing/empty config keeps the historical local ZIM root as one
-        # implicit collection. Explicit config uses [[collections]] only.
-        default_root = Path(cfg["zim_dir"]).expanduser()
-        if not default_root.is_absolute():
-            default_root = config_dir / default_root
-        collections = (ZimConfig(name="library", path=str(default_root)),)
     envelope = dict(parsed.envelope) if parsed is not None else {}
+    diagnostics = parsed.diagnostics if parsed is not None else ()
+    issues = parsed.issues if parsed is not None else ()
     from .indexing.derived import (
-        DerivedTextConfig,
         parse_derived_text,
         parse_source_overrides,
+        resolve_workers,
     )
 
     try:
@@ -418,6 +443,12 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         from .providers.config import ConfigValidationError
 
         raise ConfigValidationError(f"derived_text: {error}") from error
+    derived_workers, worker_bound = resolve_workers(derived_text.workers)
+    envelope["derived_text_workers"] = {
+        "configured": derived_text.workers,
+        "resolved": derived_workers,
+        "bound": worker_bound,
+    }
     envelope["derived_text"] = {
         "max_caption_bytes": derived_text.max_caption_bytes,
         "ocr_languages": list(derived_text.ocr_languages),
@@ -437,9 +468,17 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         key: operations.state() for key, operations in overrides.items()
     }
     cfg["derived_text"] = derived_text
+    cfg["derived_text_workers"] = {
+        "configured": derived_text.workers,
+        "resolved": derived_workers,
+        "bound": worker_bound,
+    }
     cfg["derived_source_operations"] = overrides
     cfg["collections"] = tuple(collections)
     cfg["config_dir"] = str(config_dir)
+    cfg["config_diagnostics"] = diagnostics
+    cfg["config_issues"] = issues
+    cfg["config_present"] = loaded
     settings = dict(cfg)
     settings["envelope"] = envelope
     cfg["runtime_config"] = RuntimeConfig(
@@ -450,5 +489,8 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         search_timeout_seconds=float(cfg.get("search_timeout_seconds", 30.0)),
         page_size=int(cfg.get("page_size", 10)),
         envelope=envelope,
+        diagnostics=diagnostics,
+        issues=issues,
+        config_present=loaded,
     )
     return cfg

@@ -357,6 +357,8 @@ class Search:
         self._library_source_index: dict[str, SourceInfo] = {}
         self._process_token = secrets.token_hex(8)
         self._aggregate_revision = 0
+        self._closed = False
+        self._background_discovery_threads: list[threading.Thread] = []
         runtime_config = cfg.get("runtime_config")
         if not isinstance(runtime_config, RuntimeConfig):
             runtime_config = RuntimeConfig(
@@ -602,9 +604,15 @@ class Search:
 
     def _configured_provider_entries(self) -> tuple[ProviderConfig, ...]:
         runtime_config = getattr(self, "runtime_config", None)
-        entries = list(getattr(runtime_config, "collections", ()))
-        if entries:
-            return tuple(entries)
+        if isinstance(runtime_config, RuntimeConfig) and (
+            runtime_config.collections or runtime_config.config_path is not None
+        ):
+            # An explicit empty collection list from a real config file is a
+            # valid empty configuration; never revive the historical zim_dir
+            # shorthand here.  A synthetic RuntimeConfig constructed for a
+            # direct Search caller/test has no config_path and may still use the
+            # internal zim_dir fallback below.
+            return tuple(runtime_config.collections)
         # Compatibility for direct Search callers/tests that still pass the
         # internal zim_dir setting. The TOML loader never accepts the flat key
         # from users.  A Kiwix collection exists only through an explicit
@@ -648,6 +656,13 @@ class Search:
             )
 
         entries = self._configured_provider_entries()
+        deferred_entries: tuple[ProviderConfig, ...] = ()
+        if not wait and any(entry.kind == "zim" for entry in entries):
+            deferred_entries = tuple(
+                entry for entry in entries if entry.kind != "zim"
+            )
+            if deferred_entries:
+                entries = tuple(entry for entry in entries if entry.kind == "zim")
         for entry in entries:
             provider = self.providers.get(entry.kind)
             if provider is None:
@@ -710,7 +725,10 @@ class Search:
                     pass
             for message in diagnostics:
                 logger.warning("zimantic: collection discovery: %s", message)
-            return self._publish_runtime_sources()
+            sources = self._publish_runtime_sources()
+            if deferred_entries:
+                self._start_background_discovery(deferred_entries)
+            return sources
         old_runtimes = previous_runtimes
         old_batches = previous_batches
         with self._state_lock:
@@ -738,7 +756,74 @@ class Search:
         if diagnostics:
             for message in diagnostics:
                 logger.warning("zimantic: collection discovery: %s", message)
+        if deferred_entries:
+            self._start_background_discovery(deferred_entries)
         return sources
+
+    def _start_background_discovery(
+        self, entries: tuple[ProviderConfig, ...]
+    ) -> None:
+        """Discover non-ZIM providers off the ZIM startup path.
+
+        Kiwix already refreshes its catalog in the background.  Files and
+        Kolibri discovery can also touch a slow filesystem, so a mixed library
+        starts serving local ZIM results first and publishes the remaining
+        collections when their bounded discovery completes.
+        """
+        from .discovery import discover_collections
+
+        revision = getattr(self, "_aggregate_revision", 0)
+
+        def _run() -> None:
+            result = None
+            try:
+                result = discover_collections(
+                    self.cfg,
+                    entries=entries,
+                    wait=True,
+                    persist_catalog=bool(self.cfg.get("index_dir")),
+                    on_sources_changed=self._publish_runtime_sources,
+                )
+                for message in result.diagnostics:
+                    logger.warning("zimantic: collection discovery: %s", message)
+                with self._state_lock:
+                    if getattr(self, "_closed", False) or (
+                        getattr(self, "_aggregate_revision", 0) != revision
+                    ):
+                        stale = True
+                    else:
+                        stale = False
+                        for discovered in result.collections:
+                            self._bind_runtime(discovered.runtime)
+                            self.runtimes[discovered.collection.key] = (
+                                discovered.runtime
+                            )
+                            self.collections[discovered.collection.key] = (
+                                discovered.collection
+                            )
+                            if discovered.batch not in self._discovery_batches:
+                                self._discovery_batches.append(discovered.batch)
+                        self._aggregate_revision = revision + 1
+                if stale:
+                    result.close()
+                    return
+                self._publish_runtime_sources()
+            except Exception as error:
+                logger.warning(
+                    "zimantic: background provider discovery failed: %s", error
+                )
+                if result is not None:
+                    result.close()
+
+        thread = threading.Thread(
+            target=_run, name="zimantic-discovery", daemon=True
+        )
+        threads = getattr(self, "_background_discovery_threads", None)
+        if threads is None:
+            threads = []
+            self._background_discovery_threads = threads
+        threads.append(thread)
+        thread.start()
 
     def _publish_runtime_sources(self) -> list[dict[str, Any]]:
         with self._state_lock:
@@ -918,6 +1003,13 @@ class Search:
 
     def close(self) -> None:
         """Release the search thread pool and every provider runtime."""
+        with self._state_lock:
+            self._closed = True
+        for thread in list(getattr(self, "_background_discovery_threads", [])):
+            try:
+                thread.join()
+            except RuntimeError:
+                continue
         pool = self.fulltext_pool
         self.fulltext_pool = None
         if pool is not None:
@@ -1160,6 +1252,9 @@ class Search:
                 "provider": snapshot.collection.provider,
                 "sources": snapshot.source_count,
                 "searchable": searchable_by_collection.get(key, 0),
+                "discovery_state": snapshot.discovery_state,
+                "error": snapshot.error,
+                "snapshot_version": snapshot.snapshot_version,
             }
         report = {
             "status": status,
@@ -1169,6 +1264,22 @@ class Search:
             "embedding": {
                 "enabled": self.semantic,
                 "loaded": embedder_loaded,
+            },
+            "limits": {
+                "search_timeout_seconds": getattr(
+                    self, "search_timeout_seconds", 30.0
+                ),
+                "source_timeout": getattr(self, "source_timeout", 12),
+                "slot_wait_seconds": getattr(self, "slot_wait_seconds", 10.0),
+                "max_explicit_collection_sources": getattr(
+                    self, "max_explicit_collection_sources", 500
+                ),
+                "max_body_text_bytes": getattr(self, "cfg", {}).get(
+                    "max_body_text_bytes", 1_048_576
+                ),
+                "max_derived_cache_bytes_per_source": getattr(
+                    self, "cfg", {}
+                ).get("max_derived_cache_bytes_per_source", 536_870_912),
             },
             "cache": self.cache.stats(),
             "preview_cache": (

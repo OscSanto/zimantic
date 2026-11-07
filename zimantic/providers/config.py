@@ -8,10 +8,11 @@ validation (and provider modules) out of the core settings loader.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 ProviderKind = Literal["zim", "kiwix", "files", "kolibri"]
 Granularity = Literal["collection", "children"]
@@ -276,6 +277,72 @@ class KolibriConfig:
 
 ProviderConfig = ZimConfig | KiwixConfig | FilesConfig | KolibriConfig
 
+# Provider-owned defaults.  A ``None`` value in a typed entry means "use the
+# provider default"; exposing the values here keeps ``sources`` diagnostics and
+# the CLI from inventing a second set of defaults.
+PROVIDER_DEFAULTS: Mapping[ProviderKind, Mapping[str, Any]] = MappingProxyType(
+    {
+        "zim": MappingProxyType(
+            {
+                "max_entries": None,
+                "max_visited_entries": 1_000_000,
+                "traversal_timeout_seconds": 300,
+            }
+        ),
+        "kiwix": MappingProxyType(
+            {
+                "catalog_limit": 1_000,
+                "max_catalog_entries": 50_000,
+                "max_response_bytes": 64 << 20,
+                "max_remote_sources": 100,
+            }
+        ),
+        "files": MappingProxyType(
+            {
+                "granularity": "collection",
+                "max_sources": 64,
+                "max_entries": 100_000,
+                "max_file_bytes": 256 << 20,
+                "max_visited_entries": 1_000_000,
+                "traversal_timeout_seconds": 300,
+            }
+        ),
+        "kolibri": MappingProxyType(
+            {
+                "granularity": "children",
+                "max_sources": 64,
+                "max_entries": 500_000,
+                "max_snapshot_bytes": 1_073_741_824,
+                "snapshot_disk_budget_bytes": 3_221_225_472,
+                "snapshot_timeout_seconds": 10,
+                "max_html5_zip_entries": 10_000,
+                "max_html5_zip_directory_bytes": 8_388_608,
+                "max_html5_zip_member_bytes": 268_435_456,
+                "max_html5_zip_total_bytes": 1_073_741_824,
+                "html5_zip_timeout_seconds": 10,
+            }
+        ),
+    }
+)
+
+
+@dataclass(frozen=True)
+class ConfigIssue:
+    """A provider entry that could not be normalized.
+
+    ``namespace`` is the collection key that can be formed for the entry, or
+    ``None`` when the entry is missing a usable type/name.  Prune uses
+    ``provider_wide`` to retain every potentially affected index namespace
+    instead of treating an invalid entry as if it configured nothing.
+    """
+
+    index: int
+    message: str
+    kind: str | None = None
+    name: str | None = None
+    namespace: str | None = None
+    provider_wide: bool = False
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -288,6 +355,9 @@ class RuntimeConfig:
     search_timeout_seconds: float = 30.0
     page_size: int = 10
     envelope: Mapping[str, Any] = field(default_factory=dict)
+    diagnostics: tuple[str, ...] = ()
+    issues: tuple[ConfigIssue, ...] = ()
+    config_present: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -309,6 +379,7 @@ class ParsedCollections:
     collections: tuple[ProviderConfig, ...]
     diagnostics: tuple[str, ...]
     envelope: Mapping[str, Any]
+    issues: tuple[ConfigIssue, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -328,7 +399,13 @@ def _resolve_path(value: Any, name: str, base: Path) -> str:
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = base / path
-    return str(path)
+    # Normalize once at discovery/config time so every later operation sees the
+    # same resolved provider path (relative segments, symlinked configs, and
+    # saved ad-hoc selections included).
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path.absolute())
 
 
 def _catalog_path(value: Any, name: str) -> str | None:
@@ -383,22 +460,52 @@ def _parse_zim(entry: Mapping[str, Any], base: Path) -> ZimConfig:
 
 def _parse_kiwix(entry: Mapping[str, Any], base: Path) -> KiwixConfig:
     common = _common(entry)
+    defaults = PROVIDER_DEFAULTS["kiwix"]
     return KiwixConfig(
         server=_server(entry.get("server"), "server"),
         catalog_path=_catalog_path(entry.get("catalog_path"), "catalog_path"),
-        catalog_limit=_optional_positive_int(entry.get("catalog_limit"), "catalog_limit"),
-        max_catalog_entries=_optional_positive_int(
-            entry.get("max_catalog_entries"), "max_catalog_entries"
+        catalog_limit=_positive_int(
+            entry.get("catalog_limit", defaults["catalog_limit"]), "catalog_limit"
         ),
-        max_response_bytes=_optional_positive_int(
-            entry.get("max_response_bytes"), "max_response_bytes"
+        max_catalog_entries=_positive_int(
+            entry.get("max_catalog_entries", defaults["max_catalog_entries"]),
+            "max_catalog_entries",
         ),
-        max_remote_sources=_optional_positive_int(
-            entry.get("max_remote_sources"), "max_remote_sources", allow_zero=True
+        max_response_bytes=_positive_int(
+            entry.get("max_response_bytes", defaults["max_response_bytes"]),
+            "max_response_bytes",
+        ),
+        max_remote_sources=_positive_int(
+            entry.get("max_remote_sources", defaults["max_remote_sources"]),
+            "max_remote_sources",
+            allow_zero=True,
         ),
         **common,
     )
 
+
+_COMMON_ENTRY_KEYS = frozenset(
+    {
+        "type",
+        "name",
+        "label",
+        "traversal",
+        "max_visited_entries",
+        "traversal_timeout_seconds",
+        "sources",
+    }
+)
+
+_ZIM_KEYS = _COMMON_ENTRY_KEYS | {"path", "max_entries"}
+
+_KIWIX_KEYS = _COMMON_ENTRY_KEYS | {
+    "server",
+    "catalog_path",
+    "catalog_limit",
+    "max_catalog_entries",
+    "max_response_bytes",
+    "max_remote_sources",
+}
 
 _FILES_KEYS = frozenset(
     {
@@ -422,7 +529,8 @@ _FILES_KEYS = frozenset(
 
 def _parse_files(entry: Mapping[str, Any], base: Path) -> FilesConfig:
     common = _common(entry)
-    granularity = entry.get("granularity", "collection")
+    defaults = PROVIDER_DEFAULTS["files"]
+    granularity = entry.get("granularity", defaults["granularity"])
     if granularity not in ("collection", "children"):
         raise ConfigValidationError("granularity must be collection or children")
     return FilesConfig(
@@ -430,10 +538,15 @@ def _parse_files(entry: Mapping[str, Any], base: Path) -> FilesConfig:
         granularity=granularity,
         include=_pattern_tuple(entry.get("include"), "include"),
         exclude=_pattern_tuple(entry.get("exclude"), "exclude"),
-        max_sources=_optional_positive_int(entry.get("max_sources"), "max_sources"),
-        max_entries=_optional_positive_int(entry.get("max_entries"), "max_entries"),
-        max_file_bytes=_optional_positive_int(
-            entry.get("max_file_bytes"), "max_file_bytes"
+        max_sources=_positive_int(
+            entry.get("max_sources", defaults["max_sources"]), "max_sources"
+        ),
+        max_entries=_positive_int(
+            entry.get("max_entries", defaults["max_entries"]), "max_entries"
+        ),
+        max_file_bytes=_positive_int(
+            entry.get("max_file_bytes", defaults["max_file_bytes"]),
+            "max_file_bytes",
         ),
         **common,
     )
@@ -474,7 +587,8 @@ def _optional_path(value: Any, name: str, base: Path) -> str | None:
 
 def _parse_kolibri(entry: Mapping[str, Any], base: Path) -> KolibriConfig:
     common = _common(entry)
-    granularity = entry.get("granularity", "children")
+    defaults = PROVIDER_DEFAULTS["kolibri"]
+    granularity = entry.get("granularity", defaults["granularity"])
     if granularity not in ("collection", "children"):
         raise ConfigValidationError("granularity must be collection or children")
     return KolibriConfig(
@@ -484,42 +598,143 @@ def _parse_kolibri(entry: Mapping[str, Any], base: Path) -> KolibriConfig:
             entry.get("database_path"), "database_path", base
         ),
         storage=_optional_path(entry.get("storage"), "storage", base),
-        max_sources=_optional_positive_int(entry.get("max_sources"), "max_sources"),
-        max_entries=_optional_positive_int(entry.get("max_entries"), "max_entries"),
+        max_sources=_positive_int(
+            entry.get("max_sources", defaults["max_sources"]), "max_sources"
+        ),
+        max_entries=_positive_int(
+            entry.get("max_entries", defaults["max_entries"]), "max_entries"
+        ),
         max_snapshot_bytes=_positive_int(
-            entry.get("max_snapshot_bytes", 1_073_741_824),
+            entry.get("max_snapshot_bytes", defaults["max_snapshot_bytes"]),
             "max_snapshot_bytes",
         ),
         snapshot_disk_budget_bytes=_positive_int(
-            entry.get("snapshot_disk_budget_bytes", 3_221_225_472),
+            entry.get(
+                "snapshot_disk_budget_bytes",
+                defaults["snapshot_disk_budget_bytes"],
+            ),
             "snapshot_disk_budget_bytes",
         ),
         snapshot_timeout_seconds=_positive_int(
-            entry.get("snapshot_timeout_seconds", 10),
+            entry.get("snapshot_timeout_seconds", defaults["snapshot_timeout_seconds"]),
             "snapshot_timeout_seconds",
         ),
         max_html5_zip_entries=_positive_int(
-            entry.get("max_html5_zip_entries", 10_000),
+            entry.get("max_html5_zip_entries", defaults["max_html5_zip_entries"]),
             "max_html5_zip_entries",
         ),
         max_html5_zip_directory_bytes=_positive_int(
-            entry.get("max_html5_zip_directory_bytes", 8_388_608),
+            entry.get(
+                "max_html5_zip_directory_bytes",
+                defaults["max_html5_zip_directory_bytes"],
+            ),
             "max_html5_zip_directory_bytes",
         ),
         max_html5_zip_member_bytes=_positive_int(
-            entry.get("max_html5_zip_member_bytes", 268_435_456),
+            entry.get(
+                "max_html5_zip_member_bytes",
+                defaults["max_html5_zip_member_bytes"],
+            ),
             "max_html5_zip_member_bytes",
         ),
         max_html5_zip_total_bytes=_positive_int(
-            entry.get("max_html5_zip_total_bytes", 1_073_741_824),
+            entry.get(
+                "max_html5_zip_total_bytes",
+                defaults["max_html5_zip_total_bytes"],
+            ),
             "max_html5_zip_total_bytes",
         ),
         html5_zip_timeout_seconds=_positive_int(
-            entry.get("html5_zip_timeout_seconds", 10),
+            entry.get(
+                "html5_zip_timeout_seconds",
+                defaults["html5_zip_timeout_seconds"],
+            ),
             "html5_zip_timeout_seconds",
         ),
         **common,
     )
+
+
+@dataclass(frozen=True)
+class ProviderConfigSpec:
+    """One in-tree provider's configuration contract.
+
+    Generic validation (``type``, ``name``, duplicate names) lives in
+    :func:`parse_collections`; the provider-owned parser and key set live here
+    so adding a provider does not add a branch to the generic loader.
+    """
+
+    kind: ProviderKind
+    config_class: type
+    parse: Callable[[Mapping[str, Any], Path], ProviderConfig]
+    allowed_keys: frozenset[str]
+    defaults: Mapping[str, Any]
+    buildable: bool = True
+
+
+_PROVIDER_CONFIG_SPECS: Mapping[ProviderKind, ProviderConfigSpec] = MappingProxyType(
+    {
+        "zim": ProviderConfigSpec(
+            kind="zim",
+            config_class=ZimConfig,
+            parse=_parse_zim,
+            allowed_keys=_ZIM_KEYS,
+            defaults=PROVIDER_DEFAULTS["zim"],
+        ),
+        "kiwix": ProviderConfigSpec(
+            kind="kiwix",
+            config_class=KiwixConfig,
+            parse=_parse_kiwix,
+            allowed_keys=_KIWIX_KEYS,
+            defaults=PROVIDER_DEFAULTS["kiwix"],
+            buildable=False,
+        ),
+        "files": ProviderConfigSpec(
+            kind="files",
+            config_class=FilesConfig,
+            parse=_parse_files,
+            allowed_keys=_FILES_KEYS,
+            defaults=PROVIDER_DEFAULTS["files"],
+        ),
+        "kolibri": ProviderConfigSpec(
+            kind="kolibri",
+            config_class=KolibriConfig,
+            parse=_parse_kolibri,
+            allowed_keys=_KOLIBRI_KEYS,
+            defaults=PROVIDER_DEFAULTS["kolibri"],
+        ),
+    }
+)
+
+
+PROVIDER_CONFIG_SPECS: Mapping[ProviderKind, ProviderConfigSpec] = (
+    _PROVIDER_CONFIG_SPECS
+)
+
+
+def provider_config_specs() -> Mapping[ProviderKind, ProviderConfigSpec]:
+    """Return the per-provider configuration registry in stable order."""
+    return _PROVIDER_CONFIG_SPECS
+
+
+def get_provider_config_spec(kind: str) -> ProviderConfigSpec:
+    try:
+        return _PROVIDER_CONFIG_SPECS[kind]  # type: ignore[index]
+    except KeyError as error:
+        raise ConfigValidationError(
+            f"unknown provider type {kind!r}; expected one of "
+            f"{', '.join(_PROVIDER_CONFIG_SPECS)}"
+        ) from error
+
+
+def provider_config_defaults(kind: str) -> Mapping[str, Any]:
+    return get_provider_config_spec(kind).defaults
+
+
+def _entry_namespace(kind: str | None, name: str | None) -> str | None:
+    if not kind or not name:
+        return None
+    return f"{kind}:{name}"
 
 
 def parse_collections(
@@ -541,6 +756,7 @@ def parse_collections(
         raise ConfigValidationError("collections must be an array of tables")
 
     diagnostics: list[str] = []
+    issues: list[ConfigIssue] = []
     names: dict[str, int] = {}
     normalized: list[tuple[int, ProviderConfig]] = []
     disabled: set[int] = set()
@@ -548,44 +764,64 @@ def parse_collections(
 
     for index, entry in enumerate(raw):
         if not isinstance(entry, Mapping):
-            diagnostics.append(f"collection #{index + 1} is not a table")
+            message = f"collection #{index + 1} is not a table"
+            diagnostics.append(message)
+            issues.append(
+                ConfigIssue(index=index, message=message, provider_wide=True)
+            )
             continue
         kind = entry.get("type")
         if kind not in BUILTIN_PROVIDERS:
-            diagnostics.append(
+            message = (
                 f"collection #{index + 1} has invalid type {kind!r}; expected one "
                 f"of {', '.join(BUILTIN_PROVIDERS)}"
             )
+            diagnostics.append(message)
+            issues.append(
+                ConfigIssue(
+                    index=index,
+                    message=message,
+                    kind=str(kind) if isinstance(kind, str) else None,
+                    provider_wide=True,
+                )
+            )
             continue
+        spec = get_provider_config_spec(str(kind))
         try:
             name = validate_name(entry.get("name"))
         except ConfigValidationError as error:
-            diagnostics.append(f"collection #{index + 1}: {error}")
+            message = f"collection #{index + 1}: {error}"
+            diagnostics.append(message)
+            issues.append(
+                ConfigIssue(
+                    index=index,
+                    message=message,
+                    kind=str(kind),
+                    provider_wide=True,
+                )
+            )
             continue
         names[name] = names.get(name, 0) + 1
+        unknown = sorted(set(entry) - spec.allowed_keys)
+        if unknown:
+            diagnostics.append(
+                f"collection {name!r}: unknown key(s) ignored: "
+                + ", ".join(unknown)
+            )
         try:
-            if kind == "zim":
-                parsed = _parse_zim(entry, base)
-            elif kind == "files":
-                unknown = sorted(set(entry) - _FILES_KEYS)
-                if unknown:
-                    diagnostics.append(
-                        f"collection {name!r}: unknown key(s) ignored: "
-                        + ", ".join(unknown)
-                    )
-                parsed = _parse_files(entry, base)
-            elif kind == "kolibri":
-                unknown = sorted(set(entry) - _KOLIBRI_KEYS)
-                if unknown:
-                    diagnostics.append(
-                        f"collection {name!r}: unknown key(s) ignored: "
-                        + ", ".join(unknown)
-                    )
-                parsed = _parse_kolibri(entry, base)
-            else:
-                parsed = _parse_kiwix(entry, base)
+            parsed = spec.parse(entry, base)
         except ConfigValidationError as error:
-            diagnostics.append(f"collection {name!r}: {error}")
+            message = f"collection {name!r}: {error}"
+            diagnostics.append(message)
+            issues.append(
+                ConfigIssue(
+                    index=index,
+                    message=message,
+                    kind=str(kind),
+                    name=name,
+                    namespace=_entry_namespace(str(kind), name),
+                )
+            )
             continue
         if "sources" in entry:
             envelope.setdefault("sources", {})[name] = entry["sources"]
@@ -594,10 +830,35 @@ def parse_collections(
     duplicate_names = {name for name, count in names.items() if count > 1}
     if duplicate_names:
         for name in sorted(duplicate_names):
-            diagnostics.append(
+            message = (
                 f"collection name {name!r} is configured more than once; "
                 "all entries with that name are disabled"
             )
+            diagnostics.append(message)
+            matching = [
+                (index, entry)
+                for index, entry in normalized
+                if entry.name == name
+            ]
+            if not matching:
+                issues.append(
+                    ConfigIssue(
+                        index=-1,
+                        message=message,
+                        name=name,
+                        provider_wide=True,
+                    )
+                )
+            for index, entry in matching:
+                issues.append(
+                    ConfigIssue(
+                        index=index,
+                        message=message,
+                        kind=entry.kind,
+                        name=name,
+                        namespace=_entry_namespace(entry.kind, name),
+                    )
+                )
         disabled.update(
             index for index, entry in normalized if entry.name in duplicate_names
         )
@@ -616,6 +877,7 @@ def parse_collections(
         collections=collections,
         diagnostics=tuple(diagnostics),
         envelope=envelope,
+        issues=tuple(issues),
     )
 
 
@@ -627,6 +889,11 @@ normalize_collections = parse_collections
 
 __all__ = [
     "BUILTIN_PROVIDERS",
+    "PROVIDER_CONFIG_SPECS",
+    "PROVIDER_DEFAULTS",
+    "REMOVED_KEYS",
+    "SAFE_NAME",
+    "ConfigIssue",
     "ConfigValidationError",
     "DerivedOperation",
     "FilesConfig",
@@ -635,15 +902,17 @@ __all__ = [
     "KolibriConfig",
     "ParsedCollections",
     "ProviderConfig",
+    "ProviderConfigSpec",
     "ProviderKind",
-    "REMOVED_KEYS",
     "RuntimeConfig",
-    "SAFE_NAME",
     "TraversalLimits",
     "WorkerCount",
     "ZimConfig",
+    "get_provider_config_spec",
     "normalize_collections",
     "parse_collections",
     "parse_provider_config",
+    "provider_config_defaults",
+    "provider_config_specs",
     "validate_name",
 ]

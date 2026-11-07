@@ -33,6 +33,12 @@ OOMPolicy=stop
 Environment=PYTHONUNBUFFERED=1
 
 # Hardening: the server only needs to read and write its XDG data directory.
+# Files and Kolibri collections are read-only inputs. If they live outside the
+# home directory or ProtectHome covers them, add them explicitly, for example:
+#   ReadOnlyPaths=/library/www/html/modules
+#   ReadOnlyPaths=/library/kolibri
+#   ReadWritePaths=/library/zimantic-indexes   (when index_dir points there)
+# index_dir and catalog.sqlite must stay writable; the source trees must not.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

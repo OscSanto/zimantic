@@ -96,7 +96,7 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
 
 4. **Put ZIM files in `$XDG_DATA_HOME/zimantic/zims/`.** Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. **Check the XDG config.** Relative `model_dir` and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`. A ZIM collection's `path` resolves from the config file's directory. Omit them to use the defaults. Add a Kiwix `[[collections]]` entry only when remote Kiwix sources are also needed.
+5. **Add a collection and check the XDG config.** There is no implicit library, so uncomment or add the `[[collections]]` ZIM entry from `config.toml` (use an absolute `path`, because provider paths resolve from the config file's directory). Relative `model_dir` and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`; omit them to use the defaults. Add Kiwix, files, or Kolibri entries only for those sources.
 
 6. **Verify the installation.**
 
@@ -138,7 +138,7 @@ Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/res
 
 ## Files and directories
 
-The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). Relative path overrides in the XDG config resolve under that data directory. For compatibility, if no XDG config exists, an existing `config.toml` in the current directory is still loaded and its relative paths retain their historical current-directory behavior.
+The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). Relative global path overrides (`model_dir`, `index_dir`) resolve under that data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. For compatibility, if no XDG config exists, an existing `config.toml` in the current directory is still loaded and its relative global paths retain their historical current-directory behavior.
 
 ```
 ~/.local/share/zimantic/
@@ -154,6 +154,120 @@ $XDG_RUNTIME_DIR/zimantic/zimantic.pid ← PID file while serving
 ```
 
 If the files are on a USB drive or another disk, point a ZIM collection's `path`, `model_dir`, or `index_dir` in the XDG config at them.
+
+## Sources and providers
+
+Zimantic has one configuration schema for every in-tree provider. A
+`[[collections]]` entry is one collection; the provider discovers one or more
+sources inside it (one ZIM archive per source, one files subtree or child group,
+one Kolibri channel/topic, one Kiwix book). Every collection is explicit: there
+is no `zim_dir`/`kiwix_server` shorthand and no implicit default library.
+
+```toml
+[[collections]]
+type = "zim"
+name = "library"
+path = "./zims"
+label = "ZIM files"
+
+[[collections]]
+type = "files"
+name = "modules"
+path = "/library/www/html/modules"
+label = "Modules"
+granularity = "collection"       # or "children"
+
+[[collections]]
+type = "kolibri"
+name = "kolibri"
+path = "/library/kolibri"
+label = "Kolibri"
+granularity = "children"
+
+[[collections]]
+type = "kiwix"
+name = "remote"
+server = "http://localhost:8085"
+label = "Remote Kiwix"
+catalog_limit = 1000
+max_catalog_entries = 50000
+```
+
+Provider `path` values, including `database_path` and `storage`, resolve once
+against the directory holding the active config file, even through a symlink.
+CLI path operands resolve against the working directory. The resolved choice is
+kept when an ad-hoc ZIM build saves a new collection, so it still points at the
+same files on the next invocation. Do not put global scalar keys after a table
+header; after `[[collections]]` or `[derived_text]` a key belongs to that table.
+
+Provider limits default in the provider and can be overridden per entry
+(`max_sources`, `max_entries`, `max_file_bytes`, `max_visited_entries`,
+`traversal_timeout_seconds`, Kiwix `catalog_limit`/`max_catalog_entries`, and the
+Kolibri snapshot/HTML5 zip limits). `max_sources` and `max_entries` bound
+discovery and indexing, not serving: a permitted file remains browsable even
+when indexing was capped. Exceeding `max_sources` collapses a files/Kolibri
+collection to one source with a distinct key and a warning; exceeding
+`max_entries` marks the source truncated. Both change what a rebuild should
+cover, so rebuild after a collapse or recovery.
+
+Global bounds stay global: `max_explicit_collection_sources` (default 500)
+limits work for an explicitly selected Kiwix collection and reports partial
+scope instead of claiming completion; `search_timeout_seconds` (default 30) is
+the admitted-search deadline across providers and is separate from
+`source_timeout` and `slot_wait_seconds`; `max_body_text_bytes` (default 1 MiB)
+caps the lexical body per item independently of previews and item-count
+truncation; `max_derived_cache_bytes_per_source` caps optional preview artifacts
+only, never search postings.
+
+Every local indexed provider uses the same immutable generation layout:
+
+```
+index_dir/<provider>/<collection>-<digest>/<source>-<digest>/
+├── current                         ← JSON manifest pinning one generation
+└── generations/<uuid>/
+    ├── index.sqlite                ← docs, title/body FTS, metadata
+    ├── index.faiss                 ← only when semantic vectors exist
+    └── lease                       ← shared reader pin
+```
+
+SQLite must be 3.37 or newer for the STRICT catalog and index schemas, and the
+SQLite build must provide FTS5; Zimantic checks the version early instead of
+deferring a failure to the first query. A sufficiently new SQLite build can
+still be compiled without FTS5. `catalog.sqlite` beside `index_dir` is the
+private ZIM archive metadata cache.
+Files and Kolibri do not write it, and Kiwix has no persistent local catalog. A
+catalog written by an older schema version is discarded and rebuilt by a full
+ZIM scan; do not run old and new versions against it at the same time. Index
+identity is logical (`provider`, `collection key`, `source key`), never an
+absolute source path. Removing or renaming a collection does not delete its
+indexes; `zimantic prune` is the explicit cleanup path.
+
+Treat untrusted file trees as untrusted input. Path confinement and traversal
+limits apply to serving and indexing, but `secure_browsing` sandboxes only the
+`/content/` shell; a raw `/article/` document opened directly or in a permitted
+popup is not sandboxed and can run with the app's origin and persistent storage.
+
+Derived text is three independent opt-ins, all off unless an exact source names
+one:
+
+```toml
+[[collections.sources]]
+key = "files:modules:root"
+captions = "index"     # .srt/.vtt sidecars; embedded tracks with local ffmpeg
+ocr = "tesseract"      # images and image-only PDF pages
+asr = "whisper"        # audio/video speech-to-text
+```
+
+Setting one does not enable the others. Engines run locally at build time only
+and are never loaded by `serve`; a missing engine marks only that operation
+unavailable. Embedded text captions use the optional local `ffmpeg`/`ffprobe`
+pair when available, including supported descriptor-only inputs; a missing
+pair leaves only embedded-track caption extraction unavailable. The
+per-container input and spool caps under
+`[derived_text]` are separate from `max_entry_bytes` and may need raising for
+large media. See [Files collections](#files-collections) and
+[Kolibri installations](#kolibri-installations) for copy-pasteable IIAB layouts
+(`/library/www/html/modules` and `/library/kolibri`).
 
 ### Files collections
 
@@ -284,6 +398,14 @@ zimantic build --no-wait-lock         # exit 75 if another build holds the lock
 zimantic build --lock-timeout 600     # wait at most ten minutes for the lock
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
 zimantic build --device cuda          # embed with a CUDA GPU (see below)
+zimantic build --provider files       # only files collections
+zimantic build --collection modules   # one collection key or entry name
+zimantic build --source files:modules:root  # one exact source key
+zimantic build --list                 # read-only preview; write nothing
+zimantic sources                      # human-readable collections/sources tree
+zimantic sources --json               # machine-readable, no absolute paths
+zimantic prune --dry-run              # report orphaned Zimantic indexes
+zimantic prune --yes                  # delete only those under the build lock
 zimantic serve                        # web page; unindexed ZIMs use native full-text search
 zimantic serve --fast                 # start without a model or vectors
 zimantic serve --device cuda          # keep a CUDA GPU for query embedding
@@ -298,7 +420,15 @@ zimantic model --dir ./models         # write models/<precision>/ instead of mod
 zimantic model --list                 # show supported models and precisions
 ```
 
-`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM, files, and Kolibri collection. An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; restart a running server to load that config change. Existing complete generations are skipped; pass `--force` to rebuild selected indexes, or let a changed source fingerprint trigger a rebuild. Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
+`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM, files, and Kolibri collection; Kiwix collections are reported as skipped because they are remote/search-only. Positional paths and `--provider`/`--collection`/`--source` selectors are separate modes and cannot be combined. Selector values are repeatable: values within one selector are ORed, and different selector types are intersected. `--collection` accepts an exact collection key or a configured entry name; a Kolibri entry name selects all of its channels.
+
+An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; the entry uses a relative path from the active config directory (or an absolute private locator) and a safe unique name. A matched configured ZIM root supplies defaults only: the build still covers exactly the files or folders named on the command line. Restart a running server to load a config change; `zimantic reload` only rescans startup-configured providers and does not reread config. `build --list` previews configured or generated entries and never writes config or starts a build. Existing complete generations are skipped; pass `--force` to rebuild selected indexes, or let a changed source fingerprint trigger a rebuild.
+
+`zimantic sources` uses the same discovery as `serve` without starting the web server, loading the model/FAISS, or modifying the catalog, indexes, caches, PID/build/lease files, or config. Its `--json` document has `collections` and `sources` at the top level, reusing the HTTP record schemas; private locators and absolute paths are omitted. `zimantic prune --dry-run` is the same kind of read-only inventory. `zimantic prune --yes` holds the build lock and the target-based config lock, rereads config and discovery, and deletes only indexes whose valid manifest proves Zimantic ownership and whose collection namespace is no longer configured. A missing/malformed config, an invalid entry with unknown scope, an unavailable discovery, stale `.tmp`/`.upgrade` files, and unknown legacy indexes are retained or reported for manual inspection, never deleted by filename. Uncooperative manual config edits must not race `prune`. After changing config, restart running servers before building changed collection roots or pruning: a stale server can still refer to a removed or changed entry, and leases protect open generations but cannot identify an index it has not yet opened. An ad-hoc append with a new collection name is safe while a server runs; its scoped catalog refresh cannot remove that entry.
+
+`zimantic reload` sends SIGHUP and reports that the signal was delivered, not that the background refresh has finished. A normal server rescans every startup-configured provider (ZIM, files, Kolibri, and Kiwix) but does not reread config; restart after adding, removing, or editing a collection entry or any other setting. A second signal during a refresh is ignored. A `serve --debug` process instead restarts and rereads config on SIGHUP, as before; on platforms without SIGHUP the server is restarted the same way.
+
+Logging defaults to warnings, except that `serve` and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
 
 ### Build behavior and locking
 

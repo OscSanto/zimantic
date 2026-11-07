@@ -9,8 +9,11 @@
 #   cp deploy/zimantic-indexing.service deploy/zimantic-indexing.timer ~/.config/systemd/user/
 #   systemctl --user enable --now zimantic-indexing.timer
 #
-# Watch zims/, not indexes/: build writes into indexes/, so a path unit there
-# would fire on its own output.
+# Watch source roots, not indexes/: build writes into indexes/, so a path unit
+# there would fire on its own output. For a files collection, copy this unit and
+# set PathChanged=/library/www/html/modules; for Kolibri use
+# PathChanged=/library/kolibri/content. Keep one path unit per source root and
+# leave --no-wait-lock in the service so overlapping triggers skip cleanly.
 
 [Unit]
 Description=Index new ZIMs and rescan Zimantic

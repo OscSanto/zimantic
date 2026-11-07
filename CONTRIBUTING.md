@@ -100,6 +100,42 @@ Changes to these contracts require updating the contract tests in
 `tests/providers/`, the collection/source serializers, and the migration notes
 in `plans/`.
 
+### Adding an in-tree provider
+
+Providers ship in this repository. There is no third-party plugin loading,
+entry-point discovery, download, or dynamic execution of untrusted provider
+code. Add a provider only when it belongs in-tree and can meet the same
+contracts:
+
+1. Add a typed config dataclass and a `ProviderConfigSpec` in
+   `zimantic/providers/config.py` with an allowed-key set, a parser, provider
+   defaults, and whether the provider is buildable. Generic `type`/`name`/
+   duplicate validation stays in `parse_collections`; provider-specific keys
+   and positive-int/range checks stay in the provider parser.
+2. Register the `SourceProvider` in `zimantic/providers/registry.py`. Registry
+   lookup failures stay explicit; there is no fallback provider.
+3. Implement discovery and runtime contracts in `zimantic/providers/<name>/`:
+   one configured entry may yield zero or several collections, a runtime
+   publishes an immutable snapshot with `loading`/`ready`/`error`/`closed`,
+   and a buildable local provider implements `BuildableRuntime.entry_producer`.
+4. Use the shared `IndexLocator` for every local index path and generation.
+   Never compute an index path in the provider, and never derive a logical key
+   or filename from an absolute source path.
+5. Enforce caps and path confinement before reading content. Discovery must be
+   bounded by the configured `max_sources`/`max_entries` and traversal budgets;
+   local content must be confined to the configured root; remote responses need
+   byte/time bounds. A capped operation reports truncation or partial scope,
+   not an empty success.
+6. Isolate failures per entry and per source. One provider's timeout or error
+   must not crash `serve`, hide another provider, or turn into an empty
+   successful result. Preserve the last complete snapshot on a failed refresh.
+7. Add contract tests in `tests/providers/` for source identity, snapshot states,
+   content-store behaviour (or remote-only `None`), search/suggest errors,
+   caps, path confinement, and failure isolation. Add CLI/config tests for the
+   new entry type.
+8. Update `config.toml`, the README provider section, and `deploy/` examples
+   (build path/timer and service read paths) in the same change.
+
 ## Release and deploy
 
 The Makefile can increment the patch version, update `uv.lock`, commit and publish an

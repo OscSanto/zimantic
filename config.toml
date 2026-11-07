@@ -1,17 +1,26 @@
-# Zimantic settings. This file is optional; omitted keys use hardware-based defaults.
+# Zimantic settings. Omitted settings use hardware-based defaults, but collections
+# are never implicit: add at least one [[collections]] entry to have a library.
 # See config.pi-zero-2w.toml and config.pi-5.toml for tuned starting points.
 
-# Relative paths use the directory where `zimantic` runs.
-# Absolute paths also work.
-
-# On Linux and other XDG platforms, omitted paths default under
-# $XDG_DATA_HOME/zimantic (normally ~/.local/share/zimantic).
-# Relative path overrides in this file are relative to that data directory.
-# An existing config.toml in the current directory keeps its historical
-# current-directory-relative behavior.
+# Provider paths ([[collections]] path/database_path/storage) are resolved
+# once against the directory containing the active config file, including when
+# the config is reached through a symlink. CLI path operands are resolved
+# against the invocation's working directory. Absolute paths also work.
 #
-# Collections are declared with [[collections]] at the end of this file. Each
-# configured root/server is one collection; each ZIM archive is one source.
+# On Linux and other XDG platforms, omitted global data paths default under
+# $XDG_DATA_HOME/zimantic (normally ~/.local/share/zimantic).
+# Relative global path overrides (model_dir/index_dir) are relative to that
+# data directory. An existing config.toml in the current directory keeps its
+# historical current-directory-relative behavior.
+#
+# Keep global scalar keys before the first [[collections]] or [derived_text]
+# header. After a table header, TOML keys belong to that table.
+#
+# Collections are declared with [[collections]]. There is no zim_dir or
+# kiwix_server shorthand and no implicit default collection: every ZIM, files,
+# Kolibri, and Kiwix collection needs an explicit entry. Each configured
+# root/server is one collection; a ZIM archive or a files/Kolibri source is one
+# source. `zimantic sources --json` prints the discovered hierarchy.
 # Add a local ZIM collection (downloaded from https://library.kiwix.org):
 #
 # [[collections]]
@@ -131,8 +140,15 @@ port = 8090
 # max_asr_output_bytes = 1_048_576
 # task_timeout_seconds = 7_200
 # max_spool_bytes = 2_147_483_648
-# workers = "auto"
+# workers = "auto"   # "auto" (CPU/RAM-derived) or a positive integer
 # cache = true
+#
+# Derived text runs only at build time with local engines. captions parses
+# .srt/.vtt sidecars and needs no external tool; embedded text tracks use the
+# shared ffmpeg adapter when a local ffmpeg/ffprobe is available. ocr and asr
+# are unavailable unless their local engine is installed; a missing engine
+# degrades only that operation. The spool and per-engine input caps above are
+# separate from max_entry_bytes and may need raising for large media.
 
 # Large ZIMs only (10,000+ articles): how many IVF clusters each search scans.
 # By default, searches scan about 6% of the clusters, scaling automatically with ZIM size.
@@ -189,10 +205,23 @@ port = 8090
 
 # COLLECTIONS
 #
+# Local indexed providers share one layout:
+#   index_dir/<provider>/<collection>-<digest>/<source>-<digest>/
+#     current                      JSON manifest for the pinned generation
+#     generations/<uuid>/index.sqlite
+#     generations/<uuid>/index.faiss   (only when vectors exist)
+# catalog.sqlite is the private ZIM metadata cache beside index_dir. Files and
+# Kolibri do not write it, and Kiwix keeps no persistent local catalog. A
+# catalog with an older schema is discarded and rebuilt by a full ZIM scan.
+#
 # [[collections]]
 # type = "zim"
 # name = "library"
 # path = "zims"
+# label = "ZIM files"
+# max_entries = 100000
+# max_visited_entries = 1000000
+# traversal_timeout_seconds = 300
 #
 # [[collections]]
 # type = "kiwix"

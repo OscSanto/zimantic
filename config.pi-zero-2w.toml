@@ -41,6 +41,11 @@ source_timeout = 12
 cache_size = 64
 cache_bytes = 8_388_608  # 8 MiB per cache
 
+# Provider paths resolve from this config file's directory, unlike the global
+# model_dir/index_dir above (which resolve under $XDG_DATA_HOME/zimantic when
+# this file is the XDG config). Use an absolute path when the ZIMs live in the
+# data directory, for example:
+#   path = "/home/pi/.local/share/zimantic/zims"
 [[collections]]
 type = "zim"
 name = "library"
