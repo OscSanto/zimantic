@@ -1,8 +1,12 @@
 import codecs
+import mmap
 import posixpath
 import re
+import struct
 from html.parser import HTMLParser
 from urllib.parse import unquote
+
+import numpy as np
 from libzim.reader import Archive, set_cluster_cache_max_size
 
 # libzim undercounts this cache: its 16 MB default really used ~170 MB. 1 MB used ~4 MB and wasn't slower.
@@ -78,6 +82,59 @@ def first_paragraph(html: bytes) -> str: # "" if no paragraph was long enough (t
     except _Found:
         pass  
     return parser.lead  
+
+
+def cluster_order(zim_path, entry_count: int):
+    """Entry ids in the order their content is stored in the file, or None to use plain id order.
+
+    A ZIM stores articles in compressed blocks ("clusters") of several articles each. Entry ids follow the
+    article paths (alphabetical), which jump between clusters, so reading by id decompresses the same cluster
+    again and again. Reading in storage order decompresses each cluster once (2.7x faster reading in testing,
+    with the same 1 MB cache) and reads the disk front to back, which SD cards and USB drives like.
+
+    python-libzim can't list entries in this order, so we read each entry's cluster number from the file's
+    own entry table (https://wiki.openzim.org/wiki/ZIM_file_format). Returns None for anything unexpected
+    (old-style or damaged files) so the build falls back to id order; the index comes out the same either way.
+    """
+    try:
+        with open(zim_path, "rb") as f:
+            header = f.read(80)
+            magic, = struct.unpack_from("<I", header, 0)
+            count, = struct.unpack_from("<I", header, 24)
+            pointers_at, = struct.unpack_from("<Q", header, 32)
+            if magic != 0x044D495A or count < entry_count:
+                return None
+            f.seek(pointers_at)
+            pointers = np.fromfile(f, dtype="<u8", count=count)  # where each entry's record starts
+            if len(pointers) != count:
+                return None
+
+            # Map only the part of the file holding the entry records (not the whole file: a 32-bit
+            # Raspberry Pi OS can't map files over ~2 GB). Each record starts with:
+            # mimetype (2 bytes, 0xFFFF = redirect), 1 byte, namespace (1), revision (4), cluster (4), blob (4)
+            lo = int(pointers.min()) // mmap.ALLOCATIONGRANULARITY * mmap.ALLOCATIONGRANULARITY
+            hi = int(pointers.max()) + 16
+            with mmap.mmap(f.fileno(), hi - lo, offset=lo, access=mmap.ACCESS_READ) as m:
+                raw = np.frombuffer(m, dtype=np.uint8)
+                at = (pointers - lo).astype(np.int64)
+                byte = lambda k: raw[at + k].astype(np.uint32)
+                redirect = (byte(0) | byte(1) << 8) == 0xFFFF
+                namespace = byte(3)
+                cluster = byte(8) | byte(9) << 8 | byte(10) << 16 | byte(11) << 24
+                blob = byte(12) | byte(13) << 8 | byte(14) << 16 | byte(15) << 24
+                del raw  # the map can only close once nothing points into it
+    except (OSError, ValueError, OverflowError, struct.error):
+        return None
+
+    # libzim's entry ids count the user entries (namespace "C") only, which come first
+    users = np.flatnonzero(namespace == ord("C"))
+    if len(users) != entry_count or (len(users) and users[-1] - users[0] + 1 != entry_count):
+        return None
+    first = int(users[0]) if len(users) else 0
+    part = slice(first, first + entry_count)
+    redirect, cluster, blob = redirect[part], np.where(redirect[part], 0, cluster[part]), np.where(redirect[part], 0, blob[part])
+    # content entries cluster by cluster, then redirects (they have no content to decompress)
+    return np.lexsort((blob, cluster, redirect)).astype(np.uint32)
 
 
 def read_entry(zim: Archive, i: int):

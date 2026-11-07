@@ -9,9 +9,18 @@ MAX_TOKENS = 256
 
 # Turns text into vectors with multilingual-e5-small (ONNX, int8) currently.
 class Embedder:
-    def __init__(self, model_dir):
-        """model_dir holds model.onnx and sentencepiece.bpe.model."""
+    def __init__(self, model_dir, threads: int | None = None):
+        """model_dir holds model.onnx and sentencepiece.bpe.model.
+
+        threads: how many CPU threads ONE embed() call splits its work over. None = ONNX Runtime's default
+        (all cores), right when one call runs at a time (serving searches). Builds run several calls at once
+        from worker threads, each with threads=1: then no thread waits for the others after every model step.
+        One Embedder can be shared by all worker threads; the model is loaded once.
+        """
         opts = ort.SessionOptions()
+        if threads:
+            opts.intra_op_num_threads = threads
+            opts.inter_op_num_threads = 1
         opts.enable_cpu_mem_arena = False  # the arena kept ~600 MB after indexing; without it memory is freed
         self.session = ort.InferenceSession(str(Path(model_dir) / "model.onnx"), opts, providers=["CPUExecutionProvider"])
         # sentencepiece loads this vocabulary in ~45 MB; Hugging Face `tokenizers` needed ~250 MB.
