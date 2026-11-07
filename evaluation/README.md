@@ -1,18 +1,20 @@
 # Evaluation: how good is search?
 
-This folder measures **how often a search engine puts the right article first**, using a fixed set of
-queries whose correct answers are known. It works with any version of Zimantic, with Kiwix's own
-search, and with new ZIM files and languages you add later.
+This folder contains a fixed search-quality evaluation. It measures where the
+expected article appears in the first 20 results. It supports Zimantic and
+Kiwix search for configured ZIM files.
 
-Unit tests (`tests/`) check that the code does what it says. This checks whether search actually got
-better. A ranking rule can pass its tests and still make results worse for most users, especially in
-languages the author didn't try. Run this before and after any change that affects ranking or indexing.
+Unit tests (`tests/`) check code behavior. This evaluation measures ranking
+quality. A ranking rule can pass its tests and still reduce search quality,
+especially in languages that have few test queries. Use the evaluation for
+ranking and indexing work.
 
-**All queries are synthetic.** They were written or generated for testing (with AI assistance), not
-collected from real users, and the non-English queries are translations of the English ones. The set is
-best for **comparing two versions of Zimantic on the same ZIMs and model**: it shows reliably whether a
-change made ranking better or worse, and in which languages and query types. It is not a measure of how
-satisfied real users are. See [Limitations](#limitations).
+**All queries are synthetic.** They were written or generated for testing,
+with AI assistance. They do not come from real users. The non-English queries
+are translations of English queries. Use the set to **compare two runs with
+the same ZIM files and model**. The report shows ranking differences by
+language and query type. It does not measure user satisfaction. See
+[Limitations](#limitations).
 
 ## What it measures
 
@@ -70,10 +72,12 @@ difference between two versions smaller than this number can't be told apart fro
 | af, am, ha, ig, rw, so, yo, zu | 7 / 8 each | 15 single medical words only (`words` suite) | ±35 points |
 | mul | 12 / 18 | 30 mixed-language WikiMed queries | ±25 points |
 
-Only English and the six large languages (es, fr, ar, hi, sw, zh) support conclusions on their own. The
-small sets are **smoke checks**: they show whether a language works at all (e.g. a change that returns
-nothing for Yoruba), not whether it got a few points better or worse. To judge a small language, add
-queries for it first (see [Adding a language](#adding-a-language)).
+Only English and the six large languages (es, fr, ar, hi, sw, zh) support
+conclusions on their own. The small sets are **smoke checks**: they show whether
+a language works at all (for example, whether a search returns results for
+Yoruba), not whether its score differs by a few points. Build a larger query
+set before drawing conclusions about a small language (see
+[Building a language query set](#building-a-language-query-set)).
 
 Query sources: 3,699 translated, 1,658 generated from the articles, 775 hand-written.
 
@@ -98,13 +102,12 @@ python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwi
 python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
 ```
 
-`run.py` finds the server's API itself. It probes `/api/zims` (v0.1.x), `/zims`, `/library.json` and
-`/sources` in that order, so it works with current versions and older ones; it reads `/config` when the
-server has it. Only ZIMs the server reports as **local and searchable** are measured: remote Kiwix
+`run.py` detects the server API by probing `/api/zims`, `/zims`, `/library.json`,
+and `/sources` in that order. It reads `/config` when available. Only ZIMs the
+server reports as **local and searchable** are measured: remote Kiwix
 catalog books and readable-but-unindexed archives are skipped, and so are queries for ZIMs the server
-does not have (listed in the output). Newer servers also report which source each hit came from; hits
-from another ZIM are ignored and counted in a warning, because a server that does not recognise the
-`zim` filter would otherwise silently search its whole library.
+does not have (listed in the output). When the server reports the source for
+each hit, `run.py` ignores hits from another ZIM and reports them in a warning.
 
 The server caps how many results it keeps per query (`max_results` in `/config`, 100 by default) and how
 long a query may be; `run.py` lowers `--k` to the cap and leaves out over-long queries instead of
@@ -115,13 +118,14 @@ Useful options for `run.py`: `--zims`, `--suites`, `--sets`, `--langs` (run a su
 results file), `--results-dir` (write the results somewhere other than `evaluation/results`). Results
 are saved as `<results-dir>/<label>.json`.
 
-For a fair comparison, both runs must use the same ZIM files and, when a change affects how indexes are
-built, indexes built by each version's own code. Note it in the PR if they differ.
+For a fair comparison, both runs use the same ZIM files. Each run also uses
+indexes built by its own code when the index format or build behavior differs.
+Record any index difference with the comparison.
 
-### Reproducing the published results
+### Reference results
 
-`results/v0.1.0-lite.json` (Zimantic `a043177`, 2026-10-10) and `results/kiwix-serve.json` are the
-reference runs. To compare against them, use exactly:
+`results/v0.1.0-lite.json` (Zimantic `a043177`, 2026-10-10) and
+`results/kiwix-serve.json` are reference runs. Reproduce them with these inputs:
 
 - **ZIM files** (from [library.kiwix.org](https://library.kiwix.org); names must match exactly):
   `wikipedia_en_medicine_maxi_2026-04.zim`, `wikipedia_en_astronomy_maxi_2025-11.zim`,
@@ -134,7 +138,8 @@ reference runs. To compare against them, use exactly:
   files are no longer published on Kiwix's server; the nearest releases on it are
   `wikipedia_en_astronomy_maxi_2026-08` and `wikibooks_en_all_nopic_2026-04`, whose article paths do
   not all match the queries. Ask the query-set author for the exact files, or regenerate queries for
-  the replacement releases (see [Adding a ZIM](#adding-a-zim)).
+  other releases (see
+  [Building a ZIM query set](#building-a-zim-query-set)).
 - **Model:** multilingual-e5-small, int8 ONNX from
   [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small)
   (`onnx/model_quantized.onnx` saved as `model.onnx`), 384 dimensions, with the tokenizer from
@@ -154,26 +159,26 @@ Write the commit, ZIM names, model hashes and non-default settings in the PR alo
 `compare.py` output. Search times depend on the machine and its load: compare timings only between runs
 made on the same machine, close together.
 
-### Rules for comparisons
+### Comparison rules
 
-For anyone, person or coding agent, changing ranking, indexing, query handling, the model or search
-settings:
+Use these rules to evaluate ranking, indexing, query handling, models, and
+search settings:
 
 - **Tune on dev, report on test.** Look only at `--split dev` while trying settings, then report
   `--split test` once. If you tune again after seeing test results, say so.
 - **Run everything:** every ZIM and every language, with `--by zim lang set`, not only English.
 - **Report fixed / broken counts** and results by language and ZIM, not only averages. Call out anything
   that got worse.
-- If a change filters results (e.g. a score cutoff), report how often queries return fewer results than
-  requested, or none.
+- If a run filters results (for example, with a score cutoff), report how often
+  queries return fewer results than requested or no results.
 - A difference smaller than the ± margin is not a result. Small languages are smoke checks only.
-- **Don't edit, delete or regenerate existing query files** to make a change pass, and don't change
-  `DEV_SHARE` or the split. Add new queries in new files with new ids.
+- Keep existing query files, `DEV_SHARE`, and the split fixed. Put additional
+  queries in separate files with unique ids.
 
 `run.py` turns `localhost` into `127.0.0.1`: on Windows, `localhost` first tries IPv6, and against a
 server listening on IPv4 only every request then waits ~2 seconds, which would distort the timings.
 
-## Adding a ZIM
+## Building a ZIM query set
 
 1. Generate automatic sets (alternate names, first sentences, sentences deep in an article). It samples
    random entries rather than reading the whole file, so it also works on very large ZIMs (e.g. the
@@ -192,11 +197,11 @@ server listening on IPv4 only every request then waits ~2 seconds, which would d
 **Very large ZIMs:** the evaluation itself is light (it only sends queries over HTTP). The slow part is
 building the Zimantic index for the ZIM. Use `--zims`, `--sets` or `--split dev` for quick checks.
 
-**New ZIM versions:** queries are tied to an exact ZIM file name, because article paths can change
-between releases. For a new release, regenerate the generated sets and run `check` on the hand-written
-ones; copy over those whose answers still exist.
+**ZIM releases:** Queries use an exact ZIM file name because article paths can
+differ between releases. For another release, regenerate the generated sets
+and run `check` on the hand-written sets. Keep answers that exist in the file.
 
-## Adding a language
+## Building a language query set
 
 ```bash
 python evaluation/make_queries.py translate --zim wikipedia_en_medicine_maxi_2026-04 --suite readme --to pt
@@ -210,8 +215,9 @@ codes appear.
 
 ## Reading the results
 
-- **Small groups are noisy.** #1 is accurate to roughly ±100/√n points: ±20 for 25 queries, ±10 for
-  100, ±5 for 400. Don't read much into a 5-point change in a 25-query set.
+- **Small groups are noisy.** #1 is accurate to roughly ±100/√n points: ±20 for
+  25 queries, ±10 for 100, and ±5 for 400. A 5-point score difference in a
+  25-query set is not meaningful.
 - **Look at fixed / broken**, not only averages.
 - **Look at every language**, not only English. Zimantic's biggest advantage over Kiwix is outside English.
 - **Top 20 is the ceiling** for any reranking: a reranker can only reorder what the first stage found.
@@ -220,9 +226,9 @@ codes appear.
 
 ## Limitations
 
-- **Synthetic queries.** The queries were written for testing, with AI assistance; the non-English
-  queries are translations, not searches by native speakers. Real users phrase things differently.
-  Real user queries would be a valuable addition.
+- **Synthetic queries.** The queries were written for testing, with AI
+  assistance. The non-English queries are translations, not searches by native
+  speakers. They do not represent real user queries.
 - **Generated queries come from the articles.** They are sentences taken from the articles themselves,
   with the title words removed. They test some things well (matching remembered text) and others not at
   all (questions), and they favour word matching.
@@ -232,8 +238,8 @@ codes appear.
   another language finding an English article; searching non-English ZIMs is not tested.
 - **Small language sets.** See the table under [The queries](#the-queries): many languages have 8–19
   test queries, enough to notice that a language stopped working, not to measure small changes.
-- **Built alongside Zimantic's main branch.** The query sets were written while developing main, so they
-  may suit its design. Keep this in mind when judging a very different approach.
+- **Query-set bias.** The query sets reflect Zimantic's design and may favor
+  similar approaches. Consider this when evaluating a different design.
 - **Search quality also depends on the index:** a ZIM indexed with a different reader, build settings or
   model gives different results with the same code.
 

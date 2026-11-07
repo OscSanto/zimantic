@@ -1,18 +1,18 @@
-# Media sample data
+# Media fixtures
 
-Committed sample files for the v1 media families and the optional text-derived
-scenarios.  Tests use these files directly; they do not need `ffmpeg`,
-`espeak-ng`, or any other generator tool.
+These committed files cover the supported media families and optional
+text-derived scenarios. Tests use them directly and do not need `ffmpeg`,
+`espeak-ng`, or another generator tool.
 
-Regenerate the tree after changing the fixture design:
+Run the generator to write the fixture tree:
 
 ```bash
 python tests/fixtures/media/generate.py --force
 ```
 
-The generator is deterministic in structure, not byte-for-byte (the media
-encoders embed version metadata).  `manifest.json` records the expected media
-family, MIME type, and scenario for every file.
+The generator is deterministic in structure, but not byte-for-byte. Media
+encoders include version metadata. `manifest.json` records each file's media
+family, MIME type, and scenario.
 
 ## Families
 

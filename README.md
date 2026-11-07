@@ -134,7 +134,7 @@ Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resol
 Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model\int8\sentencepiece.bpe.model
 ```
 
-`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`; restart `zimantic serve` instead. Stop the server before replacing or deleting a ZIM or index file, because Windows does not allow an open file to be replaced in place.
+`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`; restart `zimantic serve` to reload. Stop the server before you replace or delete a ZIM or index file. Windows does not allow an open file to be replaced in place.
 
 ## Optional dependencies
 
@@ -206,7 +206,7 @@ GPU ONNX Runtime wheels are covered in
 | `asr_engine` | Executable | Best for |
 |---|---|---|
 | `whisper.cpp` | `whisper-cli` | CPU-only and low-memory devices, including a Raspberry Pi |
-| `faster-whisper` | `whisper-ctranslate2` | CUDA GPUs; up to 4× faster than the old openai-whisper backend, or up to 16× with batched inference |
+| `faster-whisper` | `whisper-ctranslate2` | CUDA GPUs; up to 4× faster than the openai-whisper backend, or up to 16× with batched inference |
 | `auto` | first available | Prefers whisper.cpp, then faster-whisper |
 
 #### Quick start: whisper.cpp (CPU and edge devices)
@@ -330,7 +330,7 @@ and its language data are external. The `max_ocr_pages`, `max_ocr_pixels`, and
 
 ## Files and directories
 
-The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). Relative global path overrides (`model_dir`, `index_dir`) resolve under that data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. For compatibility, if no XDG config exists, an existing `config.toml` in the current directory is still loaded and its relative global paths retain their historical current-directory behavior.
+The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). Relative global path overrides (`model_dir`, `index_dir`) resolve under that data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. If no XDG config exists, Zimantic loads `config.toml` from the current directory and resolves relative global paths from that directory.
 
 ```
 ~/.local/share/zimantic/
@@ -388,7 +388,7 @@ max_catalog_entries = 50000
 Provider `path` values, including `database_path` and `storage`, resolve once
 against the directory holding the active config file, even through a symlink.
 CLI path operands resolve against the working directory. The resolved choice is
-kept when an ad-hoc ZIM build saves a new collection, so it still points at the
+kept when an ad-hoc ZIM build saves a collection entry, so it still points at the
 same files on the next invocation. Do not put global scalar keys after a table
 header; after `[[collections]]` or `[derived_text]` a key belongs to that table.
 
@@ -399,8 +399,8 @@ Kolibri snapshot/HTML5 zip limits). `max_sources` and `max_entries` bound
 discovery and indexing, not serving: a permitted file remains browsable even
 when indexing was capped. Exceeding `max_sources` collapses a files/Kolibri
 collection to one source with a distinct key and a warning; exceeding
-`max_entries` marks the source truncated. Both change what a rebuild should
-cover, so rebuild after a collapse or recovery.
+`max_entries` marks the source truncated. Rebuild the index when the source
+collapses or returns to its normal state.
 
 Global bounds stay global: `max_explicit_collection_sources` (default 500)
 limits work for an explicitly selected Kiwix collection and reports partial
@@ -428,8 +428,8 @@ deferring a failure to the first query. A sufficiently new SQLite build can
 still be compiled without FTS5. `catalog.sqlite` beside `index_dir` is the
 private ZIM archive metadata cache.
 Files and Kolibri do not write it, and Kiwix has no persistent local catalog. A
-catalog written by an older schema version is discarded and rebuilt by a full
-ZIM scan; do not run old and new versions against it at the same time. Index
+catalog with an unsupported schema is discarded and rebuilt by a full ZIM scan.
+Use one schema version for a catalog at a time. Index
 identity is logical (`provider`, `collection key`, `source key`), never an
 absolute source path. Removing or renaming a collection does not delete its
 indexes; `zimantic prune` is the explicit cleanup path.
@@ -486,11 +486,11 @@ max_entries = 100000
 max_file_bytes = 268435456
 ```
 
-`granularity = "children"` makes each immediate child directory its own source, plus one source for loose files directly in the root. Use it when the tree has a handful of stable top-level units; otherwise keep `collection` so the library stays bounded. If the number of child sources exceeds `max_sources`, the whole collection collapses to one source with a distinct key and a warning. Collapse and recovery change source keys, so a later build is required and any `[[collections.sources]]` override for an old key is reported as stale.
+`granularity = "children"` makes each immediate child directory its own source, plus one source for loose files directly in the root. Use it when the tree has a handful of stable top-level units; otherwise keep `collection` so the library stays bounded. If the number of child sources exceeds `max_sources`, the whole collection collapses to one source with a distinct key and a warning. The collapsed and normal states use different source keys. Rebuild the index and update any `[[collections.sources]]` override that uses the other key.
 
 `max_entries` bounds the indexed manifest and marks the source truncated when more candidates exist; all permitted files remain servable. `max_file_bytes` is combined with the global `max_entry_bytes` to bound document extraction, and `max_sources` bounds the child-source list.
 
-Source keys are derived from the configured `name` and root-relative identifiers, never the absolute path. Renaming `name` creates a new collection and requires a rebuild. The collection key is `files:<name>`; collection granularity uses `files:<name>:root`, a collapsed collection uses `files:<name>:collapsed`, a child uses `files:<name>:dir-<slug>-<digest>`, and loose root files use the reserved `files:<name>:__loose__`.
+Source keys use the configured `name` and root-relative identifiers, never the absolute path. The collection key is `files:<name>`; collection granularity uses `files:<name>:root`, a collapsed collection uses `files:<name>:collapsed`, a child uses `files:<name>:dir-<slug>-<digest>`, and loose root files use the reserved `files:<name>:__loose__`. The configured name is part of the key, so a different name has a different identity and index.
 
 All sources in one files collection share the collection-relative serving namespace. A child page can link to `../shared/style.css` and it resolves under the same source key; search results and library membership still belong to the source that indexed the item. Hidden paths, configured excludes, symlinks, and paths outside the configured root are never served. Unknown extensions are served as attachments with `X-Content-Type-Options: nosniff`; SVG opened directly is sandboxed with a restrictive CSP.
 
@@ -551,15 +551,15 @@ asr = "whisper"        # audio/video when captions did not provide usable text
 
 The provider **never writes to Kolibri**. It copies the installed database through a private, owner-only, SQLite-consistent snapshot outside the installation and storage roots; committed WAL data is included, and a concurrently changing source causes a bounded retry or a fail-closed diagnostic instead of a torn read. Snapshots are shared across a channel discovery batch, removed after their last reader, and capped by the configured size, disk, and time budgets. A failed refresh keeps the last complete published batch and reports the error. The installation database and its WAL/SHM/journal sidecars are not modified, migrated, vacuumed, or checkpointed.
 
-Keep the installation, storage, and private snapshot directory on local filesystems. The snapshot copy is validated before and after reading, but a stalled kernel or filesystem cannot provide a hard real-time bound. Content fingerprints use the selected database rows and storage-file size/mtime signatures, which are practical change detectors rather than proof of identical bytes: a same-size write that also restores the timestamp can evade detection. Keep installed content immutable or use an external snapshot when strong consistency is required.
+Keep the installation, storage, and private snapshot directory on local filesystems. The snapshot copy is validated before and after reading, but a stalled kernel or filesystem cannot provide a hard real-time bound. Content fingerprints use selected database rows and storage-file size/mtime signatures. These identify many content updates but do not prove that the bytes are identical. A same-size write that restores the timestamp can evade detection. Keep installed content immutable or use an external snapshot when strong consistency is required.
 
-Set `database_path` and `storage` only when the active database or content directory is non-standard. The provider reads SQLite installations only: if `options.ini` explicitly declares PostgreSQL, the collection is reported unsupported rather than reading an old SQLite file. Absolute configured paths stay private runtime locators and never appear in source keys, API payloads, or normal logs. `zimantic build` with no positional paths builds configured Kolibri channels along with ZIM and files collections. HTML5 serving supports the `html5_zip` preset (entry `index.html` at the zip root) with bounded streaming, path confinement, duplicate/symlink rejection, and zip-bomb limits; other viewer-dependent presets such as H5P or IMSCP are reported explicitly as unsupported. As with files collections, the browser can still be asked by untrusted app HTML to contact external URLs.
+Set `database_path` and `storage` only when the active database or content directory is non-standard. The provider reads SQLite installations only: if `options.ini` declares PostgreSQL, the collection is unsupported. Zimantic does not read a separate SQLite file in that installation. Absolute configured paths stay private runtime locators and never appear in source keys, API payloads, or normal logs. `zimantic build` with no positional paths builds configured Kolibri channels along with ZIM and files collections. HTML5 serving supports the `html5_zip` preset (entry `index.html` at the zip root) with bounded streaming, path confinement, duplicate/symlink rejection, and zip-bomb limits; other viewer-dependent presets such as H5P or IMSCP are reported explicitly as unsupported. As with files collections, the browser can still be asked by untrusted app HTML to contact external URLs.
 
 ### Copying finished indexes to another machine
 
 Embeddings live only in `index.faiss`. Its row IDs refer to `docs.rowid` in the matching `index.sqlite`, which holds titles, paths, the title and body full-text indexes, derived-text cache references, and build metadata. Copy the pair plus the source's `current` manifest; a `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and body lexical search only. A full index whose `.faiss` is missing still serves lexical results, but a later full build requires `--force` to replace it.
 
-Copying a subset is safe: each source generation is independent. Keep the same canonical source key and the same ZIM bytes on the target, and copy the generation plus its `current` manifest. Moving a ZIM between subfolders of its collection changes its key and requires a rebuild; replacing content at the same relative path keeps the key but invalidates a stale index. The target must use the same embedding model, or an export whose probe embeddings match it (for example FP32 and int8 exports of the same encoder); otherwise `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
+Copying a subset is safe: each source generation is independent. Keep the same canonical source key and the same ZIM bytes on the target, and copy the generation plus its `current` manifest. A ZIM in another collection subfolder has a different key and needs a rebuild. New content at the same relative path invalidates the index. The target must use the same embedding model, or an export whose probe embeddings match it (for example FP32 and int8 exports of the same encoder); otherwise `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
 
 To copy two completed source generations:
 
@@ -573,9 +573,9 @@ done > /tmp/index-generations.txt
 rsync -a --files-from=/tmp/index-generations.txt indexes/ pi@rpi:~/.local/share/zimantic/indexes/
 ```
 
-`rsync -a` copies only files whose size or mtime changed. Do not copy `staging-*.sqlite`, `*.tmp`, `*.sqlite-wal`, or `*.sqlite-shm`; staging files are unfinished builds, not published generations. Copy a complete generation directory and then its `current` manifest so a reload never opens a half-written pair. Run `zimantic reload` afterwards.
+`rsync -a` copies only files whose size or mtime differs. Do not copy `staging-*.sqlite`, `*.tmp`, `*.sqlite-wal`, or `*.sqlite-shm`; staging files are unfinished builds, not published generations. Copy a complete generation directory and then its `current` manifest so a reload never opens a half-written pair. Run `zimantic reload` afterwards.
 
-`catalog.sqlite` is optional for the copy. It contains metadata and icons, never vectors, and a missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute locators, so copying it only avoids the first scan when the target resolves a collection to the same absolute paths; otherwise those rows are treated as new and rescanned. The scan opens each ZIM once for metadata, illustration, and counts, not article bodies. A catalog written by a different schema version is discarded and rebuilt under the cross-process catalog lease. Both `build` and `serve` can create it.
+`catalog.sqlite` is optional for the copy. It contains metadata and icons, never vectors, and a missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute locators, so copying it avoids a scan only when the target resolves a collection to the same absolute paths; otherwise those rows are not reused and the ZIMs are rescanned. The scan opens each ZIM once for metadata, illustration, and counts, not article bodies. A catalog with a different schema is discarded and rebuilt under the cross-process catalog lease. Both `build` and `serve` can create it.
 
 ## Usage
 
@@ -625,11 +625,13 @@ zimantic model --list                 # show supported models and precisions
 
 `build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM, files, and Kolibri collection; Kiwix collections are reported as skipped because they are remote/search-only. Positional paths and `--provider`/`--collection`/`--source` selectors are separate modes and cannot be combined. Selector values are repeatable: values within one selector are ORed, and different selector types are intersected. `--collection` accepts an exact collection key or a configured entry name; a Kolibri entry name selects all of its channels.
 
-An unmatched positional path is atomically appended as a new ZIM `[[collections]]` entry so `serve` can discover it; the entry uses a relative path from the active config directory (or an absolute private locator) and a safe unique name. A matched configured ZIM root supplies defaults only: the build still covers exactly the files or folders named on the command line. Restart a running server to load a config change; `zimantic reload` only rescans startup-configured providers and does not reread config. `build --list` previews configured or generated entries and never writes config or starts a build. Existing complete generations are skipped; pass `--force` to rebuild selected indexes, or let a changed source fingerprint trigger a rebuild.
+An unmatched positional path is atomically appended as a `[[collections]]` ZIM entry so `serve` can discover it. The entry uses a relative path from the active config directory (or an absolute private locator) and a safe unique name. A matched configured ZIM root supplies defaults only: the build still covers exactly the files or folders named on the command line. Restart a running server to load edited configuration; `zimantic reload` rescans startup-configured providers but does not reread configuration. `build --list` previews configured or generated entries and never writes configuration or starts a build. Existing complete generations are skipped. Pass `--force` to rebuild selected indexes, or let a source fingerprint mismatch trigger a rebuild.
 
-`zimantic sources` uses the same discovery as `serve` without starting the web server, loading the model/FAISS, or modifying the catalog, indexes, caches, PID/build/lease files, or config. Its `--json` document has `collections` and `sources` at the top level, reusing the HTTP record schemas; private locators and absolute paths are omitted. `zimantic prune --dry-run` is the same kind of read-only inventory. `zimantic prune --yes` holds the build lock and the target-based config lock, rereads config and discovery, and deletes only indexes whose valid manifest proves Zimantic ownership and whose collection namespace is no longer configured. A missing/malformed config, an invalid entry with unknown scope, an unavailable discovery, stale `.tmp`/`.upgrade` files, and unknown legacy indexes are retained or reported for manual inspection, never deleted by filename. Uncooperative manual config edits must not race `prune`. After changing config, restart running servers before building changed collection roots or pruning: a stale server can still refer to a removed or changed entry, and leases protect open generations but cannot identify an index it has not yet opened. An ad-hoc append with a new collection name is safe while a server runs; its scoped catalog refresh cannot remove that entry.
+`zimantic sources` uses the discovery process from `serve`. It does not start the web server, load the model or FAISS, or modify the catalog, indexes, caches, PID/build/lease files, or configuration. Its `--json` document has `collections` and `sources` at the top level and uses the HTTP record schemas. It omits private locators and absolute paths. `zimantic prune --dry-run` provides the same read-only inventory.
 
-`zimantic reload` sends SIGHUP and reports that the signal was delivered, not that the background refresh has finished. A normal server rescans every startup-configured provider (ZIM, files, Kolibri, and Kiwix) but does not reread config; restart after adding, removing, or editing a collection entry or any other setting. A second signal during a refresh is ignored. A `serve --debug` process instead restarts and rereads config on SIGHUP, as before; on platforms without SIGHUP the server is restarted the same way.
+`zimantic prune --yes` holds the build lock and target-based config lock. It rereads configuration and discovery, then deletes only indexes with a valid Zimantic-owned manifest whose collection namespace is not configured. It retains or reports missing or malformed configuration, entries with unknown scope, unavailable discovery, stale `.tmp`/`.upgrade` files, and unrecognized indexes. It never deletes files by filename alone. Manual configuration edits must not race with `prune`. Restart running servers after you edit collection roots and before you build or prune. A stale server can still refer to a removed or different entry. Leases protect open generations, but not indexes the server has not opened. An ad-hoc collection append is safe while a server runs because its scoped catalog refresh does not remove that collection.
+
+`zimantic reload` sends SIGHUP and reports that the signal was delivered, not that the background refresh has finished. A normal server rescans every provider configured at startup (ZIM, files, Kolibri, and Kiwix), but does not reread configuration. Restart the server to load edited settings. A second signal during a refresh is ignored. A `serve --debug` process restarts and rereads configuration on SIGHUP. On platforms without SIGHUP, restart the server to load settings.
 
 Logging defaults to warnings, except that `serve`, `open`, and `model` use info when stderr is a terminal. Repeat `--verbose`/`-v` for info and debug output.
 
@@ -647,7 +649,7 @@ It starts a temporary server on `127.0.0.1` and opens the first selected ZIM. Th
 
 The scope is read-only and process-scoped. `open` never builds, resumes, publishes, or prunes an index; it never writes `catalog.sqlite`, an index, `zimantic.pid`, a build lock, or config. It may read the persistent catalog once to identify a selected archive, then opens any matching finished index read-only. A uniquely matched catalogued archive keeps its normal source key and `/content/<key>/` URL, so links match a `serve` process using the same catalog. An unmatched, ambiguous, or unreadable archive gets an ephemeral `zim:open:<name>-<position>` key that never locates a persistent index. If a finished index is missing, stale, or mismatched, the archive's native full-text index is used; a ZIM with neither remains readable and navigable but is not searchable.
 
-When more than one ZIM is selected, the article toolbar gains a separate previous/next ZIM arrow group. It switches to the adjacent archive's homepage in command-line order and wraps at both ends. These arrows are independent of the search-result and parent-page arrows, and they appear in error shells too so a bad article cannot strand the reader. `--fast` disables the model and FAISS for this process, just like `serve --fast`; without it, title and full-text search work immediately while semantic search may become available when the model is ready.
+When more than one ZIM is selected, the article toolbar shows separate previous/next ZIM arrows. They open the adjacent archive's homepage in command-line order and wrap at both ends. These arrows are independent of the search-result and parent-page arrows. They also appear in error shells. `--fast` disables the model and FAISS for this process, just like `serve --fast`; without it, title and full-text search work immediately while semantic search may become available when the model is ready.
 
 `zimantic serve` continues to use the persistent catalog, configured collections, PID file, and SIGHUP reload behavior. Stop the `open` process with Ctrl-C or SIGTERM; it closes its indexes and removes nothing from the user's library.
 
@@ -714,9 +716,9 @@ The path-triggered fast build runs for each ZIM in `zims/`. The full build runs 
 
 The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server that cannot fit its archives fails visibly instead of looping through OOM kills. Check `systemctl --user status zimantic` and `journalctl --user -u zimantic`; after fixing the cause, `systemctl --user reset-failed zimantic` clears the rate limit. Its header also shows `MemoryHigh`/`MemoryMax` pairs for a Pi Zero 2 W and a Pi 5; uncomment and adjust them for the device, leaving headroom for the OS and kiwix-serve. `MemoryHigh` throttles first; `MemoryMax` is the hard limit that OOM-kills only Zimantic.
 
-Each unit has install instructions in its header. The units assume runtime data at the default XDG data directory, `~/.local/share/zimantic`, and the CLI installed at `~/.local/bin/zimantic`. Their working directory preserves legacy `config.toml` fallback, while an XDG config takes precedence. If you use a custom `XDG_DATA_HOME`, adjust `WorkingDirectory`, `ReadWritePaths`, and `PathChanged`; if your systemd user manager does not inherit custom XDG variables, add them to the units or a drop-in.
+Each unit has install instructions in its header. The units use the default XDG data directory, `~/.local/share/zimantic`, and the CLI at `~/.local/bin/zimantic`. Their working directory supports the current-directory `config.toml` fallback. An XDG config takes precedence. If you use a custom `XDG_DATA_HOME`, adjust `WorkingDirectory`, `ReadWritePaths`, and `PathChanged`. If your systemd user manager does not inherit custom XDG variables, add them to the units or a drop-in.
 
-The units call the installed `~/.local/bin/zimantic` executable. `reload` does not need the config file; it reads the PID from `$XDG_RUNTIME_DIR/zimantic/zimantic.pid`, falling back to the legacy `./zimantic.pid` when present, or from the file passed with `--pid`.
+The units call the installed `~/.local/bin/zimantic` executable. `reload` does not need the config file. It reads the PID from `$XDG_RUNTIME_DIR/zimantic/zimantic.pid`, then from `./zimantic.pid` when present, or from the file passed with `--pid`.
 
 Watch `zims/`, not `indexes/`, because builds write to `indexes/`. If you [copy finished indexes from another machine](#copying-finished-indexes-to-another-machine), watch `indexes/` and run only `reload`.
 
@@ -726,7 +728,7 @@ A running `serve` discovers indexes with `zimantic reload`; a fast index remains
 
 The source picker discovers available sources and sorts matching sources by result count, grouped by collection. Each group shows its top `source_filter_limit` sources (10 by default) plus an **Other** disclosure for the rest, and sourced-filter searches show up to 30 matches plus **Show N more**. Selected sources stay visible even when their group is not expanded. Dated and flavour variants of one book collapse to a single source here and in the library view.
 
-- Selecting a collection header searches that whole collection as one unit. Only one collection group can be selected at a time; selecting another replaces it. Selecting an individual source switches to individual-source display mode and clears the group selection, after which sources from different groups can be combined. The other searched sources stay available in the picker, and a new query keeps the previous ranked scope while narrowing the returned page to the selected sources.
+- Selecting a collection header searches that whole collection as one unit. Only one collection group can be selected at a time; selecting another replaces it. Selecting an individual source switches to individual-source display mode and clears the group selection, after which sources from different groups can be combined. The other searched sources stay available in the picker, and the next query keeps the current ranked scope while narrowing the returned page to the selected sources.
 - An explicit source or collection selection always defines the search scope directly. There is no small-selection promotion and no `zim` parameter: the canonical API parameter is `source`, and `collection` selects one collection as a unit.
 - A source selected outside an unscoped Kiwix fan-out cap is still searched explicitly. An explicitly selected Kiwix collection is bounded by `max_explicit_collection_sources` (500 by default) and the request deadline. Partial scope is reported explicitly rather than claiming that every book completed.
 - An unknown source or collection key is rejected with HTTP 400 instead of silently becoming an unscoped search. A known but unsearchable source, or an intersection with no eligible sources, searches no sources rather than broadening the scope.
@@ -853,9 +855,9 @@ The phase-09 release fixture and Pi 4 benchmark harness live under
 `tests/fixtures/mixed_library/` and `tests/benchmarks/`.  A result recorded on
 the documented hardware is required; a missing result is unverified, not a pass.
 
-See [release notes](docs/release-notes-1.0.0.md) for the required config,
-catalog, and index rebuilds, and [known issues](docs/known-issues.md) for the
-pinned Kolibri schema and derived-text engine limitations.
+See [Zimantic 1.0 architecture](docs/release-notes-1.0.0.md) for the provider
+model and [current limitations](docs/known-issues.md) for the Kolibri schema
+and derived-text engine requirements.
 
 ### Resource limits
 
@@ -867,7 +869,7 @@ pinned Kolibri schema and derived-text engine limitations.
 | Bytes per indexed item | `max_entry_bytes` | extraction |
 | Indexed body text per item | `max_body_text_bytes` (1 MiB) | lexical text; reports `body_truncated_count` |
 | Staged index replacement | current + replacement + reserve | abort on storage errors; keep last good generation |
-| Derived preview cache per source | `max_derived_cache_bytes_per_source` (512 MiB) | omit new previews at cap; searchable postings remain |
+| Derived preview cache per source | `max_derived_cache_bytes_per_source` (512 MiB) | omit previews at cap; searchable postings remain |
 | Kiwix catalog entries | `max_catalog_entries` (50,000) | oversized/unpageable catalog keeps the last good snapshot |
 | Caption bytes | 1 MiB (`max_caption_bytes`) | caption parser |
 | Kolibri HTML5 zip | 10k members / 8 MiB directory / 256 MiB member / 1 GiB total / 10 s | manifest validation and bounded reads |
@@ -885,12 +887,12 @@ explicit incomplete/error state, not a complete prefix.
 
 ## Using a different embedding model
 
-The default is `multilingual-e5-small`, but Zimantic loads whatever ONNX graph and tokenizer vocabulary are in `model_dir`. Two tokenizer formats are supported:
+The default is `multilingual-e5-small`, but Zimantic loads the ONNX graph and tokenizer vocabulary in `model_dir`. Two tokenizer formats are supported:
 
 - `sentencepiece.bpe.model` selects the XLM-R SentencePiece tokenizer used by the multilingual-e5 models.
 - `vocab.txt` selects the BERT WordPiece tokenizer used by the English e5-v2 models.
 
-Zimantic chooses by which vocabulary file is present. If a directory contains both, it reads `tokenizer_config.json` when available; otherwise it keeps the historical SentencePiece choice. The ONNX graph cannot reliably identify its tokenizer, so this file-based switch is the dependable signal. Apart from the vocabulary, the model must follow the same e5 contract: `input_ids` and `attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state` output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes.
+Zimantic selects the tokenizer from the vocabulary file. If the directory contains both files, it reads `tokenizer_config.json` when available. Otherwise, it selects SentencePiece. The ONNX graph does not identify its tokenizer. Apart from the vocabulary, the model follows the e5 contract: `input_ids` and `attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state` output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes.
 
 `zimantic model` downloads the Xenova ONNX exports from a pinned revision and verifies each file's SHA-256 before replacing the destination. For the default model, fp32 is about 470 MB, fp16 about 235 MB, and int8 about 118 MB (the int8 export is Xenova's `model_quantized.onnx`). The default is int8, which is the smallest download and is optimized for CPU inference. **If you run embeddings on a GPU, prefer `zimantic model fp16`**: accelerated providers generally execute fp16 faster than quantized int8. Use fp32 only when comparing against a full-precision baseline. The probe check described below lets indexes built with one precision be served with another without re-embedding.
 
@@ -908,7 +910,7 @@ zimantic model int8 --model e5-small-v2 --dir model-e5-small-v2
 
 The same command works for other BERT WordPiece e5-v2 models such as `e5-base-v2` and `e5-large-v2`; run `zimantic model --list` for the full set. Each precision goes into its own folder (`model-e5-small-v2/int8`, for example), so you can compare or switch without redownloading. Pass `--force` to replace an existing file whose checksum does not match.
 
-Point `model_dir` at one precision folder from the new model, use a separate `index_dir` so the old indexes stay usable, and rebuild every index:
+Set `model_dir` to a precision folder for the selected model. Use a separate `index_dir` to keep the current indexes available while you build indexes for the selected model:
 
 ```toml
 model_dir = "./model-e5-small-v2/int8"
@@ -939,7 +941,7 @@ These measurements use 256-token passages, batch size 32, and 4 CPU threads on o
 
 `e5-small-v2` has the same 12-layer, 384-hidden encoder as `multilingual-e5-small`; the smaller file comes from a 30k-entry instead of a 250k-entry embedding table. It therefore saves roughly 125 MB of resident memory but embeds at about the same speed, and it cannot search non-English text. Choose it only for an English-only library on a RAM-constrained host; otherwise the default gives much broader coverage for the same compute.
 
-Vector storage also grows with dimension: an 8-bit IVF index stores one byte per dimension per article (384 B, 768 B, and 1 KB), while a flat index for under 10,000 articles stores float32 vectors (1.5 KB, 3 KB, and 4 KB). FAISS flat indexes do not provide float16 storage; the SQLite staging table uses float16 while a build runs, but vectors are widened to float32 when written to FAISS. For a mostly English library on a small device, keep the default; base is a reasonable upgrade when cross-language recall matters; large needs a machine with more RAM.
+Vector storage also grows with dimension: an 8-bit IVF index stores one byte per dimension per article (384 B, 768 B, and 1 KB), while a flat index for under 10,000 articles stores float32 vectors (1.5 KB, 3 KB, and 4 KB). FAISS flat indexes do not provide float16 storage; the SQLite staging table uses float16 during a build, but vectors are widened to float32 when written to FAISS. For a mostly English library on a small device, use the default. The base model is an option when cross-language recall matters; the large model needs more RAM.
 
 ## Measured memory use
 
@@ -973,12 +975,12 @@ Each article's **excerpt** is extracted transiently for the embedding and discar
 
 **Storage.** Each ZIM gets an immutable generation under `index_dir/<provider>/<collection-slug>-<hash>/<source-slug>-<hash>/generations/<build-generation>/` (`index.sqlite`, optional `index.faiss`, and a `lease`), plus one shared catalog:
 
-- `index.sqlite`: titles, paths, redirect targets, title postings, and a separate contentless FTS5 body index. The `vecs` table exists in every generation but is empty once a full build writes `index.faiss`; a fast build leaves it empty too. Raw excerpts and raw derived text are not stored in the new schema.
+- `index.sqlite`: titles, paths, redirect targets, title postings, and a separate contentless FTS5 body index. The `vecs` table exists in every generation but is empty once a full build writes `index.faiss`; a fast build leaves it empty too. Raw excerpts and raw derived text are not stored.
 - `index.faiss`: the vectors (the only place finished embeddings are stored), in one of two layouts depending on article count. A fast or empty-semantic build has no `index.faiss`.
 - `staging-fast.sqlite` / `staging-full.sqlite` (when present): resumable private staging files. They are not published generations and are removed after a successful build or a fatal failure.
 - `catalog.sqlite` (beside `index_dir`, not inside it): a provider-neutral `sources` table keyed by canonical source key, with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, provider ID, category, normalized tags, item count, license, origin, attribution, relation, content-type counts, homepage, native full-text capability, and the icon as a BLOB). It stores the absolute archive path only as a private indexed locator, never as source identity. It contains metadata and icons only, never vectors. It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. A warm catalog lets `serve` list sources without opening every archive; the startup scan still opens each new, resized, or previously failing ZIM to refresh its row, and the first scan after deleting the catalog opens every archive. After that, archives and their libzim `Searcher` objects are opened lazily on first use. A missing or unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the previous catalog, rather than being mistaken for a library from which every ZIM disappeared. While the directory is unavailable, the served `/sources` and `/library.json` lists are empty; the catalog rows remain on disk for the next successful scan once the directory is back. An unreadable subdirectory is logged as an error and its sources are omitted, but the rest of the library stays available.
 
-The logical source key is derived from the provider, collection, and root-relative archive path, never from an absolute filesystem path. Relocating a collection root without changing its relative layout preserves keys. Two archives can share a stem and size and still be distinct sources; every build writes a fresh immutable generation and atomically replaces the `current` manifest. Build fingerprints use the archive UUID, size, and whole-second mtime as a practical change detector, not proof of identical bytes: a same-size write that also restores the mtime can evade detection. Keep source content immutable or use an external snapshot when strong consistency matters. Pre-redesign stem-based indexes are left untouched but are not served; rebuild under the new locator to restore indexed search. To copy a subset of finished indexes to another machine, see [Copying finished indexes to another machine](#copying-finished-indexes-to-another-machine).
+The logical source key uses the provider, collection, and root-relative archive path, never an absolute filesystem path. Relocating a collection root without changing its relative layout preserves keys. Two archives can share a stem and size and still be distinct sources; each build writes an immutable generation and atomically replaces the `current` manifest. Build fingerprints use the archive UUID, size, and whole-second mtime as practical change detectors, not proof of identical bytes. A same-size write that restores the mtime can evade detection. Keep source content immutable or use an external snapshot when strong consistency matters. Indexes with stem-based paths are not served; build them with the current locator to restore indexed search. To copy a subset of finished indexes to another machine, see [Copying finished indexes to another machine](#copying-finished-indexes-to-another-machine).
 
 | ZIM size | Vector index | Why |
 |---|---|---|
@@ -991,13 +993,13 @@ The `.faiss` file is memory-mapped, so searches read only the clusters they touc
 
 Builds resume from the last saved batch. FAISS files are published atomically, and a fast index remains available while a full index builds. Changing between `--fast` and a full build after an interruption restarts that index, because fast rows have no vectors to reuse. `build --force` applies the configured extraction and preview settings while rebuilding the selected indexes.
 
-Use `--force` when a completed index must be regenerated even though its ZIM still has the same filename stem and byte size. This includes changing the embedding model or tokenizer, changing text-extraction or indexing behavior, replacing a ZIM with different content but the same size, converting a full index back to `--fast`, repairing a completed index whose `.faiss` file is missing, or intentionally replacing a suspect index. It is not normally needed when a ZIM's size changes (that automatically triggers a rebuild), when resuming an interrupted build, or when upgrading a fast index to a full index (which is automatic). `--force` deletes the existing SQLite, FAISS, and upgrade files before rebuilding, so use a separate `index_dir` for model migrations when the old indexes should be preserved.
+Use `--force` to rebuild a completed index when the ZIM has the same filename stem and byte size. Use it when you select a different embedding model or tokenizer, change text extraction or indexing behavior, replace a ZIM with different content of the same size, convert a full index to `--fast`, repair an index whose `.faiss` file is missing, or replace a suspect index. It is not needed when the ZIM size differs, when a build resumes, or when a full build follows a fast build. `--force` deletes the existing SQLite, FAISS, and upgrade files before rebuilding. Use a separate `index_dir` to preserve indexes for another model.
 
 ### 2. Starting the server
 
-At startup Zimantic reads the shared `catalog.sqlite` for source metadata, homepages, counts, and icons, then resolves the `current` manifest of each **finished** index generation whose archive is still present and matches the build-time source fingerprint. A cold catalog (or one deleted to force a rebuild) is refreshed synchronously and opens each new or changed ZIM once; after that, archives and their libzim `Searcher` objects are opened lazily on the first search or article request. Zimantic also discovers ZIM files in `zim_dir` that lack a usable SQLite index and uses each archive's native full-text index as a graceful fallback.
+At startup Zimantic reads the shared `catalog.sqlite` for source metadata, homepages, counts, and icons. It resolves the `current` manifest of each **finished** index generation whose archive is present and matches the build-time source fingerprint. A cold catalog is refreshed synchronously. The scan opens each ZIM that is not in the catalog, whose fingerprint differs, or whose prior scan failed. The server opens other archives and their libzim `Searcher` objects on the first search or article request. Zimantic also discovers ZIM files in `zim_dir` without a usable SQLite index and uses each archive's native full-text index as a fallback.
 
-An index whose ZIM is missing is ignored. An index whose archive has changed size is set aside, and the archive is served unindexed instead (re-run `build` to restore the index), so a partial or stale index never masks the ZIM that is actually available. Each stem appears only once: a finished SQLite index takes precedence over the filesystem fallback, and an unfinished one leaves the stem to that fallback. FAISS and vector files load in the background during startup, so title-word and full-text searches are available while meaning search initializes.
+An index whose ZIM is missing is ignored. A size mismatch makes the server set the index aside and serve the archive without an index. Run `build` to restore indexed search. A partial or stale index never masks the available ZIM. For each source, a finished SQLite index takes precedence over the filesystem fallback; an unfinished index uses that fallback. FAISS and vector files load in the background during startup, so title-word and full-text searches are available while meaning search initializes.
 
 The page automatically lists sources from every configured collection. A Kiwix collection discovers catalog sources and searches them with Kiwix full-text search. Catalog discovery is paged and capped per entry at `max_catalog_entries` (default 50,000); remote XML responses are capped at `max_response_bytes` (default 64 MiB). An unscoped search uses at most each entry's `max_remote_sources` (default 100); selecting a remote source explicitly always searches it. Selecting a Kiwix collection explicitly schedules sources in catalog order up to the global `max_explicit_collection_sources` (default 500) and the request deadline, and reports any partial scope instead of claiming completion. Catalog refresh runs in the background: a failed refresh keeps the last complete catalog addressable, retries with bounded backoff, and reports the failure on the collection's discovery state. A failed source search is reported only in that request's result, so the next request can try again immediately.
 

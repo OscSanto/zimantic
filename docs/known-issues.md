@@ -1,20 +1,21 @@
-# Known issues
+# Current limitations
 
-## Kolibri support is pinned to v0.19.5
+## Kolibri schema
 
-The installed Kolibri SQLite schema is recognized by its v0.19.5 tables,
-columns, and content migration history.  Other releases and export databases
-are reported as unsupported instead of guessed.  Zimantic never migrates,
-repairs, or writes the installation.  A live WAL is included in private
-snapshots, and a database that changes during the bounded copy fails closed.
+Zimantic supports the installed Kolibri SQLite schema from v0.19.5. It
+identifies the schema from its tables, columns, and content migration history.
+Other releases and export databases are reported as unsupported. Zimantic
+never migrates, repairs, or writes the installation. Private snapshots include
+committed WAL data. A concurrent write during the bounded copy makes the copy
+fail closed.
 
 ## Derived text is optional and local-only
 
-`captions`, `ocr`, and `asr` are independent build-time opt-ins and all default
-off.  A provider with no enabled operation reads no caption, image, or media
-bytes.  Engines are never loaded by `serve`, and transcription itself is
-local; the only network use is the one-time checkpoint download.  Missing local
-engines make only that operation unavailable.
+`captions`, `ocr`, and `asr` are independent build-time options. They are off
+by default. A provider with no enabled operation does not read caption, image,
+or media bytes. Engines run only during a build, not in `serve`. Transcription
+runs locally. The only network use is the one-time checkpoint download. A
+missing local engine makes only its operation unavailable.
 
 - Embedded caption tracks require a local `ffmpeg`/`ffprobe` pair.
 - OCR requires a local engine and model; pages, pixels, and output are bounded.
@@ -22,39 +23,37 @@ engines make only that operation unavailable.
   missing checkpoint is downloaded and verified on first use, so
   the first build needs network access unless the model is already cached.
   Media duration and bytes are bounded.
-- A partial requested enrichment publishes the available channels, reports the
-  partial state, and exits the build non-zero.
-- Auto worker resolution is memory- and CPU-derived.  On a host where one
-  worker cannot fit, the operations are reported unavailable rather than
-  silently run.
+- A partial enrichment publishes available channels, reports a partial state,
+  and exits the build with a non-zero status.
+- Automatic worker selection uses memory and CPU resources. If one worker
+  cannot fit, the operation is unavailable.
 
-## Secure browsing is shell-scoped
+## Secure browsing
 
-`secure_browsing = true` sandboxes the article iframe inside `/content/`.  A raw
-`/article/` document opened directly or in a permitted popup is not sandboxed
-and can run with the app origin and persistent browser storage.  It is not a
-complete security boundary for untrusted content; use a browser sandbox or
-separate profile for hostile file trees.
+`secure_browsing = true` sandboxes the article iframe inside `/content/`. A raw
+`/article/` document opened directly or in a permitted popup is not sandboxed.
+It can use the app origin and persistent browser storage. This setting is not a
+complete security boundary for untrusted content. Use a browser sandbox or a
+separate profile for untrusted file trees.
 
-## Pi 4 release benchmark must be recorded
+## Raspberry Pi 4 benchmark
 
-The Raspberry Pi 4 targets (cold startup under 120 s, mixed-library search p95
-under 8 s, peak RSS under 1 GiB) are verified only by a recorded run of
-`tests/benchmarks/run_mixed.py` on the documented fixture and hardware.  The
-repository ships the fixture generator and harness, but a missing hardware
-result is an unverified gate rather than a pass.
+The Raspberry Pi 4 targets are cold startup under 120 seconds, mixed-library
+search p95 under 8 seconds, and peak RSS under 1 GiB. A recorded run of
+`tests/benchmarks/run_mixed.py` on the documented fixture and hardware verifies
+these targets. The repository includes the fixture generator and harness. A
+missing hardware result is unverified.
 
 ## Windows filesystem confinement
 
 Files, Kolibri, and HTML5 zip reads use descriptor-relative no-follow opens on
-platforms that provide them.  On platforms without those primitives the local
-filesystem stores fail closed rather than silently falling back to a racy
-check-then-open path.  Windows x86-64 indexed build/search and reader-lease
-coverage remains part of the release matrix.
+platforms that support them. On other platforms, local filesystem stores fail
+closed; they do not use a race-prone check-then-open path. Windows x86-64
+indexed build, search, and reader-lease tests remain in the release matrix.
 
 ## Filtering and UI scale
 
-Collections are the grouping unit.  Items never become sources, and the library
-uses bounded paged source loads.  A collection that exceeds its configured
-source cap collapses to one source with a changed key; rebuild and update any
-exact `[[collections.sources]]` override after a collapse or recovery.
+Collections group sources. Items remain within their source. The library loads
+sources in bounded pages. If a collection exceeds its source cap, it collapses
+to one source with a different key. Rebuild the index and update any exact
+`[[collections.sources]]` override that uses the other state's key.

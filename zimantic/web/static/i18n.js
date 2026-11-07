@@ -60,7 +60,7 @@
             "Provider": "Proveedor",
             "Filter by provider": "Filtrar por proveedor",
             "All providers": "Todos los proveedores",
-            "Content": "Contenido",
+            "Content type": "Tipo de contenido",
             "Filter by content type": "Filtrar por tipo de contenido",
             "All content": "Todo el contenido",
             "Text": "Texto",

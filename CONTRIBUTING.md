@@ -1,28 +1,28 @@
 # Contributing to Zimantic
 
-Thanks for helping! Zimantic is an offline, multilingual search engine for Kiwix ZIM files, built to
-run on small hardware such as a Raspberry Pi. Contributions of all sizes are welcome: bug reports, fixes,
-documentation, new query sets for the evaluation, and new features.
+Zimantic is an offline, multilingual search engine for Kiwix ZIM files. It runs
+on small devices, including Raspberry Pi computers. Contributions include bug
+reports, fixes, documentation, evaluation queries, and features.
 
-## What Zimantic aims for
+## Project goals
 
-Please keep these in mind; they guide what gets merged:
-
-1. **Offline.** Everything runs without internet access once set up.
-2. **Multilingual.** Search should work across languages, not only English. Language-specific rules
-   (word lists, stemming, phrases) should not make other languages worse.
-3. **Measured.** Changes to ranking or indexing should be measured, not random. 
+1. **Offline operation.** The application runs without network access after
+   setup.
+2. **Multilingual search.** Search supports languages beyond English.
+   Language-specific rules do not reduce search quality in other languages.
+3. **Measured ranking and indexing.** Evaluation results guide ranking and
+   indexing work.
 
 ## How to contribute
 
-1. **Open an issue first** for anything bigger than a small fix, so we can agree on the approach.
-2. **Fork** the repository and create a **branch** for your change 
-3. Keep each pull request to **one topic**. Several small PRs are easier to review and merge than one
-   large one. If you are still working on it, open it as a **draft** and mark it ready when done.
-4. Open a pull request against `main` and describe what changed and why.
+1. Open an issue before work that needs design discussion.
+2. Fork the repository and create a branch.
+3. Keep each pull request focused on one topic. Use a draft pull request while
+   work is in progress.
+4. Open the pull request against `main`. Describe its purpose and behavior.
 
-To pick up changes from `main` while your PR is open, sync your fork (GitHub's **Sync fork** button,
-or `git pull upstream main`).
+To update your fork from `main`, use GitHub's **Sync fork** button or run
+`git pull upstream main`.
 
 ## Development install
 
@@ -35,13 +35,13 @@ uv sync
 
 `uv sync --no-dev` omits test tools. `pip install .` also works in a virtual environment.
 
-## Before you open a pull request
+## Pull request requirements
 
-- **Tests:** if you add or change behaviour that can be tested, add tests in `tests/` (pytest) and make
-  sure `python -m pytest` passes. (The project doesn't have a test suite yet; the first PR to add one
-  is welcome.)
-- **Evaluation, for ranking or indexing changes:** measure `main` and your branch on the same machine,
-  with the same ZIM files, and include the comparison in the PR (see
+- **Tests:** Add tests in `tests/` for testable behavior. Run
+  `python -m pytest`.
+- **Evaluation:** Ranking and indexing use the evaluation harness. Measure
+  `main` and the pull request branch on the same machine and with the same ZIM
+  files. Include the comparison in the pull request (see
   [evaluation/README.md](evaluation/README.md)):
   ```bash
   # 1. on main: start the server (python -m zimantic serve), then in a second terminal
@@ -51,19 +51,21 @@ uv sync
   # 3. compare (the first file is the baseline)
   python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
   ```
-  Only the ZIMs your server has indexes for are measured; the others are listed and left out. Report the
-  results **by language and by query type**, and the **fixed / broken** counts, not only the overall
-  number. If your change affects how indexes are built, rebuild the indexes on your branch before step 2
-  (keep a copy of main's). Tune settings on `--split dev` and report on `--split test`.
-- **Documentation:** update the README when behaviour, configuration, commands or published numbers
-  change. Numbers in the README should come from a measurement of that version.
-- **Compatibility:** if a change breaks existing configs, indexes or commands, say so in the PR and
-  give users a clear message or migration path (e.g. "index built with an older version, please rebuild").
+  The harness measures ZIMs with indexes and lists the others without scoring
+  them. Report results **by language and query type**, plus **fixed / broken**
+  counts. For indexing work, build separate indexes on each branch. Tune with
+  `--split dev` and report with `--split test`.
+- **Documentation:** Keep the README accurate for current behavior,
+  configuration, commands, and published measurements. Use measurements from
+  the documented version.
+- **Compatibility:** Document supported configuration, index, and command
+  formats. For an unsupported format, provide a clear diagnostic and migration
+  path.
 
 ## Code style
 
-Match the surrounding code: plain, readable Python, comments that explain *why*. Keep dependencies few;
-anything that must run on the Pi should be checked for memory use.
+Follow the surrounding style: use clear Python and comments that explain why.
+Keep dependencies few. Check memory use for code that runs on a Raspberry Pi.
 
 ## Provider contracts
 
@@ -96,53 +98,52 @@ the seam in `zimantic/providers/`:
   starve or crash other providers. No provider may turn a failed operation into
   an empty successful result.
 
-Changes to these contracts require updating the contract tests in
-`tests/providers/`, the collection/source serializers, and the migration notes
-in `plans/`.
+The contract tests in `tests/providers/`, collection/source serializers, and
+the migration notes in `plans/` define these contracts.
 
 ### Adding an in-tree provider
 
-Providers ship in this repository. There is no third-party plugin loading,
-entry-point discovery, download, or dynamic execution of untrusted provider
-code. Add a provider only when it belongs in-tree and can meet the same
-contracts:
+Providers ship in this repository. Zimantic does not load third-party plugins,
+discover entry points, download providers, or run untrusted provider code.
+Every in-tree provider meets the same contracts:
 
-1. Add a typed config dataclass and a `ProviderConfigSpec` in
+1. Define a typed config dataclass and a `ProviderConfigSpec` in
    `zimantic/providers/config.py` with an allowed-key set, a parser, provider
    defaults, and whether the provider is buildable. Generic `type`/`name`/
    duplicate validation stays in `parse_collections`; provider-specific keys
    and positive-int/range checks stay in the provider parser.
 2. Register the `SourceProvider` in `zimantic/providers/registry.py`. Registry
-   lookup failures stay explicit; there is no fallback provider.
+   lookup failures are explicit; no fallback provider exists.
 3. Implement discovery and runtime contracts in `zimantic/providers/<name>/`:
    one configured entry may yield zero or several collections, a runtime
    publishes an immutable snapshot with `loading`/`ready`/`error`/`closed`,
    and a buildable local provider implements `BuildableRuntime.entry_producer`.
 4. Use the shared `IndexLocator` for every local index path and generation.
-   Never compute an index path in the provider, and never derive a logical key
-   or filename from an absolute source path.
-5. Enforce caps and path confinement before reading content. Discovery must be
-   bounded by the configured `max_sources`/`max_entries` and traversal budgets;
-   local content must be confined to the configured root; remote responses need
-   byte/time bounds. A capped operation reports truncation or partial scope,
-   not an empty success.
-6. Isolate failures per entry and per source. One provider's timeout or error
-   must not crash `serve`, hide another provider, or turn into an empty
-   successful result. Preserve the last complete snapshot on a failed refresh.
-7. Add contract tests in `tests/providers/` for source identity, snapshot states,
-   content-store behaviour (or remote-only `None`), search/suggest errors,
-   caps, path confinement, and failure isolation. Add CLI/config tests for the
-   new entry type.
-8. Update `config.toml`, the README provider section, and `deploy/` examples
-   (build path/timer and service read paths) in the same change.
+   Providers do not compute index paths or derive logical keys or filenames
+   from absolute source paths.
+5. Enforce caps and path confinement before reading content. Configured
+   `max_sources`, `max_entries`, and traversal budgets bound discovery. Local
+   content stays inside the configured root. Remote responses have byte and
+   time limits. A capped operation reports truncation or partial scope, not
+   success with an empty result.
+6. Isolate failures by entry and source. A provider timeout or error does not
+   stop `serve`, hide another provider, or return an empty success. A failed
+   refresh preserves the last complete snapshot.
+7. Cover source identity, snapshot states, content-store behavior (or
+   remote-only `None`), search/suggest errors, caps, path confinement, and
+   failure isolation in `tests/providers/`. Add CLI and config tests for the
+   provider.
+8. Document the provider in `config.toml`, the README, and the relevant
+   `deploy/` examples (build path/timer and service read paths).
 
 ## Hardening and release gates
 
-Changes that touch a provider, path handling, MIME classification, ranges, XML,
-SQLite, or the build/index lifecycle must keep the phase-09 gates green:
+Provider, path, MIME, range, XML, SQLite, and build/index work keeps the
+phase-09 gates green:
 
 - Run the full suite with `python -m pytest`.
-- Add an adversarial test for every new path/MIME/range/archive/database input.
+- Add an adversarial test for each path, MIME, range, archive, or database
+  input.
   Cover `..`, encoded and double-encoded separators, backslashes, NUL bytes,
   absolute paths, symlink replacement, zip-slip, oversized members, unknown
   binaries, single-range validation, and XML DTD/entity rejection in UTF-8 and
@@ -151,54 +152,53 @@ SQLite, or the build/index lifecycle must keep the phase-09 gates green:
   exception details in API payloads, redirects, ETags, or logs above debug
   level.  Use `zimantic.diagnostics` for redaction and stable causes.
 - Keep provider failures operation-scoped.  A broken discovery, search, index,
-  or content read must not hide another source or change `serve` into a crash.
+  or content read does not hide another source or crash `serve`.
 - Preserve the `truncated`, `indexed_count`, `body_truncated_count`,
   `last_refresh`, `collapsed`, and index-state fields across source, library,
   collection, health, and `zimantic sources --json` payloads.
-- Security review is required for path, zip, MIME, and range changes before a
-  release.
+- Security review covers path, zip, MIME, and range handling before release.
 
 The mixed-library release fixture is versioned under
 `tests/fixtures/mixed_library/` and the harness under `tests/benchmarks/`.
 Generate it with `python tests/fixtures/mixed_library/generate.py --root
-/tmp/zimantic-mixed --force` and record a Pi 4 result with
-`tests/benchmarks/run_mixed.py`.  A missing hardware result is unverified, not
-a pass.  Release notes must list the required config, catalog, and index
-rebuilds plus any removed compatibility paths.
+/tmp/zimantic-mixed --force`. Record Raspberry Pi 4 results with
+`tests/benchmarks/run_mixed.py`. A missing hardware result is unverified, not
+a pass. Release notes list required config, catalog, and index rebuilds and
+unsupported compatibility paths.
 
 ## Release and deploy
 
-The Makefile can increment the patch version, update `uv.lock`, commit and publish an
-annotated tag:
+The Makefile increments the patch version, updates `uv.lock`, commits, and
+publishes an annotated tag:
 
 ```bash
 make release                 # 0.1.4 -> 0.1.5
 make release VERSION=1.0.0  # explicit version override
 ```
 
-To deploy a published tag to the default test box:
+Deploy a published tag to the default test host:
 
 ```bash
 make deploy VERSION=v0.1.5
-make release-deploy           # release, then deploy the new version
+make release-deploy           # publish and deploy a release
 ```
 
-Set `DEPLOY_HOST` and `DEPLOY_PATH` to override the SSH target and remote checkout.
-The deploy target updates the existing checkout, reinstalls the package, restarts
-`zimantic.service`, and verifies the HTTP service and installed package version.
+Set `DEPLOY_HOST` and `DEPLOY_PATH` to select the SSH host and remote checkout.
+The deploy target updates the checkout, reinstalls the package, restarts
+`zimantic.service`, and checks the HTTP service and installed package version.
 
-For a development deploy, stage the changes to send and apply them to the existing
-remote checkout without checking out a tag. Before applying the patch, the deploy
-resets tracked files in the remote checkout to `HEAD`, discarding previous
-development-deploy changes:
+For a development deploy, stage the files to send. The deploy applies them to
+the existing remote checkout without checking out a tag. Before it applies the
+patch, the deploy resets tracked files in the remote checkout to `HEAD`. This
+removes earlier development-deploy edits:
 
 ```bash
-git add path/to/changed-file
+git add path/to/file
 ./scripts/deploy.sh --dev
 # or: make deploy DEV=1
 ```
 
-The development deploy leaves the newly applied changes in the remote checkout.
+The development deploy leaves the applied files in the remote checkout.
 
 ## Licensing
 
