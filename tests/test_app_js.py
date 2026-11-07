@@ -56,7 +56,7 @@ console.log(JSON.stringify({{
             capture_output=True,
         )
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["full"], "/?q=q&source=a")
+        self.assertEqual(payload["full"], "/?q=q&display_source=a")
         self.assertEqual(payload["selective"], "/?q=q&source=a&source=b")
         self.assertEqual(payload["grouped"], "/?q=q&collection=zim%3Alibrary")
         self.assertEqual(payload["selected"], ["a"])
@@ -146,7 +146,7 @@ console.log(JSON.stringify({{full, display, collection}}));
         )
         payload = json.loads(result.stdout)
         self.assertEqual(payload["full"], "/?q=q")
-        self.assertEqual(payload["display"], "/?q=q&source=a")
+        self.assertEqual(payload["display"], "/?q=q&display_source=a")
         self.assertEqual(payload["collection"], "/?q=q&collection=files%3Amedia")
 
     def test_source_filter_layout_is_bounded_per_collection_group(self):

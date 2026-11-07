@@ -4019,14 +4019,14 @@
                     // list of hundreds of source keys.
                     url.searchParams.set("collection", resolvedCollection);
                     displayValues.forEach((source) =>
-                        url.searchParams.append("source", source),
+                        url.searchParams.append("display_source", source),
                     );
                 } else if (fullSearch) {
-                    // A full-search pool is already cached; these keys only
-                    // narrow the displayed results and are reloaded as an
-                    // explicit source scope, which is the canonical API rule.
+                    // A full-search pool is already cached; these keys narrow
+                    // only the displayed page and must not become an explicit
+                    // source scope after a reload.
                     displayValues.forEach((source) =>
-                        url.searchParams.append("source", source),
+                        url.searchParams.append("display_source", source),
                     );
                 } else {
                     scopeValues.forEach((source) =>
@@ -4037,7 +4037,7 @@
                         displayValues
                             .filter((source) => !scopeSet.has(source))
                             .forEach((source) =>
-                                url.searchParams.append("source", source),
+                                url.searchParams.append("display_source", source),
                             );
                     }
                 }
@@ -4100,12 +4100,18 @@
                 const scopeSources = [
                     ...new Set(params.getAll("source").filter(Boolean)),
                 ];
+                const displaySources = [
+                    ...new Set(params.getAll("display_source").filter(Boolean)),
+                ];
                 const collection = params.get("collection") || null;
                 return {
                     question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
-                    // `source` is the canonical source-selection parameter and
-                    // `collection` selects one collection as a unit.
-                    selectedSources: scopeSources,
+                    // `source` defines the ranked scope; `display_source`
+                    // narrows only the visible page. A URL with only
+                    // display_source keeps a full search behind the filter.
+                    selectedSources: displaySources.length
+                        ? displaySources
+                        : scopeSources,
                     scopeSources,
                     collection,
                     hasScope: params.has("source") || Boolean(collection),

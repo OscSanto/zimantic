@@ -38,9 +38,9 @@ Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. 
 - 32-bit Linux platforms (armhf/armv7) have no prebuilt wheels for the native dependencies. They work when the dependencies are installed as distribution packages. Debian 13 (trixie) or newer provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic can use them.
 - About 120 MB for the default embedding model, plus the ZIM files. The English-only `e5-small-v2` model is about 35 MB on disk.
 - Wikipedia-style ZIM files. Zimantic relies on their predictable HTML structure to locate useful content blocks.
-- **One provider seam.** ZIM, remote Kiwix, files, and Kolibri are in-tree providers. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator. There is no `mode`, `content_kind`, `book`, or `local_name` field.
-- **Configured collections.** Collections are declared with `[[collections]]` entries (ZIM roots, Kiwix servers, files trees, and Kolibri installations). Removed flat keys such as `zim_dir` and `kiwix_server` are fatal configuration errors with a migration message.
-- No `kiwix-serve` for local sources: Zimantic serves local results and articles directly. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links returned by kiwix-serve's search API.
+- **One provider seam.** ZIM, remote Kiwix, files, and Kolibri are in-tree providers. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
+- **Configured collections.** Collections are declared with `[[collections]]` entries (ZIM roots, Kiwix servers, files trees, and Kolibri installations).
+- No `kiwix-serve` is needed for local sources: Zimantic serves local results and articles directly. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links returned by kiwix-serve's search API.
 
 ## Install
 
