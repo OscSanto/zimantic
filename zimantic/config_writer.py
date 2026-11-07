@@ -164,7 +164,9 @@ def append_collection(
     target = config_target_path(config_path)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        lock = FileLease(config_lock_path(config_path))
+        lock = FileLease(
+            config_lock_path(config_path), description="config lock"
+        )
         lock.acquire(shared=False)
     except (OSError, BuildLockError) as error:
         raise ConfigWriteError(f"could not lock {target}: {error}") from error

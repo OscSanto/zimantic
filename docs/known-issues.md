@@ -17,7 +17,9 @@ used.  Missing local engines make only that operation unavailable.
 
 - Embedded caption tracks require a local `ffmpeg`/`ffprobe` pair.
 - OCR requires a local engine and model; pages, pixels, and output are bounded.
-- ASR requires a local engine and model; media duration and bytes are bounded.
+- ASR requires a local engine; a missing checkpoint is downloaded and verified
+  on first use, so the first build needs network access unless the model is
+  already cached.  Media duration and bytes are bounded.
 - A partial requested enrichment publishes the available channels, reports the
   partial state, and exits the build non-zero.
 - Auto worker resolution is memory- and CPU-derived.  On a host where one

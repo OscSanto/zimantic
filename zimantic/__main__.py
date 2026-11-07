@@ -1620,7 +1620,9 @@ def _run_prune(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             build_lock.acquire()
         except BuildLockError as error:
             sys.exit(str(error))
-        config_lock = FileLease(config_lock_path(config_path))
+        config_lock = FileLease(
+            config_lock_path(config_path), description="config lock"
+        )
         try:
             config_lock.acquire(shared=False)
         except BuildLockError as error:

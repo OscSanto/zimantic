@@ -8,13 +8,13 @@ or ``unavailable`` state instead of failing the whole build.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..whisper_models import cached_whisper_model, ensure_whisper_model
 from .derived import parse_caption_bytes
 
 _DEFAULT_TIMEOUT = 7200
@@ -219,21 +219,9 @@ def _check_image_pixels(payload: bytes, max_pixels: int) -> None:
 
 
 def _whisper_model_path(model: str) -> Path | None:
-    """Return a locally cached whisper model, or ``None``.
+    """Return a locally cached whisper model, or ``None``."""
 
-    The whisper CLI downloads missing models, which would violate Zimantic's
-    offline-only build contract.  Never invoke it unless the selected model is
-    already present in the standard cache.
-    """
-
-    root = Path(
-        os.environ.get("XDG_CACHE_HOME")
-        or (Path.home() / ".cache")
-    ) / "whisper"
-    if not model or Path(model).name != model:
-        return None
-    candidate = root / f"{model}.pt"
-    return candidate if candidate.is_file() else None
+    return cached_whisper_model(model)
 
 
 def extract_asr(payload: bytes, **options: Any) -> str:
@@ -243,11 +231,6 @@ def extract_asr(payload: bytes, **options: Any) -> str:
     if not whisper:
         raise RuntimeError("ASR needs the whisper executable")
     model = str(options.get("asr_model") or "base.en")
-    if _whisper_model_path(model) is None:
-        raise RuntimeError(
-            f"ASR model {model!r} is not cached locally; download it before "
-            "building (whisper would otherwise use the network)"
-        )
     timeout = _positive_int(options, "task_timeout_seconds", _DEFAULT_TIMEOUT)
     max_bytes = _positive_int(options, "max_asr_bytes", 1 << 30)
     max_seconds = _positive_int(options, "max_asr_seconds", 3600)
@@ -262,6 +245,13 @@ def extract_asr(payload: bytes, **options: Any) -> str:
         duration = _probe_duration(media, timeout)
         if duration is not None and duration > max_seconds:
             raise RuntimeError("ASR input exceeds max_asr_seconds")
+        if _whisper_model_path(model) is None:
+            try:
+                ensure_whisper_model(model)
+            except Exception as error:
+                raise RuntimeError(
+                    f"ASR model {model!r} is unavailable: {error}"
+                ) from error
         output = root / "out"
         output.mkdir()
         try:

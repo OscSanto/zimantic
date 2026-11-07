@@ -136,6 +136,106 @@ Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/res
 
 `zimantic reload` is unavailable on Windows because it relies on `SIGHUP`; restart `zimantic serve` instead. Stop the server before replacing or deleting a ZIM or index file, because Windows does not allow an open file to be replaced in place.
 
+## Optional dependencies
+
+Everything in this section is optional. Zimantic starts and searches without
+any of it. A missing executable disables only the operation that needs it, and
+a build reports that operation as unavailable instead of failing the rest of
+the index.
+
+| Dependency | Enables | Without it |
+|---|---|---|
+| `ffmpeg` and `ffprobe` | Embedded text-caption extraction, and audio decoding for whisper | Sidecar `.srt`/`.vtt` captions still work; embedded tracks and ASR are unavailable |
+| `tesseract` plus trained language data | `ocr = "tesseract"` on images and image-only PDF pages | OCR is unavailable |
+| `openai-whisper` (`whisper` on `PATH`) | `asr = "whisper"` on audio/video | ASR is unavailable |
+| `lsar` (from `unar`) | Archive-container detection for files with a missing or unknown extension | Built-in signatures and `puremagic` are still used |
+| `kiwix-serve` | A remote `type = "kiwix"` collection | Remote Kiwix sources are unavailable; local ZIM, files, and Kolibri sources still work |
+| GPU ONNX Runtime wheel | Accelerated embedding during `build` and `serve` | Zimantic warns and embeds on the CPU; see [GPU acceleration](#gpu-acceleration) |
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt install ffmpeg tesseract-ocr tesseract-ocr-eng unar
+```
+
+The OCR language package names follow the codes accepted by `ocr_languages`.
+Install every language you list there, for example `tesseract-ocr-ita` for
+`["eng", "ita"]`; `tesseract-ocr-all` installs every language.
+`tesseract --list-langs` shows what is installed.
+
+On macOS with Homebrew:
+
+```bash
+brew install ffmpeg tesseract tesseract-lang unar
+```
+
+On Windows, install ffmpeg and Tesseract from their official builds and put
+`ffmpeg.exe`, `ffprobe.exe`, and `tesseract.exe` on `PATH`. `lsar` is optional
+on every platform.
+
+For a remote Kiwix collection, install `kiwix-serve` from
+[kiwix.org](https://kiwix.org/en/applications/) and point a `type = "kiwix"`
+collection's `server` at it; local ZIM, files, and Kolibri sources never use
+it. GPU ONNX Runtime wheels are covered in
+[GPU acceleration](#gpu-acceleration).
+
+### Whisper ASR models
+
+`asr = "whisper"` runs the `whisper` command from
+[openai-whisper](https://github.com/openai/whisper). Install it where its
+executable is on `PATH`, either in Zimantic's environment or standalone:
+
+```bash
+uv pip install openai-whisper     # into the active .venv
+# or
+pipx install openai-whisper       # standalone, puts `whisper` on PATH
+```
+
+`ffmpeg` must also be installed. `openai-whisper` pulls in PyTorch, so if your
+interpreter has no PyTorch wheels, install whisper separately (for example
+with `pipx`) and keep Zimantic on its own interpreter. `uv sync` prunes
+packages that are not in the lockfile, so reinstall whisper after syncing or
+use the standalone install.
+
+The model is selected with `asr_model` under `[derived_text]`:
+
+```toml
+[derived_text]
+asr_model = "base.en"   # tiny, base, small, medium, large, large-v3-turbo,
+                        # and .en variants
+```
+
+Approximate on-disk model sizes are 75 MB (`tiny`), 142 MB (`base`), 466 MB
+(`small`), 1.5 GB (`medium`), and 2.9 GB (`large`); `.en` variants are about
+the same. Prefer `tiny.en` or `base.en` on small devices.
+
+Zimantic downloads the selected checkpoint on first use when it is missing.
+The cache is `$XDG_CACHE_HOME/whisper` when `XDG_CACHE_HOME` is set, otherwise
+`~/.cache/whisper` (on Windows, `%USERPROFILE%\.cache\whisper`). Each model is
+one `<model>.pt` file. A per-model lock serializes concurrent builds, so only
+one process fetches the file and the others reuse it. The download is verified
+against the checksum published by openai-whisper.
+
+The host needs network access the first time a model is fetched. If it is
+offline or the download fails, only ASR is marked partial and the build exits
+non-zero; a cached model is reused without a network request. To prepare
+a machine in advance, copy an existing `<model>.pt` from another host's cache,
+or run a build that enables ASR while online.
+
+### OCR language data
+
+OCR reads the same trained-data files as the `tesseract` command. Enable it per
+source and list the languages in the derived-text config:
+
+```toml
+[derived_text]
+ocr_languages = ["eng"]   # codes from `tesseract --list-langs`
+```
+
+PDF OCR uses the bundled PyMuPDF dependency; only the `tesseract` executable
+and its language data are external. The `max_ocr_pages`, `max_ocr_pixels`, and
+`max_ocr_output_bytes` caps still apply.
+
 ## Files and directories
 
 The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). Relative global path overrides (`model_dir`, `index_dir`) resolve under that data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. For compatibility, if no XDG config exists, an existing `config.toml` in the current directory is still loaded and its relative global paths retain their historical current-directory behavior.
@@ -262,8 +362,10 @@ Setting one does not enable the others. Engines run locally at build time only
 and are never loaded by `serve`; a missing engine marks only that operation
 unavailable. Zimantic uses the local `tesseract`, `whisper`, and
 `ffmpeg`/`ffprobe` executables when they are on `PATH`; no hosted service is
-used. ASR reads whisper's standard `~/.cache/whisper/<model>.pt` cache and
-refuses to run when that model is absent, so a build never downloads one.
+used. ASR reads whisper's standard `<cache>/whisper/<model>.pt` cache and
+downloads the selected checkpoint on first use when it is absent. See
+[Optional dependencies](#optional-dependencies) for installing these tools and
+the whisper model cache behavior.
 Embedded text captions use the optional local `ffmpeg`/`ffprobe`
 pair when available, including supported descriptor-only inputs; a missing
 pair leaves only embedded-track caption extraction unavailable. The

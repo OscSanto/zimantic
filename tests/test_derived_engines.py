@@ -111,12 +111,31 @@ def test_asr_adapter_reports_a_missing_executable(monkeypatch):
         extract_asr(b"fake audio")
 
 
-def test_asr_adapter_refuses_to_download_a_missing_model(monkeypatch):
+def test_asr_adapter_downloads_a_missing_model(monkeypatch):
     monkeypatch.setattr(
         engines_module.shutil,
         "which",
         lambda name: "/usr/bin/whisper" if name == "whisper" else None,
     )
     monkeypatch.setattr(engines_module, "_whisper_model_path", lambda _model: None)
-    with pytest.raises(RuntimeError, match="not cached locally"):
-        extract_asr(b"fake audio")
+    downloaded = []
+    monkeypatch.setattr(
+        engines_module,
+        "ensure_whisper_model",
+        lambda model: downloaded.append(model) or Path("/tmp/base.en.pt"),
+    )
+
+    def fake_run(args, **_kwargs):
+        output = Path(args[args.index("--output_dir") + 1])
+        media = Path(args[1])
+        (output / f"{media.stem}.txt").write_text(
+            "downloaded model transcript\n", encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(engines_module.subprocess, "run", fake_run)
+
+    assert extract_asr(b"fake audio", asr_model="base.en") == (
+        "downloaded model transcript"
+    )
+    assert downloaded == ["base.en"]

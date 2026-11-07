@@ -40,9 +40,16 @@ def catalog_lease_path(catalog: Path | str) -> Path:
 class FileLease:
     """An exclusively created file supporting shared or exclusive locks."""
 
-    def __init__(self, path: Path | str, *, create: bool = True) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        create: bool = True,
+        description: str = "lease",
+    ) -> None:
         self.path = Path(path)
         self.create = create
+        self.description = description
         self._fd: int | None = None
         self._mode: str | None = None
 
@@ -55,7 +62,7 @@ class FileLease:
             fd = os.open(self.path, flags, 0o644)
         except OSError as error:
             raise BuildLockError(
-                f"zimantic: cannot open the catalog lease {self.path}: "
+                f"zimantic: cannot open the {self.description} {self.path}: "
                 f"{error.strerror or error}"
             ) from error
         while True:

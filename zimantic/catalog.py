@@ -192,7 +192,9 @@ class SourceCatalog:
             if db_path is not None:
                 from .locking import FileLease, catalog_lease_path
 
-                self._lease = FileLease(catalog_lease_path(db_path))
+                self._lease = FileLease(
+                    catalog_lease_path(db_path), description="catalog lease"
+                )
                 self._lease.acquire(shared=True)
             self._initialize_database(db_path)
         except (OSError, sqlite3.Error) as error:

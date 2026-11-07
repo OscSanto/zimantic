@@ -149,7 +149,8 @@ port = 8090
 # .srt/.vtt sidecars and needs no external tool; embedded text tracks use the
 # shared ffmpeg adapter when a local ffmpeg/ffprobe is available. ocr and asr
 # are unavailable unless their local engine is installed; a missing engine
-# degrades only that operation. The spool and per-engine input caps above are
+# degrades only that operation. A missing asr_model checkpoint is downloaded to
+# the whisper cache on first use. The spool and per-engine input caps above are
 # separate from max_entry_bytes and may need raising for large media.
 
 # Large ZIMs only (10,000+ articles): how many IVF clusters each search scans.
