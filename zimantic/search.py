@@ -1951,6 +1951,7 @@ class Search:
         offset: int = 0,
         collection: str | None = None,
         debug: bool = False,
+        display_source: str | list[str] | None = None,
     ) -> dict[str, Any]:
         """Return one page plus totals, using the streaming coordinator."""
         final: dict[str, Any] = {}
@@ -1961,6 +1962,7 @@ class Search:
             offset,
             collection,
             debug,
+            display_source=display_source,
         ):
             if event["type"] == "error":
                 if event.get("busy"):
@@ -2105,6 +2107,7 @@ class Search:
         offset: int = 0,
         collection: str | None = None,
         debug: bool = False,
+        display_source: str | list[str] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield source progress and one page of the ranked pool.
 
@@ -2113,11 +2116,14 @@ class Search:
         response. The pool is cached by query, expanded source keys, and the
         publication generation. An explicit source/collection selection defines
         the whole scope directly; it is never promoted to a broader search.
+        ``display_source`` narrows only the returned page, so the same ranked
+        pool can serve a source chip without changing what was searched.
         Concurrent identical queries share a single computation.
         """
         query = self._validate_query(query)
         page_size = self._page_size(limit)
         offset = max(0, int(offset))
+        display = source if display_source is None else display_source
         scope = self._search_scope(source, collection)
         sources = scope.sources
         generation = scope.generation
@@ -2132,7 +2138,7 @@ class Search:
                 cached,
                 query,
                 sources,
-                source,
+                display,
                 offset,
                 page_size,
                 debug,
@@ -2153,7 +2159,7 @@ class Search:
             generation,
             pending,
             sources,
-            source,
+            display,
             offset,
             page_size,
             debug,

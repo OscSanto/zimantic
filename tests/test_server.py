@@ -101,10 +101,20 @@ class FakeSearch:
             raise SearchQueryError("empty")
         return query
 
-    def search_page(self, query, source, limit, offset, collection, debug):
+    def search_page(
+        self,
+        query,
+        source,
+        limit,
+        offset,
+        collection,
+        debug,
+        display_source=None,
+    ):
         self.search_page_calls.append(
-            (query, source, limit, offset, collection, debug)
+            (query, source, limit, offset, collection, debug, display_source)
         )
+        self.display_source = display_source
         result = {"id": "manual:page", "title": "Page"}
         if debug:
             result.update({"score": 1.0, "explain": "debug"})
@@ -127,9 +137,10 @@ class FakeSearch:
         offset=0,
         collection=None,
         debug=False,
+        display_source=None,
     ):
         self.stream_calls.append(
-            (query, source, limit, offset, collection, debug)
+            (query, source, limit, offset, collection, debug, display_source)
         )
         result = {"id": "manual:page", "title": "Page"}
         if debug:
@@ -906,7 +917,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.json()[0]["title"], "Page")
         self.assertEqual(
             self.search.search_page_calls[-1],
-            ("page", ["manual"], 5, 0, None, False),
+            ("page", ["manual"], 5, 0, None, False, None),
         )
 
     def test_search_accepts_page_and_filter_parameters(self):
@@ -918,7 +929,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("score", response.json()[0])
         self.assertEqual(
             self.search.search_page_calls[-1],
-            ("page", "manual", 5, 10, None, False),
+            ("page", "manual", 5, 10, None, False, None),
         )
 
     def test_search_accepts_multiple_source_filters(self):
@@ -926,12 +937,28 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.search.search_page_calls[-1][1], ["manual", "other"])
 
+    def test_search_display_source_filters_without_changing_the_scope(self):
+        response = self.client.get(
+            "/search?q=page&display_source=manual&display_source=other"
+        )
+        self.assertEqual(response.status_code, 200)
+        call = self.search.search_page_calls[-1]
+        self.assertIsNone(call[1])
+        self.assertEqual(call[-1], ["manual", "other"])
+
+        stream = self.client.get(
+            "/search/stream?q=page&display_source=manual"
+        )
+        self.assertEqual(stream.status_code, 200)
+        self.assertIsNone(self.search.stream_calls[-1][1])
+        self.assertEqual(self.search.stream_calls[-1][-1], "manual")
+
     def test_search_accepts_a_collection_filter(self):
         response = self.client.get("/search?q=page&collection=zim:library")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             self.search.search_page_calls[-1],
-            ("page", None, None, 0, "zim:library", False),
+            ("page", None, None, 0, "zim:library", False, None),
         )
 
     def test_debug_mode_is_server_wide(self):
@@ -950,7 +977,7 @@ class ServerTests(unittest.TestCase):
             events[-1]["matched_by"],
             {"semantic": 1, "title": 2, "fulltext": 3},
         )
-        self.assertTrue(self.debug_search.stream_calls[-1][-1])
+        self.assertTrue(self.debug_search.stream_calls[-1][5])
 
     def test_config_reports_debug_mode(self):
         self.assertFalse(self.client.get("/config").json()["debug"])

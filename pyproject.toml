@@ -18,6 +18,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pymupdf",
+    "puremagic>=1.30",
 ]
 
 [dependency-groups]

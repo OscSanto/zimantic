@@ -7,11 +7,14 @@ way and served another.
 
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import posixpath
 import re
+import shutil
 import stat as stat_module
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -255,6 +258,17 @@ _MIME_BY_EXTENSION: dict[str, str] = {
 _NATIVE_DOCUMENT_EXTENSIONS = frozenset(
     {".html", ".htm", ".xhtml", ".xht", ".pdf", ".txt", ".text", ".md", ".markdown", ".mdown"}
 )
+_OCR_IMAGE_MIMETYPES = frozenset(
+    {
+        "image/avif",
+        "image/bmp",
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/tiff",
+        "image/webp",
+    }
+)
 _MEDIA_EXTENSIONS = {
     family: frozenset(
         extension
@@ -308,20 +322,117 @@ def sniff_mimetype(prefix: bytes) -> str | None:
     return None
 
 
+_LSAR_MIME_BY_FORMAT = {
+    "7-zip": "application/x-7z-compressed",
+    "ar": "application/x-archive",
+    "bzip2": "application/x-bzip2",
+    "cpio": "application/x-cpio",
+    "gzip": "application/gzip",
+    "iso9660": "application/x-iso9660-image",
+    "rar": "application/vnd.rar",
+    "rar5": "application/vnd.rar",
+    "tar": "application/x-tar",
+    "xz": "application/x-xz",
+    "zip": "application/zip",
+}
+
+
+def _normalize_mimetype(value: str | None) -> str | None:
+    text = str(value or "").split(";", 1)[0].strip().lower()
+    return text or None
+
+
+def _puremagic_mimetype(prefix: bytes) -> str | None:
+    """Best-effort magic sniffing when the optional puremagic package exists."""
+
+    if not prefix:
+        return None
+    try:
+        import puremagic  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    try:
+        value = _normalize_mimetype(puremagic.from_string(prefix, mime=True))
+    except Exception:
+        return None
+    # An unknown extension whose bytes look like HTML must remain an
+    # attachment, matching the built-in sniffer's safety rule.
+    if value in {"text/html", "application/xhtml+xml"}:
+        return None
+    return value
+
+
+def _lsar_mimetype(path: str) -> str | None:
+    """Identify an archive container through the optional libarchive lsar tool."""
+
+    executable = shutil.which("lsar")
+    if not executable:
+        return None
+    try:
+        completed = subprocess.run(
+            [executable, "-j", "-nr", path],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    format_name = str(payload.get("lsarFormatName") or "").strip().casefold()
+    return _LSAR_MIME_BY_FORMAT.get(format_name)
+
+
+def detect_mimetype(
+    path: str, prefix: bytes = b"", *, allow_archive_probe: bool = False
+) -> str | None:
+    """Extension first, then magic bytes, then an optional archive probe.
+
+    The extension mapping stays authoritative so a known file keeps the MIME
+    type the rest of the application expects.  Only unknown or missing
+    extensions fall through to the built-in signatures, puremagic, and finally
+    ``lsar`` for archive formats.  Discovery uses the archive probe; request
+    serving does not, so no subprocess runs on the hot path.
+    """
+
+    mapped = extension_mimetype(path)
+    if mapped:
+        return mapped
+    sniffed = sniff_mimetype(prefix)
+    if sniffed and sniffed != "text/plain":
+        return sniffed
+    pure = _puremagic_mimetype(prefix)
+    if pure and pure != "text/plain":
+        return pure
+    if allow_archive_probe:
+        archive = _lsar_mimetype(path)
+        if archive:
+            return archive
+    return pure or sniffed
+
+
 def mimetype_for(path: str, prefix: bytes = b"") -> str:
     """Extension first, then a constrained prefix sniff.
 
     Unknown types are an attachment, never ``text/html``.  An unknown
     extension whose bytes happen to look like HTML therefore stays
-    ``application/octet-stream``.
+    ``application/octet-stream``.  Plain text is also kept as an attachment so
+    an extensionless capture cannot silently become a readable document.
     """
+
     mapped = extension_mimetype(path)
     if mapped:
         return mapped
-    if prefix:
-        sniffed = sniff_mimetype(prefix)
-        if sniffed and sniffed != "text/plain":
-            return sniffed
+    detected = detect_mimetype(path, prefix)
+    if detected and detected != "text/plain":
+        return detected
     return "application/octet-stream"
 
 
@@ -333,6 +444,30 @@ def media_family_for_path(path: str) -> str | None:
     return None
 
 
+def media_family_for_mimetype(mimetype: str | None) -> str | None:
+    value = _normalize_mimetype(mimetype)
+    if not value:
+        return None
+    if value.startswith("image/"):
+        return "image"
+    if value.startswith("audio/"):
+        return "audio"
+    if value.startswith("video/"):
+        return "video"
+    return None
+
+
+def is_ocr_candidate(mimetype: str | None, family: str | None = None) -> bool:
+    """True for raster images and PDFs that the local OCR engine can read."""
+
+    value = _normalize_mimetype(mimetype)
+    if value == "application/pdf":
+        return True
+    if value in _OCR_IMAGE_MIMETYPES:
+        return True
+    return family == "image" and not value
+
+
 def is_media_path(path: str) -> bool:
     return media_family_for_path(path) is not None
 
@@ -341,14 +476,54 @@ def is_native_document_path(path: str) -> bool:
     return Path(path).suffix.casefold() in _NATIVE_DOCUMENT_EXTENSIONS
 
 
-def content_family(path: str) -> str | None:
-    """Classification used by discovery; incidental assets return ``None``."""
+def content_family(
+    path: str, mimetype: str | None = None, prefix: bytes = b""
+) -> str | None:
+    """Indexing classification; incidental assets return ``None``.
+
+    An explicit MIME type or a bounded prefix lets an extensionless image,
+    audio, or video file keep its media family without treating ordinary
+    stylesheets and archives as readable documents.
+    """
+
     family = media_family_for_path(path)
     if family is not None:
         return family
     if is_native_document_path(path):
         return "text"
+    detected = (
+        mimetype
+        if mimetype is not None
+        else detect_mimetype(path, prefix)
+    )
+    family = media_family_for_mimetype(detected)
+    if family is not None:
+        return family
+    if _normalize_mimetype(detected) in {
+        "application/pdf",
+        "application/xhtml+xml",
+    }:
+        return "text"
     return None
+
+
+def library_family(
+    path: str,
+    mimetype: str | None = None,
+    prefix: bytes = b"",
+    *,
+    allow_archive_probe: bool = False,
+) -> str:
+    """Content family for library filters, including servable ``other`` files."""
+
+    detected = (
+        mimetype
+        if mimetype is not None
+        else detect_mimetype(
+            path, prefix, allow_archive_probe=allow_archive_probe
+        )
+    )
+    return content_family(path, detected) or "other"
 
 
 def ordered_families(families: Iterable[str]) -> tuple[str, ...]:
@@ -515,17 +690,21 @@ __all__ = [
     "OpenedFile",
     "confined_stat",
     "content_family",
+    "detect_mimetype",
     "extension_mimetype",
     "file_signature",
     "is_hidden_name",
     "is_hidden_path",
     "is_media_path",
     "is_native_document_path",
+    "is_ocr_candidate",
     "is_track_sidecar",
     "is_within",
+    "library_family",
     "list_directory",
     "matches_any",
     "matches_glob",
+    "media_family_for_mimetype",
     "media_family_for_path",
     "mimetype_for",
     "normalize_relative_path",

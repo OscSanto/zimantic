@@ -21,7 +21,7 @@ from zimantic.providers.files.discovery import discover_sources
 from zimantic.providers.files.entries import FilesEntryProducer
 
 from media_helpers import MEDIA_ROOT, copy_sample, manifest, sample
-from providers.files.helpers import files_config
+from providers.files.helpers import build_sources, files_config, open_runtime
 
 
 def _source(config, key: str):
@@ -249,6 +249,45 @@ def test_committed_sidecar_text_reaches_the_body_index(tmp_path):
     assert derived["contributors"] == ["captions"]
 
 
+def test_media_preview_uses_committed_sidecar_captions(tmp_path):
+    root = tmp_path / "media"
+    copy_sample("video/lesson.mp4", root / "lesson.mp4")
+    copy_sample("video/lesson.en.srt", root / "lesson.en.srt")
+    copy_sample("video/lesson.en.vtt", root / "lesson.en.vtt")
+    copy_sample("video/lesson.tricky.srt", root / "lesson.tricky.srt")
+    config = files_config(root, granularity="collection", include=("**/*.txt",))
+    source = _source(config, "files:modules:root")
+    cfg = {
+        "derived_source_operations": {
+            source.key: SourceDerivedOperations(captions=True)
+        },
+        "derived_text": DerivedTextConfig(),
+    }
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _runtime_config = open_runtime(index_dir, config)
+    try:
+        runtime._cfg.update(cfg)
+        build_sources(runtime, index_dir, cfg=cfg)
+        files_source = next(
+            item for item in runtime.library_sources() if item.key == source.key
+        )
+        lead, mimetype = runtime.preview(
+            files_source,
+            {"path": "lesson.mp4", "lead": "", "mimetype": None},
+            max_chars=200,
+            max_bytes=1 << 20,
+            deadline=None,
+        )
+    finally:
+        runtime.close()
+        batch.close()
+
+    assert "sidecar zebra" in lead
+    assert "vtt unicorn" in lead
+    assert "hippopotamus" in lead
+    assert mimetype == "video/mp4"
+
+
 def test_image_only_pdf_and_scanned_image_are_ocr_eligible(tmp_path):
     import pymupdf
 
@@ -276,6 +315,7 @@ def test_image_only_pdf_and_scanned_image_are_ocr_eligible(tmp_path):
 
     root = tmp_path / "media"
     copy_sample("image/scan.png", root / "scan.png")
+    copy_sample("image/diagram.svg", root / "diagram.svg")
     copy_sample("documents/scanned.pdf", root / "scanned.pdf")
     config = files_config(root, granularity="collection", include=("**/*.pdf",))
     source = _source(config, "files:modules:root")
@@ -295,6 +335,8 @@ def test_image_only_pdf_and_scanned_image_are_ocr_eligible(tmp_path):
     }
     assert kinds["scan.png"] == ["image"]
     assert kinds["scanned.pdf"] == ["image"]
+    # SVG is a vector document, not a raster image for Tesseract.
+    assert kinds["diagram.svg"] == []
 
 
 def test_ambiguous_sidecar_from_committed_samples_is_reported(tmp_path):

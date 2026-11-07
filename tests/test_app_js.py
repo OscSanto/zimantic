@@ -67,6 +67,88 @@ console.log(JSON.stringify({{
         self.assertIsNone(payload["explicitCollection"])
         self.assertTrue(payload["explicitHasScope"])
 
+    def test_scope_helpers_preserve_the_broad_source_list(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+let current = null;
+let selectedSourceKeys = new Set();
+let selectedCollectionKey = null;
+{_function_source(source, "function selectionValues(", "function dedupeParams(")}
+{_function_source(source, "function dedupeParams(", "function setSelectedSources(")}
+{_function_source(source, "function setSelectedSources(", "function searchScopeParams(")}
+const full = {{question: "q", searchAll: true, searchKeys: [], searchCollection: null, outcomes: new Map([["a", {{source: {{key: "a"}}}}], ["b", {{source: {{key: "b"}}}}]]), completed: 8, sourcesTotal: 8}};
+const explicit = {{question: "q", searchAll: false, searchKeys: ["a", "b"], searchCollection: null, outcomes: new Map([["a", {{source: {{key: "a"}}}}], ["b", {{source: {{key: "b"}}}}]]), completed: 2, sourcesTotal: 2}};
+applyLocationScope({{selectedSources: ["a"], collection: "files:media"}});
+const locationScope = {{selected: [...selectedSourceKeys], collection: selectedCollectionKey}};
+const dedupe = new URLSearchParams("source=a&source=a&source=b");
+dedupeParams(dedupe, "source");
+current = full;
+selectedSourceKeys = new Set(["a"]);
+const fullNext = nextSearchScope(["a"], null, current);
+const fullProgress = effectiveSourceProgress();
+current = explicit;
+selectedSourceKeys = new Set(["a"]);
+const explicitNext = nextSearchScope(["a"], null, current);
+selectedSourceKeys = new Set();
+const explicitProgress = effectiveSourceProgress();
+const freshNext = nextSearchScope(["a"], null, null);
+console.log(JSON.stringify({{
+  locationScope,
+  dedupe: dedupe.getAll("source"),
+  fullNext,
+  fullProgress,
+  explicitNext,
+  explicitProgress,
+  freshNext,
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["locationScope"],
+            {"selected": ["a"], "collection": "files:media"},
+        )
+        self.assertEqual(payload["dedupe"], ["a", "b"])
+        self.assertEqual(payload["fullNext"], [])
+        self.assertEqual(
+            payload["fullProgress"],
+            {"completed": 1, "total": 1, "selected": True},
+        )
+        self.assertEqual(payload["explicitNext"], ["a", "b"])
+        self.assertEqual(
+            payload["explicitProgress"],
+            {"completed": 2, "total": 2, "selected": False},
+        )
+        self.assertEqual(payload["freshNext"], ["a"])
+
+    def test_make_state_url_handles_no_current_search_with_explicit_scope(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/");
+let current = null;
+{_function_source(source, "function selectionValues(", "function setSelectedSources(")}
+{_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
+const full = makeStateUrl("q", [], 0, null, [], undefined);
+const display = makeStateUrl("q", ["a"], 0, null, [], undefined);
+const collection = makeStateUrl("q", [], 0, null, [], "files:media");
+console.log(JSON.stringify({{full, display, collection}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["full"], "/?q=q")
+        self.assertEqual(payload["display"], "/?q=q&source=a")
+        self.assertEqual(payload["collection"], "/?q=q&collection=files%3Amedia")
+
     def test_source_filter_layout_is_bounded_per_collection_group(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -170,7 +252,7 @@ console.log(JSON.stringify({{zero, one, decimal, high}}));
     def test_source_outside_a_full_search_pool_is_searched_explicitly(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
-let current = {{question: "q", searchAll: true, searchKeys: ["inside"]}};
+let current = {{question: "q", searchAll: true, searchKeys: ["inside"], outcomes: new Map([["inside", {{source: {{key: "inside"}}}}]])}};
 let selectedSourceKeys = new Set();
 const calls = [];
 function selectionValues(values) {{

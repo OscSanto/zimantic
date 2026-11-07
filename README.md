@@ -260,7 +260,11 @@ asr = "whisper"        # audio/video speech-to-text
 
 Setting one does not enable the others. Engines run locally at build time only
 and are never loaded by `serve`; a missing engine marks only that operation
-unavailable. Embedded text captions use the optional local `ffmpeg`/`ffprobe`
+unavailable. Zimantic uses the local `tesseract`, `whisper`, and
+`ffmpeg`/`ffprobe` executables when they are on `PATH`; no hosted service is
+used. ASR reads whisper's standard `~/.cache/whisper/<model>.pt` cache and
+refuses to run when that model is absent, so a build never downloads one.
+Embedded text captions use the optional local `ffmpeg`/`ffprobe`
 pair when available, including supported descriptor-only inputs; a missing
 pair leaves only embedded-track caption extraction unavailable. The
 per-container input and spool caps under
@@ -296,7 +300,7 @@ Source keys are derived from the configured `name` and root-relative identifiers
 
 All sources in one files collection share the collection-relative serving namespace. A child page can link to `../shared/style.css` and it resolves under the same source key; search results and library membership still belong to the source that indexed the item. Hidden paths, configured excludes, symlinks, and paths outside the configured root are never served. Unknown extensions are served as attachments with `X-Content-Type-Options: nosniff`; SVG opened directly is sandboxed with a restrictive CSP.
 
-`include` selects native documents for indexing. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless an exact source override enables them:
+`include` selects native documents for indexing. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless an exact source override enables them. Files whose extension is missing or unknown get a bounded MIME probe: the built-in signatures and `puremagic` are used for the prefix, and `lsar` identifies archive containers. This keeps extensionless media and servable “other” assets visible in the library content-type filters:
 
 ```toml
 # Discover the exact key first (for example from `/sources`).
@@ -513,7 +517,7 @@ A running `serve` discovers indexes with `zimantic reload`; a fast index remains
 
 The source picker discovers available sources and sorts matching sources by result count, grouped by collection. Each group shows its top `source_filter_limit` sources (10 by default) plus an **Other** disclosure for the rest, and sourced-filter searches show up to 30 matches plus **Show N more**. Selected sources stay visible even when their group is not expanded. Dated and flavour variants of one book collapse to a single source here and in the library view.
 
-- Selecting a collection header searches that whole collection as one unit. Only one collection group can be selected at a time; selecting another replaces it. Selecting an individual source switches to individual-source mode and clears the group selection, after which sources from different groups can be combined.
+- Selecting a collection header searches that whole collection as one unit. Only one collection group can be selected at a time; selecting another replaces it. Selecting an individual source switches to individual-source display mode and clears the group selection, after which sources from different groups can be combined. The other searched sources stay available in the picker, and a new query keeps the previous ranked scope while narrowing the returned page to the selected sources.
 - An explicit source or collection selection always defines the search scope directly. There is no small-selection promotion and no `zim` parameter: the canonical API parameter is `source`, and `collection` selects one collection as a unit.
 - A source selected outside an unscoped Kiwix fan-out cap is still searched explicitly. An explicitly selected Kiwix collection is bounded by `max_explicit_collection_sources` (500 by default) and the request deadline. Partial scope is reported explicitly rather than claiming that every book completed.
 - An unknown source or collection key is rejected with HTTP 400 instead of silently becoming an unscoped search. A known but unsearchable source, or an intersection with no eligible sources, searches no sources rather than broadening the scope.
@@ -534,11 +538,13 @@ Click a source's title or **Details** for an infobox with its thumbnail, homepag
 The JSON API provides the following endpoints.
 
 - `GET /search?q=...&limit=10&offset=0&source=<key>&collection=<key>` returns one page of results.
-  - `source` is the only source-selection parameter. Repeat it to select individual sources. `collection` selects one collection as a unit. When both are supplied, the scope is their intersection.
+  - `source` is the only source-scope parameter. Repeat it to select individual sources. `collection` selects one collection as a unit. When both are supplied, the scope is their intersection.
+  - `display_source` narrows only the returned page and totals to the named sources without changing the ranked scope. The UI uses it for source chips so selecting one source does not discard the other searched sources.
   - An explicit selection always defines the scope directly; there is no promotion to a full search and no `zim` parameter. Unknown source or collection keys return HTTP 400. A valid selection with no eligible sources searches no sources rather than broadening to the library.
   - An explicit individual source is never dropped by an unscoped remote fan-out cap. An explicit Kiwix collection is capped at `max_explicit_collection_sources` (500 by default) and by `search_timeout_seconds`; partial work is reported in `X-Search-Scope`.
   - Totals are returned in the `X-Total-Count`, `X-Has-More`, `X-Offset`, `X-Page`, and `X-Page-Count` headers. `X-Search-Scope` carries the JSON scope summary. An offset past the last page is clamped to the last real page, and `X-Offset`, `X-Page`, and the stream's `offset` and `page` report that effective position.
-- `GET /search/stream?q=...&limit=10&offset=0&source=<key>&collection=<key>` returns newline-delimited progress events and result snapshots.
+- `GET /search/stream?q=...&limit=10&offset=0&source=<key>&collection=<key>&display_source=<key>` returns newline-delimited progress events and result snapshots.
+  - `display_source` has the same page-narrowing rule as `/search`; the source progress and `scope` still describe the full ranked scope.
   - `snapshot` and `done` events carry the effective `page` and `page_count`; the terminal `done` event carries the same `scope` object as `X-Search-Scope`.
   - The scope object reports `requested`, `scheduled`, and `completed` source tasks plus a `status` of `complete` or `partial` and a `limit_reason` of `source_cap`, `deadline`, or `null`. Per-source provider errors stay in that source's result and do not imply a scheduler cap.
   - While sources are still working, the stream emits a `progress` heartbeat about every 700 ms. When a source finishes in between, it emits a fresh snapshot instead.
@@ -550,6 +556,7 @@ The JSON API provides the following endpoints.
 - `GET /content/<source-key>/<path>` serves a toolbar shell for a local source entry; `GET /content/<source-key>` serves the resolved source homepage.
   - The shell keeps the navigation bar in the page and loads the article itself from an inner iframe pointed at `/article/<source-key>/<path>`, so the toolbar stays visible even when the article is missing or fails.
   - Unreadable entries render an error panel in the shell instead of the raw `/article` JSON error body.
+  - Non-inline attachments render a download panel instead of an empty iframe that the browser abandons.
   - `GET /article/<source-key>/<path>` serves the raw entry: redirects are followed, its assets resolve under the same route, and entries larger than `max_article_bytes` return `413`.
   - `/article` supports one inclusive byte range per request (`bytes=start-end`, `bytes=start-`, or `bytes=-suffix`) and returns `206` with `Content-Range`, or `416` when the range starts past the representation. Unknown or malformed ranges, multiple ranges, and `If-Range` without a validator fall back to the bounded full response. Raw HTML is bridge-decorated and ignores ranges.
   - A missing or ambiguous entry, an unknown source key, or a source with no content store returns a JSON error envelope containing only a stable `error` code and the public `source` key. A store that cannot be opened returns `503`. `/article` includes `Access-Control-Allow-Origin: *` on success, redirects, partial and unsatisfiable responses, and errors; its bounded `OPTIONS` preflight allows `GET`, `HEAD`, `Range`, `If-Range`, `If-None-Match`, and `If-Modified-Since` without credentials.

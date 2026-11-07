@@ -17,6 +17,7 @@ import multiprocessing
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import tempfile
 import unicodedata
@@ -418,6 +419,62 @@ class DerivedTextCache:
         return removed
 
 
+# -- cached preview reads --------------------------------------------------
+
+_CACHE_FILE_NAME = re.compile(r"^[0-9a-f]{64}\.txt$")
+
+
+def read_cached_text(cache_root: Path | str, cache_key: str) -> str:
+    """Read one complete derived-text cache entry, or return an empty string."""
+
+    name = str(cache_key or "")
+    if not _CACHE_FILE_NAME.fullmatch(name):
+        return ""
+    path = Path(cache_root) / name[:2] / name
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+
+
+def derived_text_preview(
+    index: Any,
+    cache_root: Path | str,
+    path: str,
+) -> str:
+    """Return the best cached captions/OCR/ASR text for one indexed file path."""
+
+    db = None
+    if index is not None:
+        reader = getattr(index, "db_for_thread", None)
+        if callable(reader):
+            try:
+                db = reader()
+            except Exception:
+                db = None
+        if db is None:
+            db = getattr(index, "db", None)
+    if db is None:
+        return ""
+    try:
+        rows = db.execute(
+            "SELECT r.cache_key FROM docs AS d "
+            "JOIN derived_refs AS r ON r.rowid = d.rowid "
+            "WHERE d.path = ? "
+            "ORDER BY CASE r.operation "
+            "WHEN 'captions' THEN 0 WHEN 'ocr' THEN 1 WHEN 'asr' THEN 2 "
+            "ELSE 3 END, r.contribution_order",
+            (path,),
+        ).fetchall()
+    except sqlite3.Error:
+        return ""
+    for row in rows:
+        text = read_cached_text(cache_root, str(row[0] if row else ""))
+        if text.strip():
+            return text
+    return ""
+
+
 # -- worker resolution and spooling ---------------------------------------
 
 
@@ -762,8 +819,22 @@ class DerivedTextStage:
             "\n\n".join(caption_parts), self.config.max_caption_bytes
         )
         if caption_text:
+            cache_key = self._last_cache_key
+            if self.cache is not None and len(caption_parts) > 1:
+                digest = hashlib.sha256(
+                    caption_text.encode("utf-8", "ignore")
+                ).hexdigest()
+                stored = self.cache.put(
+                    digest,
+                    "captions",
+                    "combined",
+                    self._options(),
+                    caption_text,
+                )
+                if stored is not None:
+                    cache_key = stored.name
             result.contributions.insert(
-                0, DerivedContribution("captions", caption_text, self._last_cache_key)
+                0, DerivedContribution("captions", caption_text, cache_key)
             )
         if pending_asr_text:
             result.contributions.append(
@@ -830,11 +901,13 @@ __all__ = [
     "OPERATION_UNAVAILABLE",
     "SourceDerivedOperations",
     "compose_body",
+    "derived_text_preview",
     "normalize_for_equality",
     "parse_caption_bytes",
     "parse_derived_text",
     "parse_source_override",
     "parse_source_overrides",
+    "read_cached_text",
     "resolve_workers",
     "spool_input",
 ]

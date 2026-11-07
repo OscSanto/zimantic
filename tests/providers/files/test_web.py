@@ -122,6 +122,15 @@ def test_direct_svg_is_sandboxed_and_unknown_extension_is_attachment(files_site)
     assert mystery.headers["x-content-type-options"] == "nosniff"
 
 
+def test_attachment_shell_offers_a_download_instead_of_a_blank_iframe(files_site):
+    client, _search, key, _root = files_site
+    shell = client.get(f"/content/{quote(key, safe='')}/algebra/mystery")
+    assert shell.status_code == 200
+    assert b"zimantic-shell-attachment" in shell.content
+    assert b"Download file" in shell.content
+    assert b"<iframe" not in shell.content
+
+
 def test_hidden_and_excluded_requests_are_404(files_site):
     client, _search, key, _root = files_site
     assert client.get(_article(key, ".hidden/secret.html")).status_code == 404

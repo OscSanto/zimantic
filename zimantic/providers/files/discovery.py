@@ -31,10 +31,11 @@ from ...searching.index import IndexHandle, _nprobe
 from .common import (
     FilesConfinedError,
     confined_stat,
-    content_family,
+    detect_mimetype,
     extension_mimetype,
     is_hidden_name,
     is_hidden_path,
+    library_family,
     matches_any,
     normalize_relative_path,
     ordered_families,
@@ -209,7 +210,6 @@ def _classify(
     *,
     membership_root: str,
     loose_only: bool,
-    include: Sequence[str],
     exclude: Sequence[str],
     budget: _Budget,
     errors: list[str],
@@ -218,22 +218,31 @@ def _classify(
     families: set[str] = set()
     partial = False
 
-    def classify_file(relative: str) -> None:
+    def classify_file(relative: str, source_path: str) -> None:
         if is_hidden_path(relative):
             return
         if matches_any(exclude, relative):
             return
-        family = content_family(relative)
-        if family is None and matches_any(include, relative):
-            mimetype = extension_mimetype(relative) or ""
-            family = (
-                "text"
-                if mimetype.startswith("text/")
-                or mimetype in {"application/pdf", "application/xhtml+xml"}
-                else "other"
+        mimetype = extension_mimetype(relative)
+        prefix = b""
+        if mimetype is None:
+            # Only unknown or extensionless files need a bounded content probe.
+            try:
+                with open(source_path, "rb") as handle:
+                    prefix = handle.read(4096)
+            except OSError:
+                prefix = b""
+            mimetype = detect_mimetype(
+                relative, prefix, allow_archive_probe=True
             )
-        if family is not None:
-            families.add(family)
+        families.add(
+            library_family(
+                relative,
+                mimetype,
+                prefix,
+                allow_archive_probe=True,
+            )
+        )
 
     def visit(relative_dir: str) -> None:
         nonlocal partial
@@ -273,7 +282,7 @@ def _classify(
                     continue
             except OSError:
                 continue
-            classify_file(relative)
+            classify_file(relative, entry.path)
 
     if loose_only:
         try:
@@ -295,7 +304,7 @@ def _classify(
                     continue
             except OSError:
                 continue
-            classify_file(entry.name)
+            classify_file(entry.name, entry.path)
     else:
         visit(membership_root)
     return ordered_families(families), partial
@@ -336,7 +345,6 @@ def discover_sources(
     collection_name = str(getattr(config, "name", "files"))
     collection_key = files_collection_key(collection_name)
     label = _display_label(config)
-    include = tuple(getattr(config, "include", ()) or ())
     exclude = tuple(getattr(config, "exclude", ()) or ())
     granularity = str(getattr(config, "granularity", "collection"))
     max_visited, timeout = _traversal_limits(config)
@@ -364,7 +372,6 @@ def discover_sources(
             root,
             membership_root="",
             loose_only=False,
-            include=include,
             exclude=exclude,
             budget=budget,
             errors=errors,
@@ -436,7 +443,6 @@ def discover_sources(
             root,
             membership_root="",
             loose_only=False,
-            include=include,
             exclude=exclude,
             budget=budget,
             errors=errors,
@@ -474,7 +480,6 @@ def discover_sources(
             root,
             membership_root=relative,
             loose_only=False,
-            include=include,
             exclude=exclude,
             budget=budget,
             errors=errors,
@@ -499,7 +504,6 @@ def discover_sources(
             root,
             membership_root="",
             loose_only=True,
-            include=include,
             exclude=exclude,
             budget=budget,
             errors=errors,

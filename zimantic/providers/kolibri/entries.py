@@ -29,7 +29,7 @@ from ...content.reader import (
     truncate_utf8,
 )
 from ...indexing.types import MAX_ROW_ID, EntryRecord
-from ..files.common import FilesConfinedError, open_confined
+from ..files.common import FilesConfinedError, is_ocr_candidate, open_confined
 from .captions import associated_captions
 from .discovery import (
     ChannelRow,
@@ -626,7 +626,10 @@ class KolibriEntryProducer:
         if self.ocr_enabled and primary is not None:
             extension = "." + str(primary.extension or "").casefold().lstrip(".")
             family = media_family(primary.extension, item.node.kind)
-            if family == "image" or extension == ".pdf":
+            ocr_mimetype = primary.mimetype or (
+                "application/pdf" if extension == ".pdf" else ""
+            )
+            if is_ocr_candidate(ocr_mimetype, family):
                 size = primary.file_size or int(item.primary_size or 0)
                 inputs.append(
                     _DerivedInput(

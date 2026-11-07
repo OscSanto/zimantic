@@ -36,11 +36,14 @@ from ...content.reader import (
 from ...indexing.types import EntryRecord
 from .common import (
     FilesConfinedError,
+    detect_mimetype,
     extension_mimetype,
     is_hidden_name,
+    is_ocr_candidate,
     is_track_sidecar,
     list_directory,
     matches_any,
+    media_family_for_mimetype,
     media_family_for_path,
     normalize_relative_path,
     open_confined,
@@ -93,6 +96,32 @@ class _Snapshot:
     items: tuple[_ManifestItem, ...]
     truncated: bool
     fingerprint: str
+
+
+_PREFIX_PROBE_BYTES = 4096
+
+
+def _item_mimetype(root: Path, relative: str) -> str:
+    """Extension-first MIME for one manifest item, probing unknown suffixes."""
+
+    mapped = extension_mimetype(relative)
+    if mapped:
+        return mapped
+    prefix = b""
+    try:
+        opened = open_confined(root, relative)
+    except (FilesConfinedError, OSError):
+        opened = None
+    if opened is not None:
+        try:
+            prefix = opened.handle.read(_PREFIX_PROBE_BYTES)
+        except OSError:
+            prefix = b""
+        finally:
+            close = getattr(opened.handle, "close", None)
+            if callable(close):
+                close()
+    return detect_mimetype(relative, prefix) or "application/octet-stream"
 
 
 def _int_setting(cfg: Mapping[str, Any] | None, key: str, default: int) -> int:
@@ -372,7 +401,10 @@ class FilesEntryProducer:
                             )
                         )
                     continue
-                family = media_family_for_path(relative)
+                mimetype = _item_mimetype(self.root, relative)
+                family = media_family_for_path(relative) or media_family_for_mimetype(
+                    mimetype
+                )
                 if family is None and not matches_any(self.include, relative):
                     continue
                 if len(items) >= self.max_entries:
@@ -389,8 +421,7 @@ class FilesEntryProducer:
                         size=int(info.st_size),
                         mtime=round(info.st_mtime_ns / 1_000_000_000),
                         family=family,
-                        mimetype=extension_mimetype(relative)
-                        or "application/octet-stream",
+                        mimetype=mimetype,
                     )
                 )
             return False
@@ -433,7 +464,10 @@ class FilesEntryProducer:
                             )
                         )
                     continue
-                family = media_family_for_path(name)
+                mimetype = _item_mimetype(self.root, name)
+                family = media_family_for_path(name) or media_family_for_mimetype(
+                    mimetype
+                )
                 if family is None and not matches_any(self.include, name):
                     continue
                 if len(items) >= self.max_entries:
@@ -450,8 +484,7 @@ class FilesEntryProducer:
                         size=int(info.st_size),
                         mtime=round(info.st_mtime_ns / 1_000_000_000),
                         family=family,
-                        mimetype=extension_mimetype(name)
-                        or "application/octet-stream",
+                        mimetype=mimetype,
                     )
                 )
         else:
@@ -824,8 +857,8 @@ class FilesEntryProducer:
                         self.effective_input_limit,
                     )
                 )
-        if self.ocr_enabled and (
-            item.family == "image" or item.mimetype == "application/pdf"
+        if self.ocr_enabled and is_ocr_candidate(
+            item.mimetype, item.family
         ):
             inputs.append(
                 _DerivedInput(

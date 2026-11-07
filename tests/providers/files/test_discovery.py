@@ -219,3 +219,23 @@ def test_media_types_include_media_omitted_from_the_index_include(tmp_path):
 
     assert "video" in result.sources[0].info.media_types
     assert "text" in result.sources[0].info.media_types
+
+
+def test_other_assets_and_extensionless_media_are_library_visible(tmp_path):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "asset.css").write_text("body { color: #123; }", encoding="utf-8")
+    (root / "app.js").write_text("console.log('asset');", encoding="utf-8")
+    (root / "archive.zip").write_bytes(b"PK\x03\x04fixture")
+    (root / "unknown.bin").write_bytes(b"\x00\x01\x02\x03")
+    (root / "scan").write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"png payload without a suffix"
+    )
+    config = files_config(root, granularity="collection")
+
+    result = discover_sources(config)
+
+    # CSS/JS/archives/unknown binaries are still servable content.  They make
+    # the "Other" library filter meaningful instead of disappearing from every
+    # specific content-type view.  The extensionless PNG keeps its media family.
+    assert result.sources[0].info.media_types == ("image", "other")

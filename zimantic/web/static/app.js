@@ -267,19 +267,19 @@
             function providerLabel(provider) {
                 const value = String(provider || "");
                 if (value === "zim") return "ZIM";
-                if (value === "files") return "Files";
-                if (value === "kolibri") return "Kolibri";
-                if (value === "kiwix") return "Kiwix";
+                if (value === "files") return t("Files");
+                if (value === "kolibri") return t("Kolibri");
+                if (value === "kiwix") return t("Kiwix");
                 return value;
             }
 
             function mediaTypeLabels(mediaTypes) {
                 const labels = {
-                    text: "Text",
-                    video: "Video",
-                    audio: "Audio",
-                    image: "Image",
-                    other: "Other",
+                    text: t("Text"),
+                    video: t("Video"),
+                    audio: t("Audio"),
+                    image: t("Image"),
+                    other: t("Other"),
                 };
                 return (Array.isArray(mediaTypes) ? mediaTypes : [])
                     .map((value) => labels[value] || String(value))
@@ -306,11 +306,14 @@
             function collectionByKey(key) {
                 const wanted = String(key || "");
                 if (!wanted) return null;
-                return (
+                const direct =
                     collections.find((collection) => collection.key === wanted) ||
-                    libraryCollections.find((collection) => collection.key === wanted) ||
-                    null
+                    libraryCollections.find((collection) => collection.key === wanted);
+                if (direct) return direct;
+                const source = [...sources, ...librarySources].find(
+                    (item) => item?.collection?.key === wanted,
                 );
+                return source?.collection || null;
             }
 
             function collectionDisplayName(keyOrCollection) {
@@ -406,7 +409,7 @@
                 const text = infoValue(value);
                 if (!text) return;
                 const term = document.createElement("dt");
-                term.textContent = label;
+                term.textContent = t(label);
                 const detail = document.createElement("dd");
                 const href = options.href === false ? "" : infoUrl(text);
                 if (href) {
@@ -614,8 +617,9 @@
                 } else {
                     const unavailable = document.createElement("p");
                     unavailable.className = "library-info-unavailable";
-                    unavailable.textContent =
-                        "This source has no homepage and cannot be searched yet.";
+                    unavailable.textContent = t(
+                        "This source has no homepage and cannot be searched yet.",
+                    );
                     content.appendChild(unavailable);
                 }
 
@@ -657,7 +661,7 @@
                     const details = document.createElement("details");
                     details.className = "library-info-counter";
                     const summary = document.createElement("summary");
-                    summary.textContent = "Content types";
+                    summary.textContent = t("Content types");
                     details.appendChild(summary);
                     const code = document.createElement("code");
                     code.textContent = counter
@@ -990,7 +994,9 @@
                         source.description ||
                         (linkable
                             ? ""
-                            : "This source has no homepage and cannot be searched yet.");
+                            : t(
+                                  "This source has no homepage and cannot be searched yet.",
+                              ));
                     if (description) {
                         const text = document.createElement("p");
                         text.className = "library-card-description";
@@ -1126,24 +1132,24 @@
                 const state = view.state;
                 const collection = view.collection;
                 if (state?.loading && !state.sources.length) {
-                    return "Discovering sources…";
+                    return t("Discovering sources…");
                 }
                 if (state?.error && !state.sources.length) {
-                    return `Could not load this collection: ${state.error}`;
+                    return `${t("Could not load this collection")}: ${state.error}`;
                 }
                 if (collection.discovery_state === "error" && collection.error) {
-                    return `Collection discovery failed: ${collection.error}`;
+                    return `${t("Collection discovery failed")}: ${collection.error}`;
                 }
                 if (collection.discovery_state === "loading") {
-                    return "Discovering sources…";
+                    return t("Discovering sources…");
                 }
                 if (!Number(collection.source_count) && !state?.sources.length) {
-                    return "No sources were discovered in this collection.";
+                    return t("No sources were discovered in this collection.");
                 }
                 if (!state && Number(collection.source_count)) {
-                    return "Loading sources…";
+                    return t("Loading sources…");
                 }
-                return "No sources match these filters.";
+                return t("No sources match these filters.");
             }
 
             function renderLibrary() {
@@ -1153,7 +1159,9 @@
                 const filter = $("libraryFilter");
                 if (filter) {
                     const count = librarySources.length;
-                    filter.placeholder = `Filter ${count.toLocaleString()} source${count === 1 ? "" : "s"}`;
+                    filter.placeholder = `${t("Filter")} ${count.toLocaleString()} ${t(
+                        count === 1 ? "source" : "sources",
+                    )}`;
                 }
                 grid.replaceChildren();
                 const views = libraryCollectionViews();
@@ -1167,18 +1175,28 @@
                     const empty = document.createElement("p");
                     empty.className = "empty";
                     if (!collections.length) {
-                        empty.textContent =
-                            "No collections are configured. Add a [[collections]] entry to the server configuration, then restart the server.";
+                        empty.textContent = t(
+                            "No collections are configured. Add a [[collections]] entry to the server configuration, then restart the server.",
+                        );
                     } else if (hasFilters) {
-                        empty.textContent = "No collection or source matches these filters.";
+                        empty.textContent = t(
+                            "No collection or source matches these filters.",
+                        );
                     } else {
-                        empty.textContent =
-                            "No sources are available in the configured collections.";
+                        empty.textContent = t(
+                            "No sources are available in the configured collections.",
+                        );
                     }
                     grid.appendChild(empty);
                     return;
                 }
-                status.textContent = `${views.length} collection${views.length === 1 ? "" : "s"} · ${librarySources.length} loaded source${librarySources.length === 1 ? "" : "s"}`;
+                status.textContent = `${views.length} ${t(
+                    views.length === 1 ? "collection" : "collections",
+                )} · ${librarySources.length} ${t(
+                    librarySources.length === 1
+                        ? "loaded source"
+                        : "loaded sources",
+                )}`;
                 for (const view of views) {
                     const { key, collection, state, members } = view;
                     const section = document.createElement("section");
@@ -1198,7 +1216,9 @@
                     meta.textContent = [
                         providerLabel(collection.provider),
                         Number.isFinite(sourceCount)
-                            ? `${sourceCount.toLocaleString()} source${sourceCount === 1 ? "" : "s"}`
+                            ? `${sourceCount.toLocaleString()} ${t(
+                                  sourceCount === 1 ? "source" : "sources",
+                              )}`
                             : "",
                         families.join(" · "),
                     ]
@@ -1233,14 +1253,16 @@
                         const open = document.createElement("button");
                         open.type = "button";
                         open.className = "library-button";
-                        open.textContent = `Show all ${Number(collection.source_count).toLocaleString()} sources`;
+                        open.textContent = `${t("Show all")} ${Number(
+                            collection.source_count,
+                        ).toLocaleString()} ${t("sources")}`;
                         open.dataset.libraryExpandCollection = key;
                         actions.appendChild(open);
                     } else if (expanded && state?.hasMore) {
                         const more = document.createElement("button");
                         more.type = "button";
                         more.className = "library-button";
-                        more.textContent = "Load more sources";
+                        more.textContent = t("Load more sources");
                         more.dataset.libraryMoreCollection = key;
                         actions.appendChild(more);
                     }
@@ -1267,7 +1289,11 @@
                         ) {
                             const note = document.createElement("p");
                             note.className = "library-collection-note";
-                            note.textContent = `Showing ${visibleMembers.length.toLocaleString()} of ${Number(collection.source_count).toLocaleString()} sources.`;
+                            note.textContent = `${t("Showing")} ${visibleMembers.length.toLocaleString()} ${t(
+                                "of",
+                            )} ${Number(
+                                collection.source_count,
+                            ).toLocaleString()} ${t("sources")}.`;
                             section.appendChild(note);
                         }
                     }
@@ -1376,6 +1402,57 @@
                 return (Array.isArray(values) ? values : values ? [values] : []).filter(Boolean);
             }
 
+            function t(value) {
+                const i18n = typeof window !== "undefined" ? window.zimanticI18n : null;
+                return i18n && typeof i18n.translate === "function"
+                    ? i18n.translate(value)
+                    : value;
+            }
+
+            function dedupeParams(params, name) {
+                const values = [...new Set(params.getAll(name))];
+                if (!values.length) return;
+                params.delete(name);
+                for (const value of values) params.append(name, value);
+            }
+
+            function applyLocationScope(state) {
+                setSelectedSources(state.selectedSources);
+                selectedCollectionKey = state.collection || null;
+            }
+
+            function effectiveSourceProgress() {
+                if (!current) return { completed: 0, total: 0, selected: false };
+                const selected = [...selectedSourceKeys];
+                if (selected.length) {
+                    const known = new Set(
+                        [...current.outcomes.keys()].filter((key) =>
+                            selectedSourceKeys.has(key),
+                        ),
+                    );
+                    return {
+                        completed: known.size,
+                        total: selected.length,
+                        selected: true,
+                    };
+                }
+                return {
+                    completed: current.completed,
+                    total: current.sourcesTotal,
+                    selected: false,
+                };
+            }
+
+            function nextSearchScope(selectedSources, collectionKey, search) {
+                if (collectionKey) return [];
+                const selected = selectionValues(selectedSources);
+                if (!selected.length) return [];
+                if (!search || !search.question) return selected;
+                if (search.searchCollection || search.searchAll) return [];
+                const previous = new Set(search.searchKeys || []);
+                return [...new Set([...previous, ...selected])];
+            }
+
             function setSelectedSources(values) {
                 selectedSourceKeys = new Set(selectionValues(values));
             }
@@ -1386,7 +1463,9 @@
             }
 
             function sourceFilterParams(params) {
-                selectedSourceKeys.forEach((source) => params.append("source", source));
+                selectedSourceKeys.forEach((source) =>
+                    params.append("display_source", source),
+                );
             }
 
             function sourceFilterLayout() {
@@ -1652,10 +1731,10 @@
                 ).length;
                 if (!layout.matching.length) {
                     status.textContent = layout.query
-                        ? "No matching sources."
+                        ? t("No matching sources.")
                         : layout.outcomes.length
                           ? ""
-                          : "No sources have reported yet.";
+                          : t("No sources have reported yet.");
                 } else if (
                     layout.query &&
                     layout.matching.length > visibleMatching
@@ -1715,44 +1794,67 @@
                 }));
                 options.replaceChildren(all, ...entries);
                 const count = selectedSourceKeys.size || (selectedCollectionKey ? 1 : 0);
-                const kind = selectedCollectionKey && !selectedSourceKeys.size
-                    ? "collection"
-                    : "source";
+                const collectionMode = selectedCollectionKey && !selectedSourceKeys.size;
+                const noun = collectionMode
+                    ? count === 1
+                        ? "collection"
+                        : "collections"
+                    : count === 1
+                      ? "source"
+                      : "sources";
                 status.textContent =
-                    `${count} selected ${kind}${count === 1 ? "" : "s"}. ` +
-                    `Type a query to search ${count === 1 ? "it" : "them"}.`;
+                    `${count} ${t("selected")} ${t(noun)}. ` +
+                    t(
+                        count === 1
+                            ? "Type a query to search it."
+                            : "Type a query to search them.",
+                    );
             }
 
             function renderScopeLine() {
                 const line = $("scopeLine");
                 const text = $("scopeLineText");
                 if (!line || !text) return;
+                const collectionKey =
+                    selectedCollectionKey || current?.searchCollection || null;
+                const selected = [...selectedSourceKeys];
+                const searchKeys = selected.length
+                    ? selected
+                    : current?.searchKeys || [];
                 const scoped = Boolean(
-                    current &&
-                        !current.searchAll &&
-                        ((current.searchKeys && current.searchKeys.length) ||
-                            current.searchCollection),
+                    collectionKey ||
+                        selected.length ||
+                        (current &&
+                            !current.searchAll &&
+                            searchKeys.length),
                 );
                 line.hidden = !scoped;
                 if (!scoped) {
                     text.textContent = "";
                     return;
                 }
-                if (current.searchCollection) {
-                    const count = current.searchKeys?.length || 0;
+                if (collectionKey) {
+                    const count =
+                        current?.searchCollection === collectionKey
+                            ? current.searchKeys?.length || 0
+                            : 0;
                     text.textContent =
-                        `Searching collection: ${collectionDisplayName(current.searchCollection)}` +
-                        (count ? ` (${count} source${count === 1 ? "" : "s"})` : "");
+                        `${t("Searching collection")}: ${collectionDisplayName(collectionKey)}` +
+                        (count
+                            ? ` (${count} ${t(count === 1 ? "source" : "sources")})`
+                            : "");
                     return;
                 }
-                const names = current.searchKeys.map((key) => sourceDisplayName(key));
+                const names = searchKeys.map((key) => sourceDisplayName(key));
                 const shown = names.slice(0, 3);
                 const extra = names.length - shown.length;
                 text.textContent =
                     names.length === 1
-                        ? `Searching only in: ${shown[0]}`
-                        : `Searching only in ${names.length} sources: ${shown.join(", ")}${
-                              extra > 0 ? ` and ${extra} more` : ""
+                        ? `${t("Searching only in")}: ${shown[0]}`
+                        : `${t("Searching only in")} ${names.length} ${t("sources")}: ${shown.join(", ")}${
+                              extra > 0
+                                  ? ` ${t("and")} ${extra} ${t("more")}`
+                                  : ""
                           }`;
             }
 
@@ -2962,7 +3064,9 @@
                     empty.className = "empty";
                     empty.textContent = current?.streaming
                         ? "" // waiting for search results... but they often appear too fast to read this text so better to print nothing...
-                        : "No results found in the available sources. Try using different words.";
+                        : t(
+                              "No results found in the available sources. Try using different words.",
+                          );
                     $("results").appendChild(empty);
                     return;
                 }
@@ -3082,22 +3186,27 @@
 
             function searchStatusText() {
                 if (!current) return "";
+                const progress = effectiveSourceProgress();
                 const range = current.total
                     ? pageRangeText(current.total, current.page)
-                    : current.sourcesTotal
-                      ? "No results"
-                      : "No searchable sources.";
+                    : progress.total
+                      ? t("No results")
+                      : t("No searchable sources.");
                 // Keep the source tally visible once the stream has finished, on
                 // every page, so paging does not drop it from the status line.
-                return current.sourcesTotal > 0 &&
-                    current.completed === current.sourcesTotal
-                    ? `${range} · ${current.completed}/${current.sourcesTotal} sources complete`
+                return progress.total > 0 && progress.completed === progress.total
+                    ? `${range} · ${progress.completed}/${progress.total} ${t(
+                          progress.total === 1
+                              ? "source complete"
+                              : "sources complete",
+                      )}`
                     : range;
             }
 
             function sourceProgressText(completed, total) {
-                const noun = total === 1 ? "source" : "sources";
-                return `${completed}/${total} ${noun} complete`;
+                return `${completed}/${total} ${t(
+                    total === 1 ? "source complete" : "sources complete",
+                )}`;
             }
 
             function announceSearchStatus(message = null) {
@@ -3111,22 +3220,23 @@
                     node.textContent = "";
                     return;
                 }
+                const progress = effectiveSourceProgress();
                 // Before the stream's `started` event, 0/0 is not a result:
                 // announcing "No searchable sources." here would be wrong.
-                if (current.streaming && current.sourcesTotal === 0) {
+                if (current.streaming && progress.total === 0) {
                     node.textContent = "";
                     return;
                 }
-                if (current.sourcesTotal === 0) {
+                if (progress.total === 0) {
                     node.textContent = current.total
                         ? searchStatusText()
                         : current.streaming
                           ? ""
-                          : "No sources are available to search.";
+                          : t("No sources are available to search.");
                     return;
                 }
                 node.textContent =
-                    current.completed === current.sourcesTotal
+                    progress.completed === progress.total
                         ? searchStatusText()
                         : "";
             }
@@ -3212,15 +3322,22 @@
                     $("notice").textContent = "";
                     return;
                 }
-                const outcomes = [...current.outcomes.values()];
+                const selected = selectedSourceKeys;
+                const outcomes = [...current.outcomes.values()].filter(
+                    (outcome) =>
+                        !selected.size || selected.has(outcome.source.key),
+                );
+                const progress = effectiveSourceProgress();
                 // Only a hard "error" status counts as a failure; a "partial"
                 // source still returned results, so it must not trip this banner.
                 const errors = outcomes.filter((outcome) => outcome.status === "error");
                 $("notice").innerHTML =
-                    current.completed === current.sourcesTotal &&
+                    progress.completed === progress.total &&
                     outcomes.length > 0 &&
                     errors.length === outcomes.length
-                        ? "<div class='notice'><strong>All sources failed.</strong> Check your sources and the Kiwix service, then reload or restart the server.</div>"
+                        ? `<div class='notice'><strong>${t("All sources failed.")}</strong> ${t(
+                              "Check your sources and the Kiwix service, then reload or restart the server.",
+                          )}</div>`
                         : "";
             }
 
@@ -3474,7 +3591,7 @@
                         renderNotice();
                     } else if (event.type === "error") {
                         busy = Boolean(event.busy);
-                        $("status").textContent = event.error || "Search failed";
+                        $("status").textContent = event.error || t("Search failed");
                         announceSearchStatus($("status").textContent);
                     }
                     return false;
@@ -3505,6 +3622,19 @@
             function setSettingsOpen(open) {
                 const settings = $("settingsDetails");
                 if (settings) settings.open = Boolean(open);
+            }
+
+            async function httpError(response) {
+                let detail = `HTTP ${response.status}`;
+                try {
+                    const payload = await response.json();
+                    if (payload && payload.detail) detail = String(payload.detail);
+                } catch (_) {
+                    // The response was not JSON; keep the status message.
+                }
+                const error = new Error(detail);
+                error.status = response.status;
+                return error;
             }
 
             async function runSearch(
@@ -3565,7 +3695,7 @@
                 $("searchSummary").hidden = false;
                 $("searchButton").disabled = true;
                 $("status").innerHTML =
-                    `Searching for <span class="query-used">"${escapeHtml(question)}"</span>…`;
+                    `${t("Searching for")} <span class="query-used">"${escapeHtml(question)}"</span>…`;
                 $("notice").textContent = "";
                 $("pager").innerHTML = "";
                 renderScopeLine();
@@ -3573,7 +3703,9 @@
                 try {
                     const selected = activeSources();
                     if (!selected.length) {
-                        $("status").textContent = "No sources are available to search.";
+                        $("status").textContent = t(
+                            "No sources are available to search.",
+                        );
                         announceSearchStatus($("status").textContent);
                         return;
                     }
@@ -3588,6 +3720,8 @@
                         selectedCollectionKey ? [] : scopeKeys,
                         selectedCollectionKey,
                     );
+                    dedupeParams(params, "source");
+                    dedupeParams(params, "display_source");
                     // An explicit source/collection selection defines the scope
                     // directly; it is never promoted to a full search. Page size,
                     // offset and the display filter are not cached keys.
@@ -3609,8 +3743,7 @@
                                 signal: streamController.signal,
                             });
                             if (!response.ok) {
-                                const error = new Error(`HTTP ${response.status}`);
-                                error.status = response.status;
+                                const error = await httpError(response);
                                 try {
                                     await response.body?.cancel();
                                 } catch (_) {
@@ -3657,7 +3790,12 @@
                         sequence === searchSequence
                     ) {
                         clearPartialResults();
-                        $("status").textContent = `Search failed: ${error.message}`;
+                        $("status").textContent = t("Search failed");
+                        if (error.status === 400) {
+                            $("notice").textContent =
+                                `${t("One or more selected sources are not available.")}` +
+                                (error.message ? ` (${error.message})` : "");
+                        }
                         announceSearchStatus($("status").textContent);
                     }
                 } finally {
@@ -3699,6 +3837,8 @@
                         : current.searchKeys || [],
                     current.searchCollection,
                 );
+                dedupeParams(params, "source");
+                dedupeParams(params, "display_source");
                 $("status").textContent = "Loading page…";
                 try {
                     let response;
@@ -3739,7 +3879,7 @@
                             await waitForRetry(delay, controller.signal);
                             continue;
                         }
-                        throw new Error(`HTTP ${response.status}`);
+                        throw await httpError(response);
                     }
                     const items = await response.json();
                     if (sequence !== searchSequence || controller !== pageController) return;
@@ -3768,7 +3908,12 @@
                         controller === pageController
                     ) {
                         clearPartialResults();
-                        $("status").textContent = `Search failed: ${error.message}`;
+                        $("status").textContent = t("Search failed");
+                        if (error.status === 400) {
+                            $("notice").textContent =
+                                `${t("One or more selected sources are not available.")}` +
+                                (error.message ? ` (${error.message})` : "");
+                        }
                         announceSearchStatus($("status").textContent);
                     }
                 } finally {
@@ -3803,7 +3948,11 @@
                     current.question === question &&
                     (current.searchCollection || null) === (collectionKey || null)
                 ) {
-                    const scope = new Set(current.searchKeys || []);
+                    const scope = new Set(
+                        current.searchAll
+                            ? [...current.outcomes.keys()]
+                            : current.searchKeys || [],
+                    );
                     if (
                         !collectionKey &&
                         requested.every((key) => scope.has(key))
@@ -3851,12 +4000,12 @@
                     explicitScope || (current && current.question === question);
                 const scopeValues = scopeSources !== undefined
                     ? [...new Set(selectionValues(scopeSources))]
-                    : sameSearch
+                    : sameSearch && current
                       ? [...new Set(current.searchKeys || [])]
                       : displayValues;
                 const resolvedCollection = hasCollectionArg
                     ? collectionKey
-                    : sameSearch
+                    : sameSearch && current
                       ? current.searchCollection || null
                       : null;
                 const fullSearch =
@@ -4106,8 +4255,11 @@
                 const selected = [...selectedSourceKeys];
                 commitAutoSearchHistory();
                 const scopeKeys = [...new Set(current.searchKeys || [])];
+                const knownScope = current.searchAll
+                    ? new Set(current.outcomes.keys())
+                    : new Set(scopeKeys);
                 const addsOutside = selected.some(
-                    (source) => !scopeKeys.includes(source),
+                    (source) => !knownScope.has(source),
                 );
                 const nextScope = !selected.length
                     ? []
@@ -4515,14 +4667,22 @@
                 }
                 // Keep the current source or collection filter when the query
                 // changes, so a search started from a library card stays scoped.
+                // A source chip selected from a full search is a display filter:
+                // keep the previous broad scope so the other sources stay
+                // selectable for the next query.
                 const selectedSources = [...selectedSourceKeys];
                 const hasCollection = Boolean(selectedCollectionKey);
+                const scopeSources = nextSearchScope(
+                    selectedSources,
+                    hasCollection ? selectedCollectionKey : null,
+                    current,
+                );
                 const url = makeStateUrl(
                     question,
                     selectedSources,
                     0,
                     null,
-                    hasCollection ? [] : undefined,
+                    scopeSources,
                     hasCollection ? selectedCollectionKey : undefined,
                 );
                 if (pushHistory) {
@@ -4544,7 +4704,7 @@
                     question,
                     selectedSources,
                     0,
-                    hasCollection ? [] : undefined,
+                    scopeSources,
                     hasCollection ? selectedCollectionKey : null,
                 );
             }
@@ -4837,7 +4997,7 @@
                     if (sequence !== libraryLoadSequence) return;
                     renderLibrary();
                     $("libraryStatus").textContent =
-                        `Could not load the library: ${error.message}`;
+                        `${t("Could not load the library")}: ${error.message}`;
                 }
             }
 
@@ -4853,9 +5013,10 @@
                         libraryParams.get("media") || "";
                 }
                 const state = readLocationState();
+                let invalidScope = false;
                 // Apply the URL state before the discovery fetches below: a query typed
                 // while they are in flight must keep the URL's source selection.
-                setSelectedSources(state.selectedSources);
+                applyLocationScope(state);
                 $("homeHeading").setAttribute(
                     "aria-label",
                     libraryView
@@ -4927,13 +5088,44 @@
                         applyDiscoveryData(data.payload, false);
                         if (data.stale) {
                             $("status").textContent =
-                                `Using cached source data; refresh failed: ${data.error.message}`;
+                                `${t("Using cached source data; refresh failed")}: ${data.error.message}`;
                         }
                     }
                 } catch (error) {
                     const target = libraryView ? $("libraryStatus") : $("status");
                     target.textContent =
-                        `Could not load ${libraryView ? "library" : "sources"}: ${error.message}`;
+                        `${t("Could not load")} ${libraryView ? t("library") : t("sources")}: ${error.message}`;
+                }
+                if (!libraryView && sources.length) {
+                    const known = new Set(sources.map((source) => source.key));
+                    const unknown = [...selectedSourceKeys].filter(
+                        (key) => !known.has(key),
+                    );
+                    if (unknown.length) {
+                        const valid = [...selectedSourceKeys].filter((key) =>
+                            known.has(key),
+                        );
+                        setSelectedSources(valid);
+                        $("notice").textContent =
+                            `${t("Unknown source")}: ${unknown.join(", ")}. ` +
+                            t("Choose a source from the list.");
+                        invalidScope = !valid.length && Boolean(state.question);
+                        if (invalidScope) {
+                            $("status").textContent = t("Search failed");
+                        }
+                        history.replaceState(
+                            history.state,
+                            "",
+                            makeStateUrl(
+                                state.question || "",
+                                valid,
+                                state.page,
+                                state.modal,
+                                valid,
+                                state.collection,
+                            ),
+                        );
+                    }
                 }
                 syncArticleModal(state.modal);
                 if (!$("articleModal").hidden) {
@@ -4943,18 +5135,43 @@
                 }
                 if (state.question) {
                     $("question").value = state.question;
-                    runSearch(
-                        state.question,
-                        state.selectedSources,
-                        state.page,
-                        state.scopeSources,
-                        state.collection,
-                    );
+                    if (!invalidScope) {
+                        const knownNow = new Set(
+                            (libraryView ? [] : sources).map((source) => source.key),
+                        );
+                        const selectedNow = [...selectedSourceKeys];
+                        const scopeNow = libraryView
+                            ? state.scopeSources
+                            : state.scopeSources.filter((key) =>
+                                  knownNow.has(key),
+                              );
+                        runSearch(
+                            state.question,
+                            selectedNow,
+                            state.page,
+                            scopeNow,
+                            state.collection,
+                        );
+                    }
                 } else if (!libraryView) {
                     renderSourceSelectionSummary();
+                    renderScopeLine();
                     $("question").focus();
                 }
             }
+
+            $("localePicker")?.addEventListener("change", () => {
+                if (!$("libraryView").hidden) renderLibrary();
+                if (current) {
+                    renderView();
+                    $("status").textContent = searchStatusText();
+                    renderScopeLine();
+                    renderNotice();
+                } else if (!$("searchView").hidden) {
+                    renderSourceSelectionSummary();
+                    renderScopeLine();
+                }
+            });
 
             initialize();
         })();

@@ -588,6 +588,17 @@ def _build_producer_for_zim(zim: Path, cfg: dict, *, fast: bool):
     )
 
 
+def _build_config(cfg: dict, fast: bool) -> dict:
+    """Copy build settings and attach locally available derived-text engines."""
+
+    values = dict(cfg)
+    if not fast and "derived_engines" not in values:
+        from .indexing.engines import available_derived_engines
+
+        values["derived_engines"] = available_derived_engines()
+    return values
+
+
 def _build_files_collections(
     cfg: dict,
     args,
@@ -614,7 +625,7 @@ def _build_files_collections(
         logger=logger,
         persist_catalog=False,
     )
-    build_cfg = dict(cfg)
+    build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     for entry in entries:
         try:
@@ -706,7 +717,7 @@ def _build_kolibri_collections(
         logger=logger,
         persist_catalog=False,
     )
-    build_cfg = dict(cfg)
+    build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     for entry in entries:
         try:
@@ -1106,7 +1117,7 @@ def _build_tasks(
                 queue_size=max(2, workers * 2),
             )
 
-    build_cfg = dict(cfg)
+    build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     locator = IndexLocator(cfg["index_dir"])
 
@@ -1322,7 +1333,7 @@ def _run_positional_zim_build(
                 workers=min(embedding_workers, workers),
                 queue_size=max(2, workers * 2),
             )
-    build_cfg = dict(cfg)
+    build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     locator = IndexLocator(cfg["index_dir"])
     failures: list[tuple[Path, BaseException]] = []

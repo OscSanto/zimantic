@@ -33,6 +33,7 @@ from ...content.store import (
 from ...diagnostics import public_cause
 from ...indexes.locator import IndexLocator
 from ...indexing import search as generic_search
+from ...indexing.derived import derived_text_preview
 from ..base import (
     CollectionInfo,
     CollectionRuntime,
@@ -265,6 +266,21 @@ class KolibriRuntime(CollectionRuntime):
         finally:
             index.release()
 
+    def _derived_preview(self, source: SourceInfo, path: str) -> str:
+        with self._lock:
+            index = self.indexes.get(source.key)
+        if index is None:
+            return ""
+        try:
+            source_directory = IndexLocator(self.index_dir).source_directory(
+                source.provider, source.collection_key, source.key
+            )
+        except Exception:
+            return ""
+        return derived_text_preview(
+            index, source_directory / "derived-cache", path
+        )
+
     def preview(
         self,
         source: SourceInfo,
@@ -290,6 +306,9 @@ class KolibriRuntime(CollectionRuntime):
                 return lead, mimetype
             mimetype = entry.mimetype
             if mimetype.startswith(_MEDIA_PREFIXES):
+                derived = self._derived_preview(source, path)
+                if derived:
+                    return truncate_at_word_boundary(derived, max_chars), mimetype
                 return lead, mimetype
             if mimetype == "application/pdf":
                 data = store.read(

@@ -161,6 +161,25 @@ def test_cross_source_asset_and_child_prefix(tmp_path):
         store.close()
 
 
+def test_extensionless_media_uses_magic_for_inline_serving(tmp_path):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "index.html").write_text("<html><body>home</body></html>", encoding="utf-8")
+    (root / "scan").write_bytes(b"\x89PNG\r\n\x1a\n" + b"png payload")
+    (root / "bundle").write_bytes(b"PK\x03\x04fixture zip bytes")
+    config = files_config(root, granularity="collection")
+    store = _store(root, config, "files:modules:root")
+    try:
+        entry = store.resolve("scan")
+        assert entry.mimetype == "image/png"
+        # Built-in zip magic wins over puremagic's zip-container guesses
+        # (which can mislabel a plain archive as an OOXML document).
+        bundle = store.resolve("bundle")
+        assert bundle.mimetype == "application/zip"
+    finally:
+        store.close()
+
+
 def test_unknown_extension_and_svg_mime(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()

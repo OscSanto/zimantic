@@ -810,6 +810,24 @@ def _content_error_panel(error: dict, base_path: str = "") -> str:
     )
 
 
+def _content_attachment_panel(
+    title: str, download_url: str, mimetype: str | None
+) -> str:
+    """Explain a non-inline attachment instead of loading a blank iframe."""
+
+    kind = html_escape(str(mimetype or "file"), quote=True)
+    return (
+        '<div class="zimantic-shell-attachment" role="region">'
+        f'<h1 class="zimantic-shell-attachment-title">{html_escape(title)}</h1>'
+        '<p data-i18n="This file cannot be displayed in the offline viewer.">'
+        "This file cannot be displayed in the offline viewer.</p>"
+        f'<p class="zimantic-shell-attachment-type"><code>{kind}</code></p>'
+        f'<p><a class="zimantic-shell-download" href="{html_escape(download_url, quote=True)}" '
+        'download data-i18n="Download file">Download file</a></p>'
+        "</div>"
+    )
+
+
 def _content_shell(
     zim: str,
     article: dict,
@@ -843,6 +861,11 @@ def _content_shell(
         ' sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"'
         if secure_browsing
         else ""
+    )
+    attachment = (
+        not error
+        and bool(article.get("mimetype"))
+        and not is_inline_mimetype(article.get("mimetype"))
     )
     toolbar = _article_toolbar(
         zim,
@@ -887,6 +910,10 @@ def _content_shell(
         + (
             _content_error_panel(error, base_path)
             if error
+            else _content_attachment_panel(
+                title, iframe_url, article.get("mimetype")
+            )
+            if attachment
             else (
                 f'<h1 class="zimantic-shell-heading">{title}</h1>\n'
                 "\n<div id=\"articleStorageNotice\" class=\"article-storage-notice\" "

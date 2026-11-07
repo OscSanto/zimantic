@@ -2357,6 +2357,38 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual(page["total"], 2)
             search._executor.shutdown(wait=True)
 
+    def test_display_source_narrows_the_page_without_changing_scope(self):
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            _write_index(tmp, "alpha", rows=[(1, "Tire Change Alpha", "a", None)])
+            _write_index(tmp, "beta", rows=[(1, "Tire Change Beta", "b", None)])
+            search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
+            search._load_indexes()
+            search.refresh_sources()
+
+            page = search.search_page(
+                "tire change", limit=10, display_source="beta"
+            )
+            beta = search._zim_source_key("beta")
+            alpha = search._zim_source_key("alpha")
+            self.assertEqual(
+                [doc["source_key"] for doc in page["results"]], [beta]
+            )
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(page["counts"], {alpha: 1, beta: 1})
+            self.assertEqual(page["scope"]["requested"], 2)
+
+            page = search.search_page(
+                "tire change", limit=10, display_source=["alpha", "beta"]
+            )
+            self.assertEqual(
+                [doc["source_key"] for doc in page["results"]],
+                [alpha, beta],
+            )
+            self.assertEqual(page["total"], 2)
+            search._executor.shutdown(wait=True)
+
     def test_concurrent_identical_searches_share_one_computation(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
