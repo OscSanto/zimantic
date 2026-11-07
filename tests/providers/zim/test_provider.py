@@ -6,10 +6,10 @@ import logging
 from pathlib import Path
 
 import pytest
-
 from libzim.reader import Archive
 from libzim.writer import Creator, Hint, Item, StringProvider
 
+from zimantic.catalog import SourceCatalog, catalog_path
 from zimantic.providers.base import ProviderContext
 from zimantic.providers.config import RuntimeConfig, ZimConfig
 from zimantic.providers.zim import ZimProvider
@@ -18,7 +18,6 @@ from zimantic.providers.zim.discovery import (
     zim_collection_key,
     zim_source_key,
 )
-from zimantic.catalog import SourceCatalog, catalog_path
 
 ALPHA_HTML = (
     "<html><body><p>Alpha is a sufficiently long article about tires and "
@@ -56,6 +55,62 @@ def _create_zim(path: Path, *, main_path: str = "Alpha") -> None:
     with creator:
         creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
         creator.add_item(_Page("Beta", "Beta", ALPHA_HTML))
+
+
+def test_native_order_preserves_ids_redirects_and_original_entry_cap(tmp_path):
+    from types import SimpleNamespace
+
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
+
+    if not hasattr(Archive, "iter_efficient"):
+        pytest.skip("native efficient iterator requires libzim 4.1")
+    path = tmp_path / "ordered.zim"
+    with Creator(path) as creator:
+        creator.add_item(_Page("Zulu", "Zulu", ALPHA_HTML))
+        creator.add_item(_Page("Beta", "Beta", ALPHA_HTML))
+        creator.add_redirection("Alias", "Alias", "Zulu", {})
+    source = SimpleNamespace(key="ordered", provider="zim", collection_key="zim:test")
+    producer = ArchiveEntryProducer(source, path)
+    expected = [producer.entry_at(i) for i in range(producer.count)]
+    try:
+        assert producer.prepare_iteration() == "efficient-v1"
+        assert producer.article_work_count == 2
+        fingerprint = producer.order_fingerprint
+        actual = [producer.entry_at(i) for i in range(producer.count)]
+        assert sorted(actual, key=lambda row: row.id) == sorted(expected, key=lambda row: row.id)
+        assert actual[-1].title == "Alias"
+        assert actual[-1].target_id == actual[0].id or actual[-1].target_id == actual[1].id
+        assert producer.prepare_iteration("efficient-v1") == "efficient-v1"
+        assert producer.order_fingerprint == fingerprint
+    finally:
+        producer.close()
+    capped = ArchiveEntryProducer(source, path, max_entries=2)
+    try:
+        capped_expected = [capped.entry_at(i) for i in range(capped.count)]
+        capped.prepare_iteration()
+        assert sorted(
+            (capped.entry_at(i) for i in range(capped.count)), key=lambda row: row.id
+        ) == capped_expected
+    finally:
+        capped.close()
+
+
+def test_older_bindings_use_id_order_but_cannot_resume_native_order(tmp_path):
+    from types import SimpleNamespace
+
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
+
+    path = tmp_path / "older.zim"
+    path.write_bytes(b"fake")
+    archive = SimpleNamespace(entry_count=2)
+    producer = ArchiveEntryProducer(SimpleNamespace(key="old"), path, archive=archive)
+    try:
+        assert producer.prepare_iteration() == "id"
+        assert producer.prepare_iteration("id") == "id"
+        with pytest.raises(RuntimeError, match="requires libzim 4.1"):
+            producer.prepare_iteration("efficient-v1")
+    finally:
+        producer.close()
 
 
 def _context(index_dir: Path, *, archive_factory=Archive) -> ProviderContext:

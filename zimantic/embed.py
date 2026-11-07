@@ -16,6 +16,8 @@ import sentencepiece
 from .model_files import (
     DEFAULT_MODEL_CHECKSUMS,
     resolve_model_dir,
+)
+from .model_files import (
     sha256_file as _sha256,
 )
 from .model_meta import (
@@ -617,12 +619,19 @@ class Embedder:
 
     def embed(self, texts: list[str]) -> np.ndarray:
         """e5 expects each text to start with "query: " or "passage: "."""
-        if not texts:
+        return self.embed_encoded(self.encode(texts))
+
+    def encode(self, texts: list[str]) -> list[list[int]]:
+        """Prepare capped model inputs once, before scheduling build batches."""
+        return [self._ids(text) for text in texts]
+
+    def embed_encoded(self, encoded: list[list[int]]) -> np.ndarray:
+        """Embed already-tokenized inputs, including their special tokens."""
+        if not encoded:
             # No current caller batches zero texts, but refuse to crash on
             # ``max()`` over an empty list; the shape is unknown until the
             # first real batch, so return a degenerate row-less array.
             return np.empty((0, 0), dtype=np.float32)
-        encoded = [self._ids(t) for t in texts]
         width = max(map(len, encoded))
         ids = np.array(
             [e + [self.pad_id] * (width - len(e)) for e in encoded],
@@ -642,7 +651,7 @@ class Embedder:
         weights = mask[..., None].astype(np.float32)
         vectors = (hidden * weights).sum(1) / weights.sum(1)
         result = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
-        if self.low_memory and len(texts) > 1:
+        if self.low_memory and len(encoded) > 1:
             # Batched builds churn varied-shape workspaces and leave free heap
             # behind; return it to the OS between batches so RSS stays near the
             # model size. Single-query server embeddings skip this.

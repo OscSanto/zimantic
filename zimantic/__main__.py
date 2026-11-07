@@ -39,6 +39,12 @@ class _LazyEmbedder:
     def embed(self, *args, **kwargs):
         return self._get().embed(*args, **kwargs)
 
+    def encode(self, *args, **kwargs):
+        return self._get().encode(*args, **kwargs)
+
+    def embed_encoded(self, *args, **kwargs):
+        return self._get().embed_encoded(*args, **kwargs)
+
     @property
     def fingerprint(self) -> str:
         """The loaded model's fingerprint, or empty when it was never needed."""
@@ -1102,20 +1108,32 @@ def _build_tasks(
         def _make_embedder():
             return Embedder(
                 cfg["model_dir"],
-                threads=cfg.get("embed_threads"),
+                threads=cfg.get("embed_threads") or 1,
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
             )
 
         embedder = _LazyEmbedder(_make_embedder)
-        if workers > 1 and len(tasks) > 1:
-            embedding_workers = int(cfg.get("embedding_workers", 2))
-            if embedding_workers < 1:
-                parser.error("embedding_workers must be at least 1")
-            embedding_pipeline = EmbeddingPipeline(
-                embedder,
-                workers=min(embedding_workers, workers),
-                queue_size=max(2, workers * 2),
-            )
+        from .hardware import detect
+        from .settings import default_embedding_workers
+
+        hw = detect()
+        token_budget = int(cfg.get("embedding_batch_tokens", 1000))
+        embedding_workers = int(cfg.get("embedding_workers") or default_embedding_workers(
+            embed_threads=cfg.get("embed_threads"), token_budget=token_budget
+        ))
+        if embedding_workers < 1 or token_budget < 1:
+            parser.error("embedding_workers and embedding_batch_tokens must be at least 1")
+        logger.info(
+            "zimantic: build hardware: %s; %d embedding workers x %d threads, "
+            "%d padded tokens per call",
+            hw.describe(), embedding_workers, cfg.get("embed_threads") or 1, token_budget,
+        )
+        embedding_pipeline = EmbeddingPipeline(
+            embedder,
+            workers=embedding_workers,
+            queue_size=max(2, embedding_workers * 2),
+            token_budget=token_budget,
+        )
 
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline

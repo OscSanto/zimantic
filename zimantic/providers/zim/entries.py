@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ...content.reader import (
+    _READABLE_MIMETYPES,
     DEFAULT_MAX_BODY_TEXT_BYTES,
     DEFAULT_MAX_ENTRY_BYTES,
     DEFAULT_MAX_HTML_BYTES,
@@ -22,7 +23,7 @@ from ...content.reader import (
     read_entry,
 )
 from ...diagnostics import relative_display
-from ...indexing.types import EntryRecord, MAX_ROW_ID
+from ...indexing.types import MAX_ROW_ID, EntryRecord
 from .metadata import header_uuid
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,9 @@ class ArchiveEntryProducer:
         else:
             self.count = self._archive_entry_count
         self.truncated = self.count < self._archive_entry_count
+        self._order = None
+        self.article_work_count = None
+        self.order_fingerprint = ""
         self.fingerprint = self._fingerprint()
         self._update_catalog()
 
@@ -139,9 +143,10 @@ class ArchiveEntryProducer:
         if not isinstance(index, int) or index < 0 or index >= self.count:
             return None
         archive = self._open()
+        entry_id = int(self._order[index]) if self._order is not None else index
         row = read_entry(
             archive,
-            index,
+            entry_id,
             fast=self.fast,
             max_html_bytes=self.max_html_bytes,
             max_entry_bytes=self.max_entry_bytes,
@@ -163,6 +168,49 @@ class ArchiveEntryProducer:
                 f"{row.target_id}; refusing to merge or remap provider identities"
             )
         return row
+
+    def prepare_iteration(self, order: str | None = None) -> str:
+        """Keep canonical ids and caps while reading content in native order.
+
+        libzim 4.1 exposes iter_efficient(); older distro bindings retain id
+        order. Only metadata is read here, never compressed article bodies.
+        The cheap entries follow the article phase, whose progress has an ETA.
+        """
+        self._order = None
+        self.article_work_count = None
+        self.order_fingerprint = ""
+        iterator = getattr(self._open(), "iter_efficient", None)
+        if order == "id" or not callable(iterator):
+            if order not in (None, "id"):
+                raise RuntimeError("resuming efficient order requires libzim 4.1")
+            return "id"
+        if order not in (None, "efficient-v1"):
+            raise ValueError(f"unsupported ZIM entry order {order!r}")
+        import numpy as np
+
+        def entries():
+            for entry in iterator():
+                entry_id = int(entry._index)
+                if not 0 <= entry_id < self.count:
+                    continue
+                work = False
+                if not entry.is_redirect:
+                    mime = entry.get_item().mimetype.split(";", 1)[0].strip().lower()
+                    work = mime in _READABLE_MIMETYPES
+                yield entry_id, work
+
+        records = np.fromiter(entries(), dtype=[("id", "<u4"), ("work", "?")])
+        ids, work = records["id"], records["work"]
+        if len(ids) != self.count or not np.array_equal(
+            np.sort(ids), np.arange(self.count, dtype=np.uint32)
+        ):
+            if order is not None:
+                raise RuntimeError("native ZIM iterator no longer matches the resume manifest")
+            return "id"
+        self._order = np.concatenate((ids[work], ids[~work]))
+        self.article_work_count = int(work.sum())
+        self.order_fingerprint = hashlib.sha256(self._order.tobytes()).hexdigest()
+        return "efficient-v1"
 
     def validate_snapshot(self) -> bool:
         """Independently recheck the live archive against the fingerprint."""
@@ -192,6 +240,7 @@ class ArchiveEntryProducer:
         if self._closed:
             return
         self._closed = True
+        self._order = None
         if not self._owns_archive:
             return
         archive = self._archive

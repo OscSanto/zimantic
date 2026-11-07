@@ -63,8 +63,11 @@ class HardwareProfileTests(unittest.TestCase):
 
     def test_embedding_workers_respect_thread_budget(self):
         self.assertEqual(default_embedding_workers(4, 0.5, 1, 2), 1)
-        self.assertEqual(default_embedding_workers(20, 32, 5, None), 1)
-        self.assertEqual(default_embedding_workers(32, 128, 8, 8), 4)
+        self.assertEqual(default_embedding_workers(20, 32, 5, None), 8)
+        self.assertEqual(default_embedding_workers(32, 128, 8, 8), 3)
+        self.assertEqual(default_embedding_workers(4, 8, 1, None), 3)
+        self.assertEqual(default_embedding_workers(20, 0.5, 5, None), 1)
+        self.assertEqual(default_embedding_workers(20, 1, 5, None, 8000), 1)
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -285,7 +288,7 @@ class LoadConfigTests(unittest.TestCase):
                 patch.object(settings, "default_embedding_workers", return_value=2) as workers,
             ):
                 load_config(path, warn=lambda _: None)
-        workers.assert_called_once_with(build_workers=5, embed_threads=3)
+        workers.assert_called_once_with(build_workers=5, embed_threads=3, token_budget=1000)
 
     def test_embed_device_defaults_to_auto_and_accepts_a_string(self):
         with tempfile.TemporaryDirectory() as tmp:

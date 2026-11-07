@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
@@ -46,6 +47,7 @@ _FAISS_MIN_TRAINING_POINTS = 100_000
 DEFAULT_MAX_BODY_TEXT_BYTES = 1 << 20
 DEFAULT_BODY_BUFFER_BYTES = 16 << 20
 DEFAULT_STAGING_RESERVE_BYTES = 1 << 20
+DEFAULT_EMBEDDING_BATCH_TOKENS = 1000
 
 
 class BuildError(RuntimeError):
@@ -102,7 +104,9 @@ class BuildReport:
 
 @dataclass(slots=True)
 class _EmbeddingRequest:
-    rows: list[EntryRecord]
+    ids: list[int]
+    inputs: list
+    encoded: bool
     future: Future
 
 
@@ -115,12 +119,14 @@ class EmbeddingPipeline:
         workers: int = 1,
         queue_size: int = 8,
         max_pending_per_build: int = 2,
+        token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
     ) -> None:
         workers = int(workers)
         if workers < 1:
             raise ValueError("embedding workers must be at least 1")
         self.max_pending_per_build = max(1, int(max_pending_per_build))
         self._embedder = embedder
+        self.token_budget = max(1, int(token_budget))
         self._requests: Queue[_EmbeddingRequest | None] = Queue(
             maxsize=max(1, int(queue_size))
         )
@@ -136,7 +142,30 @@ class EmbeddingPipeline:
         if self._closed:
             raise RuntimeError("embedding pipeline is closed")
         future = Future()
-        self._requests.put(_EmbeddingRequest(rows, future))
+        batches = _embedding_batches(self._embedder, rows, self.token_budget)
+        if not batches:
+            future.set_result({})
+            return future
+        remaining = len(batches)
+        vectors = {}
+        lock = threading.Lock()
+
+        def finished(batch_future):
+            nonlocal remaining
+            with lock:
+                error = batch_future.exception()
+                if error is None:
+                    vectors.update(batch_future.result())
+                elif not future.done():
+                    future.set_exception(error)
+                remaining -= 1
+                if remaining == 0 and not future.done():
+                    future.set_result(vectors)
+
+        for ids, inputs, encoded in batches:
+            batch_future = Future()
+            batch_future.add_done_callback(finished)
+            self._requests.put(_EmbeddingRequest(ids, inputs, encoded, batch_future))
         return future
 
     def close(self) -> None:
@@ -154,8 +183,14 @@ class EmbeddingPipeline:
             if request is None:
                 return
             try:
-                request.future.set_result(_embed_rows(self._embedder, request.rows))
-            except Exception as error:  # surface it to the build thread
+                vectors = (
+                    self._embedder.embed_encoded(request.inputs)
+                    if request.encoded
+                    else self._embedder.embed(request.inputs)
+                )
+                request.future.set_result(dict(zip(request.ids, vectors)))
+            except BaseException as error:  # surface it to the build thread
+                logger.debug("embedding batch failed", exc_info=True)
                 request.future.set_exception(error)
 
 
@@ -194,6 +229,15 @@ class BodyBudget:
             self._condition.wait_for(
                 lambda: self._reserved == 0 or self._reserved + requested <= self.capacity
             )
+            self._reserved += requested
+            return requested
+
+    def try_reserve(self, size: int) -> int | None:
+        """Do not wait while a build itself holds uncommitted body text."""
+        requested = max(0, int(size))
+        with self._condition:
+            if requested > self.capacity or self._reserved + requested > self.capacity:
+                return None
             self._reserved += requested
             return requested
 
@@ -590,6 +634,8 @@ def _index_entries(
     derived_stage: Any | None = None,
     derived_metadata: dict[str, Any] | None = None,
     derived_refs: dict[int, list[tuple[str, int, str]]] | None = None,
+    progress=None,
+    token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
 ) -> None:
     pending_embeddings: list[tuple[Future, list[EntryRecord], int, int]] = []
     count = int(_producer_attr(producer, "count", 0) or 0)
@@ -612,55 +658,48 @@ def _index_entries(
                     next_entry,
                     fast=fast,
                     derived_refs=derived_refs,
+                    token_budget=token_budget,
                 ) or 0
+                if progress is not None:
+                    progress.advance(next_entry)
             finally:
                 body_budget.release(reserved)
             return
-        pending_embeddings.append(
-            (
-                embedding_pipeline.submit(
-                    [
-                        row._replace(body="", body_truncated=False)
-                        for row in rows
-                    ]
-                ),
-                rows,
-                next_entry,
-                reserved,
-            )
-        )
+        try:
+            future = embedding_pipeline.submit([
+                row._replace(body="", body_truncated=False) for row in rows
+            ])
+        except BaseException:
+            body_budget.release(reserved)
+            raise
+        pending_embeddings.append((future, rows, next_entry, reserved))
         if len(pending_embeddings) >= embedding_pipeline.max_pending_per_build:
-            future, pending_rows, pending_next, pending_reserved = (
-                pending_embeddings.pop(0)
+            drain_one()
+
+    def drain_one() -> None:
+        nonlocal truncated_rows
+        future, pending_rows, pending_next, pending_reserved = pending_embeddings.pop(0)
+        try:
+            truncated_rows += _save_rows(
+                db, pending_rows, pending_next, future.result(),
+                fast=fast, derived_refs=derived_refs,
             )
-            try:
-                truncated_rows += _save_rows(
-                    db,
-                    pending_rows,
-                    pending_next,
-                    future.result(),
-                    fast=fast,
-                    derived_refs=derived_refs,
-                )
-            finally:
-                body_budget.release(pending_reserved)
+            if progress is not None:
+                progress.advance(pending_next)
+        finally:
+            body_budget.release(pending_reserved)
 
     batch: list[EntryRecord] = []
     reserved = 0
 
     def flush(next_entry: int) -> None:
         nonlocal batch, reserved
-        save_batch(batch, next_entry, reserved)
+        rows, reservation = batch, reserved
         batch = []
         reserved = 0
+        save_batch(rows, next_entry, reservation)
 
-    for index in tqdm(
-        range(start, count),
-        initial=start,
-        total=count,
-        desc=str(_producer_attr(producer, "key", "index")),
-        delay=5,
-    ):
+    for index in range(start, count):
         try:
             row = producer.entry_at(index)
             if row is not None and derived_stage is not None and not fast:
@@ -737,11 +776,17 @@ def _index_entries(
                             f"derived stage failed: {error}"
                         )
             if row is not None:
-                batch.append(row)
                 if row.body and not fast:
-                    reserved += body_budget.reserve(
-                        len(row.body.encode("utf-8", "ignore"))
-                    )
+                    size = len(row.body.encode("utf-8", "ignore"))
+                    reservation = body_budget.try_reserve(size)
+                    if reservation is None:
+                        if batch:
+                            flush(index)
+                        while pending_embeddings:
+                            drain_one()
+                        reservation = body_budget.reserve(size)
+                    reserved += reservation
+                batch.append(row)
             if len(batch) >= batch_size:
                 flush(index + 1)
         except BaseException:
@@ -751,21 +796,54 @@ def _index_entries(
                 body_budget.release(pending_reserved)
             pending_embeddings.clear()
             raise
-    if batch or start < count:
-        flush(count)
-    while pending_embeddings:
-        future, pending_rows, pending_next, pending_reserved = pending_embeddings.pop(0)
-        try:
-            truncated_rows += _save_rows(
-                db,
-                pending_rows,
-                pending_next,
-                future.result(),
-                fast=fast,
-                derived_refs=derived_refs,
-            )
-        finally:
+    try:
+        if batch or start < count:
+            flush(count)
+        while pending_embeddings:
+            drain_one()
+    finally:
+        body_budget.release(reserved)
+        for _future, _rows, _next, pending_reserved in pending_embeddings:
             body_budget.release(pending_reserved)
+
+
+class _BuildProgress:
+    """Report committed article work separately from cheap entries."""
+
+    def __init__(self, producer, start: int):
+        self._stack = ExitStack()
+        self._key = str(_producer_attr(producer, "key", "index"))
+        self._work = _producer_attr(producer, "article_work_count")
+        self._position = start
+        total = self._work if self._work is not None else producer.count
+        self._bar = self._stack.enter_context(tqdm(
+            total=total,
+            initial=min(start, total),
+            desc=self._key + (" articles" if self._work is not None else ""),
+            delay=5,
+        ))
+        self._cheap = None
+
+    def advance(self, position: int) -> None:
+        if self._work is None:
+            self._bar.update(position - self._position)
+        else:
+            self._bar.update(min(position, self._work) - min(self._position, self._work))
+            if position > self._work:
+                if self._cheap is None:
+                    self._bar.close()
+                    self._cheap = self._stack.enter_context(tqdm(
+                        desc=self._key + " redirects/assets",
+                        initial=max(0, self._position - self._work),
+                        total=None,
+                        bar_format="{desc}: {n_fmt} entries [{elapsed}, {rate_fmt}]",
+                        delay=5,
+                    ))
+                self._cheap.update(position - max(self._position, self._work))
+        self._position = position
+
+    def close(self) -> None:
+        self._stack.close()
 
 
 def _finish_build(
@@ -971,6 +1049,7 @@ def build_index(
     locator = _locator_for(locator)
     source = _source_for_locator(producer)
     state: _BuildState | None = None
+    progress = None
     completed = False
     try:
         state = _prepare_build_state(producer, locator, fast=fast, force=force, cfg=cfg)
@@ -1040,6 +1119,22 @@ def build_index(
                     spool_directory=cfg.get("derived_spool_directory"),
                 )
         if not completed_staging:
+            start = int(state.meta.get(index_schema.NEXT, "0"))
+            prepare = getattr(producer, "prepare_iteration", None)
+            if callable(prepare):
+                recorded_order = state.meta.get(index_schema.ENTRY_ORDER)
+                order = prepare(recorded_order or ("id" if start else None))
+                order_fingerprint = getattr(producer, "order_fingerprint", "")
+                recorded_fingerprint = state.meta.get(index_schema.ENTRY_ORDER_FINGERPRINT)
+                if recorded_fingerprint and recorded_fingerprint != order_fingerprint:
+                    raise SnapshotChangedError(
+                        f"{source.key}: entry reading order changed; refusing an unsafe resume"
+                    )
+                with state.db:
+                    index_schema.write_meta(state.db, {
+                        index_schema.ENTRY_ORDER: order,
+                        index_schema.ENTRY_ORDER_FINGERPRINT: order_fingerprint,
+                    })
             batch_size = max(1, _cfg_int(cfg, "batch_size", 32))
             max_body_text_bytes = max(
                 1,
@@ -1050,10 +1145,11 @@ def build_index(
             body_budget = cfg.get("body_budget")
             if not isinstance(body_budget, BodyBudget):
                 body_budget = shared_body_budget(max_body_text_bytes)
+            progress = _BuildProgress(producer, start)
             _index_entries(
                 producer,
                 state.db,
-                int(state.meta.get(index_schema.NEXT, "0")),
+                start,
                 batch_size,
                 embedder,
                 fast,
@@ -1063,7 +1159,13 @@ def build_index(
                 derived_stage=derived_stage,
                 derived_metadata=derived_metadata,
                 derived_refs=derived_refs,
+                progress=progress,
+                token_budget=max(1, _cfg_int(
+                    cfg, "embedding_batch_tokens", DEFAULT_EMBEDDING_BATCH_TOKENS
+                )),
             )
+            progress.close()
+            progress = None
             fingerprint = getattr(embedder, "fingerprint", "") if embedder else ""
             model_probes = None
             if not fast and embedder is not None:
@@ -1182,6 +1284,8 @@ def build_index(
                 logger.debug("index build error for %s: %s", source.key, error)
         raise
     finally:
+        if progress is not None:
+            progress.close()
         if state is not None and state.db is not None:
             state.db.close()
         try:
@@ -1229,19 +1333,49 @@ def _fsync_path(path: Path) -> None:
         os.close(fd)
 
 
-def _embed_rows(embedder, rows: list[EntryRecord]) -> dict[int, Any]:
-    """Embed article rows and return vectors keyed by canonical row id."""
+def _embedding_batches(embedder, rows: list[EntryRecord], token_budget: int):
+    """Bound padded tokens per call; sort actual capped inputs, not characters."""
     if embedder is None:
-        return {}
+        return []
     articles = [row for row in rows if row.excerpt]
     if not articles:
-        return {}
+        return []
     passages = []
     for row in articles:
         prefix = f"passage: {row.title}\n"
         passages.append(prefix + embedder.truncate(row.excerpt, prefix=prefix))
-    vectors = embedder.embed(passages)
-    return {row.id: vector for row, vector in zip(articles, vectors)}
+    if not callable(getattr(embedder, "encode", None)) or not callable(
+        getattr(embedder, "embed_encoded", None)
+    ):
+        return [([row.id for row in articles], passages, False)]
+    encoded = embedder.encode(passages)
+    ordered = sorted(zip(articles, encoded), key=lambda pair: len(pair[1]))
+    batches = []
+    ids, inputs = [], []
+    for row, tokens in ordered:
+        # Padding, not just useful tokens, occupies the model workspace.
+        if inputs and (len(inputs) + 1) * len(tokens) > token_budget:
+            batches.append((ids, inputs, True))
+            ids, inputs = [], []
+        ids.append(row.id)
+        inputs.append(tokens)
+    if inputs:
+        batches.append((ids, inputs, True))
+    return batches
+
+
+def _embed_rows(
+    embedder, rows: list[EntryRecord],
+    token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
+) -> dict[int, Any]:
+    """Embed article rows and return vectors keyed by canonical row id."""
+    result = {}
+    for ids, inputs, encoded in _embedding_batches(
+        embedder, rows, token_budget
+    ):
+        vectors = embedder.embed_encoded(inputs) if encoded else embedder.embed(inputs)
+        result.update(zip(ids, vectors))
+    return result
 
 
 def _save_rows(
@@ -1326,13 +1460,14 @@ def _save(
     *,
     fast: bool = False,
     derived_refs: dict[int, list[tuple[str, int, str]]] | None = None,
+    token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
 ) -> int:
     """Embed and store a batch and the resume point in one transaction."""
     return _save_rows(
         db,
         rows,
         next_entry,
-        _embed_rows(embedder, rows),
+        _embed_rows(embedder, rows, token_budget),
         fast=fast,
         derived_refs=derived_refs,
     )

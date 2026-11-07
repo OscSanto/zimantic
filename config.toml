@@ -72,17 +72,24 @@ port = 8090
 # Desktop 100, mobile 50, supercomputer 200.
 # max_results = 100
 
-# Articles embedded per batch. Desktop 32, mobile 8, supercomputer 128.
-# Larger batches use more memory; use about 8 on a Pi Zero 2 W.
+# Rows per read/commit window. Desktop 32, mobile 8, supercomputer 128.
+# Larger windows improve length sorting but retain more lexical body text.
 # batch_size = 32
+
+# Maximum padded input tokens per model call, after sorting by actual token
+# length. ~1000 permits roughly 30 short texts or 4 long ones. A single text
+# longer than this budget still runs alone (capped by the model token limit).
+# Increase for GPU throughput; decrease to reduce worker memory.
+# embedding_batch_tokens = 1000
 
 # Independent ZIMs can be built concurrently. When unset, the default scales with
 # available CPU and RAM; set it explicitly to override the automatic worker count.
 # Values below 1 warn and fall back to the automatic default.
 # build_workers = 2
 
-# ONNX Runtime threads for embedding. Unset leaves a core for search and the web server.
-# Desktop auto, mobile 2, supercomputer 8.
+# ONNX Runtime threads per embedding call. Unset uses one thread per build
+# worker; serving still leaves a core for search and the web server.
+# Mobile 2, supercomputer 8; explicit settings apply to both build and serve.
 # embed_threads = 3
 
 # Embedding device. "auto" (the default) tries every accelerated provider the
@@ -98,10 +105,10 @@ port = 8090
 # setting.
 # embed_device = "auto"
 
-# Maximum simultaneous embedding calls when multiple ZIMs are being built.
-# When unset, the default accounts for build_workers, CPU threads and available RAM.
-# Only used when build_workers is greater than 1. Values below 1 warn and fall
-# back to the automatic default.
+# Maximum simultaneous embedding calls, including a single-source build.
+# When unset, physical cores (with affinity/cgroup limits), embed_threads and
+# available RAM bound the default. Each worker shares the same loaded model.
+# Values below 1 warn and fall back to the automatic default.
 # embedding_workers = 2
 
 # Maximum HTML read per article.

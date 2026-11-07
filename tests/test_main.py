@@ -1,3 +1,4 @@
+import argparse
 import importlib
 import tempfile
 import threading
@@ -291,44 +292,32 @@ class BuildWorkerTests(unittest.TestCase):
         self.assertEqual(lazy.embed(["a"]), ["a"])
         self.assertEqual(calls, [1])
 
-    def test_one_source_does_not_start_the_embedding_pipeline(self):
+    def test_one_source_uses_all_configured_embedding_workers(self):
         import zimantic.__main__ as main_module
-        from zimantic import settings
 
         build_module = importlib.import_module("zimantic.build")
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            source = directory / "only.zim"
-            source.write_bytes(b"zim")
-            config = {
-                "zim_dir": str(directory),
-                "index_dir": str(directory / "indexes"),
-                "batch_size": 1,
-                "build_workers": 2,
-            }
-            with (
-                patch.object(main_module.sys, "argv", [
-                    "zimantic",
-                    "build",
-                    "--workers",
-                    "2",
-                    str(source),
-                ]),
-                patch.object(settings, "load_config", return_value=config),
-                patch.object(main_module, "_configure_logging"),
-                patch.object(build_module, "build_index"),
-                patch.object(
-                    main_module,
-                    "_build_producer_for_zim",
-                    return_value=object(),
-                ),
-                patch.object(
-                    build_module,
-                    "EmbeddingPipeline",
-                    side_effect=AssertionError("pipeline used for one source"),
-                ),
-            ):
-                main_module.main()
+        runtime = types.SimpleNamespace(entry_producer=lambda *_args, **_kwargs: object())
+        config = {
+            "index_dir": "/unused/indexes",
+            "model_dir": "/unused/model",
+            "embedding_workers": 3,
+            "embedding_batch_tokens": 1000,
+        }
+        args = types.SimpleNamespace(workers=1, fast=False, force=False)
+        with (
+            patch.object(main_module, "_build_config", return_value=config.copy()),
+            patch.object(build_module, "build_index") as build,
+            patch.object(build_module, "EmbeddingPipeline") as pipeline,
+        ):
+            main_module._build_tasks(
+                [("one", runtime, object())], config, args, argparse.ArgumentParser()
+            )
+        self.assertEqual(pipeline.call_args.kwargs["workers"], 3)
+        self.assertEqual(pipeline.call_args.kwargs["token_budget"], 1000)
+        self.assertIs(
+            build.call_args.args[3]["embedding_pipeline"], pipeline.return_value
+        )
+        pipeline.return_value.close.assert_called_once()
 
 
 class ModelCommandTests(unittest.TestCase):

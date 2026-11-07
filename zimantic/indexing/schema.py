@@ -21,6 +21,8 @@ from typing import Any, Iterable, Mapping
 
 DONE = "done"
 NEXT = "next"
+ENTRY_ORDER = "entry_order"
+ENTRY_ORDER_FINGERPRINT = "entry_order_fingerprint"
 FILESIZE = "filesize"
 BUILD_FILESIZE = "build_filesize"
 INDEXED_COUNT = "indexed_count"
@@ -49,6 +51,8 @@ META_KEYS = frozenset(
     {
         DONE,
         NEXT,
+        ENTRY_ORDER,
+        ENTRY_ORDER_FINGERPRINT,
         FILESIZE,
         BUILD_FILESIZE,
         INDEXED_COUNT,
@@ -323,6 +327,8 @@ __all__ = [
     "DONE_FAST",
     "DONE_FULL",
     "DONE_VALUES",
+    "ENTRY_ORDER",
+    "ENTRY_ORDER_FINGERPRINT",
     "EXPECTED_TABLES",
     "FAISS_DIGEST",
     "FILESIZE",

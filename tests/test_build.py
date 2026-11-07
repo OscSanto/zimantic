@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from zimantic.indexes import IndexLocator
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.schema import (
     BODY_TRUNCATED_COUNT,
@@ -19,7 +20,6 @@ from zimantic.indexing.schema import (
     SCHEMA,
 )
 from zimantic.indexing.types import EntryRecord
-from zimantic.indexes import IndexLocator
 
 
 def _source(key="files:test:manual-0123", provider="files", collection_key="files:test"):
@@ -309,6 +309,37 @@ class BuildPipelineTests(unittest.TestCase):
             self.assertEqual(_meta(locator, _source())[DONE], "full")
             self.assertEqual(len(_docs(locator, _source())), 8)
 
+    def test_resume_keeps_old_id_order_and_rejects_changed_native_order(self):
+        rows = [EntryRecord(i, f"T{i}", "", f"p{i}") for i in range(4)]
+
+        class OrderedProducer(Producer):
+            order_fingerprint = "order-a"
+
+            def prepare_iteration(self, order):
+                self.requested_order = order
+                return order or "efficient-v1"
+
+        for legacy in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                first = OrderedProducer(rows, interrupt_at=2)
+                with self.assertRaises(KeyboardInterrupt):
+                    _build(first, tmp, fast=True)
+                directory = IndexLocator(tmp).source_directory(
+                    "files", "files:test", "files:test:manual-0123"
+                )
+                if legacy:
+                    with sqlite3.connect(directory / "staging-fast.sqlite") as db:
+                        db.execute("DELETE FROM meta WHERE key IN ('entry_order', 'entry_order_fingerprint')")
+                resumed = OrderedProducer(rows)
+                resumed.order_fingerprint = "order-b"
+                if legacy:
+                    locator = _build(resumed, tmp, fast=True)
+                    self.assertEqual(resumed.requested_order, "id")
+                    self.assertEqual(len(_docs(locator, _source())), 4)
+                else:
+                    with self.assertRaisesRegex(build_module.SnapshotChangedError, "reading order changed"):
+                        _build(resumed, tmp, fast=True)
+
     def test_changed_fingerprint_discards_staging(self):
         rows = [EntryRecord(i, f"T{i}", "e", f"p{i}", None, "body") for i in range(4)]
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,6 +430,26 @@ class BuildPipelineTests(unittest.TestCase):
 
 
 class BodyBudgetTests(unittest.TestCase):
+    def test_pipeline_drains_before_waiting_for_its_own_body_budget(self):
+        rows = [
+            EntryRecord(i, f"T{i}", "excerpt", f"p{i}", None, "123456")
+            for i in range(4)
+        ]
+        budget = build_module.BodyBudget(10)
+        pipeline = build_module.EmbeddingPipeline(_Embedder(), workers=2)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                    locator = _build(
+                        Producer(rows), tmp,
+                        {"batch_size": 32, "body_budget": budget, "embedding_pipeline": pipeline},
+                        embedder=_Embedder(),
+                    )
+                self.assertEqual(len(_docs(locator, _source())), 4)
+                self.assertEqual(budget.reserved, 0)
+        finally:
+            pipeline.close()
+
     def test_concurrent_reservations_are_bounded_and_released(self):
         budget = build_module.BodyBudget(10)
         budget.reserve(6)
@@ -540,6 +591,85 @@ class BuildBatchTests(unittest.TestCase):
 
 
 class EmbeddingPipelineTests(unittest.TestCase):
+    def test_batches_use_capped_padded_tokens_and_keep_vector_ids(self):
+        calls = []
+
+        class TokenEmbedder(_Embedder):
+            def encode(self, texts):
+                return [[int(text.split("\n")[-1])] * int(text.split("\n")[-1]) for text in texts]
+
+            def embed_encoded(self, inputs):
+                calls.append([len(tokens) for tokens in inputs])
+                return np.array([[tokens[0], 1] for tokens in inputs], dtype=np.float32)
+
+        lengths = [250, 20, 250, 20, 250, 20, 250, 20, 250, 20]
+        rows = [
+            EntryRecord(i, "T", str(length), str(i), None, "")
+            for i, length in enumerate(lengths)
+        ]
+        rows.append(EntryRecord(99, "Redirect", "", "", 0))
+        pipeline = build_module.EmbeddingPipeline(TokenEmbedder(), workers=2, token_budget=1000)
+        try:
+            result = pipeline.submit(rows).result(timeout=2)
+        finally:
+            pipeline.close()
+        self.assertEqual(sorted(calls), [[20] * 5, [250], [250] * 4])
+        self.assertEqual(set(result), set(range(10)))
+        for i, length in enumerate(lengths):
+            self.assertEqual(result[i][0], length)
+
+    def test_oversized_single_input_is_not_dropped_and_errors_propagate(self):
+        class TokenEmbedder(_Embedder):
+            def encode(self, texts):
+                return [[0] * 256 for _ in texts]
+
+            def embed_encoded(self, inputs):
+                raise RuntimeError("model failed")
+
+        rows = [EntryRecord(1, "Title", "Excerpt", "p")]
+        pipeline = build_module.EmbeddingPipeline(TokenEmbedder(), token_budget=100)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "model failed"):
+                pipeline.submit(rows).result(timeout=2)
+            self.assertEqual(pipeline.submit([rows[0]._replace(excerpt="")]).result(), {})
+        finally:
+            pipeline.close()
+
+    def test_progress_counts_committed_articles_and_omits_redirect_eta(self):
+        bars = []
+
+        class Bar:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.n = kwargs.get("initial", 0)
+                bars.append(self)
+
+            def update(self, amount):
+                self.n += amount
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        producer = SimpleNamespace(key="test", count=1000, article_work_count=10)
+        with patch.object(build_module, "tqdm", Bar):
+            progress = build_module._BuildProgress(producer, 3)
+            progress.advance(7)
+            self.assertEqual(bars[0].n, 7)
+            progress.advance(20)
+            progress.advance(1000)
+            progress.close()
+        self.assertEqual(bars[0].kwargs["total"], 10)
+        self.assertEqual(bars[0].n, 10)
+        self.assertIsNone(bars[1].kwargs["total"])
+        self.assertNotIn("remaining", bars[1].kwargs["bar_format"])
+        self.assertEqual(bars[1].n, 990)
+
     def test_limits_concurrent_embedding_calls(self):
         active = 0
         maximum = 0

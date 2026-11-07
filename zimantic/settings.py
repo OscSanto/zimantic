@@ -48,6 +48,7 @@ _COMMON = {
     # Global request-work cap for an explicitly selected Kiwix collection.
     "max_explicit_collection_sources": 500,
     "embed_device": "auto",
+    "embedding_batch_tokens": 1000,
     "max_html_bytes": 4_194_304,
     "max_article_bytes": DEFAULT_MAX_ARTICLE_BYTES,
     "max_preview_chars": 1_000,
@@ -261,15 +262,20 @@ def default_embedding_workers(
     memory_gb: float | None = None,
     build_workers: int | None = None,
     embed_threads: int | None = None,
+    token_budget: int = 1000,
 ) -> int:
-    """Choose embedding concurrency without oversubscribing CPU or memory."""
-    cores = max(1, cores or os.cpu_count() or 1)
-    memory_gb = _system_memory_gb() if memory_gb is None else memory_gb
-    build_workers = build_workers or default_build_workers(cores, memory_gb)
-    thread_budget = embed_threads if embed_threads and embed_threads > 0 else max(1, cores - 1)
-    cpu_limit = max(1, cores // thread_budget)
-    memory_limit = max(1, int(memory_gb // 2)) if memory_gb > 0 else 1
-    return min(build_workers, cpu_limit, memory_limit)
+    """Bound model concurrency independently of the number of source readers."""
+    from .hardware import detect
+
+    hw = detect() if cores is None or memory_gb is None else None
+    cores = max(1, cores if cores is not None else hw.cores)
+    available = int(memory_gb * (1 << 30)) if memory_gb is not None else hw.ram_available
+    thread_budget = embed_threads if embed_threads and embed_threads > 0 else 1
+    cpu_limit = max(1, (cores - 1) // thread_budget)
+    # Conservative working-set allowance, not a guarantee for arbitrary models.
+    per_worker = max(64 << 20, (64 << 20) * token_budget // 1000)
+    memory_limit = max(1, (available - (428 << 20)) // per_worker)
+    return min(8, cpu_limit, memory_limit)
 
 
 def profile_for_hardware() -> str:
@@ -397,7 +403,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # Use the validated values in ``cfg``, not the raw user mapping: an
     # invalid worker type is skipped above and must still get a computed
     # default instead of leaving the key missing.
-    for key in ("build_workers", "embedding_workers", "max_body_text_bytes", "max_derived_cache_bytes_per_source"):
+    for key in ("build_workers", "embedding_workers", "embedding_batch_tokens", "max_body_text_bytes", "max_derived_cache_bytes_per_source"):
         if key in cfg and (not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1):
             if key in {"build_workers", "embedding_workers"}:
                 warn(
@@ -419,6 +425,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         cfg["embedding_workers"] = default_embedding_workers(
             build_workers=build_workers if isinstance(build_workers, int) else None,
             embed_threads=embed_threads if isinstance(embed_threads, int) else None,
+            token_budget=cfg["embedding_batch_tokens"],
         )
     # Every collection is explicit.  A missing or empty config is an explicitly
     # empty library, not an implicit scan of the historical zim_dir default.
