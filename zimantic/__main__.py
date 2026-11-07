@@ -47,6 +47,9 @@ def main() -> None:
             if (Path(cfg["index_dir"]) / f"{zim.stem}.faiss").exists():
                 sys.exit(f"zimantic: {zim.stem} is already indexed")
 
+        from .hardware import detect
+        print(f"hardware: {detect().describe()}")
+
         embedder = Embedder(cfg["model_dir"])
         for zim in zims:
             build_zim(zim, cfg["index_dir"], embedder, cfg["batch_size"])
