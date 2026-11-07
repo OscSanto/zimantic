@@ -12,14 +12,16 @@ snapshots, and a database that changes during the bounded copy fails closed.
 
 `captions`, `ocr`, and `asr` are independent build-time opt-ins and all default
 off.  A provider with no enabled operation reads no caption, image, or media
-bytes.  Engines are never loaded by `serve` and no network or hosted service is
-used.  Missing local engines make only that operation unavailable.
+bytes.  Engines are never loaded by `serve`, and transcription itself is
+local; the only network use is the one-time checkpoint download.  Missing local
+engines make only that operation unavailable.
 
 - Embedded caption tracks require a local `ffmpeg`/`ffprobe` pair.
 - OCR requires a local engine and model; pages, pixels, and output are bounded.
-- ASR requires a local engine; a missing checkpoint is downloaded and verified
-  on first use, so the first build needs network access unless the model is
-  already cached.  Media duration and bytes are bounded.
+- ASR requires a local engine (`whisper-cli`, `whisper-ctranslate2`, or
+  `whisper`); a missing checkpoint is downloaded and verified on first use, so
+  the first build needs network access unless the model is already cached.
+  Media duration and bytes are bounded.
 - A partial requested enrichment publishes the available channels, reports the
   partial state, and exits the build non-zero.
 - Auto worker resolution is memory- and CPU-derived.  On a host where one

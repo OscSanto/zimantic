@@ -627,11 +627,25 @@ def test_full_derived_cache_omits_new_refs_but_keeps_searchable_text():
 
 def test_derived_config_and_workers_are_validated():
     config = derived_module.parse_derived_text(
-        {"max_caption_bytes": 10, "workers": 2, "ocr_languages": ["eng"]}
+        {
+            "max_caption_bytes": 10,
+            "workers": 2,
+            "ocr_languages": ["eng"],
+            "asr_engine": "faster-whisper",
+            "asr_threads": 4,
+            "asr_batched": True,
+        }
     )
     assert config.workers == 2
+    assert config.asr_engine == "faster-whisper"
+    assert config.asr_threads == 4
+    assert config.asr_batched is True
     with pytest.raises(ValueError):
         derived_module.parse_derived_text({"workers": True})
+    with pytest.raises(ValueError):
+        derived_module.parse_derived_text({"asr_engine": "not-an-engine"})
+    with pytest.raises(ValueError):
+        derived_module.parse_derived_text({"asr_threads": -1})
     assert derived_module.resolve_workers("auto", usable_cores=1, available_memory=500, per_worker_memory=1_000)[0] == 0
     workers, binding = derived_module.resolve_workers(
         "auto", usable_cores=16, available_memory=10_000, per_worker_memory=1_000

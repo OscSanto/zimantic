@@ -145,9 +145,11 @@ the index.
 
 | Dependency | Enables | Without it |
 |---|---|---|
-| `ffmpeg` and `ffprobe` | Embedded text-caption extraction, and audio decoding for whisper | Sidecar `.srt`/`.vtt` captions still work; embedded tracks and ASR are unavailable |
+| `ffmpeg` and `ffprobe` | Embedded text-caption extraction, and audio decoding for `whisper.cpp` and `openai-whisper` | Sidecar `.srt`/`.vtt` captions still work; embedded tracks and those ASR engines are unavailable |
 | `tesseract` plus trained language data | `ocr = "tesseract"` on images and image-only PDF pages | OCR is unavailable |
-| `openai-whisper` (`whisper` on `PATH`) | `asr = "whisper"` on audio/video | ASR is unavailable |
+| `whisper-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | `asr = "whisper"` with `asr_engine = "whisper.cpp"` or `"auto"` | That backend is unavailable; `auto` falls through to another installed engine |
+| `whisper-ctranslate2` from [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `asr = "whisper"` with `asr_engine = "faster-whisper"` | That backend is unavailable; it is the fastest option on CUDA GPUs |
+| `whisper` from [openai-whisper](https://github.com/openai/whisper) | `asr = "whisper"` with `asr_engine = "openai-whisper"` | That backend is unavailable |
 | `lsar` (from `unar`) | Archive-container detection for files with a missing or unknown extension | Built-in signatures and `puremagic` are still used |
 | `kiwix-serve` | A remote `type = "kiwix"` collection | Remote Kiwix sources are unavailable; local ZIM, files, and Kolibri sources still work |
 | GPU ONNX Runtime wheel | Accelerated embedding during `build` and `serve` | Zimantic warns and embeds on the CPU; see [GPU acceleration](#gpu-acceleration) |
@@ -181,46 +183,84 @@ it. GPU ONNX Runtime wheels are covered in
 
 ### Whisper ASR models
 
-`asr = "whisper"` runs the `whisper` command from
-[openai-whisper](https://github.com/openai/whisper). Install it where its
-executable is on `PATH`, either in Zimantic's environment or standalone:
+`asr = "whisper"` uses a local Whisper engine. Three backends are supported:
+
+| `asr_engine` | Executable | Best for |
+|---|---|---|
+| `whisper.cpp` | `whisper-cli` | CPU-only and low-memory devices, including a Raspberry Pi |
+| `faster-whisper` | `whisper-ctranslate2` | CUDA GPUs; up to 4× faster than openai-whisper, or up to 16× with batched inference |
+| `openai-whisper` | `whisper` | Reference implementation and existing installs |
+| `auto` | first available | Prefers whisper.cpp, then faster-whisper, then openai-whisper |
+
+Install at least one where its executable is on `PATH`:
 
 ```bash
-uv pip install openai-whisper     # into the active .venv
-# or
-pipx install openai-whisper       # standalone, puts `whisper` on PATH
+# whisper.cpp: CPU/edge default; build it and put whisper-cli on PATH
+git clone https://github.com/ggml-org/whisper.cpp
+cmake -B whisper.cpp/build -S whisper.cpp
+cmake --build whisper.cpp/build -j --config Release
+sudo install whisper.cpp/build/bin/whisper-cli /usr/local/bin/
+
+# faster-whisper: Python + CTranslate2; no system ffmpeg needed
+pipx install whisper-ctranslate2
+# or: uv pip install whisper-ctranslate2
+
+# openai-whisper: Python + PyTorch; needs system ffmpeg
+pipx install openai-whisper
+# or: uv pip install openai-whisper
 ```
 
-`ffmpeg` must also be installed. `openai-whisper` pulls in PyTorch, so if your
-interpreter has no PyTorch wheels, install whisper separately (for example
-with `pipx`) and keep Zimantic on its own interpreter. `uv sync` prunes
-packages that are not in the lockfile, so reinstall whisper after syncing or
-use the standalone install.
+`uv sync` prunes packages that are not in the lockfile, so use `pipx` or
+reinstall the Python backends after syncing. `whisper.cpp` and
+`openai-whisper` need `ffmpeg` for audio decoding. `faster-whisper` uses PyAV
+instead. GPU execution with faster-whisper needs CUDA 12 cuBLAS and cuDNN 9
+libraries. faster-whisper has no official CLI, so Zimantic uses
+`whisper-ctranslate2`, its openai-whisper-compatible client.
 
-The model is selected with `asr_model` under `[derived_text]`:
+Select the backend and model under `[derived_text]`:
 
 ```toml
 [derived_text]
-asr_model = "base.en"   # tiny, base, small, medium, large, large-v3-turbo,
-                        # and .en variants
+asr_engine = "auto"   # auto, whisper.cpp, faster-whisper, or openai-whisper
+asr_model = "base.en"
+asr_threads = 0       # 0 uses the engine default
+asr_batched = false   # faster-whisper: extra 2-4x speed, uses VAD
 ```
 
-Approximate on-disk model sizes are 75 MB (`tiny`), 142 MB (`base`), 466 MB
-(`small`), 1.5 GB (`medium`), and 2.9 GB (`large`); `.en` variants are about
-the same. Prefer `tiny.en` or `base.en` on small devices.
+`auto` prefers whisper.cpp because it is the lightest and most portable. On a
+CUDA host, set `asr_engine = "faster-whisper"` explicitly to get the GPU
+speedup, and set `asr_batched = true` for its additional throughput. In a mixed
+install, the same `asr_model` name works across backends:
+for example `base.en` maps to `ggml-base.en.bin`, the faster-whisper
+`Systran/faster-whisper-base.en` repository, or `base.en.pt`.
+
+For whisper.cpp, quantized models are supported by name:
+
+```toml
+asr_model = "tiny.en-q5_1"   # about 31 MiB; smaller and faster than tiny.en
+```
+
+Approximate non-quantized sizes are 75 MB (`tiny`), 142 MB (`base`), 466 MB
+(`small`), 1.5 GB (`medium`), and 2.9 GB (`large`). faster-whisper also accepts
+distilled models such as `distil-large-v3`, `distil-medium.en`, and
+`distil-small.en`.
 
 Zimantic downloads the selected checkpoint on first use when it is missing.
-The cache is `$XDG_CACHE_HOME/whisper` when `XDG_CACHE_HOME` is set, otherwise
-`~/.cache/whisper` (on Windows, `%USERPROFILE%\.cache\whisper`). Each model is
-one `<model>.pt` file. A per-model lock serializes concurrent builds, so only
-one process fetches the file and the others reuse it. The download is verified
-against the checksum published by openai-whisper.
+Downloads are atomic, checksum-verified, and serialized by a per-model lock, so
+concurrent builds fetch one copy and reuse it. Each backend keeps its models in
+the usual place:
+
+| Backend | Cache |
+|---|---|
+| whisper.cpp | `$XDG_CACHE_HOME/zimantic/whisper-cpp` or `~/.cache/zimantic/whisper-cpp` |
+| faster-whisper | `$XDG_CACHE_HOME/zimantic/faster-whisper` or `~/.cache/zimantic/faster-whisper` |
+| openai-whisper | `$XDG_CACHE_HOME/whisper` or `~/.cache/whisper` |
 
 The host needs network access the first time a model is fetched. If it is
 offline or the download fails, only ASR is marked partial and the build exits
-non-zero; a cached model is reused without a network request. To prepare
-a machine in advance, copy an existing `<model>.pt` from another host's cache,
-or run a build that enables ASR while online.
+non-zero; a cached model is reused without a network request. To prepare a
+machine in advance, copy the backend's cache directory from another host or run
+a build that enables ASR while online.
 
 ### OCR language data
 
@@ -360,12 +400,12 @@ asr = "whisper"        # audio/video speech-to-text
 
 Setting one does not enable the others. Engines run locally at build time only
 and are never loaded by `serve`; a missing engine marks only that operation
-unavailable. Zimantic uses the local `tesseract`, `whisper`, and
-`ffmpeg`/`ffprobe` executables when they are on `PATH`; no hosted service is
-used. ASR reads whisper's standard `<cache>/whisper/<model>.pt` cache and
-downloads the selected checkpoint on first use when it is absent. See
-[Optional dependencies](#optional-dependencies) for installing these tools and
-the whisper model cache behavior.
+unavailable. Zimantic uses local `tesseract`, `whisper-cli`,
+`whisper-ctranslate2`, `whisper`, and `ffmpeg`/`ffprobe` executables when they
+are on `PATH`; no hosted transcription service is used. ASR uses the backend
+selected by `asr_engine` and downloads its checkpoint on first use when it is
+absent. See [Optional dependencies](#optional-dependencies) for installing the
+backends and their model caches.
 Embedded text captions use the optional local `ffmpeg`/`ffprobe`
 pair when available, including supported descriptor-only inputs; a missing
 pair leaves only embedded-track caption extraction unavailable. The

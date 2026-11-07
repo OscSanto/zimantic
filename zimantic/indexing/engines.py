@@ -14,8 +14,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..whisper_models import cached_whisper_model, ensure_whisper_model
-from .derived import parse_caption_bytes
+from ..faster_whisper_models import ensure_faster_whisper_model
+from ..whisper_models import (
+    cached_openai_whisper_model,
+    ensure_openai_whisper_model,
+    ensure_whisper_cpp_model,
+)
+from .derived import ASR_ENGINES, parse_caption_bytes
 
 _DEFAULT_TIMEOUT = 7200
 
@@ -218,23 +223,208 @@ def _check_image_pixels(payload: bytes, max_pixels: int) -> None:
         raise RuntimeError("image exceeds max_ocr_pixels")
 
 
-def _whisper_model_path(model: str) -> Path | None:
-    """Return a locally cached whisper model, or ``None``."""
+ASR_EXECUTABLES = {
+    "whisper.cpp": "whisper-cli",
+    "faster-whisper": "whisper-ctranslate2",
+    "openai-whisper": "whisper",
+}
 
-    return cached_whisper_model(model)
+# Edge-friendly whisper.cpp first, then the GPU-oriented faster-whisper, then
+# the reference openai-whisper CLI.  An explicit asr_engine bypasses this.
+_AUTO_ASR_ORDER = (
+    ("whisper.cpp", ("ffmpeg",)),
+    ("faster-whisper", ()),
+    ("openai-whisper", ("ffmpeg",)),
+)
+
+
+def _openai_whisper_model_path(model: str) -> Path | None:
+    """Return a locally cached openai-whisper checkpoint, or ``None``."""
+
+    return cached_openai_whisper_model(model)
+
+
+def _resolve_asr_engine(requested: str) -> tuple[str, str]:
+    requested = str(requested or "auto")
+    if requested not in ASR_ENGINES:
+        raise RuntimeError(
+            f"unknown asr_engine {requested!r} "
+            f"(use one of {', '.join(ASR_ENGINES)})"
+        )
+    if requested == "auto":
+        for name, prerequisites in _AUTO_ASR_ORDER:
+            executable = shutil.which(ASR_EXECUTABLES[name])
+            if executable and all(shutil.which(tool) for tool in prerequisites):
+                return name, executable
+        raise RuntimeError(
+            "ASR needs whisper-cli (with ffmpeg), whisper-ctranslate2, "
+            "or whisper (with ffmpeg) on PATH"
+        )
+
+    executable = shutil.which(ASR_EXECUTABLES[requested])
+    if not executable:
+        raise RuntimeError(
+            f"asr_engine {requested!r} needs "
+            f"{ASR_EXECUTABLES[requested]!r} on PATH"
+        )
+    return requested, executable
+
+
+def _run_process(args: list[str], timeout: int, label: str):
+    try:
+        completed = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"{label} failed: {error}") from error
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(f"{label} failed: {detail[-300:]}")
+    return completed
+
+
+def _read_transcript(path: Path, label: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise RuntimeError(f"{label} produced no transcript: {error}") from error
+
+
+def _run_whisper_cli(
+    executable: str,
+    media: Path,
+    model: str,
+    output: Path,
+    timeout: int,
+    threads: int,
+    *,
+    label: str,
+) -> str:
+    if label == "openai-whisper" and not shutil.which("ffmpeg"):
+        raise RuntimeError("openai-whisper ASR needs the ffmpeg executable")
+    if label == "openai-whisper" and _openai_whisper_model_path(model) is None:
+        ensure_openai_whisper_model(model)
+    args = [
+        executable,
+        str(media),
+        "--model",
+        model,
+        "--output_format",
+        "txt",
+        "--output_dir",
+        str(output),
+    ]
+    if threads:
+        args.extend(["--threads", str(threads)])
+    _run_process(args, timeout, label)
+    return _read_transcript(output / f"{media.stem}.txt", label)
+
+
+def _run_faster_whisper(
+    executable: str,
+    media: Path,
+    model: str,
+    output: Path,
+    timeout: int,
+    threads: int,
+    *,
+    batched: bool,
+) -> str:
+    model_directory = ensure_faster_whisper_model(model)
+    args = [
+        executable,
+        str(media),
+        "--model_directory",
+        str(model_directory),
+        "--local_files_only",
+        "True",
+        "--output_format",
+        "txt",
+        "--output_dir",
+        str(output),
+    ]
+    if threads:
+        args.extend(["--threads", str(threads)])
+    if batched:
+        args.extend(["--batched", "True"])
+    _run_process(args, timeout, "faster-whisper")
+    return _read_transcript(output / f"{media.stem}.txt", "faster-whisper")
+
+
+def _run_whisper_cpp(
+    executable: str,
+    media: Path,
+    model: str,
+    output: Path,
+    timeout: int,
+    threads: int,
+) -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("whisper.cpp ASR needs the ffmpeg executable")
+    model_path = ensure_whisper_cpp_model(model)
+    wav = media.with_name("decoded.wav")
+    _run_process(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(media),
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(wav),
+        ],
+        timeout,
+        "ffmpeg",
+    )
+    base = output / "transcript"
+    args = [
+        executable,
+        "-m",
+        str(model_path),
+        "-f",
+        str(wav),
+        "-otxt",
+        "-of",
+        str(base),
+    ]
+    if threads:
+        args.extend(["-t", str(threads)])
+    _run_process(args, timeout, "whisper.cpp")
+    return _read_transcript(base.with_suffix(".txt"), "whisper.cpp")
 
 
 def extract_asr(payload: bytes, **options: Any) -> str:
-    """Transcribe one audio/video file with the local whisper CLI."""
+    """Transcribe one audio/video file with the selected local Whisper engine."""
 
-    whisper = shutil.which("whisper")
-    if not whisper:
-        raise RuntimeError("ASR needs the whisper executable")
+    engine, executable = _resolve_asr_engine(
+        str(options.get("asr_engine") or "auto")
+    )
     model = str(options.get("asr_model") or "base.en")
     timeout = _positive_int(options, "task_timeout_seconds", _DEFAULT_TIMEOUT)
     max_bytes = _positive_int(options, "max_asr_bytes", 1 << 30)
     max_seconds = _positive_int(options, "max_asr_seconds", 3600)
     max_output = _positive_int(options, "max_asr_output_bytes", 1 << 20)
+    threads_value = options.get("asr_threads", 0)
+    threads = (
+        threads_value
+        if isinstance(threads_value, int)
+        and not isinstance(threads_value, bool)
+        and threads_value > 0
+        else 0
+    )
+    batched = bool(options.get("asr_batched", False))
     if len(payload) > max_bytes:
         raise RuntimeError("ASR input exceeds max_asr_bytes")
 
@@ -245,57 +435,56 @@ def extract_asr(payload: bytes, **options: Any) -> str:
         duration = _probe_duration(media, timeout)
         if duration is not None and duration > max_seconds:
             raise RuntimeError("ASR input exceeds max_asr_seconds")
-        if _whisper_model_path(model) is None:
-            try:
-                ensure_whisper_model(model)
-            except Exception as error:
-                raise RuntimeError(
-                    f"ASR model {model!r} is unavailable: {error}"
-                ) from error
         output = root / "out"
         output.mkdir()
         try:
-            completed = subprocess.run(
-                [
-                    whisper,
-                    str(media),
-                    "--model",
+            if engine == "whisper.cpp":
+                text = _run_whisper_cpp(
+                    executable, media, model, output, timeout, threads
+                )
+            elif engine == "faster-whisper":
+                text = _run_faster_whisper(
+                    executable,
+                    media,
                     model,
-                    "--output_format",
-                    "txt",
-                    "--output_dir",
-                    str(output),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise RuntimeError(f"whisper failed: {error}") from error
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout).strip()
-            raise RuntimeError(f"whisper failed: {detail[-300:]}")
-        transcript = output / f"{media.stem}.txt"
-        try:
-            text = transcript.read_text(encoding="utf-8")
-        except OSError as error:
-            raise RuntimeError(f"whisper produced no transcript: {error}") from error
-        return _cap_utf8(text.strip(), max_output)
+                    output,
+                    timeout,
+                    threads,
+                    batched=batched,
+                )
+            else:
+                text = _run_whisper_cli(
+                    executable,
+                    media,
+                    model,
+                    output,
+                    timeout,
+                    threads,
+                    label="openai-whisper",
+                )
+        except Exception as error:
+            raise RuntimeError(
+                f"ASR engine {engine!r} could not transcribe the input: {error}"
+            ) from error
+        return _cap_utf8(text, max_output)
 
 
 def available_derived_engines() -> dict[str, Any]:
     """Return the engines whose local executables are installed.
 
     The names match the provider config contract: ``captions`` is always the
-    built-in parser, ``ocr`` is Tesseract, ``asr`` is whisper, and ``ffmpeg``
+    built-in parser, ``ocr`` is Tesseract, ``asr`` is Whisper, and ``ffmpeg``
     is the embedded-caption adapter.
     """
 
     engines: dict[str, Any] = {}
     if shutil.which("tesseract"):
         engines["ocr"] = extract_ocr
-    if shutil.which("whisper"):
+    if (
+        (shutil.which("whisper-cli") and shutil.which("ffmpeg"))
+        or shutil.which("whisper-ctranslate2")
+        or (shutil.which("whisper") and shutil.which("ffmpeg"))
+    ):
         engines["asr"] = extract_asr
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):
         engines["ffmpeg"] = extract_embedded_captions

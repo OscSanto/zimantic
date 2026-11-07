@@ -153,6 +153,14 @@ def parse_caption_bytes(data: bytes, **_options: Any) -> str:
 # -- configuration ---------------------------------------------------------
 
 
+ASR_ENGINES = (
+    "auto",
+    "whisper.cpp",
+    "faster-whisper",
+    "openai-whisper",
+)
+
+
 @dataclass(frozen=True)
 class DerivedTextConfig:
     max_caption_bytes: int = 1 << 20
@@ -160,7 +168,10 @@ class DerivedTextConfig:
     max_ocr_pages: int = 20
     max_ocr_pixels: int = 50_000_000
     max_ocr_output_bytes: int = 256 << 10
+    asr_engine: str = "auto"
     asr_model: str = "base.en"
+    asr_threads: int = 0
+    asr_batched: bool = False
     max_asr_seconds: int = 3600
     max_asr_bytes: int = 1 << 30
     max_asr_output_bytes: int = 1 << 20
@@ -190,6 +201,18 @@ class DerivedTextConfig:
             or self.workers < 1
         ):
             raise ValueError("workers must be 'auto' or a positive integer")
+        if self.asr_engine not in ASR_ENGINES:
+            raise ValueError(
+                f"asr_engine must be one of {', '.join(ASR_ENGINES)}"
+            )
+        if (
+            isinstance(self.asr_threads, bool)
+            or not isinstance(self.asr_threads, int)
+            or self.asr_threads < 0
+        ):
+            raise ValueError("asr_threads must be zero or a positive integer")
+        if not isinstance(self.asr_batched, bool):
+            raise ValueError("asr_batched must be true or false")
         if not self.asr_model:
             raise ValueError("asr_model must not be empty")
         if not self.ocr_languages:
@@ -699,7 +722,10 @@ class DerivedTextStage:
             "max_ocr_pages": self.config.max_ocr_pages,
             "max_ocr_pixels": self.config.max_ocr_pixels,
             "max_ocr_output_bytes": self.config.max_ocr_output_bytes,
+            "asr_engine": self.config.asr_engine,
             "asr_model": self.config.asr_model,
+            "asr_threads": self.config.asr_threads,
+            "asr_batched": self.config.asr_batched,
             "max_asr_seconds": self.config.max_asr_seconds,
             "max_asr_bytes": self.config.max_asr_bytes,
             "max_asr_output_bytes": self.config.max_asr_output_bytes,
@@ -886,6 +912,7 @@ class DerivedTextStage:
 
 
 __all__ = [
+    "ASR_ENGINES",
     "DERIVED_ORDER",
     "DerivedContribution",
     "DerivedResult",
