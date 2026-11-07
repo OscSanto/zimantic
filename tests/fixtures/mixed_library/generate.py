@@ -34,6 +34,7 @@ CHANNEL_ID = "fixture-channel"
 CHANNEL_NAME = "Fixture Channel"
 DEFAULT_FILES = 1_000
 DEFAULT_ZIM_ENTRIES = 200
+MEDIA_FIXTURES = Path(__file__).resolve().parents[1] / "media"
 
 _TOPICS = ("Mathematics", "Biology", "Geography")
 _WORDS = (
@@ -437,7 +438,7 @@ def write_kolibri(home: Path, *, documents_per_topic: int = 5) -> None:
             storage,
             checksum_seed="video:fixture",
             extension="mp4",
-            content=b"fixture video bytes",
+            content=(MEDIA_FIXTURES / "video" / "lesson.mp4").read_bytes(),
             node_id=video_id,
             preset="high_res_video",
         )
@@ -446,10 +447,7 @@ def write_kolibri(home: Path, *, documents_per_topic: int = 5) -> None:
             storage,
             checksum_seed="caption:fixture",
             extension="vtt",
-            content=(
-                b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n"
-                b"fixture caption about algebra\n"
-            ),
+            content=(MEDIA_FIXTURES / "video" / "lesson.en.vtt").read_bytes(),
             node_id=video_id,
             preset="video_subtitle",
             supplementary=True,

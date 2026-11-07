@@ -19,6 +19,8 @@ from zimantic.providers.files.discovery import (
 )
 from zimantic.providers.files.entries import FilesEntryProducer
 
+from media_helpers import copy_sample
+
 from .helpers import create_pdf, files_config
 
 
@@ -381,7 +383,7 @@ def test_body_beyond_excerpt_and_body_truncation_count(tmp_path):
 def test_media_is_title_only_without_reading_bytes(tmp_path, monkeypatch):
     root = tmp_path / "modules"
     root.mkdir()
-    (root / "video.mp4").write_bytes(b"media bytes that must not be read")
+    copy_sample("video/lesson.mp4", root / "video.mp4")
     (root / "notes.txt").write_text("notes", encoding="utf-8")
     config = files_config(
         root,
@@ -412,8 +414,8 @@ def test_media_is_title_only_without_reading_bytes(tmp_path, monkeypatch):
 def test_ocr_and_asr_use_fake_engines(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()
-    (root / "scan.png").write_bytes(b"fake png")
-    (root / "talk.mp3").write_bytes(b"fake audio")
+    copy_sample("image/scan.png", root / "scan.png")
+    copy_sample("audio/speech.mp3", root / "talk.mp3")
     (root / "notes.txt").write_text("native text", encoding="utf-8")
     config = files_config(
         root,
@@ -461,7 +463,7 @@ def test_ocr_and_asr_use_fake_engines(tmp_path):
 def test_image_only_pdf_is_ocr_eligible(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()
-    create_pdf(root / "scan.pdf")
+    copy_sample("documents/scanned.pdf", root / "scan.pdf")
     config = files_config(
         root,
         granularity="collection",
@@ -500,12 +502,9 @@ def test_caption_sidecars_attach_and_change_fingerprint_only_when_enabled(
 ):
     root = tmp_path / "modules"
     root.mkdir()
-    (root / "lesson.mp4").write_bytes(b"fake video")
+    copy_sample("video/lesson.mp4", root / "lesson.mp4")
     sidecar = root / "lesson.en.srt"
-    sidecar.write_text(
-        "1\n00:00:00,000 --> 00:00:01,000\ncaption zebra\n",
-        encoding="utf-8",
-    )
+    copy_sample("video/lesson.en.srt", sidecar)
     config = files_config(
         root,
         granularity="collection",
@@ -560,7 +559,7 @@ def test_caption_sidecars_attach_and_change_fingerprint_only_when_enabled(
 def test_embedded_captions_use_the_ffmpeg_adapter(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()
-    (root / "talk.mp4").write_bytes(b"fake video container")
+    copy_sample("video/embedded.mp4", root / "talk.mp4")
     config = files_config(
         root,
         granularity="collection",
@@ -595,11 +594,9 @@ def test_embedded_captions_use_the_ffmpeg_adapter(tmp_path):
 def test_ambiguous_sidecar_is_reported_not_attached(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()
-    (root / "video.mp4").write_bytes(b"fake mp4")
-    (root / "video.webm").write_bytes(b"fake webm")
-    (root / "video.srt").write_text(
-        "1\n00:00:00,000 --> 00:00:01,000\nambiguous\n", encoding="utf-8"
-    )
+    copy_sample("video/shared.mp4", root / "video.mp4")
+    copy_sample("video/shared.webm", root / "video.webm")
+    copy_sample("video/shared.srt", root / "video.srt")
     config = files_config(
         root,
         granularity="collection",

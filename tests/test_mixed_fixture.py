@@ -49,13 +49,21 @@ def test_mixed_fixture_generates_all_providers(tmp_path):
         caption = db.execute(
             "SELECT local_file_id FROM content_file WHERE preset = 'video_subtitle'"
         ).fetchone()[0]
-        for checksum in (html5, caption):
+        video = db.execute(
+            "SELECT local_file_id FROM content_file WHERE preset = 'high_res_video'"
+        ).fetchone()[0]
+        for checksum in (html5, caption, video):
             storage = root / "kolibri" / "content" / "storage"
             matches = list(storage.glob(f"{checksum[0]}/{checksum[1]}/{checksum}.*"))
             assert matches, checksum
             if checksum == html5:
                 with zipfile.ZipFile(matches[0]) as bundle:
                     assert "index.html" in bundle.namelist()
+            elif checksum == video:
+                # The committed sample is a real MP4, not placeholder bytes.
+                assert matches[0].read_bytes()[4:8] == b"ftyp"
+            elif checksum == caption:
+                assert b"WEBVTT" in matches[0].read_bytes()
     finally:
         db.close()
 

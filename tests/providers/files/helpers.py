@@ -11,6 +11,8 @@ from zimantic.providers.base import ProviderContext
 from zimantic.providers.config import FilesConfig, RuntimeConfig
 from zimantic.providers.files import FilesProvider
 
+from media_helpers import copy_sample
+
 INCLUDE = (
     "**/*.html",
     "**/*.htm",
@@ -91,7 +93,7 @@ def build_tree(root: Path) -> None:
         "<p>biology lesson about cells</p></body></html>",
         encoding="utf-8",
     )
-    (root / "biology" / "video.mp4").write_bytes(bytes(range(256)) * 4)
+    copy_sample("video/lesson.mp4", root / "biology" / "video.mp4")
     (root / "loose.txt").write_text(
         "loose notes about zebra and other animals", encoding="utf-8"
     )

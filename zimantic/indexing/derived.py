@@ -664,7 +664,7 @@ class DerivedTextStage:
         result = DerivedResult(states=self._initial_states())
         if not self.enabled:
             return result
-        caption_text = ""
+        caption_parts: list[str] = []
         pending_asr_text = ""
         ordered_inputs = sorted(
             inputs or (),
@@ -693,9 +693,9 @@ class DerivedTextStage:
                     result.errors.append(error)
                     result.states["captions"] = self._failure_state("captions")
                 elif text:
-                    caption_text = _cap_text(
-                        text, self.config.max_caption_bytes
-                    )
+                    part = _cap_text(text, self.config.max_caption_bytes)
+                    if part and part not in caption_parts:
+                        caption_parts.append(part)
                     result.states["captions"] = OPERATION_READY
                 else:
                     result.states["captions"] = OPERATION_READY
@@ -739,12 +739,11 @@ class DerivedTextStage:
                         result.errors.append(error)
                         result.states["captions"] = self._failure_state("captions")
                     elif text:
-                        caption_text = _cap_text(
-                            (caption_text + "\n\n" + text).strip(),
-                            self.config.max_caption_bytes,
-                        )
+                        part = _cap_text(text, self.config.max_caption_bytes)
+                        if part and part not in caption_parts:
+                            caption_parts.append(part)
                         result.states["captions"] = OPERATION_READY
-                if self.operations.asr and not caption_text:
+                if self.operations.asr and not caption_parts:
                     text, error = self._extract(
                         candidate,
                         operation="asr",
@@ -759,6 +758,9 @@ class DerivedTextStage:
                             text, self.config.max_asr_output_bytes
                         )
                         result.states["asr"] = OPERATION_READY
+        caption_text = _cap_text(
+            "\n\n".join(caption_parts), self.config.max_caption_bytes
+        )
         if caption_text:
             result.contributions.insert(
                 0, DerivedContribution("captions", caption_text, self._last_cache_key)

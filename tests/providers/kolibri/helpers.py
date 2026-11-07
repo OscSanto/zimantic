@@ -14,6 +14,8 @@ from zimantic.providers.config import KolibriConfig, RuntimeConfig
 from zimantic.providers.kolibri import KolibriProvider
 from zimantic.providers.kolibri.discovery import ChannelRow, SourceScope
 
+from media_helpers import sample
+
 SCHEMA = """
 CREATE TABLE django_migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -248,17 +250,19 @@ class KolibriFixture:
     def add_video(
         self,
         node_id: str,
-        data: bytes = b"fake video bytes",
+        data: bytes | None = None,
         *,
         captions: bytes | None = None,
         preset: str = "high_res_video",
         variant: bool = False,
     ) -> None:
+        if data is None:
+            data = sample("video/lesson.mp4").read_bytes()
         self.add_file(node_id, data, "mp4", preset=preset, priority=1)
         if variant:
             self.add_file(
                 node_id,
-                b"lower resolution " + data,
+                sample("video/shared.mp4").read_bytes(),
                 "mp4",
                 preset="low_res_video",
                 priority=2,
@@ -377,7 +381,7 @@ def make_two_channel_fixture(root: Path) -> KolibriFixture:
     fixture.add_channel("channel-b", "Channel B", "root-b")
     fixture.add_node("root-b", "channel-b", "Channel B", kind="topic", lft=1, rght=6, level=0, tree_id=2)
     fixture.add_node("audio-1", "channel-b", "Audio One", kind="audio", parent_id="root-b", lft=2, rght=3, level=1, tree_id=2)
-    fixture.add_file("audio-1", b"fake audio", "mp3", preset="audio")
+    fixture.add_file("audio-1", sample("audio/speech.mp3").read_bytes(), "mp3", preset="audio")
     fixture.add_node("exercise-1", "channel-b", "Exercise One", kind="exercise", parent_id="root-b", lft=4, rght=5, level=1, tree_id=2, description="public exercise description")
     fixture.close()
     return fixture

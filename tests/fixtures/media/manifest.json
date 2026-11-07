@@ -1,0 +1,157 @@
+{
+  "fixture_version": 1,
+  "speech": "The quick brown fox jumps over the lazy dog.",
+  "embedded_caption": "Embedded caption about a zebra crossing.",
+  "files": [
+    {
+      "path": "audio/speech.mp3",
+      "media_family": "audio",
+      "mimetype": "audio/mpeg",
+      "scenario": "speech for ASR"
+    },
+    {
+      "path": "audio/speech.ogg",
+      "media_family": "audio",
+      "mimetype": "audio/ogg",
+      "scenario": "speech for ASR"
+    },
+    {
+      "path": "audio/tone.wav",
+      "media_family": "audio",
+      "mimetype": "audio/wav",
+      "scenario": "no speech for ASR"
+    },
+    {
+      "path": "video/lesson.mp4",
+      "media_family": "video",
+      "mimetype": "video/mp4",
+      "scenario": "sidecar captions + speech"
+    },
+    {
+      "path": "video/lesson.en.srt",
+      "media_family": null,
+      "mimetype": "application/x-subrip",
+      "scenario": "sidecar SRT"
+    },
+    {
+      "path": "video/lesson.en.vtt",
+      "media_family": null,
+      "mimetype": "text/vtt",
+      "scenario": "sidecar WebVTT"
+    },
+    {
+      "path": "video/lesson.tricky.srt",
+      "media_family": null,
+      "mimetype": "application/x-subrip",
+      "scenario": "tags, entities, NOTE"
+    },
+    {
+      "path": "video/embedded.mp4",
+      "media_family": "video",
+      "mimetype": "video/mp4",
+      "scenario": "embedded mov_text captions + speech"
+    },
+    {
+      "path": "video/silent.webm",
+      "media_family": "video",
+      "mimetype": "video/webm",
+      "scenario": "no audio, no captions"
+    },
+    {
+      "path": "video/shared.mp4",
+      "media_family": "video",
+      "mimetype": "video/mp4",
+      "scenario": "ambiguous sidecar target"
+    },
+    {
+      "path": "video/shared.webm",
+      "media_family": "video",
+      "mimetype": "video/webm",
+      "scenario": "ambiguous sidecar target"
+    },
+    {
+      "path": "video/shared.srt",
+      "media_family": null,
+      "mimetype": "application/x-subrip",
+      "scenario": "ambiguous sidecar"
+    },
+    {
+      "path": "image/scan.png",
+      "media_family": "image",
+      "mimetype": "image/png",
+      "scenario": "readable text for OCR"
+    },
+    {
+      "path": "image/photo.jpg",
+      "media_family": "image",
+      "mimetype": "image/jpeg",
+      "scenario": "no text"
+    },
+    {
+      "path": "image/diagram.svg",
+      "media_family": "image",
+      "mimetype": "image/svg+xml",
+      "scenario": "vector image"
+    },
+    {
+      "path": "documents/notes.txt",
+      "media_family": "text",
+      "mimetype": "text/plain",
+      "scenario": "native text"
+    },
+    {
+      "path": "documents/notes.md",
+      "media_family": "text",
+      "mimetype": "text/markdown",
+      "scenario": "native markdown"
+    },
+    {
+      "path": "documents/page.html",
+      "media_family": "text",
+      "mimetype": "text/html",
+      "scenario": "native HTML"
+    },
+    {
+      "path": "documents/text.pdf",
+      "media_family": "text",
+      "mimetype": "application/pdf",
+      "scenario": "native PDF text"
+    },
+    {
+      "path": "documents/scanned.pdf",
+      "media_family": "text",
+      "mimetype": "application/pdf",
+      "scenario": "image-only PDF for OCR"
+    },
+    {
+      "path": "other/styles.css",
+      "media_family": null,
+      "mimetype": "text/css",
+      "scenario": "servable asset"
+    },
+    {
+      "path": "other/app.js",
+      "media_family": null,
+      "mimetype": "application/javascript",
+      "scenario": "servable asset"
+    },
+    {
+      "path": "other/data.json",
+      "media_family": null,
+      "mimetype": "application/json",
+      "scenario": "servable asset"
+    },
+    {
+      "path": "other/unknown.bin",
+      "media_family": null,
+      "mimetype": "application/octet-stream",
+      "scenario": "unknown attachment"
+    },
+    {
+      "path": "other/archive.zip",
+      "media_family": null,
+      "mimetype": "application/zip",
+      "scenario": "attachment"
+    }
+  ]
+}
