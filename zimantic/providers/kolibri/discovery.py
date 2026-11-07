@@ -265,8 +265,9 @@ def load_channels(db) -> list[ChannelRow]:
         except (TypeError, ValueError) as error:
             logger.warning(
                 "zimantic: ignoring malformed Kolibri channel metadata (%s)",
-                error,
+                type(error).__name__,
             )
+            logger.debug("malformed Kolibri channel metadata: %s", error)
     return channels
 
 

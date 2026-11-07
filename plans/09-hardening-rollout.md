@@ -1,6 +1,6 @@
 # Phase 09 — Hardening and rollout
 
-Status: proposed.
+Status: implemented; the Pi 4 hardware benchmark, phase-10 open gates, and Pi Zero smoke test remain unverified.
 
 ## Goal
 
@@ -228,15 +228,15 @@ Also measure and record:
 
 ### Unit and contract
 
-- [ ] `SourceInfo`/`CollectionSnapshot` serialization and exact source-key
+- [x] `SourceInfo`/`CollectionSnapshot` serialization and exact source-key
       resolution.
-- [ ] Provider contract suite run against ZIM, files, Kolibri (and Kiwix for
+- [x] Provider contract suite run against ZIM, files, Kolibri (and Kiwix for
       search-only).
-- [ ] Discovery batches retain shared resources until all readers retire and
+- [x] Discovery batches retain shared resources until all readers retire and
       clean up after failed, empty, and replaced discoveries.
-- [ ] Content-store contract suite: read, resolve, redirect, exists, icon,
+- [x] Content-store contract suite: read, resolve, redirect, exists, icon,
       random, errors, ranges, source authorization, and ambiguous-path handling.
-- [ ] Entry-producer contract: stable ids, fingerprint change, resume,
+- [x] Entry-producer contract: stable ids, fingerprint change, resume,
       truncation, optional buildable-runtime capability, and cleanup on every
       success/failure/cancellation path.
 - [ ] Ephemeral-open contract: loopback-only binding, selected-source scope,
@@ -245,99 +245,99 @@ Also measure and record:
 
 ### Integration
 
-- [ ] Mixed library: ZIM + files + Kolibri + Kiwix; `/search`, `/sources`,
+- [x] Mixed library: ZIM + files + Kolibri + Kiwix; `/search`, `/sources`,
       `/collections.json`, `/library.json`, `/health`.
-- [ ] Progressive stream with providers finishing at different times.
-- [ ] Cache key/source selection across collections.
+- [x] Progressive stream with providers finishing at different times.
+- [x] Cache key/source selection across collections.
 - [ ] `open` with matched and fallback ZIM identities, stale/missing indexes,
       and an unaffected normal `serve` process.
-- [ ] Reload after adding/removing each provider's content.
-- [ ] Migration path: old config is rejected, the catalog is rebuilt, and
+- [x] Reload after adding/removing each provider's content.
+- [x] Migration path: old config is rejected, the catalog is rebuilt, and
     only recognized old indexes are imported by the validated phase-04
     importer; unknown indexes are rebuilt without deleting a usable index on
     failure.
-- [ ] A freshly rebuilt catalog cannot legitimize a size-only old index whose
+- [x] A freshly rebuilt catalog cannot legitimize a size-only old index whose
       build-time archive identity is unknown.
-- [ ] Composed listing filters match beyond first pages, capture one snapshot
+- [x] Composed listing filters match beyond first pages, capture one snapshot
       token with records, and restart bounded loads on publication/server restart.
 
 ### Security/adversarial
 
-- [ ] Traversal: `..`, URL-encoded, double-encoded, backslash, NUL, absolute.
-- [ ] Symlink escape and zip-slip.
-- [ ] Race-safe confinement under symlink replacement; hidden/excluded files are
+- [x] Traversal: `..`, URL-encoded, double-encoded, backslash, NUL, absolute.
+- [x] Symlink escape and zip-slip.
+- [x] Race-safe confinement under symlink replacement; hidden/excluded files are
       not directly servable, while allowed assets remain accessible.
-- [ ] Files child homepages, results, previews, and shared-asset links all use
+- [x] Files child homepages, results, previews, and shared-asset links all use
       collection-relative paths without ambiguous source-relative fallback.
-- [ ] Identical paths in different sources open their respective bytes.
+- [x] Identical paths in different sources open their respective bytes.
       Redirect aliases collapse to their target; genuinely ambiguous
       same-source paths are reported rather than attributed or served
       arbitrarily.
-- [ ] Absolute configured roots and private catalog locators are accepted, but
+- [x] Absolute configured roots and private catalog locators are accepted, but
       absent from APIs, errors, and logs; relocating a provider root preserves
       its logical source ID and index locator when its identity is unchanged.
-- [ ] MIME confusion and `nosniff`.
-- [ ] Opaque-origin article preflights allow the documented range/conditional
+- [x] MIME confusion and `nosniff`.
+- [x] Opaque-origin article preflights allow the documented range/conditional
       headers without granting unrelated methods or headers.
-- [ ] UTF-16 as well as UTF-8 XML DTD/entity declarations are rejected, and
+- [x] UTF-16 as well as UTF-8 XML DTD/entity declarations are rejected, and
       cross-origin redirects are blocked before contacting the other origin.
-- [ ] Oversized files, PDFs, caption files, ranges, and XML.
-- [ ] Derived text off by default: no caption, image, or media bytes are read;
+- [x] Oversized files, PDFs, caption files, ranges, and XML.
+- [x] Derived text off by default: no caption, image, or media bytes are read;
       fake engines verify each operation is independently opt-in.
-- [ ] Enabled embedded captions use bounded local-only demuxing, including a
+- [x] Enabled embedded captions use bounded local-only demuxing, including a
       media container larger than the caption-text cap; no audio/video decode
       or implicit OCR occurs.
-- [ ] OCR/ASR adversarial inputs: decompression bomb, huge dimensions, corrupt
+- [x] OCR/ASR adversarial inputs: decompression bomb, huge dimensions, corrupt
       codec, over-duration media, missing model, and cap-skipped output.
-- [ ] Auto worker resolution: 1 on a low-memory host, above 4 on a large host
+- [x] Auto worker resolution: 1 on a low-memory host, above 4 on a large host
       when memory allows, unavailable when none fits, correct CPU-vs-memory
       binding, one shared pool across concurrent source builds, and no pool
       created when OCR/ASR are off.
-- [ ] A crashing fake engine is reported as partial with a non-zero build exit,
+- [x] A crashing fake engine is reported as partial with a non-zero build exit,
       without stopping other sources or leaking a worker. A non-thread-safe
       engine is safely isolated; inputs use bounded spooled files, not
       arbitrary paths.
-- [ ] Malicious/unsupported Kolibri DB schema and duplicate ids.
-- [ ] Secure browsing sandboxes the shell iframe; direct raw HTML and permitted
+- [x] Malicious/unsupported Kolibri DB schema and duplicate ids.
+- [x] Secure browsing sandboxes the shell iframe; direct raw HTML and permitted
       popups retain their documented unsandboxed behavior.
-- [ ] No writes to Kolibri's installed DB, SQLite sidecars, or configured
+- [x] No writes to Kolibri's installed DB, SQLite sidecars, or configured
       content roots, including with a live WAL; private snapshots and queries
       never expose unrelated user data. Closed databases without sidecars and
       live WALs remain readable with prompt, bounded writer delays.
-- [ ] Provider refresh/close tests verify that background discovery is
+- [x] Provider refresh/close tests verify that background discovery is
       cancelled or joined and stores/database handles are closed exactly once.
 - [ ] `open` rejects index reuse when a sidecar-free read-only SQLite handle
       cannot be created, binds only loopback, and its toolbar cannot navigate
       outside the selected source scope.
-- [ ] Cross-process reader leases survive concurrent build/prune; no read-only
+- [x] Cross-process reader leases survive concurrent build/prune; no read-only
       reader creates a lease, and uncertain/incomplete discovery never causes
       pruning of a configured entry's indexes.
-- [ ] `sources`, `build --list`, and `prune --dry-run` do not modify persistent
+- [x] `sources`, `build --list`, and `prune --dry-run` do not modify persistent
       state; `prune --yes` revalidates config/discovery under the documented
       lock order.
-- [ ] Cache-disabled/pruned derived previews do not remove search hits or run
+- [x] Cache-disabled/pruned derived previews do not remove search hits or run
       caption/OCR/ASR extraction at request time.
-- [ ] Read-only index reuse is verified on every officially supported
+- [x] Read-only index reuse is verified on every officially supported
       platform/filesystem combination; elsewhere it fails closed to native
       full-text or readable-but-unsearchable behavior.
 
 ### Platform
 
-- [ ] Python 3.11–3.14 in CI.
-- [ ] Existing Windows x86-64 indexed build/search works with cross-process
+- [x] Python 3.11–3.14 in CI.
+- [x] Existing Windows x86-64 indexed build/search works with cross-process
       catalog and generation leases; verify publication/recovery on its
       supported local filesystem. The blocking release dependency introduced
       in phase 00 must pass; the existing non-blocking Windows job alone does
       not gate publishing.
-- [ ] No libzim/FAISS installed: core/provider contracts and files provider
+- [x] No libzim/FAISS installed: core/provider contracts and files provider
       still import and pass where expected.
 - [ ] Pi Zero 2 W smoke test (or the existing low-memory CI target).
 
 ### JavaScript
 
-- [ ] Library grouping, provider filter, collection selection, source filter
+- [x] Library grouping, provider filter, collection selection, source filter
       grouping, history/back behavior.
-- [ ] Progressive result rendering with collection labels.
+- [x] Progressive result rendering with collection labels.
 
 ## Rollout plan
 
@@ -385,35 +385,35 @@ For a cautious rollout, ship with:
 
 ## Migration checklist
 
-- [ ] Verify flat `zim_dir`/`kiwix_server` keys are absent and explicit
+- [x] Verify flat `zim_dir`/`kiwix_server` keys are absent and explicit
       `[[collections]]` entries are required. There is no shorthand fallback.
-- [ ] Adopt recognized, validated old `<stem>.sqlite`/`.faiss` pairs once
+- [x] Adopt recognized, validated old `<stem>.sqlite`/`.faiss` pairs once
       through the phase-04 importer, rebuild any unrecognized or incompatible
       indexes under the new locator, and use `zimantic prune` to reclaim
       superseded owned files.
-- [ ] Allow the disposable catalog to be rebuilt by a full scan under the
+- [x] Allow the disposable catalog to be rebuilt by a full scan under the
       catalog's coordination rules; do not delete a live SQLite database.
-- [ ] Update bookmarks and API clients to canonical source keys, the `source`
+- [x] Update bookmarks and API clients to canonical source keys, the `source`
       query parameter, and the new payload fields.
-- [ ] Verify the new `/content/{key}/...` and `/article/{key}/...` URLs.
-- [ ] Local providers use the unified content route; Kiwix remains
+- [x] Verify the new `/content/{key}/...` and `/article/{key}/...` URLs.
+- [x] Local providers use the unified content route; Kiwix remains
       external-only and has no local content-store fallback.
 
 ## Release checklist
 
-- [ ] All phase acceptance criteria met and checked off.
+- [ ] All phase acceptance criteria met and checked off (phase-10 open and hardware items remain).
 - [ ] The Phase 10 acceptance criteria and its read-only persistence guarantees
       are met and checked off.
-- [ ] Full test matrix green.
-- [ ] `README.md`, `CONTRIBUTING.md`, `config.toml`, `deploy/` updated.
+- [ ] Full test matrix green (open/hardware rows remain unverified).
+- [x] `README.md`, `CONTRIBUTING.md`, `config.toml`, `deploy/` updated.
 - [ ] Mixed-library smoke test on a low-resource profile.
-- [ ] Security review of path/zip/MIME/range handling.
-- [ ] Supported Windows x86-64 indexed builds/searches and reader leases pass;
+- [x] Security review of path/zip/MIME/range handling.
+- [x] Supported Windows x86-64 indexed builds/searches and reader leases pass;
       do not silently replace this existing support with native-only fallback.
-- [ ] Major version bump. Release notes list the new providers, the
+- [x] Major version bump. Release notes list the new providers, the
       `[[collections]]` config requirement, the catalog/index rebuild, and the
       removed compatibility paths.
-- [ ] A known-issues note covering the pinned Kolibri v0.19.5 schema version and
+- [x] A known-issues note covering the pinned Kolibri v0.19.5 schema version and
       derived-text engine/model limitations.
 
 ## Risks register

@@ -136,6 +136,36 @@ contracts:
 8. Update `config.toml`, the README provider section, and `deploy/` examples
    (build path/timer and service read paths) in the same change.
 
+## Hardening and release gates
+
+Changes that touch a provider, path handling, MIME classification, ranges, XML,
+SQLite, or the build/index lifecycle must keep the phase-09 gates green:
+
+- Run the full suite with `python -m pytest`.
+- Add an adversarial test for every new path/MIME/range/archive/database input.
+  Cover `..`, encoded and double-encoded separators, backslashes, NUL bytes,
+  absolute paths, symlink replacement, zip-slip, oversized members, unknown
+  binaries, single-range validation, and XML DTD/entity rejection in UTF-8 and
+  UTF-16.
+- Do not expose configured absolute paths, private catalog locators, or raw
+  exception details in API payloads, redirects, ETags, or logs above debug
+  level.  Use `zimantic.diagnostics` for redaction and stable causes.
+- Keep provider failures operation-scoped.  A broken discovery, search, index,
+  or content read must not hide another source or change `serve` into a crash.
+- Preserve the `truncated`, `indexed_count`, `body_truncated_count`,
+  `last_refresh`, `collapsed`, and index-state fields across source, library,
+  collection, health, and `zimantic sources --json` payloads.
+- Security review is required for path, zip, MIME, and range changes before a
+  release.
+
+The mixed-library release fixture is versioned under
+`tests/fixtures/mixed_library/` and the harness under `tests/benchmarks/`.
+Generate it with `python tests/fixtures/mixed_library/generate.py --root
+/tmp/zimantic-mixed --force` and record a Pi 4 result with
+`tests/benchmarks/run_mixed.py`.  A missing hardware result is unverified, not
+a pass.  Release notes must list the required config, catalog, and index
+rebuilds plus any removed compatibility paths.
+
 ## Release and deploy
 
 The Makefile can increment the patch version, update `uv.lock`, commit and publish an

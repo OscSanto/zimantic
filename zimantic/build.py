@@ -11,6 +11,7 @@ from __future__ import annotations
 from .indexing.pipeline import (
     BodyBudget,
     BuildError,
+    BuildReport,
     EmbeddingPipeline,
     InsufficientSpaceError,
     SnapshotChangedError,
@@ -27,6 +28,7 @@ from .indexing.schema import SCHEMA
 __all__ = [
     "BodyBudget",
     "BuildError",
+    "BuildReport",
     "EmbeddingPipeline",
     "InsufficientSpaceError",
     "SCHEMA",

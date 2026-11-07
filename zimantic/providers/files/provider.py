@@ -31,6 +31,7 @@ from ...content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
+from ...diagnostics import public_cause
 from ...indexes.locator import IndexLocator
 from ...indexing import search as generic_search
 from ...model_meta import (
@@ -116,6 +117,7 @@ class FilesRuntime(CollectionRuntime):
         self._error: str | None = None
         self._closed = False
         self._scanned_at = 0.0
+        self._last_refresh: float | None = None
         self._semantic = False
         self._defer_faiss = False
         self._model_fingerprint = ""
@@ -142,6 +144,17 @@ class FilesRuntime(CollectionRuntime):
     def snapshot(self) -> CollectionSnapshot:
         with self._lock:
             sources = self._library
+            indexes = list(self.indexes.values())
+            indexed_values = [
+                source.info.indexed_count
+                for source in sources
+                if source.info.indexed_count is not None
+            ]
+            body_values = [
+                source.info.body_truncated_count
+                for source in sources
+                if source.info.body_truncated_count is not None
+            ]
             return CollectionSnapshot(
                 collection=self.collection,
                 source_count=len(sources),
@@ -151,6 +164,19 @@ class FilesRuntime(CollectionRuntime):
                 error=self._error,
                 discovery_state=self._state,  # type: ignore[arg-type]
                 snapshot_version=self._version,
+                last_refresh=self._last_refresh,
+                collapsed=self._was_collapsed,
+                index_count=len(indexes),
+                index_states=tuple(
+                    str(getattr(index, "done", "") or "") for index in indexes
+                ),
+                indexed_count=sum(indexed_values) if indexed_values else None,
+                truncated=(
+                    any(source.info.truncated is True for source in sources)
+                    if sources
+                    else None
+                ),
+                body_truncated_count=sum(body_values) if body_values else None,
             )
 
     @property
@@ -463,8 +489,9 @@ class FilesRuntime(CollectionRuntime):
             self._logger.warning(
                 "zimantic: semantic search disabled: FAISS unavailable (%s); "
                 "falling back to lexical search",
-                error,
+                public_cause(error),
             )
+            logger.debug("files FAISS load error: %s", error)
             return
         getter = self._model_fingerprint_getter
         if getter is not None:
@@ -474,8 +501,9 @@ class FilesRuntime(CollectionRuntime):
                 self._logger.warning(
                     "zimantic: could not fingerprint the embedding model (%s); "
                     "vectors will not be checked against it",
-                    error,
+                    public_cause(error),
                 )
+                logger.debug("files model fingerprint error: %s", error)
         with self._lock:
             self._defer_faiss = False
         try:
@@ -485,8 +513,9 @@ class FilesRuntime(CollectionRuntime):
                 "zimantic: semantic search disabled for %s (%s); falling back "
                 "to lexical search",
                 self.collection.label,
-                error,
+                public_cause(error),
             )
+            self._logger.debug("files FAISS reopen error: %s", error)
 
     def _probe_compatible(
         self, db: sqlite3.Connection, db_path: Path
@@ -582,6 +611,7 @@ class FilesRuntime(CollectionRuntime):
                     self._error = "; ".join(discovery.errors)
                     self._state = "error"
                     self._scanned_at = time.monotonic()
+                    self._last_refresh = time.time()
                     self._version += 1
                 for index in old:
                     try:
@@ -631,7 +661,10 @@ class FilesRuntime(CollectionRuntime):
                             "%s: index open failed (%s); serving files without "
                             "an index until it is rebuilt",
                             info.key,
-                            error,
+                            public_cause(error),
+                        )
+                        self._logger.debug(
+                            "files index open error for %s: %s", info.key, error
                         )
                         index = None
                 if index is not None:
@@ -665,6 +698,7 @@ class FilesRuntime(CollectionRuntime):
                 self._error = "; ".join(discovery.errors) or None
                 self._state = "ready"
                 self._scanned_at = time.monotonic()
+                self._last_refresh = time.time()
                 if changed:
                     self._version += 1
             for index in discarded:
@@ -774,6 +808,8 @@ class FilesRuntime(CollectionRuntime):
                 "status": "ok",
                 "index_file": index.db_path is not None,
                 "archive": True,
+                "done": str(getattr(index, "done", "") or ""),
+                "fast": str(getattr(index, "done", "") or "") == "fast",
                 "capabilities": {
                     "title": index.db_path is not None,
                     "fulltext": index.db_path is not None,

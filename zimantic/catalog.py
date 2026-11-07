@@ -202,12 +202,14 @@ class SourceCatalog:
                 except (AttributeError, sqlite3.Error):
                     pass
                 raise
+            from .diagnostics import public_cause
+
             logger.warning(
-                "zimantic: catalog database %s unavailable (%s); "
-                "deleting and recreating it",
-                db_path,
-                error,
+                "zimantic: catalog database unavailable (%s); deleting and "
+                "recreating it",
+                public_cause(error),
             )
+            logger.debug("catalog database %s: %s", db_path, error)
             try:
                 self.db.close()
             except (AttributeError, sqlite3.Error):
@@ -311,8 +313,7 @@ class SourceCatalog:
                 else "a different table layout"
             )
             logger.warning(
-                "%s has %s, rebuilding (wanted version %s)",
-                self.db_path,
+                "zimantic: catalog database has %s; rebuilding (wanted version %s)",
                 reason,
                 SCHEMA_VERSION,
             )

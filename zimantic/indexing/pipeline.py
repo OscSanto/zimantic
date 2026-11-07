@@ -14,6 +14,7 @@ import secrets
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from typing import Any, Mapping
 
 from tqdm import tqdm
 
+from ..diagnostics import public_cause
 from ..model_meta import (
     MODEL_FINGERPRINT_KEY,
     MODEL_PROBE_SHAPE_KEY,
@@ -60,6 +62,42 @@ class SnapshotChangedError(BuildError):
 
 class PartialEnrichmentError(BuildError):
     """A requested derived operation was incomplete; available channels published."""
+
+
+@dataclass(frozen=True)
+class BuildReport:
+    """One source's build outcome, including bounded-index metadata.
+
+    The report is informational: callers that only need the published index
+    may ignore the return value of :func:`build_index`.
+    """
+
+    provider: str
+    collection_key: str
+    source_key: str
+    status: str
+    indexed_count: int
+    skipped_count: int
+    truncated: bool
+    body_truncated_count: int
+    duration_seconds: float
+    fast: bool = False
+    failure_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "collection": self.collection_key,
+            "source": self.source_key,
+            "status": self.status,
+            "indexed_count": self.indexed_count,
+            "skipped_count": self.skipped_count,
+            "truncated": self.truncated,
+            "body_truncated_count": self.body_truncated_count,
+            "duration_seconds": round(self.duration_seconds, 3),
+            "fast": self.fast,
+            "failure_reason": self.failure_reason,
+        }
 
 
 @dataclass(slots=True)
@@ -861,6 +899,46 @@ def _derived_baseline(
     }
 
 
+def _report_from_meta(
+    source: Any,
+    meta: Mapping[str, str],
+    *,
+    status: str,
+    started: float,
+    fast: bool,
+    producer: Any,
+) -> BuildReport:
+    from . import schema as index_schema
+
+    def _decoded(name: str, default: int | bool) -> Any:
+        value = meta.get(name)
+        if value is None:
+            return default
+        try:
+            if isinstance(default, bool):
+                return index_schema.decode_bool(value)
+            return index_schema.decode_int(value)
+        except (TypeError, ValueError):
+            return default
+
+    indexed = _decoded(index_schema.INDEXED_COUNT, 0)
+    count = int(_producer_attr(producer, "count", 0) or 0)
+    return BuildReport(
+        provider=str(getattr(source, "provider", "") or ""),
+        collection_key=str(getattr(source, "collection_key", "") or ""),
+        source_key=str(getattr(source, "key", "") or ""),
+        status=status,
+        indexed_count=int(indexed),
+        skipped_count=max(0, count - int(indexed)),
+        truncated=bool(_decoded(index_schema.TRUNCATED, False)),
+        body_truncated_count=int(
+            _decoded(index_schema.BODY_TRUNCATED_COUNT, 0)
+        ),
+        duration_seconds=max(0.0, time.monotonic() - started),
+        fast=fast,
+    )
+
+
 def build_index(
     producer: EntryProducer,
     locator: Any,
@@ -869,12 +947,15 @@ def build_index(
     *,
     fast: bool = False,
     force: bool = False,
-) -> None:
+) -> BuildReport:
     """Build and publish one complete immutable index generation.
 
     The producer supplies the only provider-specific behaviour.  The core owns
     staging, resume, embedding, vector publication, metadata, and publication.
+    The returned :class:`BuildReport` describes what that source contributed
+    without changing any existing caller contract.
     """
+    started = time.monotonic()
     cfg = cfg or {}
     max_body_setting = (
         cfg.get("max_body_text_bytes", DEFAULT_MAX_BODY_TEXT_BYTES)
@@ -894,7 +975,19 @@ def build_index(
     try:
         state = _prepare_build_state(producer, locator, fast=fast, force=force, cfg=cfg)
         if state is None:
-            return
+            current = _read_published_state(locator, source)
+            meta: Mapping[str, str] = {}
+            if current is not None:
+                meta, lease = current
+                lease.close()
+            return _report_from_meta(
+                source,
+                meta,
+                status="skipped",
+                started=started,
+                fast=fast,
+                producer=producer,
+            )
         if state.db is None:
             raise BuildError("build database is unavailable")
         completed_staging = state.meta.get(index_schema.DONE) in index_schema.DONE_VALUES
@@ -985,8 +1078,9 @@ def build_index(
                         "a later serve with a different model file will not reuse "
                         "these vectors",
                         source.key,
-                        error,
+                        public_cause(error),
                     )
+                    logger.debug("model probe error for %s: %s", source.key, error)
             _finish_build(
                 state,
                 producer=producer,
@@ -1031,12 +1125,26 @@ def build_index(
         state.build_db_path.unlink(missing_ok=True)
         state.build_faiss_path.unlink(missing_ok=True)
         completed = True
+        current = _read_published_state(locator, source)
+        report_meta: Mapping[str, str] = {}
+        if current is not None:
+            report_meta, report_lease = current
+            report_lease.close()
+        report = _report_from_meta(
+            source,
+            report_meta,
+            status="published",
+            started=started,
+            fast=fast,
+            producer=producer,
+        )
         if derived_metadata.get("partial"):
             raise PartialEnrichmentError(
                 f"{source.key}: requested derived-text enrichment was partial; "
                 "available channels were published"
             )
         logger.debug("%s: index ready", source.key)
+        return report
     except InsufficientSpaceError:
         raise
     except BaseException as error:
@@ -1049,8 +1157,9 @@ def build_index(
                     "%s: partial enrichment published (%s); the available "
                     "channels remain searchable and a later build will retry",
                     source.key,
-                    error,
+                    public_cause(error),
                 )
+                logger.debug("partial enrichment error for %s: %s", source.key, error)
                 raise
             resumable = isinstance(error, KeyboardInterrupt)
             if not resumable:
@@ -1060,15 +1169,17 @@ def build_index(
                     "%s: index build failed (%s); the previous published "
                     "generation was left untouched",
                     source.key,
-                    error,
+                    public_cause(error),
                 )
+                logger.debug("index build error for %s: %s", source.key, error)
             else:
                 logger.warning(
                     "%s: index build failed (%s); no partial generation was "
                     "published",
                     source.key,
-                    error,
+                    public_cause(error),
                 )
+                logger.debug("index build error for %s: %s", source.key, error)
         raise
     finally:
         if state is not None and state.db is not None:

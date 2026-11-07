@@ -548,7 +548,7 @@ The JSON API provides the following endpoints.
 - `GET /sources`, `GET /library.json`, `GET /collections.json`, `GET /config`, and `GET /health` return source, library, collection, configuration, and health information.
   - `/sources` describes searchable sources and carries the canonical `key`, `provider`, `title`, `collection`, `searchable`, `homepage`, `icon_url`, `size`, `intent_phrases`, `media_types`, `item_count`, `indexed_count`, `truncated`, `body_truncated_count`, `index_freshness`, and `derived_text` fields. It never exposes a filesystem locator or an `available`/`error` status.
   - `/library.json` describes library sources from every provider, including external-only Kiwix books and unsearchable archives. Its records have the same canonical shape; metadata includes `provider_id`, `mime_counts`, and `native_fulltext_available`.
-  - `/collections.json` returns collection records with `key`, `provider`, `label`, `title`, `description`, `source_count`, `media_types`, `error`, `discovery_state`, `snapshot_version`, and `icon_url`. `source_count` counts all discovered library sources; `/health` exposes the searchable subset.
+  - `/collections.json` returns collection records with `key`, `provider`, `label`, `title`, `description`, `source_count`, `media_types`, `error`, `discovery_state`, `snapshot_version`, `last_refresh`, `collapsed`, `index_count`, `index_states`, `indexed_count`, `truncated`, `body_truncated_count`, and `icon_url`. `source_count` counts all discovered library sources; `/health` exposes the searchable subset and the same per-collection observability fields.
   - All three listings accept optional `provider`, `media_type`, and `q` filters; `/sources` and `/library.json` also accept an exact `collection` key. `q` is a case-insensitive substring match on approved display fields (title, label, description, provider, and collection metadata) and is not a content search. Unknown enum values and collection keys return HTTP 400. Filters compose before paging and `X-Total-Count` describes the filtered snapshot.
   - Listings capture one discovery snapshot token with their records. Responsive pages, `304` responses, and filtered responses carry `X-Total-Count`, `X-Offset`, `X-Has-More`, and `X-Snapshot-Version`; a client that sees the version change while paging reloads rather than mixing revisions. Omitted `limit` uses the global `page_size`; explicit limits are positive and at most 200.
   - `/config` exposes `source_filter_limit`, `collection_source_limit`, `max_explicit_collection_sources`, and the configured provider kinds.
@@ -569,6 +569,80 @@ Reloading indexes is **not** an HTTP API: running servers rescan via `zimantic r
 Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` (32 MiB per cache by default). A ranked pool is keyed by the normalized query, the expanded source keys of the resolved scope, and the publication generation. Paging and display filters reuse the same pool. Replacing an index without changing source keys, changing collection membership, or changing discovery metadata invalidates the affected generation, so stale results and previews are not served.
 
 For large libraries, `search_workers` controls how many ZIM indexes are searched in parallel. `max_stream_ranks` limits completion-spaced intermediate ranking passes. Timed snapshots are additionally emitted about every 700 ms so a slow query keeps updating, and the final result still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. The automatic profiles use 8 workers and 16 completion-spaced passes on desktops, and 2 workers and 8 passes on low-memory devices.
+
+## Hardening and release gates
+
+Zimantic treats configured file trees and Kolibri installations as untrusted
+input.  The provider boundary assumes a provider can fail, report an unexpected
+MIME type, or return a path it should not.
+
+- **Path confinement.** Local stores use race-safe, root-confined, no-follow
+  opens and reject symlinks, `..`, encoded separators, backslashes, NUL bytes,
+  absolute paths, hidden paths, and configured excludes.  Directory requests
+  serve only a known index file, never a generated listing.
+- **Archive bounds.** Kolibri HTML5 zips are validated from their end record and
+  central directory before any member is read.  Absolute/`..`/link members,
+  duplicate or overlapping entries, oversized output, and zip bombs fail closed.
+  Per-entry member, directory, total, and read-time limits are configurable.
+- **MIME and responses.** Extension mapping comes first, followed by constrained
+  sniffing.  Unknown binaries are attachments, never `text/html`.  Provider
+  content sends `X-Content-Type-Options: nosniff`; SVG is sandboxed.  A request
+  may use one validated, capped byte range, and partial responses are never
+  gzip-compressed.
+- **Kiwix network boundary.** XML DTD/entity declarations are rejected in UTF-8
+  and UTF-16 before expansion.  Redirect origins are checked before the next
+  request, remote catalogs are bounded, and the last complete catalog is kept
+  when a refresh fails.
+- **Kolibri isolation.** The installed database and its WAL/SHM/journal sidecars
+  are never written.  Queries use a private owner-only snapshot that includes
+  committed WAL data; unsupported schemas, PostgreSQL installations, changing
+  databases, and malformed mappings fail closed.
+- **Private diagnostics.** Absolute configured roots and private catalog
+  locators are not emitted in API payloads, errors, redirects, ETags, or logs
+  above debug level.  Raw exception details are debug-only.
+- **Failure isolation.** Discovery, search, and content failures are
+  operation-scoped.  A failed refresh keeps the last complete snapshot; one
+  broken source cannot hide or crash another provider.
+- **Observability.** `zimantic sources --json`, `/collections.json`, and
+  `/health` agree on collection/source counts, discovery state, index counts and
+  fast/full state, last refresh time, collapse, and truncation metadata.  Build
+  logs report provider, collection, source, indexed/skipped counts, truncation,
+  `body_truncated_count`, duration, and failure cause.
+
+Resource limits are documented in [Resource limits](#resource-limits) below.
+The phase-09 release fixture and Pi 4 benchmark harness live under
+`tests/fixtures/mixed_library/` and `tests/benchmarks/`.  A result recorded on
+the documented hardware is required; a missing result is unverified, not a pass.
+
+See [release notes](docs/release-notes-1.0.0.md) for the required config,
+catalog, and index rebuilds, and [known issues](docs/known-issues.md) for the
+pinned Kolibri schema and derived-text engine limitations.
+
+### Resource limits
+
+| Limit | Default | Enforcement |
+|---|---|---|
+| Sources per collection | 64 | hierarchical providers collapse; fixed-identity providers use paging/fan-out limits |
+| Sources overall | 512 | advisory target; never silently drop sources |
+| Entries per source | files 100,000 / Kolibri 500,000 / ZIM configurable | indexing reports `truncated`/`indexed_count` |
+| Bytes per indexed item | `max_entry_bytes` | extraction |
+| Indexed body text per item | `max_body_text_bytes` (1 MiB) | lexical text; reports `body_truncated_count` |
+| Staged index replacement | current + replacement + reserve | abort on storage errors; keep last good generation |
+| Derived preview cache per source | `max_derived_cache_bytes_per_source` (512 MiB) | omit new previews at cap; searchable postings remain |
+| Kiwix catalog entries | `max_catalog_entries` (50,000) | oversized/unpageable catalog keeps the last good snapshot |
+| Caption bytes | 1 MiB (`max_caption_bytes`) | caption parser |
+| Kolibri HTML5 zip | 10k members / 8 MiB directory / 256 MiB member / 1 GiB total / 10 s | manifest validation and bounded reads |
+| OCR pages / pixels / output | 20 / 50 MP / 256 KiB | OCR stage and image guard |
+| ASR media | 1 h / 1 GiB | ASR stage |
+| Derived-text workers | `"auto"` | memory/CPU-derived; unavailable if none fits |
+| Discovery time per provider | 10 s startup budget | serving starts before optional/remote discovery completes |
+| Entries/traversal time | 1,000,000 / 300 s | per-provider bounded walk |
+| Search timeout | `search_timeout_seconds` (30 s) | admitted search scheduling, ranking, and previews |
+| Listing page size | `page_size`, maximum 200 | collection/source/library JSON |
+
+A provider that reaches a limit logs once and degrades; indexing truncation never
+truncates serving.  A traversal budget that prevents a complete discovery is an
+explicit incomplete/error state, not a complete prefix.
 
 ## Using a different embedding model
 

@@ -21,6 +21,7 @@ from ...content.reader import (
     DEFAULT_PREVIEW_CHARS,
     read_entry,
 )
+from ...diagnostics import relative_display
 from ...indexing.types import EntryRecord, MAX_ROW_ID
 from .metadata import header_uuid
 
@@ -112,8 +113,11 @@ class ArchiveEntryProducer:
                 )
         except Exception as error:
             logger.warning(
-                "catalog metadata update failed for %s (%s)", self.path, error
+                "catalog metadata update failed for %s (%s)",
+                relative_display(getattr(self, "_root", None), self.path),
+                type(error).__name__,
             )
+            logger.debug("catalog metadata update error for %s: %s", self.path, error)
 
     # -- producer contract -------------------------------------------------
 

@@ -19,6 +19,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response, StreamingResponse
 
 from ..content.serving import content_disposition, is_inline_mimetype
+from ..diagnostics import public_cause
 from ..search import (
     ArticleNotFoundError,
     ArticleTooLargeError,
@@ -1012,7 +1013,8 @@ def _handle_reload_request(searchClass, guard: threading.Lock) -> None:
                 f"-{len(summary.get('removed', []))} removed)"
             )
         except Exception as error:  # never let a reload take the process down
-            logger.error("zimantic: reload failed: %s", error)
+            logger.error("zimantic: reload failed: %s", public_cause(error))
+            logger.debug("reload failure: %s", error)
         finally:
             guard.release()
 
@@ -1036,7 +1038,11 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
         pid_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
     except OSError as error:
-        logger.error("zimantic: could not write PID file %s: %s", pid_file, error)
+        logger.error(
+            "zimantic: could not write the PID file (%s)",
+            public_cause(error),
+        )
+        logger.debug("could not write PID file %s: %s", pid_file, error)
 
     # Provider runtimes start their own bounded discovery in the background;
     # an unreachable Kiwix server cannot delay binding the port.
@@ -1070,7 +1076,10 @@ def serve(searchClass, port: int, debug: bool = False) -> None:
             try:
                 shutdown()
             except Exception as error:  # never mask the original shutdown path
-                logger.warning("zimantic: search shutdown failed (%s)", error)
+                logger.warning(
+                    "zimantic: search shutdown failed (%s)", public_cause(error)
+                )
+                logger.debug("search shutdown error: %s", error)
         try:
             pid_file.unlink()
         except OSError:

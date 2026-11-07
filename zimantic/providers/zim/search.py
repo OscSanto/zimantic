@@ -17,6 +17,7 @@ from ...content.reader import (
     truncate_at_word_boundary,
 )
 from ...content.zim_paths import ZimPathError, resolve_zim_path
+from ...diagnostics import public_cause
 from ...contracts import SourceInfo, SourceResult, encode_document_id
 from ...indexing.search import body_search, fuse_fulltext
 from ...libzim_compat import search_paths
@@ -548,8 +549,9 @@ def suggest(
         logger.warning(
             "zimantic: title suggestions unavailable for %s: %s",
             source.key,
-            error,
+            public_cause(error),
         )
+        logger.debug("title suggestion database error for %s: %s", source.key, error)
         return []
     finally:
         index.release()

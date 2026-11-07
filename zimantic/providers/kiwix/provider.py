@@ -10,6 +10,7 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
+from ...diagnostics import public_cause
 from ...contracts import SourceInfo, SourceResult
 from ...media_types import ordered_media_types
 from ..base import (
@@ -158,6 +159,7 @@ class KiwixRuntime(CollectionRuntime):
         self._state_changed = threading.Event()
         self._closed = False
         self._failure_logged = False
+        self._last_refresh: float | None = None
 
     # -- contracts ---------------------------------------------------------
 
@@ -173,6 +175,7 @@ class KiwixRuntime(CollectionRuntime):
                 error=self._error,
                 discovery_state=self._state,  # type: ignore[arg-type]
                 snapshot_version=self._version,
+                last_refresh=self._last_refresh,
             )
 
     @property
@@ -249,8 +252,9 @@ class KiwixRuntime(CollectionRuntime):
             logger.warning(
                 "zimantic: Kiwix catalog listener failed for %s (%s)",
                 self.collection.label,
-                error,
+                public_cause(error),
             )
+            logger.debug("Kiwix catalog listener error: %s", error)
 
     def _set_state(self, state: str, error: str | None) -> None:
         with self._lock:
@@ -271,6 +275,7 @@ class KiwixRuntime(CollectionRuntime):
             self._version += 1
             self._error = None
             self._state = "ready"
+            self._last_refresh = time.time()
             self._state_changed.set()
         if self._failure_logged:
             logger.info(
@@ -286,6 +291,8 @@ class KiwixRuntime(CollectionRuntime):
         with self._lock:
             if self._closed:
                 return
+        with self._lock:
+            self._last_refresh = time.time()
         self._set_state("error", error)
         if not self._failure_logged:
             logger.warning(

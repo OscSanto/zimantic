@@ -47,9 +47,11 @@ port = 8090
 
 # Sandbox article documents in the browser (secure browsing). Off by default
 # because local ZIMs are trusted input and sandboxing isolates Web Storage and
-# IndexedDB (some offline sites lose persistence). Enable this when serving ZIMs
-# from untrusted sources; the shell itself stays trusted and the article is
-# isolated inside it.
+# IndexedDB (some offline sites lose persistence). Enable this when serving ZIMs,
+# file trees, or Kolibri HTML5 apps from untrusted sources. The shell itself
+# stays trusted and the article is isolated inside it. A raw /article/ document
+# opened directly or in a permitted popup is still unsandboxed and can use the
+# app origin and persistent storage, so this is not a complete boundary.
 # secure_browsing = false
 
 # Optional Kiwix collections are declared with [[collections]] type = "kiwix".

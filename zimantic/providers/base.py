@@ -107,10 +107,22 @@ class CollectionSnapshot:
     error: str | None
     discovery_state: DiscoveryState
     snapshot_version: int
+    # Observability fields added by phase 09.  Providers that do not own local
+    # indexes (Kiwix) leave the index fields empty rather than inventing zeroes.
+    last_refresh: float | None = None
+    collapsed: bool = False
+    index_count: int | None = None
+    index_states: tuple[str, ...] = ()
+    indexed_count: int | None = None
+    truncated: bool | None = None
+    body_truncated_count: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "media_types", ordered_media_types(self.media_types)
+        )
+        object.__setattr__(
+            self, "index_states", tuple(sorted(str(item) for item in self.index_states))
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,6 +135,13 @@ class CollectionSnapshot:
                 "error": self.error,
                 "discovery_state": self.discovery_state,
                 "snapshot_version": self.snapshot_version,
+                "last_refresh": self.last_refresh,
+                "collapsed": self.collapsed,
+                "index_count": self.index_count,
+                "index_states": list(self.index_states),
+                "indexed_count": self.indexed_count,
+                "truncated": self.truncated,
+                "body_truncated_count": self.body_truncated_count,
             }
         )
         return payload

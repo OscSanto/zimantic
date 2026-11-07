@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from ...diagnostics import public_cause
 from .schema import detect_schema
 
 logger = logging.getLogger(__name__)
@@ -402,8 +403,9 @@ class SnapshotManager:
         except OSError as error:
             logger.warning(
                 "zimantic: could not remove a private Kolibri snapshot (%s)",
-                error,
+                public_cause(error),
             )
+            logger.debug("Kolibri snapshot removal error: %s", error)
 
     def acquire(self, *, schema_validator: Callable | None = None) -> KolibriSnapshot:
         """Create, validate, and return a new snapshot."""

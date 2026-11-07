@@ -30,6 +30,7 @@ from .content.store import (
     ContentStore,
 )
 from .contracts import SourceInfo, SourceResult
+from .diagnostics import private_locators, public_cause, sanitize_public_text
 from .providers.base import CollectionInfo, CollectionSnapshot, ProviderContext, SourceQuery
 from .providers.config import ProviderConfig, RuntimeConfig, ZimConfig
 from .searching.config import (
@@ -382,6 +383,22 @@ class Search:
         """Normalized URL prefix for generated links (reverse-proxy support)."""
         return normalize_web_base_path(self.cfg.get("web_base_path"))
 
+    def private_locators(self) -> tuple[str, ...]:
+        """Configured filesystem locators that must never leave the process."""
+        locators = private_locators(self.cfg, getattr(self, "runtime_config", None))
+        if locators:
+            return locators
+        # Lightweight direct callers may only set an index directory.
+        value = self.cfg.get("index_dir")
+        return (str(value),) if value else ()
+
+    def public_error(self, error: BaseException) -> str:
+        """Return a stable, locator-free cause for a provider failure."""
+        return public_cause(error, self.private_locators())
+
+    def public_text(self, value: Any) -> Any:
+        return sanitize_public_text(value, self.private_locators())
+
     def start_embedder(self, factory) -> None:
         """Build the embedding model on a background thread.
 
@@ -401,8 +418,9 @@ class Search:
                     "zimantic: semantic search disabled: embedding model "
                     "unavailable (%s); falling back to title and full-text "
                     "(lexical) search",
-                    error,
+                    self.public_error(error),
                 )
+                logger.debug("embedding model load error: %s", error)
             else:
                 with self._state_lock:
                     self.embedder = embedder
@@ -454,8 +472,9 @@ class Search:
                 logger.warning(
                     "zimantic: semantic search disabled: FAISS unavailable (%s); "
                     "falling back to title and full-text (lexical) search",
-                    error,
+                    self.public_error(error),
                 )
+                logger.debug("FAISS load error: %s", error)
                 return
 
             model_dir = self.cfg.get("model_dir")
@@ -468,8 +487,9 @@ class Search:
                     logger.warning(
                         "zimantic: could not fingerprint the embedding model (%s); "
                         "vectors will not be checked against it",
-                        error,
+                        self.public_error(error),
                     )
+                    logger.debug("model fingerprint error: %s", error)
 
             with self._state_lock:
                 self._defer_faiss = False
@@ -486,8 +506,9 @@ class Search:
                             "zimantic: semantic search disabled for %s (%s); "
                             "falling back to title and full-text",
                             getattr(runtime.collection, "label", "collection"),
-                            error,
+                            self.public_error(error),
                         )
+                        logger.debug("FAISS reopen error: %s", error)
             with self._state_lock:
                 semantic_indexes = sum(
                     sum(
@@ -590,8 +611,9 @@ class Search:
                 logger.warning(
                     "zimantic: source refresh failed for %s (%s)",
                     getattr(runtime.collection, "label", "collection"),
-                    error,
+                    self.public_error(error),
                 )
+                logger.debug("source refresh error: %s", error)
         return self._publish_runtime_sources()
 
     def resolve_source(self, identifier: str) -> SourceInfo | None:
@@ -810,8 +832,10 @@ class Search:
                 self._publish_runtime_sources()
             except Exception as error:
                 logger.warning(
-                    "zimantic: background provider discovery failed: %s", error
+                    "zimantic: background provider discovery failed: %s",
+                    self.public_error(error),
                 )
+                logger.debug("background provider discovery error: %s", error)
                 if result is not None:
                     result.close()
 
@@ -876,6 +900,8 @@ class Search:
         with self._state_lock:
             snapshots = dict(self._collection_snapshots)
         records = [snapshot.to_dict() for snapshot in snapshots.values()]
+        for record in records:
+            record["error"] = self.public_text(record.get("error"))
         return sorted(records, key=self._collection_sort_key)
 
     def snapshot_token(self) -> tuple[str, int]:
@@ -1241,8 +1267,9 @@ class Search:
                 logger.warning(
                     "zimantic: health report failed for %s (%s)",
                     getattr(runtime.collection, "label", "collection"),
-                    error,
+                    self.public_error(error),
                 )
+                logger.debug("health report error: %s", error)
         status = "ok"
         if not reports or any(report["status"] != "ok" for report in reports):
             status = "degraded"
@@ -1253,8 +1280,15 @@ class Search:
                 "sources": snapshot.source_count,
                 "searchable": searchable_by_collection.get(key, 0),
                 "discovery_state": snapshot.discovery_state,
-                "error": snapshot.error,
+                "error": self.public_text(snapshot.error),
                 "snapshot_version": snapshot.snapshot_version,
+                "last_refresh": snapshot.last_refresh,
+                "collapsed": snapshot.collapsed,
+                "index_count": snapshot.index_count,
+                "index_states": list(snapshot.index_states),
+                "indexed_count": snapshot.indexed_count,
+                "truncated": snapshot.truncated,
+                "body_truncated_count": snapshot.body_truncated_count,
             }
         report = {
             "status": status,
@@ -1674,8 +1708,9 @@ class Search:
             logger.warning(
                 "zimantic: query embedding failed (%s); falling back to title "
                 "and full-text (lexical) search",
-                error,
+                self.public_error(error),
             )
+            logger.debug("query embedding failed: %s", error)
             return None
 
     def suggest(
@@ -1715,8 +1750,9 @@ class Search:
                 logger.warning(
                     "zimantic: title suggestions unavailable for %s: %s",
                     source.key,
-                    error,
+                    self.public_error(error),
                 )
+                logger.debug("suggest failed for %s: %s", source.key, error)
                 continue
             for doc in items:
                 doc_id = str(doc.get("id") or "")
@@ -2218,7 +2254,7 @@ class Search:
                         except Exception as error:
                             result = SourceResult(
                                 source=src,
-                                error=f"search failed: {error}",
+                                error=f"search failed: {self.public_error(error)}",
                                 status="error",
                             )
                         completed.append(result)
@@ -2456,13 +2492,17 @@ class Search:
                 status="error",
             )
         try:
-            return runtime.search(source, request)
+            result = runtime.search(source, request)
         except Exception as error:  # provider failure is source-scoped
+            logger.debug("source search failed for %s: %s", source.key, error)
             return SourceResult(
                 source=source,
-                error=f"search failed: {error}",
+                error=f"search failed: {self.public_error(error)}",
                 status="error",
             )
+        if result.error:
+            result.error = str(self.public_text(result.error))
+        return result
 
     def _hydrate_results(
         self,
@@ -2517,8 +2557,11 @@ class Search:
                     )
                 except Exception as error:
                     logger.warning(
-                        "%s: preview extraction failed (%s)", source.key, error
+                        "%s: preview extraction failed (%s)",
+                        source.key,
+                        self.public_error(error),
                     )
+                    logger.debug("preview failed for %s: %s", source.key, error)
                     lead, mimetype = "", doc.get("mimetype")
                 previews[doc["id"]] = (lead, mimetype)
             return source_key, source_docs, previews

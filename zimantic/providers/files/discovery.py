@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 from ...contracts import SourceInfo
+from ...diagnostics import public_cause
 from ...indexes.locator import IndexLocator, IndexLocatorError
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
@@ -592,7 +593,12 @@ def open_files_index(
             verify_faiss=bool(options.semantic and not options.defer_faiss),
         )
     except IndexLocatorError as error:
-        logger.warning("%s: index generation unavailable (%s)", source.key, error)
+        logger.warning(
+            "%s: index generation unavailable (%s)",
+            source.key,
+            public_cause(error),
+        )
+        logger.debug("%s: index generation error: %s", source.key, error)
         return None
     if lease is None:
         return None
@@ -662,8 +668,9 @@ def open_files_index(
                     logger.warning(
                         "%s: vectors unavailable (%s); falling back to lexical search",
                         source.key,
-                        error,
+                        public_cause(error),
                     )
+                    logger.debug("%s: vector open error: %s", source.key, error)
                     faiss_index = None
         db.close()
         return IndexHandle(

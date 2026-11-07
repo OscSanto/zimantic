@@ -545,6 +545,7 @@ def _build_files_collections(
 ) -> None:
     """Build every configured files collection through the generic pipeline."""
     from .build import build_index
+    from .diagnostics import public_cause
     from .indexes import IndexLocator
     from .providers.base import ProviderContext
     from .providers.files import FilesProvider
@@ -570,8 +571,9 @@ def _build_files_collections(
             logger.error(
                 "zimantic: files collection %s discovery failed: %s",
                 getattr(entry, "name", "files"),
-                error,
+                public_cause(error),
             )
+            logger.debug("files collection discovery error: %s", error)
             failures.append((Path(entry.path), error))
             continue
         try:
@@ -607,15 +609,17 @@ def _build_files_collections(
                             logger.error(
                                 "zimantic: failed to index %s: %s",
                                 source.key,
-                                error,
+                                public_cause(error),
                             )
+                            logger.debug("files source build error: %s", error)
                             failures.append((Path(entry.path), error))
                 except Exception as error:
                     logger.error(
                         "zimantic: files collection %s failed: %s",
                         collection.label,
-                        error,
+                        public_cause(error),
                     )
+                    logger.debug("files collection error: %s", error)
                     failures.append((Path(entry.path), error))
                 finally:
                     if runtime is not None:
@@ -633,6 +637,7 @@ def _build_kolibri_collections(
 ) -> None:
     """Build every configured Kolibri channel through the generic pipeline."""
     from .build import build_index
+    from .diagnostics import public_cause
     from .indexes import IndexLocator
     from .providers.base import ProviderContext
     from .providers.kolibri import KolibriProvider
@@ -658,8 +663,9 @@ def _build_kolibri_collections(
             logger.error(
                 "zimantic: Kolibri collection %s discovery failed: %s",
                 getattr(entry, "name", "kolibri"),
-                error,
+                public_cause(error),
             )
+            logger.debug("Kolibri collection discovery error: %s", error)
             failures.append((Path(entry.path), error))
             continue
         try:
@@ -695,15 +701,17 @@ def _build_kolibri_collections(
                             logger.error(
                                 "zimantic: failed to index %s: %s",
                                 source.key,
-                                error,
+                                public_cause(error),
                             )
+                            logger.debug("Kolibri source build error: %s", error)
                             failures.append((Path(entry.path), error))
                 except Exception as error:
                     logger.error(
                         "zimantic: Kolibri collection %s failed: %s",
                         collection.label,
-                        error,
+                        public_cause(error),
                     )
+                    logger.debug("Kolibri collection error: %s", error)
                     failures.append((Path(entry.path), error))
                 finally:
                     if runtime is not None:
@@ -971,6 +979,42 @@ def _warn_about_appended_collections(appended: list, cfg: dict) -> None:
         logger.warning("zimantic:   %s -> %s", item.name, item.saved)
 
 
+def _log_build_report(report) -> None:
+    """Log one provider-neutral, path-free build report."""
+    if report is None or not isinstance(
+        getattr(report, "indexed_count", None), int
+    ):
+        # A test double or a legacy caller may patch out the pipeline and not
+        # return a report; that must not turn a successful build into an error.
+        return
+    logger.info(
+        "zimantic: build report: provider=%s collection=%s source=%s "
+        "status=%s indexed=%d skipped=%d truncated=%s "
+        "body_truncated=%d duration=%.2fs",
+        report.provider,
+        report.collection_key or "-",
+        report.source_key,
+        report.status,
+        report.indexed_count,
+        report.skipped_count,
+        "true" if report.truncated else "false",
+        report.body_truncated_count,
+        report.duration_seconds,
+    )
+
+
+def _log_build_failure(source: object, error: BaseException, cfg: dict) -> None:
+    """Log a path-free failure report for one source."""
+    logger.error(
+        "zimantic: build report: provider=%s collection=%s source=%s "
+        "status=failed failure=%s",
+        getattr(source, "provider", "-"),
+        getattr(source, "collection_key", "-") or "-",
+        getattr(source, "key", "-"),
+        _sanitize_public_text(str(error), cfg),
+    )
+
+
 def _build_tasks(
     tasks: list[tuple[str, object, object]],
     cfg: dict,
@@ -1014,9 +1058,9 @@ def _build_tasks(
     build_cfg["embedding_pipeline"] = embedding_pipeline
     locator = IndexLocator(cfg["index_dir"])
 
-    def run_task(label: str, runtime: object, source: object) -> None:
+    def run_task(label: str, runtime: object, source: object):
         producer = runtime.entry_producer(source, fast=args.fast)
-        build_index(
+        return build_index(
             producer,
             locator,
             embedder,
@@ -1030,9 +1074,10 @@ def _build_tasks(
         if workers == 1 or len(tasks) == 1:
             for label, runtime, source in tasks:
                 try:
-                    run_task(label, runtime, source)
+                    _log_build_report(run_task(label, runtime, source))
                 except Exception as error:
-                    logger.error("zimantic: failed to index %s: %s", label, error)
+                    _log_build_failure(source, error, cfg)
+                    logger.debug("build error for %s: %s", label, error)
                     failures.append((label, error))
         else:
             pool = ThreadPoolExecutor(
@@ -1041,17 +1086,16 @@ def _build_tasks(
             )
             try:
                 futures = {
-                    pool.submit(run_task, label, runtime, source): label
+                    pool.submit(run_task, label, runtime, source): (label, source)
                     for label, runtime, source in tasks
                 }
                 for future in as_completed(futures):
-                    label = futures[future]
+                    label, source = futures[future]
                     try:
-                        future.result()
+                        _log_build_report(future.result())
                     except Exception as error:
-                        logger.error(
-                            "zimantic: failed to index %s: %s", label, error
-                        )
+                        _log_build_failure(source, error, cfg)
+                        logger.debug("build error for %s: %s", label, error)
                         failures.append((label, error))
             finally:
                 pool.shutdown(wait=True, cancel_futures=True)
@@ -1231,9 +1275,9 @@ def _run_positional_zim_build(
     locator = IndexLocator(cfg["index_dir"])
     failures: list[tuple[Path, BaseException]] = []
 
-    def run_build(zim: Path) -> None:
+    def run_build(zim: Path):
         producer = _build_producer_for_zim(zim, cfg, fast=args.fast)
-        build_index(
+        return build_index(
             producer,
             locator,
             embedder,
@@ -1246,9 +1290,14 @@ def _run_positional_zim_build(
         if workers == 1 or len(zims) == 1:
             for zim in zims:
                 try:
-                    run_build(zim)
+                    _log_build_report(run_build(zim))
                 except Exception as error:
-                    logger.error("zimantic: failed to index %s: %s", zim, error)
+                    logger.error(
+                        "zimantic: failed to index %s: %s",
+                        zim.name,
+                        _sanitize_public_text(str(error), cfg),
+                    )
+                    logger.debug("build error for %s: %s", zim, error)
                     failures.append((zim, error))
         else:
             pool = ThreadPoolExecutor(
@@ -1260,11 +1309,14 @@ def _run_positional_zim_build(
                 for future in as_completed(futures):
                     zim = futures[future]
                     try:
-                        future.result()
+                        _log_build_report(future.result())
                     except Exception as error:
                         logger.error(
-                            "zimantic: failed to index %s: %s", zim, error
+                            "zimantic: failed to index %s: %s",
+                            zim.name,
+                            _sanitize_public_text(str(error), cfg),
                         )
+                        logger.debug("build error for %s: %s", zim, error)
                         failures.append((zim, error))
             finally:
                 pool.shutdown(wait=True, cancel_futures=True)
@@ -1308,24 +1360,12 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
 
 def _sanitize_public_text(text: Any, cfg: dict) -> Any:
     """Remove configured private locators from user-visible diagnostics."""
-    if not isinstance(text, str):
-        return text
-    replacements = set()
-    for entry in cfg.get("collections") or ():
-        for attribute in ("path", "database_path", "storage"):
-            value = getattr(entry, attribute, None)
-            if isinstance(value, str) and value:
-                replacements.add(value)
-    index_dir = cfg.get("index_dir")
-    if isinstance(index_dir, str) and index_dir:
-        replacements.add(index_dir)
-    config_dir = cfg.get("config_dir")
-    if isinstance(config_dir, str) and config_dir:
-        replacements.add(config_dir)
-    result = text
-    for value in sorted(replacements, key=len, reverse=True):
-        result = result.replace(value, "<private>")
-    return result
+    from .diagnostics import private_locators, sanitize_public_text
+
+    return sanitize_public_text(
+        text,
+        private_locators(cfg, cfg.get("runtime_config")),
+    )
 
 
 def _public_collection_record(discovered, cfg: dict) -> dict[str, Any]:

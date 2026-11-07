@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from ...catalog import SourceCatalog, SourceRecord, absolute_path
+from ...diagnostics import public_cause
 from ...indexes.locator import IndexLocator, IndexLocatorError
 from ...model_meta import (
     MODEL_PROBE_SHAPE_KEY,
@@ -253,7 +254,12 @@ def scan_collection(
             top_error = error
         else:
             unreadable_roots.add(str(target))
-        logger.warning("zimantic: cannot list %s (%s)", target, error)
+        logger.warning(
+            "zimantic: cannot list %s (%s)",
+            _safe_display(root, Path(target)),
+            public_cause(error),
+        )
+        logger.debug("zimantic: cannot list %s: %s", target, error)
 
     try:
         paths = archive_paths(config, on_error=remember_error)
@@ -263,12 +269,18 @@ def scan_collection(
         return stats
     except OSError as error:
         stats.complete = False
-        stats.errors.append(f"cannot scan ZIM collection: {error}")
+        stats.errors.append(
+            f"cannot scan ZIM collection: {public_cause(error)}"
+        )
+        logger.debug("cannot scan ZIM collection: %s", error)
         return stats
 
     if top_error is not None:
         stats.complete = False
-        stats.errors.append(f"cannot list ZIM collection: {top_error}")
+        stats.errors.append(
+            f"cannot list ZIM collection: {public_cause(top_error)}"
+        )
+        logger.debug("cannot list ZIM collection: %s", top_error)
         return stats
 
     files: dict[str, os.stat_result] = {}
@@ -279,9 +291,10 @@ def scan_collection(
             stat_failed.add(str(absolute_path(path)))
             logger.warning(
                 "zimantic: cannot stat %s (%s); keeping its row",
-                path,
-                error,
+                _safe_display(root, path),
+                public_cause(error),
             )
+            logger.debug("zimantic: cannot stat %s: %s", path, error)
 
     existing = {
         record.path: record
@@ -346,8 +359,9 @@ def scan_collection(
                 "zimantic: skipping invalid ZIM %s (%s); re-download the "
                 "archive or run zimcheck to see what is wrong",
                 _safe_display(root, path),
-                str(error),
+                public_cause(error),
             )
+            logger.debug("zimantic: invalid ZIM %s: %s", path, error)
             stored = catalog.upsert(
                 _minimal_record(
                     path, stat, key=key, collection_key=collection_key
@@ -465,7 +479,12 @@ def open_generation_index(
             verify_faiss=bool(options.semantic and not options.defer_faiss),
         )
     except IndexLocatorError as error:
-        logger.warning("%s: index generation unavailable (%s)", source.key, error)
+        logger.warning(
+            "%s: index generation unavailable (%s)",
+            source.key,
+            public_cause(error),
+        )
+        logger.debug("%s: index generation error: %s", source.key, error)
         return None
     if lease is None:
         return None
@@ -580,8 +599,9 @@ def open_generation_index(
                         "%s: vectors unavailable (%s); falling back to title "
                         "and full-text",
                         source.key,
-                        error,
+                        public_cause(error),
                     )
+                    logger.debug("%s: vector open error: %s", source.key, error)
                     faiss_index = None
         db.close()
         return _LocalIndex(
@@ -635,8 +655,9 @@ def open_native_index(
             logger.warning(
                 "%s: ZIM fallback unavailable (%s)",
                 source.key,
-                error,
+                public_cause(error),
             )
+            logger.debug("%s: ZIM fallback error: %s", source.key, error)
             return None
         if not getattr(archive, "has_fulltext_index", False):
             return None

@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from ...diagnostics import public_cause
 from ...catalog import SourceCatalog, SourceRecord, catalog_path
 from ...content.serving import MAX_ICON_BYTES
 from ...content.store import (
@@ -88,8 +89,9 @@ class ZimRuntime(CollectionRuntime):
                 "zimantic: catalog unavailable for %s (%s); using an in-memory "
                 "catalog for this collection",
                 collection.label,
-                error,
+                public_cause(error),
             )
+            logger.debug("ZIM catalog open error: %s", error)
             self._catalog = SourceCatalog(None)
         self._sources: tuple[SourceInfo, ...] = ()
         self._library_sources: tuple[SourceInfo, ...] = ()
@@ -103,6 +105,7 @@ class ZimRuntime(CollectionRuntime):
         self._error: str | None = None
         self._closed = False
         self._scanned_at = 0.0
+        self._last_refresh: float | None = None
         self._semantic = False
         self._defer_faiss = False
         self._model_fingerprint = ""
@@ -126,6 +129,17 @@ class ZimRuntime(CollectionRuntime):
     def snapshot(self) -> CollectionSnapshot:
         with self._lock:
             sources = self._library_sources
+            indexes = list(self.indexes.values())
+            indexed_values = [
+                source.indexed_count
+                for source in sources
+                if source.indexed_count is not None
+            ]
+            body_values = [
+                source.body_truncated_count
+                for source in sources
+                if source.body_truncated_count is not None
+            ]
             return CollectionSnapshot(
                 collection=self.collection,
                 source_count=len(sources),
@@ -135,6 +149,18 @@ class ZimRuntime(CollectionRuntime):
                 error=self._error,
                 discovery_state=self._state,  # type: ignore[arg-type]
                 snapshot_version=self._version,
+                last_refresh=self._last_refresh,
+                index_count=len(indexes),
+                index_states=tuple(
+                    str(getattr(index, "done", "") or "") for index in indexes
+                ),
+                indexed_count=sum(indexed_values) if indexed_values else None,
+                truncated=(
+                    any(source.truncated is True for source in sources)
+                    if sources
+                    else None
+                ),
+                body_truncated_count=sum(body_values) if body_values else None,
             )
 
     @property
@@ -383,8 +409,9 @@ class ZimRuntime(CollectionRuntime):
             self._logger.warning(
                 "zimantic: semantic search disabled: FAISS unavailable (%s); "
                 "falling back to title and full-text (lexical) search",
-                error,
+                public_cause(error),
             )
+            logger.debug("ZIM FAISS load error: %s", error)
             return
         getter = self._model_fingerprint_getter
         if getter is not None:
@@ -394,8 +421,9 @@ class ZimRuntime(CollectionRuntime):
                 self._logger.warning(
                     "zimantic: could not fingerprint the embedding model (%s); "
                     "vectors will not be checked against it",
-                    error,
+                    public_cause(error),
                 )
+                logger.debug("ZIM model fingerprint error: %s", error)
         with self._lock:
             self._defer_faiss = False
         try:
@@ -404,8 +432,9 @@ class ZimRuntime(CollectionRuntime):
             self._logger.warning(
                 "zimantic: semantic search disabled: FAISS indexes unavailable "
                 "(%s); falling back to title and full-text (lexical) search",
-                error,
+                public_cause(error),
             )
+            self._logger.debug("ZIM FAISS reopen error: %s", error)
 
     # -- discovery / lifecycle --------------------------------------------
 
@@ -443,16 +472,20 @@ class ZimRuntime(CollectionRuntime):
                 )
             except Exception as error:
                 with self._lock:
-                    self._error = f"ZIM catalog scan failed: {error}"
+                    self._error = f"ZIM catalog scan failed: {public_cause(error)}"
                     self._state = "error"
+                    self._last_refresh = time.time()
                 self._logger.error(
-                    "zimantic: ZIM catalog scan failed (%s)", error
+                    "zimantic: ZIM catalog scan failed (%s)",
+                    public_cause(error),
                 )
+                self._logger.debug("ZIM catalog scan error: %s", error)
                 return False
             if not scan.complete:
                 with self._lock:
                     self._error = "; ".join(scan.errors) or "ZIM discovery incomplete"
                     self._state = "error"
+                    self._last_refresh = time.time()
                 for message in scan.errors:
                     self._logger.warning(
                         "zimantic: collection %s: %s",
@@ -546,6 +579,7 @@ class ZimRuntime(CollectionRuntime):
             }
             self._unreadable = dict(scan.unreadable)
             self._scanned_at = time.monotonic()
+            self._last_refresh = time.time()
             self._error = None
             self._state = "ready"
             if changed:
@@ -740,6 +774,8 @@ class ZimRuntime(CollectionRuntime):
                 "status": "ok" if not reasons else "degraded",
                 "index_file": index.db_path is not None,
                 "archive": archive_current,
+                "done": str(getattr(index, "done", "") or ""),
+                "fast": str(getattr(index, "done", "") or "") == "fast",
                 "capabilities": {
                     "title": index.db_path is not None,
                     "fulltext": fulltext_capability,

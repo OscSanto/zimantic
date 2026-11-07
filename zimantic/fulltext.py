@@ -20,8 +20,16 @@ import queue
 import subprocess
 import sys
 import threading
+from pathlib import Path
+
+from .diagnostics import sanitize_public_text
 
 logger = logging.getLogger(__name__)
+
+
+def _archive_name(path: str | None) -> str:
+    """A log-safe archive name; the full locator stays at debug level."""
+    return Path(str(path or "")).name or "<archive>"
 
 _WORKER_MODULE = "zimantic.fulltext_worker"
 # Worker processes are relatively cheap (one archive cache each), but they are
@@ -122,8 +130,9 @@ class _Worker:
                 except queue.Empty:
                     logger.warning(
                         "zimantic: native full-text search timed out for %s",
-                        zim_path,
+                        _archive_name(zim_path),
                     )
+                    logger.debug("full-text timeout for %s", zim_path)
                     self.close()
                     reader.join(timeout=1)
                     return None
@@ -135,8 +144,9 @@ class _Worker:
                 logger.warning(
                     "zimantic: native full-text worker exited without a response "
                     "for %s",
-                    zim_path,
+                    _archive_name(zim_path),
                 )
+                logger.debug("full-text worker failure for %s", zim_path)
                 self.close()
                 return None
             try:
@@ -145,17 +155,19 @@ class _Worker:
                 logger.warning(
                     "zimantic: native full-text worker returned an invalid "
                     "response for %s",
-                    zim_path,
+                    _archive_name(zim_path),
                 )
+                logger.debug("full-text invalid response for %s", zim_path)
                 self.close()
                 return None
             if payload.get("error"):
                 self._archive_failure = True
                 logger.warning(
                     "zimantic: native full-text search failed for %s: %s",
-                    zim_path,
-                    payload["error"],
+                    _archive_name(zim_path),
+                    sanitize_public_text(payload["error"], (str(zim_path),)),
                 )
+                logger.debug("full-text failure for %s: %s", zim_path, payload["error"])
                 return None
             results = payload.get("results") or []
             return [
@@ -237,15 +249,19 @@ class FulltextPool:
         except queue.Empty:
             logger.warning(
                 "zimantic: no native full-text worker became available for %s",
-                zim_path,
+                _archive_name(zim_path),
             )
+            logger.debug("full-text worker unavailable for %s", zim_path)
             return None
         try:
             results = worker.search_results(zim_path, query, count, version)
         except Exception as error:  # never let helper plumbing fail a search
             logger.warning(
-                "zimantic: full-text helper failed for %s: %s", zim_path, error
+                "zimantic: full-text helper failed for %s: %s",
+                _archive_name(zim_path),
+                type(error).__name__,
             )
+            logger.debug("full-text helper failure for %s: %s", zim_path, error)
             results = None
         finally:
             self._idle.put(worker)
@@ -258,8 +274,9 @@ class FulltextPool:
                     "zimantic: native full-text search unavailable for %s after "
                     "a helper failure; falling back to title and semantic search "
                     "for this archive",
-                    zim_path,
+                    _archive_name(zim_path),
                 )
+                logger.debug("full-text archive marked broken: %s", zim_path)
         return results
 
     def clear_broken(self) -> None:
