@@ -99,6 +99,27 @@
                     </div>
                     <div class="library-toolbar">
                         <button id="libraryShuffle" class="library-button" type="button" data-i18n="Shuffle">Shuffle</button>
+                        <label class="library-filter-select">
+                            <span data-i18n="Provider">Provider</span>
+                            <select id="libraryProviderFilter" aria-label="Filter by provider" data-i18n-aria-label="Filter by provider">
+                                <option value="" data-i18n="All providers">All providers</option>
+                                <option value="zim">ZIM</option>
+                                <option value="files" data-i18n="Files">Files</option>
+                                <option value="kolibri" data-i18n="Kolibri">Kolibri</option>
+                                <option value="kiwix" data-i18n="Kiwix">Kiwix</option>
+                            </select>
+                        </label>
+                        <label class="library-filter-select">
+                            <span data-i18n="Content">Content</span>
+                            <select id="libraryMediaFilter" aria-label="Filter by content type" data-i18n-aria-label="Filter by content type">
+                                <option value="" data-i18n="All content">All content</option>
+                                <option value="text" data-i18n="Text">Text</option>
+                                <option value="video" data-i18n="Video">Video</option>
+                                <option value="audio" data-i18n="Audio">Audio</option>
+                                <option value="image" data-i18n="Images">Images</option>
+                                <option value="other" data-i18n="Other">Other</option>
+                            </select>
+                        </label>
                         <input
                             id="libraryFilter"
                             type="search"
@@ -119,8 +140,8 @@
                 class="library-info-backdrop"
                 type="button"
                 tabindex="-1"
-                aria-label="Close ZIM details"
-                data-i18n-aria-label="Close ZIM details"
+                aria-label="Close source details"
+                data-i18n-aria-label="Close source details"
             ></button>
             <section
                 class="library-info-dialog"
@@ -132,8 +153,8 @@
                     id="libraryInfoClose"
                     class="library-info-close"
                     type="button"
-                    aria-label="Close ZIM details"
-                    data-i18n-aria-label="Close ZIM details"
+                    aria-label="Close source details"
+                    data-i18n-aria-label="Close source details"
                 >&times;</button>
                 <div id="libraryInfoContent" class="library-info-content"></div>
             </section>

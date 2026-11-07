@@ -41,6 +41,11 @@ _COMMON = {
     "port": 8090,
     "web_base_path": "",
     "page_size": 10,
+    # UI display budget for source chips per collection group and the bounded
+    # first page of preview sources loaded for one collection card.
+    "source_filter_limit": 10,
+    # Global request-work cap for an explicitly selected Kiwix collection.
+    "max_explicit_collection_sources": 500,
     "embed_device": "auto",
     "max_html_bytes": 4_194_304,
     "max_article_bytes": DEFAULT_MAX_ARTICLE_BYTES,
@@ -116,10 +121,22 @@ PROFILES = {"mobile": MOBILE, "desktop": DESKTOP, "supercomputer": SUPERCOMPUTER
 # but remain user-settable, so they must stay known.
 KNOWN_KEYS = (
     frozenset(key for profile in PROFILES.values() for key in profile)
-    | {"nprobe", "build_workers", "embedding_workers"}
+    | {
+        "nprobe",
+        "build_workers",
+        "embedding_workers",
+        "collection_source_limit",
+    }
 )
 # Optional integer keys that have no value in the hardware profiles.
-_OPTIONAL_INT_KEYS = frozenset({"nprobe", "build_workers", "embedding_workers"})
+_OPTIONAL_INT_KEYS = frozenset(
+    {
+        "nprobe",
+        "build_workers",
+        "embedding_workers",
+        "collection_source_limit",
+    }
+)
 
 
 def _coerce_config_value(key: str, value: object, default: object) -> object | None:

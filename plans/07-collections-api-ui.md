@@ -1,6 +1,6 @@
 # Phase 07 — Collections, API, and UI
 
-Status: proposed.
+Status: implemented.
 
 ## Goal
 
@@ -283,33 +283,33 @@ Keep `indexes`, `sources`, and `cache` counters.
 
 ## Work items
 
-- [ ] Reuse `CollectionSnapshot.to_dict()` and `Search.collection_dicts()`
+- [x] Reuse `CollectionSnapshot.to_dict()` and `Search.collection_dicts()`
       from phase 00; nested source payloads use the immutable collection
       descriptor rather than a stale runtime snapshot.
-- [ ] Add `Search.collection_version()` and invalidate it with the source set.
-- [ ] Add `/collections.json` to `zimantic/web/routes.py` using the existing
+- [x] Add `Search.collection_version()` and invalidate it with the source set.
+- [x] Add `/collections.json` to `zimantic/web/routes.py` using the existing
       paged response helper.
-- [ ] Reuse phase 00's `collection` field in `SourceInfo.to_dict()` and ensure
+- [x] Reuse phase 00's `collection` field in `SourceInfo.to_dict()` and ensure
       all providers populate it.
-- [ ] Add `collection` query parsing to `/search`, `/search/stream`, and
+- [x] Add `collection` query parsing to `/search`, `/search/stream`, and
       `/suggest`; remove `zim` and the dual `(zim, source)` parameter split in
       `Search.search_page`/`Search.stream_search`, and expand `collection` +
       `source` in `Search._search_scope`.
-- [ ] Key/invalidate cached pools using the expanded source keys and relevant
+- [x] Key/invalidate cached pools using the expanded source keys and relevant
       source/index generations.
-- [ ] Apply the documented Kiwix explicit-collection cap and canonical ordering
+- [x] Apply the documented Kiwix explicit-collection cap and canonical ordering
       using phase 00's deadline and partial-result metadata (`X-Search-Scope`
       on `/search` and `"scope"` on the terminal `"done"` stream event).
-- [ ] Add `collection` filtering to `/sources` and `/library.json` using the
+- [x] Add `collection` filtering to `/sources` and `/library.json` using the
       standard pagination so opening a collection can fetch all its sources
       without an unbounded payload.
-- [ ] Implement composed listing filters before pagination, bounded
+- [x] Implement composed listing filters before pagination, bounded
       filter-keyed caches, and one captured snapshot token/payload pair per
       response, including conditional responses.
-- [ ] Add `collection_source_limit` only if the UI cannot stay bounded with the
+- [x] Add `collection_source_limit` only if the UI cannot stay bounded with the
       existing limit; default to the global source limit.
-- [ ] Update `/config` with the new limit and provider list.
-- [ ] Update `app.js`:
+- [x] Update `/config` with the new limit and provider list.
+- [x] Update `app.js`:
       - fetch/cache `/collections.json` alongside `/sources`;
       - group `librarySources` by collection;
       - expose the content-type filter using `media_types`;
@@ -319,60 +319,60 @@ Keep `indexes`, `sources`, and `cache` counters.
       - replace the ZIM-specific empty-library message with the provider-neutral
         configured/discovered state behavior above;
       - keep history/back-button behavior.
-- [ ] Update `app.css` for collection headers/cards and grouped filters.
-- [ ] Update `README.md` API examples and the library section.
-- [ ] Update `tests/test_app_js.py` and the API tests.
+- [x] Update `app.css` for collection headers/cards and grouped filters.
+- [x] Update `README.md` API examples and the library section.
+- [x] Update `tests/test_app_js.py` and the API tests.
 
 ## Tests
 
-- [ ] `/sources` and `/library.json` use the canonical source payload; no
+- [x] `/sources` and `/library.json` use the canonical source payload; no
       `zim`, `content_id`, `mode`, or alias fields remain.
-- [ ] `/collections.json` paging, version invalidation, and empty/error cases.
-- [ ] Collection records use the same schema and nullability in APIs, CLI
+- [x] `/collections.json` paging, version invalidation, and empty/error cases.
+- [x] Collection records use the same schema and nullability in APIs, CLI
       output, and SSE snapshots.
-- [ ] `collection` search expands to the right sources; intersection with
+- [x] `collection` search expands to the right sources; intersection with
       `source`; unknown selectors return a client error; cache key changes when
       collection membership changes.
-- [ ] A large explicit selection never schedules a source outside its scope;
+- [x] A large explicit selection never schedules a source outside its scope;
       switching between group and individual selection has predictable UI state.
-- [ ] A Kiwix collection selection stops at its explicit collection cap or
+- [x] A Kiwix collection selection stops at its explicit collection cap or
       deadline deterministically and reports partial scheduled/completed counts.
-- [ ] Collection search response and terminal stream summary use the same
+- [x] Collection search response and terminal stream summary use the same
       `scope` status/count fields; provider errors remain per-source results and
       are not confused with scheduler cap/deadline partial status.
-- [ ] A deadline during ranking or preview reports partial scope even when
+- [x] A deadline during ranking or preview reports partial scope even when
       `scheduled` and `completed` source-task counts are equal.
-- [ ] A known unsearchable explicit source resolves to an empty eligible scope
+- [x] A known unsearchable explicit source resolves to an empty eligible scope
       without broadening the search. A selected remote source that fails
       during search returns its per-source error without changing metadata.
-- [ ] Library grouping: one-source collections, multi-source collections,
+- [x] Library grouping: one-source collections, multi-source collections,
       empty collections, discovery-error collections.
-- [ ] An unconfigured/empty library shows provider-neutral setup guidance;
+- [x] An unconfigured/empty library shows provider-neutral setup guidance;
       empty or failed configured collections show discovery state without
       ZIM-only `zim_dir` instructions.
-- [ ] Content-type classification and filtering for ZIM MIME counters and
+- [x] Content-type classification and filtering for ZIM MIME counters and
       mixed Files/Kolibri sources: a truncated source still matches its known
       families, while an empty `media_types` array does not match a specific type;
       folder paths and absolute paths stay hidden.
-- [ ] Replacing an index without changing source keys invalidates cached
+- [x] Replacing an index without changing source keys invalidates cached
       results and previews.
-- [ ] Filter grouping: top-N + Other per collection; selected sources stay
+- [x] Filter grouping: top-N + Other per collection; selected sources stay
       visible; collection select/deselect sends the expected request.
-- [ ] Provider filter and text filter compose.
-- [ ] "Search within collection" from a library card.
-- [ ] Opening a collection fetches its paged sources through the documented
+- [x] Provider filter and text filter compose.
+- [x] "Search within collection" from a library card.
+- [x] Opening a collection fetches its paged sources through the documented
       collection filter; collection media facets remain correct when members
       appear on later pages and page versions change.
-- [ ] Provider/media/text filters find matching members beyond the first page;
+- [x] Provider/media/text filters find matching members beyond the first page;
       empty/error collections follow the same rules without a client-side
       full-library fetch. Snapshot changes/restarts cause bounded page reloads,
       not mixed-version records.
-- [ ] Local and mixed searches stop at the request deadline and expose the same
+- [x] Local and mixed searches stop at the request deadline and expose the same
       partial-scope semantics as remote collection searches; incomplete pools
       are not reused as complete cached results.
-- [ ] Progressive results show the correct collection label.
-- [ ] Keyboard/focus behavior in the source filter panel is preserved.
-- [ ] No source explosion when a files collection has `max_sources` sources.
+- [x] Progressive results show the correct collection label.
+- [x] Keyboard/focus behavior in the source filter panel is preserved.
+- [x] No source explosion when a files collection has `max_sources` sources.
 
 ## Acceptance criteria
 

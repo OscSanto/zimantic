@@ -16,7 +16,7 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
-    def test_full_search_filters_are_url_display_filters(self):
+    def test_search_urls_use_canonical_source_and_collection_selectors(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 const location = new URL("http://example.test/?q=q");
@@ -28,21 +28,25 @@ let current = {{question: "q", searchAll: true, searchKeys: ["a", "b", "c"]}};
 const full = makeStateUrl("q", ["a"], 0);
 current = {{question: "q", searchAll: false, searchKeys: ["a", "b"]}};
 const selective = makeStateUrl("q", ["a"], 0);
-location.href = "http://example.test/?q=q&zim=a&zim=b&source=a";
-location.search = "?q=q&zim=a&zim=b&source=a";
+current = {{question: "q", searchAll: false, searchKeys: [], searchCollection: "zim:library"}};
+const grouped = makeStateUrl("q", [], 0);
+location.href = "http://example.test/?q=q&collection=zim:library&source=a";
+location.search = "?q=q&collection=zim:library&source=a";
 const state = readLocationState();
 location.href = "http://example.test/?q=q&source=a";
 location.search = "?q=q&source=a";
-const displayOnly = readLocationState();
+const explicit = readLocationState();
 console.log(JSON.stringify({{
   full,
   selective,
+  grouped,
   selected: state.selectedSources,
   scope: state.scopeSources,
+  collection: state.collection,
   hasScope: state.hasScope,
-  displayOnly: displayOnly.selectedSources,
-  displayOnlyScope: displayOnly.scopeSources,
-  displayOnlyHasScope: displayOnly.hasScope,
+  explicitSources: explicit.selectedSources,
+  explicitCollection: explicit.collection,
+  explicitHasScope: explicit.hasScope,
 }}));
 """
         result = subprocess.run(
@@ -53,15 +57,75 @@ console.log(JSON.stringify({{
         )
         payload = json.loads(result.stdout)
         self.assertEqual(payload["full"], "/?q=q&source=a")
-        self.assertEqual(
-            payload["selective"], "/?q=q&zim=a&zim=b&source=a"
-        )
+        self.assertEqual(payload["selective"], "/?q=q&source=a&source=b")
+        self.assertEqual(payload["grouped"], "/?q=q&collection=zim%3Alibrary")
         self.assertEqual(payload["selected"], ["a"])
-        self.assertEqual(payload["scope"], ["a", "b"])
+        self.assertEqual(payload["scope"], ["a"])
+        self.assertEqual(payload["collection"], "zim:library")
         self.assertTrue(payload["hasScope"])
-        self.assertEqual(payload["displayOnly"], ["a"])
-        self.assertEqual(payload["displayOnlyScope"], [])
-        self.assertFalse(payload["displayOnlyHasScope"])
+        self.assertEqual(payload["explicitSources"], ["a"])
+        self.assertIsNone(payload["explicitCollection"])
+        self.assertTrue(payload["explicitHasScope"])
+
+    def test_source_filter_layout_is_bounded_per_collection_group(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/?q=q");
+const document = {{ getElementById: () => ({{ value: "" }}) }};
+const $ = (id) => document.getElementById(id);
+let sources = [];
+let librarySources = [];
+let collections = [];
+let libraryCollections = [];
+const SOURCE_FILTER_LIMIT = 2;
+const SOURCE_FILTER_QUERY_LIMIT = 30;
+let sourceFilterShowAll = false;
+let sourceFilterShowOther = false;
+let selectedSourceKeys = new Set(["a3"]);
+const formatLibrarySize = () => "";
+{_function_source(source, "function libraryTitle(", "function sourceRecord(")}
+{_function_source(source, "function sourceRecord(", "function sourceDisplayName(")}
+{_function_source(source, "function sourceDisplayName(", "function sourceStemName(")}
+{_function_source(source, "function sourceStemName(", "function libraryHomepageUrl(")}
+{_function_source(source, "function providerLabel(", "function libraryHomepageUrl(")}
+const outcome = (key, collection, count) => ({{
+  source: {{ key, title: key.toUpperCase(), provider: "zim", collection }},
+  status: "ok",
+}});
+const a = {{ key: "zim:a", label: "A", provider: "zim" }};
+const b = {{ key: "zim:b", label: "B", provider: "zim" }};
+let current = {{
+  outcomes: new Map([
+    ["a1", outcome("a1", a, 5)],
+    ["a2", outcome("a2", a, 4)],
+    ["a3", outcome("a3", a, 0)],
+    ["b1", outcome("b1", b, 3)],
+    ["b2", outcome("b2", b, 2)],
+  ]),
+  counts: {{ a1: 5, a2: 4, a3: 0, b1: 3, b2: 2 }},
+}};
+{_function_source(source, "function sourceFilterLayout(", "function sourceFilterControlKey(")}
+const layout = sourceFilterLayout();
+console.log(JSON.stringify(layout.groups.map((group) => ({{
+  label: group.label,
+  visible: group.visible.map((item) => item.source.key),
+  other: group.other.map((item) => item.source.key),
+}}))));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload,
+            [
+                {"label": "A", "visible": ["a3", "a1", "a2"], "other": []},
+                {"label": "B", "visible": ["b1", "b2"], "other": []},
+            ],
+        )
 
     def test_page_parameter_is_canonicalized(self):
         source = APP_JS.read_text(encoding="utf-8")

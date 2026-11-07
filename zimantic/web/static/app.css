@@ -247,6 +247,44 @@ button.source-filter-option[aria-pressed="true"] {
     border-color: var(--accent);
     color: #fff;
 }
+.source-filter-group {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 5px 8px 7px;
+}
+.source-filter-group.selected {
+    border-color: var(--accent);
+}
+button.source-filter-collection {
+    align-self: flex-start;
+    background: none;
+    border: 0;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    padding: 1px 2px;
+    text-align: left;
+    text-transform: uppercase;
+}
+button.source-filter-collection:hover,
+button.source-filter-collection:focus-visible {
+    color: var(--accent);
+    text-decoration: underline;
+}
+button.source-filter-collection[aria-pressed="true"] {
+    color: var(--accent);
+}
+.source-filter-group-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
 .source-filter-status {
     margin-top: 6px;
     font-size: 0.78rem;
@@ -505,6 +543,65 @@ ol.results {
 .library-toolbar input {
     max-width: 220px;
     padding: 7px 10px;
+}
+.library-filter-select {
+    align-items: center;
+    color: var(--muted);
+    display: inline-flex;
+    font-size: 0.78rem;
+    gap: 5px;
+}
+.library-filter-select select {
+    max-width: 170px;
+    padding: 6px 8px;
+}
+.library-collection {
+    border-top: 1px solid var(--border);
+    margin-top: 20px;
+    padding-top: 14px;
+}
+.library-collection:first-child {
+    border-top: 0;
+    margin-top: 0;
+    padding-top: 0;
+}
+.library-collection-header {
+    align-items: start;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.library-collection-heading h3 {
+    font-size: 1.1rem;
+    margin: 0;
+}
+.library-collection-meta,
+.library-collection-description,
+.library-collection-note {
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: 3px 0 0;
+}
+.library-collection-actions {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.library-collection-actions .library-button {
+    font-size: 0.82rem;
+    padding: 5px 9px;
+}
+.library-collection .library-grid {
+    margin-top: 4px;
+}
+.library-card-collection {
+    color: var(--muted);
+    font-size: 0.7rem;
+    margin: 3px 0 0;
+    text-transform: uppercase;
 }
 .library-grid {
     display: grid;

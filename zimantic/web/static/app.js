@@ -97,17 +97,27 @@
             const THUMB_LIMIT = 128 * 1024;
             const THUMB_CONCURRENCY = 4;
             let SOURCE_FILTER_LIMIT = 10;
+            let COLLECTION_SOURCE_LIMIT = 10;
             const SOURCE_FILTER_QUERY_LIMIT = 30;
             let sourceFilterShowAll = false;
             let sourceFilterShowOther = false;
-            const SOURCE_CACHE_KEY = "zimantic.sources.v3";
-            const LIBRARY_CACHE_KEY = "zimantic.library.v6";
+            const SOURCE_CACHE_KEY = "zimantic.sources.v4";
+            const LIBRARY_CACHE_KEY = "zimantic.library.v7";
+            const COLLECTION_CACHE_KEY = "zimantic.collections.v1";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let librarySources = [];
+            let collections = [];
+            let libraryCollections = [];
+            const libraryCollectionPages = new Map();
+            const libraryExpandedCollections = new Set();
+            const libraryCollectionRefreshes = new Map();
+            let libraryLoadSequence = 0;
+            let libraryFilterTimer = null;
             let current = null;
             let previousHeadingSearch = null;
             let selectedSourceKeys = new Set();
+            let selectedCollectionKey = null;
             let requestController = null;
             let pageController = null;
             let searchSequence = 0;
@@ -254,12 +264,81 @@
                 return String(source.key || "").trim();
             }
 
+            function providerLabel(provider) {
+                const value = String(provider || "");
+                if (value === "zim") return "ZIM";
+                if (value === "files") return "Files";
+                if (value === "kolibri") return "Kolibri";
+                if (value === "kiwix") return "Kiwix";
+                return value;
+            }
+
+            function mediaTypeLabels(mediaTypes) {
+                const labels = {
+                    text: "Text",
+                    video: "Video",
+                    audio: "Audio",
+                    image: "Image",
+                    other: "Other",
+                };
+                return (Array.isArray(mediaTypes) ? mediaTypes : [])
+                    .map((value) => labels[value] || String(value))
+                    .filter(Boolean);
+            }
+
+            function collectionFor(sourceOrKey) {
+                if (sourceOrKey && typeof sourceOrKey === "object") {
+                    return sourceOrKey.collection || null;
+                }
+                const source = sourceRecord(sourceOrKey);
+                return source?.collection || null;
+            }
+
+            function collectionKeyFor(source) {
+                return String(source?.collection?.key || "");
+            }
+
+            function collectionLabelFor(sourceOrKey) {
+                const collection = collectionFor(sourceOrKey);
+                return String(collection?.label || collection?.title || "");
+            }
+
+            function collectionByKey(key) {
+                const wanted = String(key || "");
+                if (!wanted) return null;
+                return (
+                    collections.find((collection) => collection.key === wanted) ||
+                    libraryCollections.find((collection) => collection.key === wanted) ||
+                    null
+                );
+            }
+
+            function collectionDisplayName(keyOrCollection) {
+                if (keyOrCollection && typeof keyOrCollection === "object") {
+                    return String(
+                        keyOrCollection.title ||
+                            keyOrCollection.label ||
+                            keyOrCollection.key ||
+                            "Collection",
+                    );
+                }
+                const collection = collectionByKey(keyOrCollection);
+                return String(
+                    collection?.title ||
+                        collection?.label ||
+                        keyOrCollection ||
+                        "Collection",
+                );
+            }
+
             function librarySearchText(source) {
                 const tags = Array.isArray(source.tags) ? source.tags : [];
+                const collection = collectionFor(source);
                 return [
                     source.title,
                     source.key,
                     source.provider,
+                    providerLabel(source.provider),
                     source.description,
                     source.long_description,
                     source.creator,
@@ -275,6 +354,10 @@
                     source.mime_counts,
                     source.item_count,
                     formatLibrarySize(source.size),
+                    collection?.label,
+                    collection?.title,
+                    collection?.provider,
+                    ...mediaTypeLabels(source.media_types),
                     ...tags,
                 ]
                     .filter(Boolean)
@@ -364,6 +447,18 @@
                 target.pathname = appPath("/");
                 // The search view has no library filter.
                 target.searchParams.delete("filter");
+                target.searchParams.delete("provider");
+                target.searchParams.delete("media");
+                window.location.assign(target.toString());
+            }
+
+            function searchWithinLibraryCollection(collection) {
+                const key = String(collection?.key || "").trim();
+                if (!key) return;
+                closeLibraryInfo({ navigateHistory: false });
+                const target = new URL(appPath("/"), location.href);
+                target.search = "";
+                target.searchParams.set("collection", key);
                 window.location.assign(target.toString());
             }
 
@@ -503,6 +598,18 @@
                         search.addEventListener("click", () => searchWithinLibrarySource(source));
                         actions.append(search);
                     }
+                    const collection = collectionFor(source);
+                    if (collection?.key) {
+                        const searchCollection = document.createElement("button");
+                        searchCollection.type = "button";
+                        searchCollection.className = "library-button library-info-action";
+                        searchCollection.textContent = "Search collection";
+                        searchCollection.dataset.i18n = "Search collection";
+                        searchCollection.addEventListener("click", () =>
+                            searchWithinLibraryCollection(collection),
+                        );
+                        actions.append(searchCollection);
+                    }
                     content.appendChild(actions);
                 } else {
                     const unavailable = document.createElement("p");
@@ -526,7 +633,13 @@
                     appendInfoRow(list, "Indexed", Number(source.indexed_count).toLocaleString());
                 }
                 appendInfoRow(list, "Category", source.category);
-                appendInfoRow(list, "Provider", source.provider);
+                appendInfoRow(list, "Provider", providerLabel(source.provider));
+                appendInfoRow(list, "Collection", collectionLabelFor(source));
+                appendInfoRow(
+                    list,
+                    "Content types",
+                    mediaTypeLabels(source.media_types).join(" · "),
+                );
                 appendInfoRow(
                     list,
                     "Tags",
@@ -573,13 +686,24 @@
             }
 
             function shuffleLibrary() {
-                for (let index = librarySources.length - 1; index > 0; index--) {
-                    const other = Math.floor(Math.random() * (index + 1));
-                    [librarySources[index], librarySources[other]] = [
-                        librarySources[other],
-                        librarySources[index],
-                    ];
+                const shuffle = (values) => {
+                    for (let index = values.length - 1; index > 0; index--) {
+                        const other = Math.floor(Math.random() * (index + 1));
+                        [values[index], values[other]] = [
+                            values[other],
+                            values[index],
+                        ];
+                    }
+                };
+                shuffle(libraryCollections);
+                for (const state of libraryCollectionPages.values()) {
+                    shuffle(state.sources);
                 }
+                librarySources = sortLibrarySources(
+                    [...libraryCollectionPages.values()].flatMap(
+                        (state) => state.sources,
+                    ),
+                );
                 renderLibrary();
             }
 
@@ -623,30 +747,106 @@
                 return cached;
             }
 
-            async function fetchPagedJson(path) {
-                const limit = Math.max(1, PAGE_SIZE);
-                const items = [];
-                let offset = 0;
-                for (let page = 0; page < 1000; page++) {
-                    const url = new URL(path, location.href);
-                    url.searchParams.set("limit", String(limit));
-                    url.searchParams.set("offset", String(offset));
-                    const response = await fetch(url, { cache: "no-cache" });
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    const payload = await response.json();
-                    if (!Array.isArray(payload)) throw new Error("invalid JSON payload");
-                    items.push(...payload);
-                    const hasMore = response.headers.get("X-Has-More") === "true";
-                    if (!payload.length || !hasMore) return items;
-                    offset += payload.length;
-                }
-                throw new Error("source page count exceeded its bound");
+            function isCanonicalCollectionRecord(collection) {
+                return Boolean(
+                    collection &&
+                    typeof collection === "object" &&
+                    typeof collection.key === "string" &&
+                    collection.key &&
+                    typeof collection.provider === "string" &&
+                    collection.provider &&
+                    typeof collection.label === "string",
+                );
             }
 
-            async function fetchCachedJson(path, key) {
+            function readCollectionCache() {
+                const cached = readJsonCache(COLLECTION_CACHE_KEY);
+                if (!cached || !cached.every(isCanonicalCollectionRecord)) return null;
+                return cached;
+            }
+
+            function listingParams({ provider = "", media = "", q = "", collection = "" } = {}) {
+                const params = new URLSearchParams();
+                if (provider) params.set("provider", provider);
+                if (media) params.set("media_type", media);
+                if (q) params.set("q", q);
+                if (collection) params.set("collection", collection);
+                return params;
+            }
+
+            async function fetchJsonPage(
+                path,
+                {
+                    limit = PAGE_SIZE,
+                    offset = 0,
+                    provider = "",
+                    media = "",
+                    q = "",
+                    collection = "",
+                } = {},
+            ) {
+                const url = new URL(path, location.href);
+                url.searchParams.set("limit", String(Math.max(1, limit)));
+                url.searchParams.set("offset", String(Math.max(0, offset)));
+                for (const [key, value] of listingParams({
+                    provider,
+                    media,
+                    q,
+                    collection,
+                })) {
+                    url.searchParams.set(key, value);
+                }
+                const response = await fetch(url, { cache: "no-cache" });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const payload = await response.json();
+                if (!Array.isArray(payload)) throw new Error("invalid JSON payload");
+                return {
+                    items: payload,
+                    total: Number(response.headers.get("X-Total-Count") || payload.length),
+                    offset: Number(response.headers.get("X-Offset") || offset),
+                    hasMore: response.headers.get("X-Has-More") === "true",
+                    version: response.headers.get("X-Snapshot-Version") || "",
+                };
+            }
+
+            async function fetchPagedJson(path, options = {}) {
+                const limit = Math.max(1, options.limit || PAGE_SIZE);
+                const retries = Number(options.retries || 0);
+                const items = [];
+                let offset = 0;
+                let version = "";
+                for (let page = 0; page < 1000; page++) {
+                    const result = await fetchJsonPage(path, {
+                        ...options,
+                        limit,
+                        offset,
+                    });
+                    if (version && result.version && result.version !== version) {
+                        // A discovery revision changed between pages. Restart
+                        // once instead of mixing records from two snapshots;
+                        // a revision that keeps moving surfaces an error.
+                        if (retries < 1) {
+                            return fetchPagedJson(path, {
+                                ...options,
+                                retries: retries + 1,
+                            });
+                        }
+                        throw new Error(
+                            "discovery changed while loading; refresh the library",
+                        );
+                    }
+                    version = result.version || version;
+                    items.push(...result.items);
+                    if (!result.items.length || !result.hasMore) return items;
+                    offset += result.items.length;
+                }
+                throw new Error("listing page count exceeded its bound");
+            }
+
+            async function fetchCachedJson(path, key, options = {}) {
                 const cached = readCanonicalCache(key);
                 try {
-                    const payload = await fetchPagedJson(path);
+                    const payload = await fetchPagedJson(path, options);
                     if (!payload.every(isCanonicalSourceRecord)) {
                         throw new Error("invalid source payload");
                     }
@@ -666,6 +866,20 @@
                 if (location.pathname !== appPath("/library")) return;
                 const filter = $("libraryFilter")?.value.trim() || "";
                 replaceQueryParam("filter", filter || null);
+                replaceQueryParam(
+                    "provider",
+                    $("libraryProviderFilter")?.value || null,
+                );
+                replaceQueryParam("media", $("libraryMediaFilter")?.value || null);
+            }
+
+            function scheduleLibraryReload() {
+                updateLibraryFilterUrl();
+                clearTimeout(libraryFilterTimer);
+                libraryFilterTimer = setTimeout(() => {
+                    libraryFilterTimer = null;
+                    loadLibraryData();
+                }, 250);
             }
 
             function sortLibrarySources(sources) {
@@ -684,53 +898,40 @@
                 });
             }
 
-            function renderLibrary() {
-                const grid = $("libraryGrid");
-                const status = $("libraryStatus");
-                if (!grid || !status) return;
-                const filter = $("libraryFilter");
-                if (filter) {
-                    const count = librarySources.length;
-                    filter.placeholder = `Filter ${count.toLocaleString()} source${count === 1 ? "" : "s"}`;
-                }
-                grid.replaceChildren();
-                if (!librarySources.length) {
-                    status.textContent = "No installed sources found.";
-                    const empty = document.createElement("p");
-                    empty.className = "empty";
-                    empty.textContent =
-                        "Add a .zim file to zim_dir, then reload the server.";
-                    grid.appendChild(empty);
-                    return;
-                }
-                const query = $("libraryFilter").value.trim().toLocaleLowerCase();
+            function libraryFilterTerms() {
+                return $("libraryFilter")?.value.trim().toLocaleLowerCase() || "";
+            }
+
+            function matchesLibraryTerms(text, query) {
+                if (!query) return true;
                 const terms = query.split(/\s+/).filter(Boolean);
-                const excludedTerms = terms
+                const excluded = terms
                     .filter((term) => term.startsWith("-") && term.length > 1)
                     .map((term) => term.slice(1));
-                const includedTerms = terms.filter(
+                const included = terms.filter(
                     (term) => !term.startsWith("-") || term.length === 1,
                 );
-                const visibleSources = query
-                    ? librarySources.filter((source) => {
-                          const searchable = librarySearchText(source);
-                          return (
-                              includedTerms.every((term) => searchable.includes(term)) &&
-                              excludedTerms.every((term) => !searchable.includes(term))
-                          );
-                      })
-                    : librarySources;
-                status.textContent = query
-                    ? `${visibleSources.length} of ${librarySources.length} installed sources`
-                    : "";
-                if (!visibleSources.length) {
-                    const empty = document.createElement("p");
-                    empty.className = "empty";
-                    empty.textContent = "No installed source matches that filter.";
-                    grid.appendChild(empty);
-                    return;
-                }
-                visibleSources.forEach((source) => {
+                const haystack = String(text || "").toLocaleLowerCase();
+                return (
+                    included.every((term) => haystack.includes(term)) &&
+                    excluded.every((term) => !haystack.includes(term))
+                );
+            }
+
+            function libraryCollectionText(collection) {
+                return [
+                    collection?.title,
+                    collection?.label,
+                    collection?.description,
+                    collection?.provider,
+                    providerLabel(collection?.provider),
+                ]
+                    .filter(Boolean)
+                    .join(" ");
+            }
+
+            function libraryCardsFor(sources) {
+                return sources.map((source) => {
                     const title = libraryTitle(source);
                     const openUrl = libraryHomepageUrl(source);
                     const stem = sourceStemName(source);
@@ -777,6 +978,13 @@
                     }
                     heading.appendChild(titleLink);
                     body.appendChild(heading);
+                    const collectionLabel = collectionLabelFor(source);
+                    if (collectionLabel) {
+                        const group = document.createElement("p");
+                        group.className = "library-card-collection";
+                        group.textContent = collectionLabel;
+                        body.appendChild(group);
+                    }
                     const description =
                         source.long_description ||
                         source.description ||
@@ -792,6 +1000,7 @@
                     const details = document.createElement("p");
                     details.className = "library-card-details";
                     const detailValues = [
+                        providerLabel(source.provider),
                         libraryLanguage(source),
                         formatLibrarySize(source.size),
                         Number(source.item_count) > 0
@@ -823,8 +1032,247 @@
                     actions.appendChild(detailsButton);
                     body.appendChild(actions);
                     card.append(preview, body);
-                    grid.appendChild(card);
+                    return card;
                 });
+            }
+
+            function libraryCollectionViews() {
+                const query = libraryFilterTerms();
+                const provider = $("libraryProviderFilter")?.value || "";
+                const media = $("libraryMediaFilter")?.value || "";
+                const orderedCollections =
+                    libraryCollections.length || collections.length
+                        ? libraryCollections.length
+                            ? libraryCollections
+                            : collections
+                        : [];
+                const views = [];
+                const seen = new Set();
+                for (const collection of orderedCollections) {
+                    const key = String(collection.key || "");
+                    if (!key || seen.has(key)) continue;
+                    seen.add(key);
+                    const state = libraryCollectionPages.get(key);
+                    const collectionMatches = matchesLibraryTerms(
+                        libraryCollectionText(collection),
+                        query,
+                    );
+                    const members = (state?.sources || []).filter((source) => {
+                        if (provider && source.provider !== provider) return false;
+                        if (
+                            media &&
+                            !(Array.isArray(source.media_types)
+                                ? source.media_types
+                                : []
+                            ).includes(media)
+                        ) {
+                            return false;
+                        }
+                        return (
+                            collectionMatches ||
+                            matchesLibraryTerms(librarySearchText(source), query)
+                        );
+                    });
+                    views.push({
+                        key,
+                        collection,
+                        state,
+                        members,
+                        collectionMatches,
+                    });
+                }
+                for (const [key, state] of libraryCollectionPages.entries()) {
+                    if (seen.has(key)) continue;
+                    const collection =
+                        collectionByKey(key) ||
+                        state.collection || {
+                            key,
+                            label: key,
+                            provider: "",
+                            source_count: state.total,
+                        };
+                    views.push({
+                        key,
+                        collection,
+                        state,
+                        members: state.sources,
+                        collectionMatches: true,
+                    });
+                }
+                return views.filter((view) => {
+                    if (!query && !provider && !media) return true;
+                    if (view.collectionMatches) {
+                        if (!provider && !media) return true;
+                        if (
+                            provider &&
+                            view.collection?.provider &&
+                            view.collection.provider !== provider
+                        ) {
+                            return false;
+                        }
+                        if (media) {
+                            const families = Array.isArray(view.collection?.media_types)
+                                ? view.collection.media_types
+                                : [];
+                            if (!families.includes(media)) return false;
+                        }
+                        return true;
+                    }
+                    return view.members.length > 0;
+                });
+            }
+
+            function libraryStateMessage(view) {
+                const state = view.state;
+                const collection = view.collection;
+                if (state?.loading && !state.sources.length) {
+                    return "Discovering sources…";
+                }
+                if (state?.error && !state.sources.length) {
+                    return `Could not load this collection: ${state.error}`;
+                }
+                if (collection.discovery_state === "error" && collection.error) {
+                    return `Collection discovery failed: ${collection.error}`;
+                }
+                if (collection.discovery_state === "loading") {
+                    return "Discovering sources…";
+                }
+                if (!Number(collection.source_count) && !state?.sources.length) {
+                    return "No sources were discovered in this collection.";
+                }
+                if (!state && Number(collection.source_count)) {
+                    return "Loading sources…";
+                }
+                return "No sources match these filters.";
+            }
+
+            function renderLibrary() {
+                const grid = $("libraryGrid");
+                const status = $("libraryStatus");
+                if (!grid || !status) return;
+                const filter = $("libraryFilter");
+                if (filter) {
+                    const count = librarySources.length;
+                    filter.placeholder = `Filter ${count.toLocaleString()} source${count === 1 ? "" : "s"}`;
+                }
+                grid.replaceChildren();
+                const views = libraryCollectionViews();
+                const hasFilters = Boolean(
+                    libraryFilterTerms() ||
+                        $("libraryProviderFilter")?.value ||
+                        $("libraryMediaFilter")?.value,
+                );
+                if (!views.length) {
+                    status.textContent = "";
+                    const empty = document.createElement("p");
+                    empty.className = "empty";
+                    if (!collections.length) {
+                        empty.textContent =
+                            "No collections are configured. Add a [[collections]] entry to the server configuration, then restart the server.";
+                    } else if (hasFilters) {
+                        empty.textContent = "No collection or source matches these filters.";
+                    } else {
+                        empty.textContent =
+                            "No sources are available in the configured collections.";
+                    }
+                    grid.appendChild(empty);
+                    return;
+                }
+                status.textContent = `${views.length} collection${views.length === 1 ? "" : "s"} · ${librarySources.length} loaded source${librarySources.length === 1 ? "" : "s"}`;
+                for (const view of views) {
+                    const { key, collection, state, members } = view;
+                    const section = document.createElement("section");
+                    section.className = "library-collection";
+                    section.dataset.libraryCollection = key;
+                    const header = document.createElement("div");
+                    header.className = "library-collection-header";
+                    const heading = document.createElement("div");
+                    heading.className = "library-collection-heading";
+                    const title = document.createElement("h3");
+                    title.textContent = collectionDisplayName(collection);
+                    heading.appendChild(title);
+                    const meta = document.createElement("p");
+                    meta.className = "library-collection-meta";
+                    const sourceCount = Number(collection.source_count);
+                    const families = mediaTypeLabels(collection.media_types);
+                    meta.textContent = [
+                        providerLabel(collection.provider),
+                        Number.isFinite(sourceCount)
+                            ? `${sourceCount.toLocaleString()} source${sourceCount === 1 ? "" : "s"}`
+                            : "",
+                        families.join(" · "),
+                    ]
+                        .filter(Boolean)
+                        .join(" · ");
+                    heading.appendChild(meta);
+                    header.appendChild(heading);
+                    if (collection.description) {
+                        const description = document.createElement("p");
+                        description.className = "library-collection-description";
+                        description.textContent = collection.description;
+                        header.appendChild(description);
+                    }
+                    const actions = document.createElement("div");
+                    actions.className = "library-collection-actions";
+                    if (Number(collection.source_count) > 0) {
+                        const search = document.createElement("button");
+                        search.type = "button";
+                        search.className = "library-button";
+                        search.textContent = "Search collection";
+                        search.dataset.i18n = "Search collection";
+                        search.dataset.librarySearchCollection = key;
+                        actions.appendChild(search);
+                    }
+                    const expanded = libraryExpandedCollections.has(key);
+                    const loadedCount = state?.sources.length || 0;
+                    if (
+                        !expanded &&
+                        (Number(collection.source_count) > loadedCount ||
+                            loadedCount > COLLECTION_SOURCE_LIMIT)
+                    ) {
+                        const open = document.createElement("button");
+                        open.type = "button";
+                        open.className = "library-button";
+                        open.textContent = `Show all ${Number(collection.source_count).toLocaleString()} sources`;
+                        open.dataset.libraryExpandCollection = key;
+                        actions.appendChild(open);
+                    } else if (expanded && state?.hasMore) {
+                        const more = document.createElement("button");
+                        more.type = "button";
+                        more.className = "library-button";
+                        more.textContent = "Load more sources";
+                        more.dataset.libraryMoreCollection = key;
+                        actions.appendChild(more);
+                    }
+                    header.appendChild(actions);
+                    section.appendChild(header);
+
+                    if (!members.length) {
+                        const message = document.createElement("p");
+                        message.className = "empty";
+                        message.textContent = libraryStateMessage(view);
+                        section.appendChild(message);
+                    } else {
+                        const groupGrid = document.createElement("div");
+                        groupGrid.className = "library-grid library-collection-grid";
+                        const visibleMembers = expanded
+                            ? members
+                            : members.slice(0, COLLECTION_SOURCE_LIMIT);
+                        groupGrid.append(...libraryCardsFor(visibleMembers));
+                        section.appendChild(groupGrid);
+                        if (
+                            !expanded &&
+                            (Number(collection.source_count) > visibleMembers.length ||
+                                loadedCount > visibleMembers.length)
+                        ) {
+                            const note = document.createElement("p");
+                            note.className = "library-collection-note";
+                            note.textContent = `Showing ${visibleMembers.length.toLocaleString()} of ${Number(collection.source_count).toLocaleString()} sources.`;
+                            section.appendChild(note);
+                        }
+                    }
+                    grid.appendChild(section);
+                }
             }
 
             function resultKey(item) {
@@ -932,8 +1380,9 @@
                 selectedSourceKeys = new Set(selectionValues(values));
             }
 
-            function searchScopeParams(params, keys) {
-                keys.forEach((key) => params.append("zim", key));
+            function searchScopeParams(params, keys, collectionKey = null) {
+                if (collectionKey) params.set("collection", collectionKey);
+                keys.forEach((key) => params.append("source", key));
             }
 
             function sourceFilterParams(params) {
@@ -958,74 +1407,105 @@
                           return queryTerms.every((term) => searchable.includes(term));
                       })
                     : nonEmptyOutcomes;
-                const sorted = matching.sort((left, right) => {
-                    const countDifference = outcomeCount(right) - outcomeCount(left);
-                    return (
-                        countDifference ||
-                        sourceDisplayName(left.source).localeCompare(
-                            sourceDisplayName(right.source),
-                        )
-                    );
-                });
-                const topVisible = sorted.slice(
-                    0,
-                    query
+                const byCollection = new Map();
+                for (const outcome of matching) {
+                    const collection = outcome.source.collection || null;
+                    const key = collection?.key || `provider:${outcome.source.provider || ""}`;
+                    if (!byCollection.has(key)) {
+                        byCollection.set(key, {
+                            key,
+                            label: collection?.label || outcome.source.provider || "",
+                            provider: collection?.provider || outcome.source.provider || "",
+                            outcomes: [],
+                        });
+                    }
+                    byCollection.get(key).outcomes.push(outcome);
+                }
+                // A selected source must remain visible even when the source
+                // filter query no longer matches its metadata.
+                for (const outcome of outcomes) {
+                    if (!selectedSourceKeys.has(outcome.source.key)) continue;
+                    const collection = outcome.source.collection || null;
+                    const key = collection?.key || `provider:${outcome.source.provider || ""}`;
+                    if (!byCollection.has(key)) {
+                        byCollection.set(key, {
+                            key,
+                            label: collection?.label || outcome.source.provider || "",
+                            provider: collection?.provider || outcome.source.provider || "",
+                            outcomes: [],
+                        });
+                    }
+                    const group = byCollection.get(key);
+                    if (!group.outcomes.includes(outcome)) {
+                        group.outcomes.push(outcome);
+                    }
+                }
+                const groups = [...byCollection.values()].map((group) => {
+                    group.outcomes.sort((left, right) => {
+                        const countDifference =
+                            outcomeCount(right) - outcomeCount(left);
+                        return (
+                            countDifference ||
+                            sourceDisplayName(left.source).localeCompare(
+                                sourceDisplayName(right.source),
+                            )
+                        );
+                    });
+                    const limit = query
                         ? sourceFilterShowAll
-                            ? sorted.length
+                            ? group.outcomes.length
                             : SOURCE_FILTER_QUERY_LIMIT
-                        : SOURCE_FILTER_LIMIT,
-                );
-                const selectedVisible = outcomes.filter((outcome) =>
-                    selectedSourceKeys.has(outcome.source.key),
-                );
-                const visibleKeys = new Set([
-                    ...topVisible.map((outcome) => outcome.source.key),
-                    ...selectedVisible.map((outcome) => outcome.source.key),
-                ]);
-                let otherOutcomes = nonEmptyOutcomes.filter(
-                    (outcome) =>
-                        !visibleKeys.has(outcome.source.key) &&
-                        outcomeCount(outcome) > 0 &&
-                        (!query || matching.includes(outcome)),
-                );
-                const otherCount = otherOutcomes.reduce(
-                    (total, outcome) => total + outcomeCount(outcome),
+                        : SOURCE_FILTER_LIMIT;
+                    const selected = group.outcomes.filter((outcome) =>
+                        selectedSourceKeys.has(outcome.source.key),
+                    );
+                    const showable = (outcome) =>
+                        failed(outcome) || outcomeCount(outcome) > 0;
+                    const nonSelected = group.outcomes.filter(
+                        (outcome) =>
+                            !selected.includes(outcome) && showable(outcome),
+                    );
+                    let visible = [...selected, ...nonSelected.slice(0, limit)];
+                    const visibleSet = new Set(visible);
+                    let other = group.outcomes.filter(
+                        (outcome) =>
+                            !visibleSet.has(outcome) && showable(outcome),
+                    );
+                    if (!query && sourceFilterShowOther) {
+                        visible = group.outcomes.filter(showable);
+                        other = [];
+                    } else if (other.length === 1) {
+                        // A lone hidden source is cheaper as a normal chip
+                        // than as a one-item disclosure.
+                        visible.push(other[0]);
+                        other = [];
+                    }
+                    return {
+                        ...group,
+                        visible,
+                        other,
+                        showOther: other.length > 0,
+                        otherCount: other.reduce(
+                            (total, outcome) => total + outcomeCount(outcome),
+                            0,
+                        ),
+                    };
+                });
+                const visible = groups.flatMap((group) => group.visible);
+                const otherOutcomes = groups.flatMap((group) => group.other);
+                const otherCount = groups.reduce(
+                    (total, group) => total + group.otherCount,
                     0,
                 );
-                // A lone hidden source is cheaper as a normal chip than as a
-                // one-item disclosure. For an unfiltered list, keep the
-                // historical one-result promotion too.
-                if (
-                    (query && otherOutcomes.length === 1) ||
-                    (!query && otherCount === 1)
-                ) {
-                    otherOutcomes.forEach((outcome) => visibleKeys.add(outcome.source.key));
-                    otherOutcomes = [];
-                }
-                if (!query && sourceFilterShowOther) {
-                    otherOutcomes.forEach((outcome) =>
-                        visibleKeys.add(outcome.source.key),
-                    );
-                    otherOutcomes = [];
-                }
-                const showOther = query
-                    ? otherOutcomes.length > 0
-                    : otherCount > 1 && otherOutcomes.length > 0;
                 return {
                     outcomes,
                     query,
                     matching,
-                    visible: [
-                        ...selectedVisible,
-                        ...sorted.filter(
-                            (outcome) =>
-                                visibleKeys.has(outcome.source.key) &&
-                                !selectedSourceKeys.has(outcome.source.key),
-                        ),
-                    ],
-                    otherOutcomes: showOther ? otherOutcomes : [],
+                    groups,
+                    visible,
+                    otherOutcomes,
                     otherCount,
-                    showOther,
+                    showOther: otherOutcomes.length > 0,
                     failed,
                     outcomeCount,
                 };
@@ -1033,9 +1513,39 @@
 
             function sourceFilterControlKey(node) {
                 if (!(node instanceof HTMLElement)) return "";
+                if (node.dataset.sourceCollection) {
+                    return `collection:${node.dataset.sourceCollection}`;
+                }
                 if (node.dataset.sourceAction) return `action:${node.dataset.sourceAction}`;
                 if (node.dataset.source) return `source:${node.dataset.source}`;
                 return "";
+            }
+
+            function sourceFilterButton(outcome, layout) {
+                // Counts come from the ranked pool (server-reported), not per-source
+                // candidate lists, so they match what the filtered view actually shows.
+                const count = layout.outcomeCount(outcome);
+                const isFailed = layout.failed(outcome);
+                const button = document.createElement("button");
+                button.className = isFailed
+                    ? "source-filter-option err"
+                    : count > 0
+                      ? "source-filter-option ok"
+                      : "source-filter-option";
+                button.type = "button";
+                button.dataset.source = outcome.source.key;
+                const sourceLabel = sourceDisplayName(outcome.source);
+                button.textContent = isFailed
+                    ? `${sourceLabel}: ${outcome.error}`
+                    : `${sourceLabel}: ${count}`;
+                const stem = sourceStemName(outcome.source);
+                if (stem) button.title = stem;
+                button.disabled = isFailed;
+                button.setAttribute(
+                    "aria-pressed",
+                    selectedSourceKeys.has(outcome.source.key) ? "true" : "false",
+                );
+                return button;
             }
 
             function renderSourceFilters() {
@@ -1066,53 +1576,58 @@
                 all.type = "button";
                 all.dataset.source = "";
                 all.dataset.sourceAction = "all";
-                all.setAttribute("aria-pressed", selectedSourceKeys.size ? "false" : "true");
+                all.setAttribute(
+                    "aria-pressed",
+                    selectedSourceKeys.size || selectedCollectionKey ? "false" : "true",
+                );
                 all.textContent = "All Sources";
 
-                const entries = layout.visible.map((outcome) => {
-                    // Counts come from the ranked pool (server-reported), not per-source
-                    // candidate lists, so they match what the filtered view actually shows.
-                    const count = layout.outcomeCount(outcome);
-                    const isFailed = layout.failed(outcome);
-                    const button = document.createElement("button");
-                    button.className = isFailed
-                        ? "source-filter-option err"
-                        : count > 0
-                          ? "source-filter-option ok"
-                          : "source-filter-option";
-                    button.type = "button";
-                    button.dataset.source = outcome.source.key;
-                    const sourceLabel = sourceDisplayName(outcome.source);
-                    button.textContent = isFailed
-                        ? `${sourceLabel}: ${outcome.error}`
-                        : `${sourceLabel}: ${count}`;
-                    const stem = sourceStemName(outcome.source);
-                    if (stem) button.title = stem;
-                    button.disabled = isFailed;
-                    button.setAttribute(
+                const entries = [];
+                for (const group of layout.groups) {
+                    const section = document.createElement("div");
+                    section.className = "source-filter-group";
+                    if (selectedCollectionKey === group.key) {
+                        section.classList.add("selected");
+                    }
+                    const header = document.createElement("button");
+                    header.type = "button";
+                    header.className = "source-filter-collection";
+                    header.dataset.sourceCollection = group.key;
+                    header.setAttribute(
                         "aria-pressed",
-                        selectedSourceKeys.has(outcome.source.key) ? "true" : "false",
+                        selectedCollectionKey === group.key ? "true" : "false",
                     );
-                    return button;
-                });
-                if (layout.showOther) {
-                    const other = document.createElement("button");
-                    other.className = "source-filter-option ok";
-                    other.type = "button";
-                    other.dataset.sourceAction = layout.query ? "more" : "other";
-                    if (!layout.query) {
-                        other.setAttribute("aria-pressed", "false");
+                    header.textContent = group.label;
+                    header.title = `Search within ${group.label}`;
+                    section.appendChild(header);
+                    const groupOptions = document.createElement("div");
+                    groupOptions.className = "source-filter-group-options";
+                    groupOptions.append(
+                        ...group.visible.map((outcome) =>
+                            sourceFilterButton(outcome, layout),
+                        ),
+                    );
+                    if (group.showOther) {
+                        const other = document.createElement("button");
+                        other.className = "source-filter-option ok";
+                        other.type = "button";
+                        other.dataset.sourceAction = layout.query ? "more" : "other";
+                        if (!layout.query) {
+                            other.setAttribute("aria-pressed", "false");
+                        }
+                        if (layout.query) {
+                            other.textContent = `Show ${group.other.length} more`;
+                        } else {
+                            const count = group.other.length;
+                            other.textContent = `Other: ${count} source${count === 1 ? "" : "s"}`;
+                            other.title =
+                                `Show ${count} more sources ` +
+                                `(${group.otherCount} results)`;
+                        }
+                        groupOptions.appendChild(other);
                     }
-                    if (layout.query) {
-                        other.textContent = `Show ${layout.otherOutcomes.length} more`;
-                    } else {
-                        const count = layout.otherOutcomes.length;
-                        other.textContent = `Other: ${count} source${count === 1 ? "" : "s"}`;
-                        other.title =
-                            `Show ${count} more sources ` +
-                            `(${layout.otherCount} results)`;
-                    }
-                    entries.push(other);
+                    section.appendChild(groupOptions);
+                    entries.push(section);
                 }
                 options.replaceChildren(all, ...entries);
                 if (focusKey) {
@@ -1177,7 +1692,17 @@
                 all.dataset.sourceAction = "all";
                 all.setAttribute("aria-pressed", "false");
                 all.textContent = "All Sources";
-                const entries = [...selectedSourceKeys].map((key) => {
+                const entries = [];
+                if (selectedCollectionKey) {
+                    const collection = document.createElement("button");
+                    collection.className = "source-filter-option ok";
+                    collection.type = "button";
+                    collection.dataset.sourceCollection = selectedCollectionKey;
+                    collection.setAttribute("aria-pressed", "true");
+                    collection.textContent = collectionDisplayName(selectedCollectionKey);
+                    entries.push(collection);
+                }
+                entries.push(...[...selectedSourceKeys].map((key) => {
                     const button = document.createElement("button");
                     button.className = "source-filter-option ok";
                     button.type = "button";
@@ -1187,11 +1712,14 @@
                     const stem = sourceStemName(key);
                     if (stem) button.title = stem;
                     return button;
-                });
+                }));
                 options.replaceChildren(all, ...entries);
-                const count = entries.length;
+                const count = selectedSourceKeys.size || (selectedCollectionKey ? 1 : 0);
+                const kind = selectedCollectionKey && !selectedSourceKeys.size
+                    ? "collection"
+                    : "source";
                 status.textContent =
-                    `${count} selected source${count === 1 ? "" : "s"}. ` +
+                    `${count} selected ${kind}${count === 1 ? "" : "s"}. ` +
                     `Type a query to search ${count === 1 ? "it" : "them"}.`;
             }
 
@@ -1202,12 +1730,19 @@
                 const scoped = Boolean(
                     current &&
                         !current.searchAll &&
-                        current.searchKeys &&
-                        current.searchKeys.length,
+                        ((current.searchKeys && current.searchKeys.length) ||
+                            current.searchCollection),
                 );
                 line.hidden = !scoped;
                 if (!scoped) {
                     text.textContent = "";
+                    return;
+                }
+                if (current.searchCollection) {
+                    const count = current.searchKeys?.length || 0;
+                    text.textContent =
+                        `Searching collection: ${collectionDisplayName(current.searchCollection)}` +
+                        (count ? ` (${count} source${count === 1 ? "" : "s"})` : "");
                     return;
                 }
                 const names = current.searchKeys.map((key) => sourceDisplayName(key));
@@ -1227,6 +1762,22 @@
                     : "";
             }
 
+            function sourceDisplayNameWithCollection(keyOrSource) {
+                const name = sourceDisplayName(keyOrSource);
+                const source = sourceRecord(keyOrSource);
+                const label = collectionLabelFor(source || keyOrSource);
+                if (!source || !label) return name;
+                const candidates = current
+                    ? [...current.outcomes.values()].map((outcome) => outcome.source)
+                    : [...sources, ...librarySources];
+                const duplicate = candidates.some(
+                    (candidate) =>
+                        candidate.key !== source.key &&
+                        libraryTitle(candidate) === name,
+                );
+                return duplicate ? `${name} · ${label}` : name;
+            }
+
             function setSourceMeta(node, item) {
                 const meta = node.querySelector(".result-meta");
                 meta.replaceChildren();
@@ -1244,7 +1795,7 @@
                 }
                 const source = document.createElement("span");
                 const sourceKey = item.source_key || item.source || "";
-                source.textContent = sourceDisplayName(sourceKey);
+                source.textContent = sourceDisplayNameWithCollection(sourceKey);
                 const stem = sourceStemName(sourceKey);
                 if (stem) source.title = stem;
                 if (sourceKey) source.dataset.sourceKey = sourceKey;
@@ -2853,7 +3404,11 @@
                             // A hidden version alias (for example, a bookmarked
                             // mini/nopic variant) resolves to the chosen book.
                             // Reflect that canonical key in the filter UI.
-                            if (event.all_sources === false && current.searchKeys.length) {
+                            if (
+                                event.all_sources === false &&
+                                current.searchKeys.length &&
+                                !current.searchCollection
+                            ) {
                                 setSelectedSources(current.searchKeys);
                             }
                         }
@@ -2947,7 +3502,13 @@
                 return false;
             }
 
-            async function runSearch(question, selectedSources = [], page = 0, scopeSources) {
+            async function runSearch(
+                question,
+                selectedSources = [],
+                page = 0,
+                scopeSources,
+                collectionKey = null,
+            ) {
                 question = question.trim();
                 if (!question) return;
                 sourceFilterShowAll = false;
@@ -2975,6 +3536,7 @@
                     ),
                 ];
                 setSelectedSources(requested);
+                selectedCollectionKey = collectionKey || null;
                 current = {
                     question,
                     terms: queryTerms(question),
@@ -2988,10 +3550,8 @@
                     streaming: true,
                     page: pageIndex,
                     searchKeys: scopeKeys,
-                    // The server decides whether this selection is small
-                    // enough to search on its own; `started` replaces both
-                    // values with the scope it actually searched.
-                    searchAll: scopeKeys.length === 0,
+                    searchCollection: selectedCollectionKey,
+                    searchAll: !selectedCollectionKey && scopeKeys.length === 0,
                 };
                 announceSearchStatus();
                 document.body.classList.add("search-active");
@@ -3017,10 +3577,14 @@
                         offset: String(pageIndex * PAGE_SIZE),
                     });
                     sourceFilterParams(params);
-                    searchScopeParams(params, scopeKeys);
-                    // The server promotes large selections to one full search, so
-                    // this request's scope is reported in the `started` event. Page
-                    // size, offset and the display filter are not cached keys.
+                    searchScopeParams(
+                        params,
+                        selectedCollectionKey ? [] : scopeKeys,
+                        selectedCollectionKey,
+                    );
+                    // An explicit source/collection selection defines the scope
+                    // directly; it is never promoted to a full search. Page size,
+                    // offset and the display filter are not cached keys.
                     let busyRetries = 0;
                     while (true) {
                         const streamController = new AbortController();
@@ -3122,7 +3686,13 @@
                     offset: String(pageIndex * PAGE_SIZE),
                 });
                 sourceFilterParams(params);
-                searchScopeParams(params, current.searchAll ? [] : current.searchKeys || []);
+                searchScopeParams(
+                    params,
+                    current.searchAll || current.searchCollection
+                        ? []
+                        : current.searchKeys || [],
+                    current.searchCollection,
+                );
                 $("status").textContent = "Loading page…";
                 try {
                     let response;
@@ -3200,14 +3770,20 @@
                 }
             }
 
-            function applySourceSelection(question, selectedSources, page = 0, scopeSources) {
+            function applySourceSelection(
+                question,
+                selectedSources,
+                page = 0,
+                scopeSources,
+                collectionKey = null,
+            ) {
                 // The running search already knows its real scope. A full pool
                 // can serve any selected source that it actually searched, so
                 // narrowing is display-only. A source outside that pool (for
                 // example a remote source beyond max_remote_sources) must be
                 // searched explicitly instead of filtering to an empty page.
                 const requested = [...new Set(selectionValues(selectedSources))];
-                if (!requested.length) {
+                if (!requested.length && !collectionKey) {
                     if (current && current.question === question && current.searchAll) {
                         setSelectedSources(requested);
                         loadPage(page);
@@ -3216,9 +3792,16 @@
                     runSearch(question, requested, page);
                     return;
                 }
-                if (current && current.question === question) {
+                if (
+                    current &&
+                    current.question === question &&
+                    (current.searchCollection || null) === (collectionKey || null)
+                ) {
                     const scope = new Set(current.searchKeys || []);
-                    if (requested.every((key) => scope.has(key))) {
+                    if (
+                        !collectionKey &&
+                        requested.every((key) => scope.has(key))
+                    ) {
                         setSelectedSources(requested);
                         loadPage(page);
                         return;
@@ -3229,6 +3812,7 @@
                     requested,
                     page,
                     scopeSources === undefined ? requested : scopeSources,
+                    collectionKey,
                 );
             }
 
@@ -3238,6 +3822,7 @@
                 page,
                 modal = null,
                 scopeSources,
+                collectionKey,
             ) {
                 // Keep search and modal state in the query string so links are shareable
                 // and Back/Forward just work.
@@ -3254,48 +3839,58 @@
                             ? [selectedSources]
                             : [];
                 const displayValues = [...new Set(selectionValues(sourceValues))];
-                const explicitScope = scopeSources !== undefined;
+                const hasCollectionArg = collectionKey !== undefined;
+                const explicitScope = scopeSources !== undefined || hasCollectionArg;
                 const sameSearch =
                     explicitScope || (current && current.question === question);
-                const scopeValues = explicitScope
+                const scopeValues = scopeSources !== undefined
                     ? [...new Set(selectionValues(scopeSources))]
                     : sameSearch
                       ? [...new Set(current.searchKeys || [])]
                       : displayValues;
+                const resolvedCollection = hasCollectionArg
+                    ? collectionKey
+                    : sameSearch
+                      ? current.searchCollection || null
+                      : null;
                 const fullSearch =
                     sameSearch &&
-                    (explicitScope
+                    !resolvedCollection &&
+                    (scopeSources !== undefined
                         ? scopeValues.length === 0
-                        : Boolean(current.searchAll));
-                if (fullSearch) {
+                        : Boolean(current?.searchAll));
+                if (resolvedCollection) {
+                    // A collection is one canonical scope selector, never a
+                    // list of hundreds of source keys.
+                    url.searchParams.set("collection", resolvedCollection);
+                    displayValues.forEach((source) =>
+                        url.searchParams.append("source", source),
+                    );
+                } else if (fullSearch) {
                     // A full-search pool is already cached; these keys only
-                    // narrow the displayed results and must not become a new
-                    // `zim` search scope when the URL is reloaded.
+                    // narrow the displayed results and are reloaded as an
+                    // explicit source scope, which is the canonical API rule.
                     displayValues.forEach((source) =>
                         url.searchParams.append("source", source),
                     );
                 } else {
                     scopeValues.forEach((source) =>
-                        url.searchParams.append("zim", source),
+                        url.searchParams.append("source", source),
                     );
                     if (sameSearch) {
                         const scopeSet = new Set(scopeValues);
-                        const displaySet = new Set(displayValues);
-                        const differs =
-                            scopeSet.size !== displaySet.size ||
-                            [...displaySet].some((key) => !scopeSet.has(key));
-                        if (differs) {
-                            displayValues.forEach((source) =>
+                        displayValues
+                            .filter((source) => !scopeSet.has(source))
+                            .forEach((source) =>
                                 url.searchParams.append("source", source),
                             );
-                        }
                     }
                 }
                 if (page > 0) url.searchParams.set("page", String(page + 1));
                 if (modal) url.searchParams.set("modal", modal);
-                // Search state owns q/source/zim/page/modal, but a library view
-                // also has its filter in the URL. Keep it when opening an
-                // article or another history entry from /library.
+                // Search state owns q/source/collection/page/modal, but a
+                // library view also has its filters in the URL. Keep them when
+                // opening an article or another history entry from /library.
                 if (
                     typeof appPath === "function" &&
                     location.pathname === appPath("/library")
@@ -3304,6 +3899,10 @@
                         ($("libraryFilter")?.value || "").trim() ||
                         readLibraryFilter();
                     if (filter) url.searchParams.set("filter", filter);
+                    const provider = $("libraryProviderFilter")?.value || "";
+                    const media = $("libraryMediaFilter")?.value || "";
+                    if (provider) url.searchParams.set("provider", provider);
+                    if (media) url.searchParams.set("media", media);
                 }
                 return url.pathname + url.search;
             }
@@ -3344,26 +3943,17 @@
                 const params = new URLSearchParams(location.search);
                 const pageNumber = Number.parseInt(params.get("page") || "1", 10);
                 const scopeSources = [
-                    ...new Set(
-                        [
-                            ...params.getAll("zim"),
-                            ...params.getAll("src"),
-                        ].filter(Boolean),
-                    ),
-                ];
-                const displaySources = [
                     ...new Set(params.getAll("source").filter(Boolean)),
                 ];
+                const collection = params.get("collection") || null;
                 return {
                     question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
-                    // `zim` is the canonical search-scope parameter and
-                    // `source` is the display filter for a full-search pool.
-                    // Keep reading legacy `src` links too.
-                    selectedSources: displaySources.length
-                        ? displaySources
-                        : scopeSources,
+                    // `source` is the canonical source-selection parameter and
+                    // `collection` selects one collection as a unit.
+                    selectedSources: scopeSources,
                     scopeSources,
-                    hasScope: params.has("zim") || params.has("src"),
+                    collection,
+                    hasScope: params.has("source") || Boolean(collection),
                     page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0,
                     modal: params.get("modal") || null,
                 };
@@ -3398,43 +3988,83 @@
             });
 
             $("sourceFilterOptions").addEventListener("click", (event) => {
-                const button = event.target.closest("button[data-source], button[data-source-action]");
+                const button = event.target.closest(
+                    "button[data-source], button[data-source-action], button[data-source-collection]",
+                );
                 if (!button || button.disabled) return;
                 const key = button.dataset.source || null;
+                const collectionKey = button.dataset.sourceCollection || null;
+                const focusButton = (wanted) => {
+                    const buttons = [
+                        ...$("sourceFilterOptions").querySelectorAll("button"),
+                    ];
+                    const next =
+                        (wanted &&
+                            buttons.find(
+                                (item) =>
+                                    sourceFilterControlKey(item) === wanted,
+                            )) ||
+                        buttons.find(
+                            (item) => item.dataset.sourceAction === "all",
+                        ) ||
+                        buttons[0];
+                    if (next) next.focus({ preventScroll: true });
+                    else $("question").focus();
+                };
                 if (!current) {
                     if (button.dataset.sourceAction === "all") {
                         selectedSourceKeys.clear();
+                        selectedCollectionKey = null;
                         sourceFilterShowAll = false;
                         sourceFilterShowOther = false;
+                    } else if (collectionKey) {
+                        selectedCollectionKey =
+                            selectedCollectionKey === collectionKey
+                                ? null
+                                : collectionKey;
+                        selectedSourceKeys.clear();
                     } else if (key && selectedSourceKeys.has(key)) {
                         selectedSourceKeys.delete(key);
                     } else if (key) {
+                        selectedCollectionKey = null;
                         selectedSourceKeys.add(key);
                     }
                     const selected = [...selectedSourceKeys];
                     history.replaceState(
                         history.state,
                         "",
-                        makeStateUrl("", selected, 0),
+                        makeStateUrl(
+                            "",
+                            selected,
+                            0,
+                            null,
+                            selectedCollectionKey ? [] : selected,
+                            selectedCollectionKey,
+                        ),
                     );
                     renderSourceSelectionSummary();
-                    const buttons = [
-                        ...$("sourceFilterOptions").querySelectorAll("button"),
-                    ];
-                    const next =
-                        (key && buttons.find((item) => item.dataset.source === key)) ||
-                        buttons.find(
-                            (item) => item.dataset.sourceAction === "all",
-                        ) ||
-                        buttons[0];
-                    if (next) next.focus();
-                    else $("question").focus();
+                    focusButton(
+                        collectionKey
+                            ? `collection:${collectionKey}`
+                            : key
+                              ? `source:${key}`
+                              : "action:all",
+                    );
                     return;
                 }
                 if (button.dataset.sourceAction === "all") {
                     selectedSourceKeys.clear();
+                    selectedCollectionKey = null;
                     sourceFilterShowAll = false;
                     sourceFilterShowOther = false;
+                } else if (collectionKey) {
+                    // One collection group is selected as a unit. Switching
+                    // groups replaces the previous selection.
+                    selectedCollectionKey =
+                        selectedCollectionKey === collectionKey
+                            ? null
+                            : collectionKey;
+                    selectedSourceKeys.clear();
                 } else if (button.dataset.sourceAction === "more") {
                     // Reveal the remaining matching source chips without
                     // changing the search scope or the current selection.
@@ -3443,13 +4073,7 @@
                     );
                     sourceFilterShowAll = true;
                     renderSourceFilters();
-                    const next = [
-                        ...$("sourceFilterOptions").querySelectorAll("button"),
-                    ].find(
-                        (item) =>
-                            hidden.length && item.dataset.source === hidden[0],
-                    );
-                    if (next) next.focus({ preventScroll: true });
+                    focusButton(hidden.length ? `source:${hidden[0]}` : "action:all");
                     return;
                 } else if (button.dataset.sourceAction === "other") {
                     // "Other" is a disclosure, not a filter. Reveal the group's
@@ -3460,16 +4084,17 @@
                     );
                     sourceFilterShowOther = true;
                     renderSourceFilters();
-                    const next = hidden.length
-                        ? [
-                              ...$("sourceFilterOptions").querySelectorAll("button"),
-                          ].find((item) => item.dataset.source === hidden[0].key)
-                        : null;
-                    if (next) next.focus({ preventScroll: true });
+                    focusButton(
+                        hidden.length ? `source:${hidden[0].key}` : "action:all",
+                    );
                     return;
+                } else if (selectedCollectionKey) {
+                    // Choosing an individual source leaves group mode.
+                    selectedCollectionKey = null;
+                    selectedSourceKeys = new Set(key ? [key] : []);
                 } else if (selectedSourceKeys.has(key)) {
                     selectedSourceKeys.delete(key);
-                } else {
+                } else if (key) {
                     selectedSourceKeys.add(key);
                 }
                 const selected = [...selectedSourceKeys];
@@ -3480,20 +4105,35 @@
                 );
                 const nextScope = !selected.length
                     ? []
-                    : current.searchAll
-                      ? addsOutside
-                        ? selected
-                        : []
-                      : addsOutside
-                        ? selected
-                        : scopeKeys;
+                    : current.searchCollection
+                      ? selected
+                      : current.searchAll
+                        ? addsOutside
+                          ? selected
+                          : []
+                        : addsOutside
+                          ? selected
+                          : scopeKeys;
                 history.pushState(
                     null,
                     "",
-                    makeStateUrl(current.question, selected, 0, null, nextScope),
+                    makeStateUrl(
+                        current.question,
+                        selected,
+                        0,
+                        null,
+                        nextScope,
+                        selectedCollectionKey,
+                    ),
                 );
                 renderSourceFilters();
-                applySourceSelection(current.question, selected, 0, nextScope);
+                applySourceSelection(
+                    current.question,
+                    selected,
+                    0,
+                    nextScope,
+                    selectedCollectionKey,
+                );
             });
 
             $("results").addEventListener("click", (event) => {
@@ -3508,6 +4148,37 @@
 
             $("libraryGrid").addEventListener("click", (event) => {
                 const target = event.target instanceof Element ? event.target : null;
+                const searchCollection = target?.closest(
+                    "button[data-library-search-collection]",
+                );
+                if (searchCollection) {
+                    const collection = collectionByKey(
+                        searchCollection.dataset.librarySearchCollection,
+                    );
+                    if (collection) searchWithinLibraryCollection(collection);
+                    return;
+                }
+                const expand = target?.closest("button[data-library-expand-collection]");
+                if (expand) {
+                    const key = expand.dataset.libraryExpandCollection;
+                    libraryExpandedCollections.add(key);
+                    renderLibrary();
+                    loadCollectionSources(key, {
+                        append: false,
+                        filters: currentLibraryFilters(),
+                        sequence: libraryLoadSequence,
+                    });
+                    return;
+                }
+                const more = target?.closest("button[data-library-more-collection]");
+                if (more) {
+                    loadCollectionSources(more.dataset.libraryMoreCollection, {
+                        append: true,
+                        filters: currentLibraryFilters(),
+                        sequence: libraryLoadSequence,
+                    });
+                    return;
+                }
                 const link = target?.closest("a[data-library-article]");
                 if (!link || modifiedClick(event)) return;
                 if (new URL(link.href, location.href).origin !== location.origin) return;
@@ -3533,10 +4204,9 @@
             $("libraryInfoModal").addEventListener("keydown", (event) => {
                 trapModalTabFocus($("libraryInfoModal"), event);
             });
-            $("libraryFilter").addEventListener("input", () => {
-                updateLibraryFilterUrl();
-                renderLibrary();
-            });
+            $("libraryFilter").addEventListener("input", scheduleLibraryReload);
+            $("libraryProviderFilter").addEventListener("change", scheduleLibraryReload);
+            $("libraryMediaFilter").addEventListener("change", scheduleLibraryReload);
             $("libraryShuffle").addEventListener("click", shuffleLibrary);
 
             $("pager").addEventListener("click", (event) => {
@@ -3553,12 +4223,13 @@
                 if (!current || current.searchAll) return;
                 commitAutoSearchHistory();
                 setSelectedSources([]);
+                selectedCollectionKey = null;
                 history.pushState(
                     null,
                     "",
-                    makeStateUrl(current.question, [], 0, null, []),
+                    makeStateUrl(current.question, [], 0, null, [], null),
                 );
-                applySourceSelection(current.question, [], 0, []);
+                applySourceSelection(current.question, [], 0, [], null);
             });
 
             $("articleModal").addEventListener("click", (event) => {
@@ -3620,6 +4291,7 @@
                 current = null;
                 activeSearchResult = null;
                 selectedSourceKeys = new Set();
+                selectedCollectionKey = null;
                 resultList = null;
                 announceSearchStatus();
                 document.body.classList.remove("search-active");
@@ -3666,9 +4338,11 @@
                     previousHeadingSearch = {
                         question: current.question,
                         selectedSources: [...selectedSourceKeys],
-                        scopeSources: current.searchAll
-                            ? []
-                            : [...new Set(current.searchKeys || [])],
+                        scopeSources:
+                            current.searchAll || current.searchCollection
+                                ? []
+                                : [...new Set(current.searchKeys || [])],
+                        collection: current.searchCollection || null,
                         page: current.page,
                     };
                     clearSearch(true);
@@ -3687,6 +4361,7 @@
                         previous.page,
                         null,
                         previous.scopeSources,
+                        previous.collection,
                     ),
                 );
                 runSearch(
@@ -3694,6 +4369,7 @@
                     previous.selectedSources,
                     previous.page,
                     previous.scopeSources,
+                    previous.collection,
                 );
             }
 
@@ -3826,10 +4502,18 @@
                         `Search queries are limited to ${MAX_QUERY_LENGTH.toLocaleString()} characters.`;
                     return;
                 }
-                // Keep the current source filter when the query changes, so a search
-                // started from a library source's "Search" button stays scoped to it.
+                // Keep the current source or collection filter when the query
+                // changes, so a search started from a library card stays scoped.
                 const selectedSources = [...selectedSourceKeys];
-                const url = makeStateUrl(question, selectedSources, 0);
+                const hasCollection = Boolean(selectedCollectionKey);
+                const url = makeStateUrl(
+                    question,
+                    selectedSources,
+                    0,
+                    null,
+                    hasCollection ? [] : undefined,
+                    hasCollection ? selectedCollectionKey : undefined,
+                );
                 if (pushHistory) {
                     commitAutoSearchHistory();
                     if (url !== currentUrlValue()) {
@@ -3845,7 +4529,13 @@
                     cancelAutoSearchHistory();
                     history.replaceState(null, "", url);
                 }
-                runSearch(question, selectedSources);
+                runSearch(
+                    question,
+                    selectedSources,
+                    0,
+                    hasCollection ? [] : undefined,
+                    hasCollection ? selectedCollectionKey : null,
+                );
             }
 
             $("question").addEventListener("input", (event) => {
@@ -3889,11 +4579,18 @@
                 cancelAutoSearchHistory();
                 const libraryView = location.pathname === appPath("/library");
                 if (libraryView) {
+                    const params = new URLSearchParams(location.search);
                     const filter = readLibraryFilter();
-                    if ($("libraryFilter").value !== filter) {
-                        $("libraryFilter").value = filter;
-                        renderLibrary();
-                    }
+                    const provider = params.get("provider") || "";
+                    const media = params.get("media") || "";
+                    const changed =
+                        $("libraryFilter").value !== filter ||
+                        $("libraryProviderFilter").value !== provider ||
+                        $("libraryMediaFilter").value !== media;
+                    $("libraryFilter").value = filter;
+                    $("libraryProviderFilter").value = provider;
+                    $("libraryMediaFilter").value = media;
+                    if (changed) loadLibraryData();
                 }
                 const state = readLocationState();
                 syncArticleModal(state.modal);
@@ -3916,17 +4613,31 @@
                 const sameScope =
                     currentScope.length === stateScope.length &&
                     currentScope.every((key) => stateScope.includes(key));
-                if (current && current.question === state.question && sameScope) {
+                const sameCollection =
+                    (current?.searchCollection || null) === state.collection;
+                if (
+                    current &&
+                    current.question === state.question &&
+                    sameCollection &&
+                    sameScope
+                ) {
                     // Same query and search scope: reuse the pool when the
                     // displayed filters change; otherwise the scope itself
                     // changed and needs a new search.
-                    applySourceSelection(state.question, state.selectedSources, state.page);
+                    applySourceSelection(
+                        state.question,
+                        state.selectedSources,
+                        state.page,
+                        undefined,
+                        state.collection,
+                    );
                 } else {
                     runSearch(
                         state.question,
                         state.selectedSources,
                         state.page,
-                        stateScope,
+                        state.scopeSources,
+                        state.collection,
                     );
                 }
             });
@@ -3946,10 +4657,190 @@
                 }
             }
 
+            async function mapWithConcurrency(values, limit, worker) {
+                const queue = [...values];
+                const runners = Array.from(
+                    { length: Math.min(Math.max(1, limit), queue.length) },
+                    async () => {
+                        while (queue.length) {
+                            const value = queue.shift();
+                            await worker(value);
+                        }
+                    },
+                );
+                await Promise.all(runners);
+            }
+
+            function currentLibraryFilters() {
+                return {
+                    provider: $("libraryProviderFilter")?.value || "",
+                    media: $("libraryMediaFilter")?.value || "",
+                    q: libraryFilterTerms(),
+                };
+            }
+
+            function refreshLibrarySourceList() {
+                librarySources = sortLibrarySources(
+                    [...libraryCollectionPages.values()].flatMap(
+                        (state) => state.sources,
+                    ),
+                );
+            }
+
+            async function loadCollectionSources(
+                key,
+                { append = false, filters = currentLibraryFilters(), sequence = 0, retry = false } = {},
+            ) {
+                if (!key) return;
+                const collection = collectionByKey(key);
+                const previous = libraryCollectionPages.get(key);
+                const offset = append ? previous?.sources.length || 0 : 0;
+                const state = {
+                    ...(previous || {}),
+                    collection,
+                    sources: previous?.sources || [],
+                    total: previous?.total || 0,
+                    hasMore: previous?.hasMore || false,
+                    version: previous?.version || "",
+                    loading: true,
+                    error: null,
+                };
+                if (!append) {
+                    state.sources = [];
+                }
+                libraryCollectionPages.set(key, state);
+                renderLibrary();
+                try {
+                    const result = await fetchJsonPage(appPath("/library.json"), {
+                        limit: COLLECTION_SOURCE_LIMIT,
+                        offset,
+                        collection: key,
+                        ...filters,
+                    });
+                    if (sequence && sequence !== libraryLoadSequence) return;
+                    if (
+                        append &&
+                        previous?.version &&
+                        result.version &&
+                        previous.version !== result.version &&
+                        !retry
+                    ) {
+                        // The discovery revision moved while this group was
+                        // loading. Restart the group; never splice pages from
+                        // two different snapshots.
+                        return loadCollectionSources(key, {
+                            append: false,
+                            filters,
+                            sequence,
+                            retry: true,
+                        });
+                    }
+                    if (!result.items.every(isCanonicalSourceRecord)) {
+                        throw new Error("invalid source payload");
+                    }
+                    const merged =
+                        append &&
+                        previous?.version &&
+                        result.version &&
+                        previous.version === result.version
+                            ? [...previous.sources, ...result.items]
+                            : result.items;
+                    const unique = new Map();
+                    for (const source of merged) unique.set(source.key, source);
+                    libraryCollectionPages.set(key, {
+                        collection,
+                        sources: [...unique.values()],
+                        total: result.total,
+                        hasMore: result.hasMore,
+                        version: result.version || previous?.version || "",
+                        loading: false,
+                        error: null,
+                    });
+                } catch (error) {
+                    if (sequence && sequence !== libraryLoadSequence) return;
+                    libraryCollectionPages.set(key, {
+                        ...state,
+                        sources: append ? previous?.sources || [] : state.sources,
+                        loading: false,
+                        error: error.message || "load failed",
+                    });
+                }
+                refreshLibrarySourceList();
+                renderLibrary();
+            }
+
+            async function loadLibraryData({ reset = true } = {}) {
+                const sequence = ++libraryLoadSequence;
+                const filters = currentLibraryFilters();
+                const filtered = Boolean(filters.provider || filters.media || filters.q);
+                if (reset) {
+                    libraryCollectionPages.clear();
+                    librarySources = [];
+                    libraryExpandedCollections.clear();
+                    if (!filtered) {
+                        const cachedCollections = readCollectionCache();
+                        if (cachedCollections) {
+                            collections = cachedCollections;
+                            libraryCollections = [...cachedCollections];
+                            renderLibrary();
+                        }
+                    }
+                }
+                try {
+                    const records = await fetchPagedJson(appPath("/collections.json"), {
+                        ...filters,
+                        limit: Math.max(50, PAGE_SIZE),
+                    });
+                    if (sequence !== libraryLoadSequence) return;
+                    if (!records.every(isCanonicalCollectionRecord)) {
+                        throw new Error("invalid collection payload");
+                    }
+                    collections = records;
+                    libraryCollections = [...records];
+                    if (!filtered) writeJsonCache(COLLECTION_CACHE_KEY, records);
+                    renderLibrary();
+                    await mapWithConcurrency(
+                        libraryCollections.map((collection) => collection.key),
+                        4,
+                        (key) =>
+                            loadCollectionSources(key, {
+                                append: false,
+                                filters,
+                                sequence,
+                            }),
+                    );
+                    if (!libraryCollections.length) {
+                        const fallback = await fetchPagedJson(appPath("/library.json"), {
+                            ...filters,
+                            limit: COLLECTION_SOURCE_LIMIT,
+                        });
+                        if (sequence !== libraryLoadSequence) return;
+                        if (!fallback.every(isCanonicalSourceRecord)) {
+                            throw new Error("invalid source payload");
+                        }
+                        if (!filtered) writeJsonCache(LIBRARY_CACHE_KEY, fallback);
+                        librarySources = sortLibrarySources(fallback);
+                    }
+                    if (sequence === libraryLoadSequence) renderLibrary();
+                } catch (error) {
+                    if (sequence !== libraryLoadSequence) return;
+                    renderLibrary();
+                    $("libraryStatus").textContent =
+                        `Could not load the library: ${error.message}`;
+                }
+            }
+
             async function initialize() {
                 normalizePageParam();
                 const libraryView = location.pathname === appPath("/library");
-                if (libraryView) $("libraryFilter").value = readLibraryFilter();
+                if (libraryView) {
+                    $("libraryFilter").value = readLibraryFilter();
+                    const libraryParams = new URLSearchParams(location.search);
+                    $("libraryProviderFilter").value =
+                        libraryParams.get("provider") || "";
+                    $("libraryMediaFilter").value =
+                        libraryParams.get("media") || "";
+                }
                 const state = readLocationState();
                 // Apply the URL state before the discovery fetches below: a query typed
                 // while they are in flight must keep the URL's source selection.
@@ -3979,17 +4870,10 @@
                 }
                 // Source discovery is read-only; refreshing the index/catalog set is an
                 // admin action done only via `zimantic reload` or SIGHUP.
-                const dataPath = libraryView ? appPath("/library.json") : appPath("/sources");
-                const dataCacheKey = libraryView ? LIBRARY_CACHE_KEY : SOURCE_CACHE_KEY;
-                // Paint the last known library immediately, then revalidate it
-                // in the background. First visits still wait for the request.
-                const cachedData = readCanonicalCache(dataCacheKey);
-                if (cachedData) applyDiscoveryData(cachedData, libraryView);
                 try {
-                    const [configResponse, data] = await Promise.all([
-                        fetch(appPath("/config"), { cache: "no-cache" }),
-                        fetchCachedJson(dataPath, dataCacheKey),
-                    ]);
+                    const configResponse = await fetch(appPath("/config"), {
+                        cache: "no-cache",
+                    });
                     if (configResponse.ok) {
                         const config = await configResponse.json();
                         debugMode = Boolean(config.debug);
@@ -4008,6 +4892,12 @@
                             SOURCE_FILTER_LIMIT = config.source_filter_limit;
                         }
                         if (
+                            Number.isInteger(config.collection_source_limit) &&
+                            config.collection_source_limit > 0
+                        ) {
+                            COLLECTION_SOURCE_LIMIT = config.collection_source_limit;
+                        }
+                        if (
                             Number.isInteger(config.max_query_length) &&
                             config.max_query_length > 0
                         ) {
@@ -4015,13 +4905,22 @@
                             $("question").maxLength = MAX_QUERY_LENGTH;
                         }
                     }
-                    applyDiscoveryData(data.payload, libraryView);
-                    if (data.stale) {
-                        $("status").textContent =
-                            `Using cached ${libraryView ? "library" : "source"} data; refresh failed: ${data.error.message}`;
+                    if (libraryView) {
+                        await loadLibraryData();
+                    } else {
+                        const data = await fetchCachedJson(
+                            appPath("/sources"),
+                            SOURCE_CACHE_KEY,
+                        );
+                        applyDiscoveryData(data.payload, false);
+                        if (data.stale) {
+                            $("status").textContent =
+                                `Using cached source data; refresh failed: ${data.error.message}`;
+                        }
                     }
                 } catch (error) {
-                    $("status").textContent =
+                    const target = libraryView ? $("libraryStatus") : $("status");
+                    target.textContent =
                         `Could not load ${libraryView ? "library" : "sources"}: ${error.message}`;
                 }
                 syncArticleModal(state.modal);
@@ -4037,6 +4936,7 @@
                         state.selectedSources,
                         state.page,
                         state.scopeSources,
+                        state.collection,
                     );
                 } else if (!libraryView) {
                     renderSourceSelectionSummary();

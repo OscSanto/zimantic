@@ -19,6 +19,7 @@ from zimantic.search import (
     PREVIEW_HTML_BYTES,
     Search as _SearchBase,
     SearchBusyError,
+    SearchQueryError,
     _fulltext_query,
     _phrase_words,
     _query_terms,
@@ -634,15 +635,25 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(_title_prefix_query("praise of fol"), "praise* AND fol*")
         self.assertEqual(_title_prefix_query("c"), '"c"')
 
-    def test_cache_key_normalizes_query_and_source_selection(self):
-        self.assertEqual(
-            Search._cache_key("How  TO change", ["beta", "alpha"]),
-            Search._cache_key("how to change", ["alpha", "beta"]),
-        )
-        self.assertNotEqual(
-            Search._cache_key("q", ["manual"]),
-            Search._cache_key("q", ["other"]),
-        )
+    def test_cache_key_normalizes_query_expanded_keys_and_generation(self):
+        search = _bare_search({})
+        try:
+            search._cache_generation = 1
+            self.assertEqual(
+                search._cache_key("How  TO change", ("beta", "alpha")),
+                search._cache_key("how to change", ("alpha", "beta")),
+            )
+            self.assertNotEqual(
+                search._cache_key("q", ("manual",)),
+                search._cache_key("q", ("other",)),
+            )
+            search._cache_generation = 2
+            self.assertNotEqual(
+                search._cache_key("q", ("manual",)),
+                search._cache_key("q", ("manual",), 1),
+            )
+        finally:
+            search._executor.shutdown(wait=True)
 
     def test_hybrid_ranking_is_deterministic(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
@@ -1483,7 +1494,7 @@ class SearchContractTests(unittest.TestCase):
             },
         )
 
-    def test_suggest_stays_scoped_on_two_source_library_and_unknown_zim(self):
+    def test_suggest_stays_scoped_and_rejects_unknown_source(self):
         manual_db = sqlite3.connect(":memory:", check_same_thread=False)
         other_db = sqlite3.connect(":memory:", check_same_thread=False)
         for db, row in (
@@ -1515,7 +1526,8 @@ class SearchContractTests(unittest.TestCase):
         try:
             scoped = search.suggest("tire", ["manual"], limit=8)
             self.assertEqual([item["id"] for item in scoped], [encode_document_id("manual", "Tire_Changes")])
-            self.assertEqual(search.suggest("tire", ["missing"], limit=8), [])
+            with self.assertRaises(SearchQueryError):
+                search.suggest("tire", ["missing"], limit=8)
         finally:
             search.close()
 
@@ -2304,7 +2316,7 @@ class PaginationTests(unittest.TestCase):
             self.assertNotEqual(first[0]["id"], second[0]["id"])
             search._executor.shutdown(wait=True)
 
-    def test_display_source_filter_keeps_counts_for_all_sources(self):
+    def test_explicit_source_scope_searches_only_selected_sources(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             _write_index(tmp, "alpha", rows=[(1, "Tire Change Alpha", "a", None)])
@@ -2318,7 +2330,7 @@ class PaginationTests(unittest.TestCase):
 
             self.assertEqual([doc["source_key"] for doc in page["results"]], [search._zim_source_key("beta")])
             self.assertEqual(page["total"], 1)
-            self.assertEqual(page["counts"], {search._zim_source_key("alpha"): 1, search._zim_source_key("beta"): 1})
+            self.assertEqual(page["counts"], {search._zim_source_key("beta"): 1})
 
             page = search.search_page("tire change", limit=10, source=["alpha", "beta"])
 
@@ -2806,22 +2818,13 @@ class SourceScopeTests(unittest.TestCase):
             self.assertEqual(runtime.catalog.db_path, Path(":memory:"))
             self.assertEqual(search._scan_zim_paths(), {"manual": zim_path})
 
-    def test_selective_limit_is_min_ten_or_thirty_five_percent(self):
-        self.assertEqual(Search._selective_source_limit(1), 0)
-        self.assertEqual(Search._selective_source_limit(3), 1)
-        self.assertEqual(Search._selective_source_limit(20), 7)
-        self.assertEqual(Search._selective_source_limit(100), 10)
-        self.assertEqual(Search._selective_source_limit(1_000), 10)
-
-    def test_unknown_source_selection_falls_back_to_all_sources(self):
+    def test_unknown_source_selection_is_a_client_error(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = self._search(tmp)
             try:
-                sources, selective, scope = search._search_scope(["removed-source"])
-                self.assertEqual(len(sources), 6)
-                self.assertFalse(selective)
-                self.assertIsNone(scope)
+                with self.assertRaises(SearchQueryError):
+                    search._search_scope(["removed-source"])
             finally:
                 search._executor.shutdown(wait=True)
 
@@ -2830,12 +2833,101 @@ class SourceScopeTests(unittest.TestCase):
             tmp = Path(tmp)
             search = self._search(tmp)
             try:
-                sources, selective, scope = search._search_scope([])
-                self.assertEqual(sources, [])
-                self.assertTrue(selective)
-                self.assertEqual(scope, ())
+                scope = search._search_scope([])
+                self.assertEqual(scope.sources, [])
+                self.assertTrue(scope.selective)
+                self.assertEqual(scope.cache_selection, ())
+                self.assertEqual(scope.requested, 0)
             finally:
                 search._executor.shutdown(wait=True)
+
+    def test_known_unsearchable_source_resolves_to_an_empty_scope(self):
+        search = _bare_search({})
+        search.sources = {
+            "quiet": SourceInfo(
+                key="quiet",
+                provider="zim",
+                title="Quiet",
+                searchable=False,
+            )
+        }
+        try:
+            scope = search._search_scope(["quiet"])
+            self.assertEqual(scope.sources, [])
+            self.assertTrue(scope.selective)
+            self.assertEqual(scope.cache_selection, ())
+        finally:
+            search._executor.shutdown(wait=True)
+
+    def test_collection_selector_expands_and_intersects_sources(self):
+        from zimantic.providers.base import CollectionInfo
+
+        search = _bare_search({})
+        search.collections = {
+            "zim:group": CollectionInfo(
+                key="zim:group", provider="zim", label="Group"
+            )
+        }
+        search.sources = {
+            "one": SourceInfo(
+                key="one", provider="zim", title="One",
+                collection_key="zim:group", collection_label="Group",
+                searchable=True,
+            ),
+            "two": SourceInfo(
+                key="two", provider="zim", title="Two",
+                collection_key="zim:group", collection_label="Group",
+                searchable=True,
+            ),
+            "other": SourceInfo(
+                key="other", provider="zim", title="Other",
+                collection_key="zim:other", collection_label="Other",
+                searchable=True,
+            ),
+        }
+        try:
+            expanded = search._search_scope(None, "zim:group")
+            self.assertEqual(
+                [source.key for source in expanded.sources], ["one", "two"]
+            )
+            self.assertEqual(expanded.requested, 2)
+            intersected = search._search_scope(["two"], "zim:group")
+            self.assertEqual(
+                [source.key for source in intersected.sources], ["two"]
+            )
+            with self.assertRaises(SearchQueryError):
+                search._search_scope(None, "zim:missing")
+        finally:
+            search._executor.shutdown(wait=True)
+
+    def test_explicit_kiwix_collection_is_capped(self):
+        from zimantic.providers.base import CollectionInfo
+
+        search = _bare_search({})
+        search.max_explicit_collection_sources = 2
+        search.collections = {
+            "kiwix:remote": CollectionInfo(
+                key="kiwix:remote", provider="kiwix", label="Remote"
+            )
+        }
+        search.sources = {
+            f"book-{index}": SourceInfo(
+                key=f"book-{index}",
+                provider="kiwix",
+                title=f"Book {index}",
+                collection_key="kiwix:remote",
+                collection_label="Remote",
+                searchable=True,
+            )
+            for index in range(3)
+        }
+        try:
+            scope = search._search_scope(None, "kiwix:remote")
+            self.assertEqual(len(scope.sources), 2)
+            self.assertEqual(scope.requested, 3)
+            self.assertTrue(scope.source_cap)
+        finally:
+            search._executor.shutdown(wait=True)
 
     def test_remote_dated_book_slug_selects_the_local_base_source(self):
         search = _bare_search({})
@@ -2845,10 +2937,10 @@ class SourceScopeTests(unittest.TestCase):
             )
         }
         try:
-            sources, _selective, _scope = search._search_scope(["foo"])
+            scope = search._search_scope(["foo"])
         finally:
             search._executor.shutdown(wait=True)
-        self.assertEqual([source.key for source in sources], ["foo"])
+        self.assertEqual([source.key for source in scope.sources], ["foo"])
 
     def test_hidden_flavour_variant_selects_the_chosen_book(self):
         search = _bare_search({})
@@ -2867,11 +2959,11 @@ class SourceScopeTests(unittest.TestCase):
                 key, key, key, "local", local_name=key
             )
         try:
-            sources, selective, _scope = search._search_scope(["medicine"])
+            scope = search._search_scope(["medicine"])
         finally:
             search._executor.shutdown(wait=True)
-        self.assertEqual([source.key for source in sources], ["medicine"])
-        self.assertTrue(selective)
+        self.assertEqual([source.key for source in scope.sources], ["medicine"])
+        self.assertTrue(scope.selective)
 
     def test_unscoped_search_caps_remote_sources_but_honors_explicit_ones(self):
         class _RemoteRuntime:
@@ -2898,15 +2990,20 @@ class SourceScopeTests(unittest.TestCase):
             ),
         }
         try:
-            sources, _selective, _scope = search._search_scope(None)
-            self.assertEqual([source.key for source in sources], ["local", "remote-one"])
-            sources, _selective, _scope = search._search_scope(["remote-two"])
-            self.assertEqual([source.key for source in sources], ["remote-two"])
+            scope = search._search_scope(None)
+            self.assertEqual(
+                [source.key for source in scope.sources], ["local", "remote-one"]
+            )
+            self.assertTrue(scope.source_cap)
+            scope = search._search_scope(["remote-two"])
+            self.assertEqual([source.key for source in scope.sources], ["remote-two"])
+            self.assertFalse(scope.source_cap)
             search.runtimes["kiwix:remote"].limit = 0
-            sources, _selective, _scope = search._search_scope(["remote-two"])
-            self.assertEqual([source.key for source in sources], ["remote-two"])
-            sources, _selective, _scope = search._search_scope(None)
-            self.assertEqual([source.key for source in sources], ["local"])
+            scope = search._search_scope(["remote-two"])
+            self.assertEqual([source.key for source in scope.sources], ["remote-two"])
+            self.assertFalse(scope.source_cap)
+            scope = search._search_scope(None)
+            self.assertEqual([source.key for source in scope.sources], ["local"])
         finally:
             search._executor.shutdown(wait=True)
 
@@ -2914,31 +3011,31 @@ class SourceScopeTests(unittest.TestCase):
 
 
 
-    def test_unknown_display_filter_falls_back_to_the_full_page(self):
+    def test_unknown_source_selection_does_not_fall_back_to_all_sources(self):
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            search = self._search(tmp)
+            try:
+                with self.assertRaises(SearchQueryError):
+                    list(
+                        search.stream_search(
+                            "tire change",
+                            source=["removed-source"],
+                            limit=2,
+                        )
+                    )
+            finally:
+                search._executor.shutdown(wait=True)
+
+    def test_small_selection_searches_only_those_sources_and_is_cached(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = self._search(tmp)
             try:
                 events = list(
                     search.stream_search(
-                        "tire change",
-                        zim=["removed-source"],
-                        source=["removed-source"],
-                        limit=2,
+                        "tire change", source=["s1", "s2"], limit=2
                     )
-                )
-                self.assertTrue(events[-1]["results"])
-                self.assertEqual(events[-1]["total"], 6)
-            finally:
-                search._executor.shutdown(wait=True)
-
-    def test_small_selection_searches_only_those_sources_and_is_not_cached(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            search = self._search(tmp)
-            try:
-                events = list(
-                    search.stream_search("tire change", zim=["s1", "s2"], limit=2)
                 )
                 started = events[0]
                 self.assertTrue(started["selective"])
@@ -2948,13 +3045,19 @@ class SourceScopeTests(unittest.TestCase):
                     {source["title"] for source in started["sources"]},
                     {"s1", "s2"},
                 )
+                keys = tuple(
+                    sorted(source["key"] for source in started["sources"])
+                )
+                self.assertIsNotNone(
+                    search.cache.get(search._cache_key("tire change", keys))
+                )
                 self.assertIsNone(
-                    search.cache.get(search._cache_key("tire change", ("s1", "s2")))
+                    search.cache.get(search._cache_key("tire change", None))
                 )
             finally:
                 search._executor.shutdown(wait=True)
 
-    def test_large_selection_promotes_to_full_cached_scope(self):
+    def test_large_selection_is_not_promoted_to_the_full_scope(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             search = self._search(tmp)
@@ -2962,19 +3065,25 @@ class SourceScopeTests(unittest.TestCase):
                 events = list(
                     search.stream_search(
                         "tire change",
-                        zim=["s1", "s2", "s3"],
+                        source=["s1", "s2", "s3"],
                         limit=2,
                     )
                 )
                 started = events[0]
-                self.assertFalse(started["selective"])
-                self.assertTrue(started["all_sources"])
-                self.assertEqual(started["total_sources"], 6)
+                self.assertTrue(started["selective"])
+                self.assertFalse(started["all_sources"])
+                self.assertEqual(started["total_sources"], 3)
+                keys = tuple(
+                    sorted(source["key"] for source in started["sources"])
+                )
                 self.assertIsNotNone(
+                    search.cache.get(search._cache_key("tire change", keys))
+                )
+                self.assertIsNone(
                     search.cache.get(search._cache_key("tire change", None))
                 )
 
-                # Every promoted selection shares that full-search pool.
+                # The explicit scope is reused instead of being promoted.
                 with patch.object(
                     search,
                     "_search_source",
@@ -2983,12 +3092,12 @@ class SourceScopeTests(unittest.TestCase):
                     cached = list(
                         search.stream_search(
                             "tire change",
-                            zim=["s4", "s5", "s6"],
+                            source=["s1", "s2", "s3"],
                             limit=2,
                         )
                     )
-                self.assertFalse(cached[0]["selective"])
-                self.assertTrue(cached[0]["all_sources"])
+                self.assertTrue(cached[0]["selective"])
+                self.assertFalse(cached[0]["all_sources"])
             finally:
                 search._executor.shutdown(wait=True)
 

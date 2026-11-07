@@ -8,9 +8,10 @@ import re
 import secrets
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -103,10 +104,12 @@ DEFAULT_STREAM_UPDATE_INTERVAL = 0.7
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
-# A selection at or below this many sources is searched on its own. Larger
-# selections are promoted to one full search so their pool can be shared.
-SELECTIVE_SOURCE_LIMIT = 10
-SELECTIVE_SOURCE_RATIO = 0.35
+# The UI shows this many source chips per collection group until the reader
+# asks for the rest. It is a display budget, never a search-scope promotion.
+DEFAULT_SOURCE_FILTER_LIMIT = 10
+# An explicitly selected Kiwix collection is bounded by this many admitted
+# source tasks. A single explicit source is never capped.
+DEFAULT_MAX_EXPLICIT_COLLECTION_SOURCES = 500
 MAX_PHRASE_CANDIDATES = 32
 # Previews only need the opening of an article. Reading a bounded prefix keeps
 # a few unusually large pages from dominating search latency; the preview path
@@ -135,6 +138,18 @@ class SearchQueryError(ValueError):
 
 class SearchBusyError(Exception):
     """Too many searches are already running; the client should retry."""
+
+
+@dataclass(frozen=True)
+class _ResolvedScope:
+    """One immutable search-scope resolution and its publication generation."""
+
+    sources: list[SourceInfo]
+    selective: bool
+    cache_selection: tuple[str, ...] | None
+    requested: int
+    source_cap: bool
+    generation: int
 
 
 def _source_title(source: SourceInfo) -> str:
@@ -261,6 +276,17 @@ class Search:
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
         self.source_workers = _int_config(cfg, "search_workers", 4)
+        self.source_filter_limit = _int_config(
+            cfg, "source_filter_limit", DEFAULT_SOURCE_FILTER_LIMIT
+        )
+        self.collection_source_limit = _int_config(
+            cfg, "collection_source_limit", self.source_filter_limit
+        )
+        self.max_explicit_collection_sources = _int_config(
+            cfg,
+            "max_explicit_collection_sources",
+            DEFAULT_MAX_EXPLICIT_COLLECTION_SOURCES,
+        )
         self.preview_chars = _int_config(cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS)
         self.max_html_bytes = _int_config(
             cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES
@@ -531,6 +557,12 @@ class Search:
             removed = sorted(old_keys - new_keys)
             upgraded = sorted(new_indexes - old_indexes)
             if added or removed or upgraded or new_tokens != old_tokens:
+                # A replaced index can keep the same source key, so the source
+                # set alone is not enough to invalidate cached pools or listing
+                # snapshot tokens.
+                with self._state_lock:
+                    self._cache_generation += 1
+                    self._aggregate_revision += 1
                 self._invalidate_library_cache()
                 self.cache.clear()
                 preview_cache = self.preview_cache
@@ -725,13 +757,17 @@ class Search:
             )
             old_sources = self.sources
             changed = ordered != old_sources
-            self.sources = ordered
-            self._library_source_index = library
-            self._collection_snapshots = {
+            old_snapshots = self._collection_snapshots
+            snapshots = {
                 key: runtime.snapshot for key, runtime in self.runtimes.items()
             }
+            snapshot_changed = snapshots != old_snapshots
+            self.sources = ordered
+            self._library_source_index = library
+            self._collection_snapshots = snapshots
             if changed:
                 self._cache_generation += 1
+            if changed or snapshot_changed:
                 self._aggregate_revision = (
                     getattr(self, "_aggregate_revision", 0) + 1
                 )
@@ -745,19 +781,26 @@ class Search:
                 preview_cache.clear()
         return result
 
+    @staticmethod
+    def _collection_sort_key(record: dict[str, Any]) -> tuple[str, str]:
+        title = record.get("title") or record.get("label") or record.get("key") or ""
+        return (str(title).casefold(), str(record.get("key") or ""))
+
     def collection_dicts(self) -> list[dict[str, Any]]:
-        """Serialize the current collection snapshots."""
+        """Serialize the current collection snapshots in display order."""
         with self._state_lock:
             snapshots = dict(self._collection_snapshots)
-        return [
-            snapshot.to_dict()
-            for _key, snapshot in sorted(snapshots.items())
-        ]
+        records = [snapshot.to_dict() for snapshot in snapshots.values()]
+        return sorted(records, key=self._collection_sort_key)
 
     def snapshot_token(self) -> tuple[str, int]:
         """Process-instance identity plus aggregate publication revision."""
         with self._state_lock:
             return self._process_token, self._aggregate_revision
+
+    def collection_version(self) -> tuple[str, int]:
+        """Token invalidated by collection membership, state, or metadata."""
+        return self.snapshot_token()
 
     def source_dicts(self) -> list[dict[str, Any]]:
         with self._state_lock:
@@ -765,6 +808,40 @@ class Search:
                 source.to_dict(include_metadata=True)
                 for source in self.sources.values()
             ]
+
+    def listing_snapshot(self) -> dict[str, Any]:
+        """Capture listing records and the aggregate token from one revision.
+
+        The returned lists are detached copies. Filtering, sorting, and slicing
+        happen on this snapshot, so a page cannot mix records from two
+        different discovery revisions.
+        """
+        for _attempt in range(2):
+            with self._state_lock:
+                before = self._aggregate_revision
+            library = self._library_records()
+            with self._state_lock:
+                if self._aggregate_revision != before:
+                    continue
+                return {
+                    "sources": [
+                        source.to_dict(include_metadata=True)
+                        for source in self.sources.values()
+                    ],
+                    "library": library,
+                    "collections": self.collection_dicts(),
+                    "token": (self._process_token, self._aggregate_revision),
+                }
+        with self._state_lock:
+            return {
+                "sources": [
+                    source.to_dict(include_metadata=True)
+                    for source in self.sources.values()
+                ],
+                "library": library,
+                "collections": self.collection_dicts(),
+                "token": (self._process_token, self._aggregate_revision),
+            }
 
     def _library_cache_lock(self) -> threading.Lock:
         """Return the lock guarding the library scan/version caches."""
@@ -785,8 +862,8 @@ class Search:
             # result with a fresh timestamp.
             self._library_scan_token = getattr(self, "_library_scan_token", 0) + 1
 
-    def library_dicts(self) -> list[dict[str, Any]]:
-        """Return metadata for every document-library source.
+    def _library_records(self) -> list[dict[str, Any]]:
+        """Return a sorted, detached library record list.
 
         ZIM runtimes include readable-but-unsearchable and unreadable archives
         that are not in the searchable source set.  Discovery failures remain
@@ -819,6 +896,10 @@ class Search:
                 key=lambda item: (_source_title(item).casefold(), item.key),
             )
         ]
+
+    def library_dicts(self) -> list[dict[str, Any]]:
+        """Return metadata for every document-library source."""
+        return self._library_records()
 
     def library_version(self) -> tuple[Any, ...]:
         """Return a cheap token that changes when the library contents change."""
@@ -1033,15 +1114,23 @@ class Search:
             source_count = len(self.sources)
             embedder_loaded = self.embedder is not None
             generation = self._cache_generation
+            aggregate_revision = self._aggregate_revision
             deferred_faiss = self._defer_faiss
             runtimes = list(self.runtimes.values())
+            snapshots = dict(self._collection_snapshots)
+            searchable_by_collection = Counter(
+                source.collection_key
+                for source in self.sources.values()
+                if source.searchable
+            )
             cached = getattr(self, "_health_cache", None)
         if (
             cached is not None
             and now - cached[0] < HEALTH_CACHE_TTL_SECONDS
-            and cached[1:4] == (generation, embedder_loaded, deferred_faiss)
+            and cached[1:5]
+            == (generation, embedder_loaded, deferred_faiss, aggregate_revision)
         ):
-            report = dict(cached[4])
+            report = dict(cached[5])
             report["cache"] = self.cache.stats()
             preview_cache = self.preview_cache
             report["preview_cache"] = (
@@ -1065,10 +1154,18 @@ class Search:
         status = "ok"
         if not reports or any(report["status"] != "ok" for report in reports):
             status = "degraded"
+        collections = {}
+        for key, snapshot in sorted(snapshots.items()):
+            collections[key] = {
+                "provider": snapshot.collection.provider,
+                "sources": snapshot.source_count,
+                "searchable": searchable_by_collection.get(key, 0),
+            }
         report = {
             "status": status,
             "indexes": reports,
             "sources": source_count,
+            "collections": collections,
             "embedding": {
                 "enabled": self.semantic,
                 "loaded": embedder_loaded,
@@ -1086,32 +1183,20 @@ class Search:
                 generation,
                 embedder_loaded,
                 deferred_faiss,
+                aggregate_revision,
                 report,
             )
         return report
 
-    def health_version(self) -> tuple[int, bool, bool, int]:
+    def health_version(self) -> tuple[int, bool, bool, int, int]:
         """Return a short-lived version token for the health response cache."""
         with self._state_lock:
             generation = self._cache_generation
             embedder_loaded = self.embedder is not None
             deferred_faiss = self._defer_faiss
+            aggregate_revision = self._aggregate_revision
         bucket = int(time.monotonic() / HEALTH_CACHE_TTL_SECONDS)
-        return generation, embedder_loaded, deferred_faiss, bucket
-
-    @staticmethod
-    def _selective_source_limit(total_sources: int) -> int:
-        """Largest selection that still searches only the selected sources.
-
-        The ratio intentionally rounds down: a two-source library has a limit
-        of zero, so selecting one of them is promoted to the shared full search
-        (the display filter still narrows the visible results). This keeps the
-        number of distinct cached pools small on tiny libraries.
-        """
-        return min(
-            SELECTIVE_SOURCE_LIMIT,
-            math.floor(total_sources * SELECTIVE_SOURCE_RATIO),
-        )
+        return generation, embedder_loaded, deferred_faiss, aggregate_revision, bucket
 
     def _bounded_available_sources(
         self, available: list[SourceInfo]
@@ -1154,73 +1239,102 @@ class Search:
                 self._remote_limit_warned = True
         return [source for source in available if source.key in keep]
 
-    def _select_sources(
-        self, available: list[SourceInfo], zim: list[str]
-    ) -> list[SourceInfo]:
-        wanted = set(zim)
-        return [source for source in available if source.key in wanted]
+    @staticmethod
+    def _source_selection(source: str | list[str] | tuple[str, ...] | None) -> list[str] | None:
+        if source is None:
+            return None
+        values = [source] if isinstance(source, str) else list(source)
+        return [str(value) for value in values if str(value)]
 
     def _search_scope(
-        self, zim: list[str] | None
-    ) -> tuple[list[SourceInfo], bool, tuple[str, ...] | None]:
-        """Resolve which sources to search and how the pool may be cached.
+        self,
+        source: str | list[str] | tuple[str, ...] | None,
+        collection: str | None = None,
+    ) -> _ResolvedScope:
+        """Resolve an explicit source/collection selection or the unscoped scope.
 
-        A small selection searches only those sources and is treated as a
-        one-off scope: it is not cached, because users can try many different
-        subsets. A larger selection is promoted to a full search over every
-        available source (remote Kiwix fan-out is capped by
-        ``max_remote_sources``); that pool is cached without a selection in its
-        key so every large selection and every unfiltered search share it. An
-        explicit selection that includes a source outside that cap is honored.
+        An explicit selection always defines the resolved search scope; it is
+        never promoted to a broader search. A known but unsearchable source
+        resolves to an empty scope. Unknown source or collection keys are a
+        client error, so a stale bookmark cannot silently search everything.
         """
         with self._state_lock:
-            available = [source for source in self.sources.values() if source.searchable]
-        bounded = self._bounded_available_sources(available)
-        self._scope_requested = len(available)
-        self._scope_source_cap = len(bounded) < len(available)
-        if zim is None:
-            return bounded, False, None
-        if not zim:
-            # An explicit empty list is a deliberately empty scope (the cache
-            # key distinguishes it from None); it must not mean "all sources".
-            self._scope_requested = 0
-            self._scope_source_cap = False
-            return [], True, ()
+            available = [
+                source_info
+                for source_info in self.sources.values()
+                if source_info.searchable
+            ]
+            known_sources = dict(self.sources)
+            known_library = dict(self._library_source_index)
+            collections = dict(self.collections)
+            generation = self._cache_generation
 
-        selected = self._select_sources(available, zim)
-        if not selected:
-            # A stale bookmark or a source removed since the URL was saved must
-            # not silently turn into a zero-source search. Fall back to the full
-            # library and let the normal availability rules decide.
-            logger.warning(
-                "zimantic: ignoring unknown source selection (%s); searching all sources",
-                ", ".join(sorted(set(zim))),
+        selected_keys = self._source_selection(source)
+        if selected_keys is not None:
+            unknown = [
+                key
+                for key in selected_keys
+                if key not in known_sources and key not in known_library
+            ]
+            if unknown:
+                raise SearchQueryError(
+                    "unknown source: " + ", ".join(sorted(set(unknown)))
+                )
+        if collection is not None and collection not in collections:
+            raise SearchQueryError(f"unknown collection: {collection}")
+
+        if source is None and collection is None:
+            bounded = self._bounded_available_sources(available)
+            return _ResolvedScope(
+                sources=bounded,
+                selective=False,
+                cache_selection=None,
+                requested=len(available),
+                source_cap=len(bounded) < len(available),
+                generation=generation,
             )
-            return bounded, False, None
-        limit = self._selective_source_limit(len(available))
-        bounded_keys = {source.key for source in bounded}
-        if len(selected) <= limit and all(
-            source.key in bounded_keys for source in selected
+
+        candidates = available
+        if collection is not None:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.collection_key == collection
+            ]
+        if selected_keys is not None:
+            wanted = set(selected_keys)
+            candidates = [
+                candidate for candidate in candidates if candidate.key in wanted
+            ]
+        requested = len(candidates)
+        capped = False
+        collection_info = collections.get(collection) if collection is not None else None
+        if (
+            collection_info is not None
+            and collection_info.provider == "kiwix"
         ):
-            self._scope_requested = len(selected)
-            self._scope_source_cap = False
-            return (
-                selected,
-                bool(selected),
-                tuple(sorted(source.key for source in selected)),
-            )
-        if any(source.key not in bounded_keys for source in selected):
-            # The user named a source that the unscoped remote cap would have
-            # dropped. Honor the explicit selection instead of silently
-            # searching a different set.
-            self._scope_requested = len(selected)
-            self._scope_source_cap = False
-            return (
-                selected,
-                bool(selected),
-                tuple(sorted(source.key for source in selected)),
-            )
-        return bounded, False, None
+            cap = max(1, int(getattr(self, "max_explicit_collection_sources", 500)))
+            if len(candidates) > cap:
+                candidates = candidates[:cap]
+                capped = True
+        return _ResolvedScope(
+            sources=candidates,
+            selective=True,
+            cache_selection=tuple(
+                sorted(candidate.key for candidate in candidates)
+            ),
+            requested=requested,
+            source_cap=capped,
+            generation=generation,
+        )
+
+    def validate_search_scope(
+        self,
+        source: str | list[str] | None = None,
+        collection: str | None = None,
+    ) -> None:
+        """Raise ``SearchQueryError`` for unknown selectors before streaming."""
+        self._search_scope(source, collection)
 
     @staticmethod
     def _validate_query(query: str) -> str:
@@ -1233,19 +1347,30 @@ class Search:
             raise SearchQueryError(f"query must be at most {MAX_QUERY_LENGTH} characters")
         return query
 
-    @staticmethod
-    def _cache_key(query: str, zim: list[str] | None) -> tuple:
-        """Key by query and source selection only.
+    def _cache_key(
+        self,
+        query: str,
+        selection: tuple[str, ...] | None,
+        generation: int | None = None,
+    ) -> tuple:
+        """Key by query, expanded source keys, and publication generation.
 
         The ranked pool is independent of page size, offset, display filter and
         debug flag, so none of those belong in the key: every page of a query
         reuses one cached pool instead of fragmenting the cache per `limit`.
-        A ``None`` selection is the shared full-search pool; an empty tuple is a
-        deliberately empty source scope.
+        A ``None`` selection is the shared unscoped pool; an empty tuple is a
+        deliberately empty source scope. Including the generation invalidates
+        an explicit scope when membership or an index changes without changing
+        its keys.
         """
-        selection = tuple(sorted(zim)) if zim is not None else None
+        if generation is None:
+            with self._state_lock:
+                generation = self._cache_generation
         normalized = re.sub(r"\s+", " ", query).strip().casefold()
-        return (normalized, selection)
+        normalized_selection = (
+            tuple(sorted(selection)) if selection is not None else None
+        )
+        return (generation, normalized, normalized_selection)
 
     def _page_size(self, limit: int | None) -> int:
         default = self.page_size
@@ -1445,8 +1570,9 @@ class Search:
     def suggest(
         self,
         query: str,
-        zim: list[str] | None = None,
+        source: str | list[str] | None = None,
         limit: int = 8,
+        collection: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return title-completion candidates scoped to the given sources.
 
@@ -1461,11 +1587,8 @@ class Search:
         except (TypeError, ValueError):
             limit = 8
         with self._state_lock:
-            available = [
-                source for source in self.sources.values() if source.searchable
-            ]
             runtimes = dict(self.runtimes)
-        sources = available if zim is None else self._select_sources(available, zim)
+        sources = self._search_scope(source, collection).sources
         suggestions: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         for source in sources:
@@ -1495,15 +1618,22 @@ class Search:
     def search_page(
         self,
         query: str,
-        zim: list[str] | None = None,
+        source: str | list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
-        source: str | list[str] | None = None,
+        collection: str | None = None,
         debug: bool = False,
     ) -> dict[str, Any]:
         """Return one page plus totals, using the streaming coordinator."""
         final: dict[str, Any] = {}
-        for event in self.stream_search(query, zim, limit, offset, source, debug):
+        for event in self.stream_search(
+            query,
+            source,
+            limit,
+            offset,
+            collection,
+            debug,
+        ):
             if event["type"] == "error":
                 if event.get("busy"):
                     raise SearchBusyError(event["error"])
@@ -1566,6 +1696,15 @@ class Search:
                 "total_sources": total_sources,
             }
         matched_by = self._matched_by(pool) if debug else None
+        scope = cached.get("scope") if isinstance(cached, dict) else None
+        if scope is None:
+            scope = {
+                "status": "complete",
+                "requested": total_sources,
+                "scheduled": total_sources,
+                "completed": total_sources,
+                "limit_reason": None,
+            }
         yield self._event(
             "done",
             state,
@@ -1574,13 +1713,7 @@ class Search:
             offset,
             page_size,
             matched_by,
-            scope={
-                "status": "complete",
-                "requested": total_sources,
-                "scheduled": total_sources,
-                "completed": total_sources,
-                "limit_reason": None,
-            },
+            scope=scope,
         )
 
     def _finish_inflight(self, key: Any, pending: Future, value: Any) -> None:
@@ -1639,32 +1772,31 @@ class Search:
     def stream_search(
         self,
         query: str,
-        zim: list[str] | None = None,
+        source: str | list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
-        source: str | list[str] | None = None,
+        collection: str | None = None,
         debug: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """Yield source progress and one page of the ranked pool.
 
         Ranking runs once to a fixed pool (`max_results`, at least
-        `candidate_count`); `limit`/`offset`/`source` only slice that pool for
-        the response. The pool is cached by query and resolved source scope, so
-        every page and display filter reuses one computation. Small selected
-        scopes are not cached; larger selections promote to the shared full
-        search. Concurrent identical queries share a single computation.
+        `candidate_count`); `limit`/`offset` only slice that pool for the
+        response. The pool is cached by query, expanded source keys, and the
+        publication generation. An explicit source/collection selection defines
+        the whole scope directly; it is never promoted to a broader search.
+        Concurrent identical queries share a single computation.
         """
         query = self._validate_query(query)
         page_size = self._page_size(limit)
         offset = max(0, int(offset))
-        # Snapshot the source set and the cache generation together. Reading
-        # them in separate critical sections could pair the old sources with a
-        # newer generation and cache pre-refresh results as current.
-        with self._state_lock:
-            sources, selective, scope_key = self._search_scope(zim)
-            generation = self._cache_generation
+        scope = self._search_scope(source, collection)
+        sources = scope.sources
+        generation = scope.generation
+        selective = scope.selective
+        scope_key = scope.cache_selection
         all_sources = scope_key is None
-        cache_key = self._cache_key(query, scope_key)
+        cache_key = self._cache_key(query, scope_key, generation)
         inflight_key = (generation, cache_key)
         cached, pending = self._claim_search(cache_key, inflight_key, generation)
         if cached is not None:
@@ -1699,6 +1831,8 @@ class Search:
             debug,
             selective,
             all_sources,
+            scope.requested,
+            scope.source_cap,
         )
 
     def _finalize_search(
@@ -1711,9 +1845,9 @@ class Search:
         debug: bool,
         pool_target: int,
         reported_counts: dict[str, int | None],
-        selective: bool,
         generation: int,
         cache_key: Any,
+        scope: dict[str, Any],
         pool: list[dict[str, Any]] | None = None,
         cacheable: bool = True,
         deadline: float | None = None,
@@ -1746,12 +1880,12 @@ class Search:
                 result.to_event(reported_counts.get(result.source.key))
                 for result in source_results
             ],
+            "scope": dict(scope),
         }
         with self._state_lock:
             current_generation = self._cache_generation
         if (
-            not selective
-            and cacheable
+            cacheable
             and current_generation == generation
             and (deadline is None or time.monotonic() < deadline)
         ):
@@ -1771,6 +1905,8 @@ class Search:
         debug: bool,
         selective: bool = False,
         all_sources: bool = True,
+        requested: int | None = None,
+        source_cap: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """Run one uncached search and publish progress to waiting callers."""
         total_sources = len(sources)
@@ -1804,10 +1940,22 @@ class Search:
                 "limit": page_size,
             }
             if not sources:
-                cache_value = {"generation": generation, "pool": [], "sources": []}
+                empty_scope = {
+                    "status": "complete",
+                    "requested": 0,
+                    "scheduled": 0,
+                    "completed": 0,
+                    "limit_reason": None,
+                }
+                cache_value = {
+                    "generation": generation,
+                    "pool": [],
+                    "sources": [],
+                    "scope": empty_scope,
+                }
                 with self._state_lock:
                     current_generation = self._cache_generation
-                if not selective and current_generation == generation:
+                if current_generation == generation:
                     self.cache.put(cache_key, cache_value)
                 # The computation is complete; do not keep an admission slot
                 # while the client reads the final event.
@@ -1831,13 +1979,7 @@ class Search:
                     offset,
                     page_size,
                     {} if debug else None,
-                    scope={
-                        "status": "complete",
-                        "requested": 0,
-                        "scheduled": 0,
-                        "completed": 0,
-                        "limit_reason": None,
-                    },
+                    scope=empty_scope,
                 )
                 return
 
@@ -2075,14 +2217,14 @@ class Search:
                     future.cancel()
             scope = {
                 "status": "partial" if deadline_hit else "complete",
-                "requested": getattr(self, "_scope_requested", total_sources),
+                "requested": total_sources if requested is None else requested,
                 "scheduled": len(futures),
                 "completed": len(completed),
                 "limit_reason": (
                     "deadline"
                     if deadline_hit
                     else "source_cap"
-                    if getattr(self, "_scope_source_cap", False)
+                    if source_cap
                     else None
                 ),
             }
@@ -2097,9 +2239,9 @@ class Search:
                 debug,
                 pool_target,
                 reported_counts,
-                selective,
                 generation,
                 cache_key,
+                scope,
                 pool=None if unranked else pool,
                 cacheable=not deadline_hit,
                 deadline=deadline,

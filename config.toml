@@ -169,6 +169,13 @@ port = 8090
 # Monotonic deadline for one admitted search (scheduling, ranking and bounded
 # previews). Default 30; must be positive.
 # search_timeout_seconds = 30
+# Source chips shown per collection group in the search filter before "Other".
+# source_filter_limit = 10
+# Bounded first page of preview sources loaded for one library collection card.
+# collection_source_limit = 10
+# Global request-work cap for an explicitly selected Kiwix collection. A
+# single explicit source is never capped. Reaching it reports a partial scope.
+# max_explicit_collection_sources = 500
 # Seconds a search waits for a free slot before reporting busy. Keep this at
 # least as long as a typical cold search on the host so overlapping requests
 # queue instead of returning 503.

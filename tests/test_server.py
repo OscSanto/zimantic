@@ -48,8 +48,36 @@ class FakeSearch:
             "searchable": True,
             "homepage": "Main_Page",
             "description": "Manual description",
+            "media_types": ["text"],
             "provider_id": "00000000-0000-0000-0000-000000000001",
         }]
+
+    def collection_dicts(self):
+        return [{
+            "key": "zim:library",
+            "provider": "zim",
+            "label": "Library",
+            "title": "Library",
+            "description": None,
+            "source_count": 1,
+            "media_types": ["text"],
+            "error": None,
+            "discovery_state": "ready",
+            "snapshot_version": 1,
+            "icon_url": None,
+        }]
+
+    def collection_version(self):
+        return ("test-process", 1)
+
+    def listing_snapshot(self):
+        sources = self.source_dicts()
+        return {
+            "sources": sources,
+            "library": sources,
+            "collections": self.collection_dicts(),
+            "token": self.collection_version(),
+        }
 
     def refresh_sources(self):
         self.refresh_calls += 1
@@ -73,8 +101,10 @@ class FakeSearch:
             raise SearchQueryError("empty")
         return query
 
-    def search_page(self, query, zim, limit, offset, source, debug):
-        self.search_page_calls.append((query, zim, limit, offset, source, debug))
+    def search_page(self, query, source, limit, offset, collection, debug):
+        self.search_page_calls.append(
+            (query, source, limit, offset, collection, debug)
+        )
         result = {"id": "manual:page", "title": "Page"}
         if debug:
             result.update({"score": 1.0, "explain": "debug"})
@@ -89,8 +119,18 @@ class FakeSearch:
             "matched_by": {"semantic": 1, "title": 2, "fulltext": 3},
         }
 
-    def stream_search(self, query, zim, limit=None, offset=0, source=None, debug=False):
-        self.stream_calls.append((query, zim, limit, offset, source, debug))
+    def stream_search(
+        self,
+        query,
+        source=None,
+        limit=None,
+        offset=0,
+        collection=None,
+        debug=False,
+    ):
+        self.stream_calls.append(
+            (query, source, limit, offset, collection, debug)
+        )
         result = {"id": "manual:page", "title": "Page"}
         if debug:
             result.update({"score": 1.0, "explain": "debug"})
@@ -139,6 +179,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(config["page_size"], 10)
         self.assertEqual(config["max_results"], 100)
         self.assertEqual(config["source_filter_limit"], 10)
+        self.assertEqual(config["collection_source_limit"], 10)
+        self.assertEqual(config["max_explicit_collection_sources"], 500)
+        self.assertEqual(config["providers"], ["zim", "kiwix", "files", "kolibri"])
         self.assertIn("the", config["stopwords"])
         self.assertGreater(config["max_query_length"], 0)
 
@@ -160,6 +203,58 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-offset"], "0")
         self.assertEqual(response.json()[0]["key"], "manual")
+
+    def test_collections_endpoint_is_paged_and_reports_snapshot(self):
+        response = self.client.get("/collections.json", params={"limit": 1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-total-count"], "1")
+        self.assertEqual(response.headers["x-has-more"], "false")
+        self.assertEqual(response.headers["x-snapshot-version"], "test-process:1")
+        self.assertEqual(response.json()[0]["key"], "zim:library")
+        self.assertEqual(response.json()[0]["media_types"], ["text"])
+
+        cached = self.client.get(
+            "/collections.json",
+            params={"limit": 1},
+            headers={"If-None-Match": response.headers["etag"]},
+        )
+        self.assertEqual(cached.status_code, 304)
+        self.assertEqual(cached.headers["x-total-count"], "1")
+        self.assertEqual(cached.headers["x-snapshot-version"], "test-process:1")
+
+    def test_listing_filters_compose_before_paging(self):
+        sources = self.client.get(
+            "/sources",
+            params={
+                "provider": "zim",
+                "media_type": "text",
+                "collection": "zim:library",
+                "q": "manual",
+            },
+        )
+        self.assertEqual(sources.status_code, 200)
+        self.assertEqual([item["key"] for item in sources.json()], ["manual"])
+
+        collections = self.client.get(
+            "/collections.json",
+            params={"provider": "zim", "media_type": "text", "q": "library"},
+        )
+        self.assertEqual(collections.status_code, 200)
+        self.assertEqual([item["key"] for item in collections.json()], ["zim:library"])
+
+    def test_listing_filters_reject_unknown_values(self):
+        for path, params in (
+            ("/sources", {"provider": "unknown"}),
+            ("/sources", {"media_type": "hologram"}),
+            ("/sources", {"collection": "files:missing"}),
+            ("/library.json", {"provider": "unknown"}),
+            ("/collections.json", {"media_type": "hologram"}),
+        ):
+            with self.subTest(path=path, params=params):
+                self.assertEqual(
+                    self.client.get(path, params=params).status_code,
+                    400,
+                )
 
     def test_page_assets_are_served(self):
         page = self.client.get("/")
@@ -823,13 +918,21 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("score", response.json()[0])
         self.assertEqual(
             self.search.search_page_calls[-1],
-            ("page", None, 5, 10, "manual", False),
+            ("page", "manual", 5, 10, None, False),
         )
 
     def test_search_accepts_multiple_source_filters(self):
         response = self.client.get("/search?q=page&source=manual&source=other")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.search.search_page_calls[-1][4], ["manual", "other"])
+        self.assertEqual(self.search.search_page_calls[-1][1], ["manual", "other"])
+
+    def test_search_accepts_a_collection_filter(self):
+        response = self.client.get("/search?q=page&collection=zim:library")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.search.search_page_calls[-1],
+            ("page", None, None, 0, "zim:library", False),
+        )
 
     def test_debug_mode_is_server_wide(self):
         response = self.debug_client.get("/search?q=page")
@@ -878,6 +981,8 @@ class ServerTests(unittest.TestCase):
         etag = first.headers["etag"]
         second = self.client.get("/sources", headers={"If-None-Match": etag})
         self.assertEqual(second.status_code, 304)
+        self.assertEqual(second.headers["x-snapshot-version"], "test-process:1")
+        self.assertEqual(second.headers["x-total-count"], "1")
 
     def test_reload_is_not_exposed_over_http(self):
         # Reload is an admin action via `zimantic reload` (SIGHUP), never over HTTP.
@@ -896,6 +1001,18 @@ class ServerTests(unittest.TestCase):
 
     def test_streaming_search_validates_query(self):
         self.assertEqual(self.client.get("/search/stream?q=%20").status_code, 400)
+
+    def test_streaming_search_rejects_unknown_scope_before_starting(self):
+        class _ValidatingSearch(FakeSearch):
+            @staticmethod
+            def validate_search_scope(source, collection=None):
+                if collection == "missing":
+                    raise SearchQueryError("unknown collection: missing")
+
+        client = TestClient(create_app(_ValidatingSearch()))
+        response = client.get("/search/stream?q=page&collection=missing")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unknown collection", response.json()["detail"])
 
     def test_article_error_types_map_by_subclass(self):
         self.assertEqual(

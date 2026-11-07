@@ -15,13 +15,21 @@ from ..content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
+from ..providers.config import BUILTIN_PROVIDERS
 from ..search import (
-    SELECTIVE_SOURCE_LIMIT,
+    DEFAULT_SOURCE_FILTER_LIMIT,
     SearchBusyError,
     SearchQueryError,
 )
 from ..searching.query import MAX_QUERY_LENGTH, STOPWORDS
 from . import app as web_app
+from .listing import (
+    filter_collections,
+    filter_sources,
+    validate_collection,
+    validate_media_type,
+    validate_provider,
+)
 
 _ARTICLE_METHODS = "GET, HEAD, OPTIONS"
 _ARTICLE_REQUEST_HEADERS = (
@@ -212,13 +220,43 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     secure_browsing = bool(cfg.get("secure_browsing", False))
 
     def _snapshot_version() -> str:
-        token_of = getattr(search_class, "snapshot_token", None)
+        token_of = getattr(search_class, "collection_version", None)
+        if not callable(token_of):
+            token_of = getattr(search_class, "snapshot_token", None)
         if callable(token_of):
             token = token_of()
             return f"{token[0]}:{token[1]}"
         version_of = getattr(search_class, "source_version", None)
         version = version_of() if callable(version_of) else 0
         return str(version)
+
+    def _capture_listing() -> dict:
+        capture = getattr(search_class, "listing_snapshot", None)
+        if callable(capture):
+            return capture()
+        source_of = getattr(search_class, "source_dicts", None)
+        library_of = getattr(search_class, "library_dicts", None)
+        collection_of = getattr(search_class, "collection_dicts", None)
+        token_of = getattr(search_class, "collection_version", None)
+        if not callable(token_of):
+            token_of = getattr(search_class, "snapshot_token", None)
+        token = token_of() if callable(token_of) else ("", 0)
+        return {
+            "sources": source_of() if callable(source_of) else [],
+            "library": (
+                library_of() if callable(library_of) else (
+                    source_of() if callable(source_of) else []
+                )
+            ),
+            "collections": collection_of() if callable(collection_of) else [],
+            "token": token,
+        }
+
+    def _token_string(token) -> str:
+        try:
+            return f"{token[0]}:{token[1]}"
+        except (TypeError, IndexError, KeyError):
+            return str(token)
 
     def paged_json_response(
         request: Request,
@@ -228,25 +266,67 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         memos,
         limit: int | None,
         offset: int,
+        *,
+        snapshot: str | None = None,
+        cacheable: bool = True,
     ):
-        snapshot = _snapshot_version()
+        snapshot = _snapshot_version() if snapshot is None else snapshot
         if limit is None:
-            response = web_app._json_response(
-                request,
+            if cacheable:
+                response = web_app._json_response(
+                    request,
+                    memo_key,
+                    version,
+                    payload_factory,
+                    memos,
+                )
+            else:
+                payload = payload_factory()
+                body = json.dumps(
+                    payload,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                    default=str,
+                )
+                etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
+                if request.headers.get("if-none-match") == etag:
+                    return Response(
+                        status_code=304,
+                        headers={
+                            "ETag": etag,
+                            "Cache-Control": "no-cache",
+                            "X-Snapshot-Version": snapshot,
+                        },
+                    )
+                return Response(
+                    content=body,
+                    media_type="application/json",
+                    headers={
+                        "ETag": etag,
+                        "Cache-Control": "no-cache",
+                        "X-Snapshot-Version": snapshot,
+                    },
+                )
+            response.headers["X-Snapshot-Version"] = snapshot
+            return response
+
+        if cacheable:
+            _, payload, _, full_etag = web_app._memoized_json(
                 memo_key,
                 version,
                 payload_factory,
                 memos,
             )
-            response.headers["X-Snapshot-Version"] = snapshot
-            return response
-
-        _, payload, _, full_etag = web_app._memoized_json(
-            memo_key,
-            version,
-            payload_factory,
-            memos,
-        )
+        else:
+            # Arbitrary filter combinations must not grow an unbounded memo.
+            payload = payload_factory()
+            body = json.dumps(
+                payload,
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            )
+            full_etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
         total = len(payload)
         # Clamp to the last real page, like /search does. Without this, an
         # out-of-range offset returns an empty page and a misleading X-Offset.
@@ -368,6 +448,9 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/config")
     def config(request: Request):
+        source_filter_limit = int(
+            getattr(search_class, "source_filter_limit", DEFAULT_SOURCE_FILTER_LIMIT)
+        )
         return web_app._json_response(
             request,
             "config",
@@ -377,59 +460,193 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 "max_results": getattr(search_class, "max_results", 100),
                 "max_query_length": MAX_QUERY_LENGTH,
                 "stopwords": sorted(STOPWORDS),
-                "source_filter_limit": SELECTIVE_SOURCE_LIMIT,
+                "source_filter_limit": source_filter_limit,
+                "collection_source_limit": int(
+                    getattr(
+                        search_class,
+                        "collection_source_limit",
+                        source_filter_limit,
+                    )
+                ),
+                "max_explicit_collection_sources": int(
+                    getattr(search_class, "max_explicit_collection_sources", 500)
+                ),
+                "providers": list(BUILTIN_PROVIDERS),
                 "debug": debug,
             },
             memos,
         )
 
-    @app.get("/sources")
-    def sources(
+    def _known_collections(snapshot: dict) -> set[str]:
+        known = {
+            str(record.get("key"))
+            for record in snapshot.get("collections") or []
+            if record.get("key")
+        }
+        for record in [
+            *(snapshot.get("sources") or []),
+            *(snapshot.get("library") or []),
+        ]:
+            collection = record.get("collection")
+            if isinstance(collection, dict) and collection.get("key"):
+                known.add(str(collection["key"]))
+        return known
+
+    def _validate_listing_filters(
+        snapshot: dict,
+        provider: str | None,
+        media_type: str | None,
+        collection: str | None,
+    ) -> tuple[str | None, str | None, str | None]:
+        try:
+            return (
+                validate_provider(provider),
+                validate_media_type(media_type),
+                validate_collection(collection, _known_collections(snapshot)),
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    def _filtered_page(
         request: Request,
-        limit: int | None = Query(default=None, ge=1, le=200),
-        offset: int = Query(default=0, ge=0),
+        snapshot: dict,
+        records,
+        *,
+        providers_filter: str | None,
+        media_type: str | None,
+        collection: str | None,
+        query: str | None,
+        limit: int | None,
+        offset: int,
+        memo_key: str,
+        version,
+        filter_sources_fn,
     ):
-        version_of = getattr(search_class, "source_version", None)
-        version = version_of() if callable(version_of) else 0
+        snapshot_token = _token_string(
+            snapshot.get("token") or _snapshot_version()
+        )
+        filtered = filter_sources_fn(
+            records,
+            provider=providers_filter,
+            media_type=media_type,
+            collection=collection,
+            query=query,
+            collections=snapshot.get("collections") or (),
+        )
+        cacheable = not any(
+            (providers_filter, media_type, collection, query)
+        )
         default_page = int(getattr(search_class, "page_size", 10) or 10)
         return paged_json_response(
             request,
-            "sources",
-            version,
-            search_class.source_dicts,
+            memo_key,
+            (snapshot_token, version),
+            lambda: filtered,
             memos,
             min(limit or default_page, 200),
             offset,
+            snapshot=snapshot_token,
+            cacheable=cacheable,
+        )
+
+    @app.get("/collections.json")
+    def collections(
+        request: Request,
+        provider: str | None = Query(default=None),
+        media_type: str | None = Query(default=None),
+        q: str | None = Query(default=None, max_length=4096),
+        limit: int | None = Query(default=None, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ):
+        snapshot = _capture_listing()
+        provider_filter, media_filter, _collection = _validate_listing_filters(
+            snapshot, provider, media_type, None
+        )
+        members = snapshot.get("library") or snapshot.get("sources") or []
+        snapshot_token = _token_string(
+            snapshot.get("token") or _snapshot_version()
+        )
+        filtered = filter_collections(
+            snapshot.get("collections") or [],
+            members,
+            provider=provider_filter,
+            media_type=media_filter,
+            query=q or None,
+        )
+        cacheable = not any((provider_filter, media_filter, q))
+        default_page = int(getattr(search_class, "page_size", 10) or 10)
+        return paged_json_response(
+            request,
+            "collections",
+            snapshot_token,
+            lambda: filtered,
+            memos,
+            min(limit or default_page, 200),
+            offset,
+            snapshot=snapshot_token,
+            cacheable=cacheable,
+        )
+
+    @app.get("/sources")
+    def sources(
+        request: Request,
+        provider: str | None = Query(default=None),
+        media_type: str | None = Query(default=None),
+        collection: str | None = Query(default=None),
+        q: str | None = Query(default=None, max_length=4096),
+        limit: int | None = Query(default=None, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ):
+        snapshot = _capture_listing()
+        provider_filter, media_filter, collection_filter = _validate_listing_filters(
+            snapshot, provider, media_type, collection
+        )
+        version_of = getattr(search_class, "source_version", None)
+        version = version_of() if callable(version_of) else 0
+        return _filtered_page(
+            request,
+            snapshot,
+            snapshot.get("sources") or [],
+            providers_filter=provider_filter,
+            media_type=media_filter,
+            collection=collection_filter,
+            query=q or None,
+            limit=limit,
+            offset=offset,
+            memo_key="sources",
+            version=version,
+            filter_sources_fn=filter_sources,
         )
 
     @app.get("/library.json")
     def library(
         request: Request,
+        provider: str | None = Query(default=None),
+        media_type: str | None = Query(default=None),
+        collection: str | None = Query(default=None),
+        q: str | None = Query(default=None, max_length=4096),
         limit: int | None = Query(default=None, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ):
+        snapshot = _capture_listing()
+        provider_filter, media_filter, collection_filter = _validate_listing_filters(
+            snapshot, provider, media_type, collection
+        )
         version_of = getattr(search_class, "library_version", None)
         version = version_of() if callable(version_of) else 0
-        library_of = getattr(search_class, "library_dicts", None)
-        if not callable(library_of):
-
-            def library_of():
-                return [
-                    source
-                    for source in search_class.source_dicts()
-                    if source.get("provider") in {"zim", "files", "kolibri"}
-                    and (source.get("searchable") or source.get("homepage"))
-                ]
-
-        default_page = int(getattr(search_class, "page_size", 10) or 10)
-        return paged_json_response(
+        return _filtered_page(
             request,
-            "library",
-            version,
-            library_of,
-            memos,
-            min(limit or default_page, 200),
-            offset,
+            snapshot,
+            snapshot.get("library") or [],
+            providers_filter=provider_filter,
+            media_type=media_filter,
+            collection=collection_filter,
+            query=q or None,
+            limit=limit,
+            offset=offset,
+            memo_key="library",
+            version=version,
+            filter_sources_fn=filter_sources,
         )
 
     @app.get("/health")
@@ -1010,16 +1227,19 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     def api_suggest(
         q: str = Query(..., min_length=1, max_length=4096),
         source: list[str] | None = Query(None),
+        collection: str | None = Query(None),
         limit: int = Query(8, ge=1, le=20),
     ):
         suggest = getattr(search_class, "suggest", None)
         try:
             if callable(suggest):
-                items = suggest(q, source, limit)
+                items = suggest(q, source, limit, collection)
             else:
                 # Older search backends and test doubles only expose the full
                 # search API; its first page is still a usable suggestion list.
-                page = search_class.search_page(q, source, limit, 0, None, False)
+                page = search_class.search_page(
+                    q, source, limit, 0, collection, False
+                )
                 items = page.get("results", [])
         except SearchBusyError as error:
             raise HTTPException(
@@ -1034,14 +1254,21 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     @app.get("/search")
     def api_search(
         q: str = Query(..., min_length=1, max_length=4096),
-        zim: list[str] | None = Query(None),
         source: list[str] | None = Query(None),
+        collection: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
     ):
         source_filter = source[0] if source and len(source) == 1 else source
         try:
-            page = search_class.search_page(q, zim, limit, offset, source_filter, debug)
+            page = search_class.search_page(
+                q,
+                source_filter,
+                limit,
+                offset,
+                collection,
+                debug,
+            )
         except SearchBusyError as error:
             raise HTTPException(
                 status_code=503,
@@ -1074,24 +1301,27 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     @app.get("/search/stream")
     def api_search_stream(
         q: str = Query(..., min_length=1, max_length=4096),
-        zim: list[str] | None = Query(None),
         source: list[str] | None = Query(None),
+        collection: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
     ):
         try:
             search_class._validate_query(q)
+            source_filter = source[0] if source and len(source) == 1 else source
+            validate_scope = getattr(search_class, "validate_search_scope", None)
+            if callable(validate_scope):
+                validate_scope(source_filter, collection)
         except SearchQueryError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
         def events():
-            source_filter = source[0] if source and len(source) == 1 else source
             stream = search_class.stream_search(
                 q,
-                zim,
+                source_filter,
                 limit,
                 offset,
-                source_filter,
+                collection,
                 debug,
             )
             try:
