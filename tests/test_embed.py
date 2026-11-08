@@ -73,6 +73,28 @@ class ModelFingerprintTests(unittest.TestCase):
             _sentencepiece_dir(tmp)
             self.assertEqual(embed.model_fingerprint(tmp), "")
 
+    def test_missing_model_directory_does_not_fingerprint_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "model.onnx").write_bytes(b"model")
+            _sentencepiece_dir(root)
+            self.assertTrue(embed.model_fingerprint(root))
+            self.assertEqual(embed.model_fingerprint(root / "int8"), "")
+
+    def test_embedder_does_not_load_model_from_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            precision = root / "int8"
+            precision.mkdir()
+            (root / "model.onnx").write_bytes(b"model")
+            _sentencepiece_dir(root)
+            with (
+                patch.object(embed.ort, "InferenceSession", return_value=MagicMock()),
+                patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+                self.assertRaisesRegex(FileNotFoundError, str(precision)),
+            ):
+                embed.Embedder(precision, device="cpu")
+
     def test_verify_and_fingerprint_hash_unchanged_files_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "model.onnx").write_bytes(b"model-bytes")

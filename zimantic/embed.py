@@ -13,10 +13,7 @@ import onnxruntime as ort
 import sentencepiece
 
 from .hardware import detect
-from .model_files import (
-    DEFAULT_MODEL_CHECKSUMS,
-    resolve_model_dir,
-)
+from .model_files import DEFAULT_MODEL_CHECKSUMS
 from .model_files import (
     sha256_file as _sha256,
 )
@@ -283,7 +280,7 @@ def model_fingerprint(model_dir, hashes: dict[str, str] | None = None) -> str:
     silently searching with vectors from a different encoder. An empty string
     means the files needed for a fingerprint are unavailable.
     """
-    model_dir = resolve_model_dir(model_dir)
+    model_dir = Path(model_dir).expanduser()
     model_path = Path(model_dir) / "model.onnx"
     try:
         tokenizer_kind, tokenizer_path = _resolve_tokenizer(model_dir)
@@ -440,8 +437,8 @@ class Embedder:
         self.embedding_tokens = int(embedding_tokens)
         if self.embedding_tokens < SPECIAL_TOKEN_COUNT:
             raise ValueError(f"embedding_tokens must be at least {SPECIAL_TOKEN_COUNT}")
-        model_dir = resolve_model_dir(model_dir)
-        self.model_dir = Path(model_dir)
+        model_dir = Path(model_dir).expanduser()
+        self.model_dir = model_dir
         hashes = verify_model_files(model_dir)
         self.threads = (
             int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS

@@ -107,28 +107,6 @@ class DownloadFileTests(unittest.TestCase):
             self.assertFalse(destination.with_name("model.onnx.part").exists())
 
 
-class ModelDirectoryTests(unittest.TestCase):
-    def test_uses_parent_when_precision_folder_has_no_model(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "model"
-            precision = root / "int8"
-            precision.mkdir(parents=True)
-            (root / "model.onnx").write_bytes(b"model")
-            self.assertEqual(model_files.resolve_model_dir(precision), root)
-
-    def test_keeps_an_explicit_complete_folder(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            precision = Path(tmp) / "model" / "int8"
-            precision.mkdir(parents=True)
-            (precision / "model.onnx").write_bytes(b"model")
-            self.assertEqual(model_files.resolve_model_dir(precision), precision)
-
-    def test_missing_model_stays_put(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            precision = Path(tmp) / "model" / "int8"
-            self.assertEqual(model_files.resolve_model_dir(precision), precision)
-
-
 class DownloadModelTests(unittest.TestCase):
     def test_writes_the_model_and_tokenizer_into_each_precision_folder(self):
         output = Path("/tmp/models")

@@ -1001,7 +1001,10 @@ zimantic model int8 --model e5-small-v2 --dir model-e5-small-v2
 
 The same command works for other BERT WordPiece e5-v2 models such as `e5-base-v2` and `e5-large-v2`; run `zimantic model --list` for the full set. Each precision goes into its own folder (`model-e5-small-v2/int8`, for example), so you can compare or switch without redownloading. Pass `--force` to replace an existing file whose checksum does not match.
 
-Set `model_dir` to a precision folder for the selected model. Use a separate `index_dir` to keep the current indexes available while you build indexes for the selected model:
+Set `model_dir` directly to the folder containing `model.onnx` and its tokenizer
+vocabulary (normally the selected precision folder). Zimantic does not search
+parent directories for model files. Use a separate `index_dir` to keep the current
+indexes available while you build indexes for the selected model:
 
 ```toml
 model_dir = "./model-e5-small-v2/int8"
