@@ -283,9 +283,7 @@ class KolibriConfig:
             if not isinstance(value, str) or not value.strip():
                 raise ConfigValidationError(f"{name} must be a non-empty string")
             if (
-                re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value)
-                or value.startswith("//")
-                or value.startswith("\\\\")
+                re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) or value.startswith(("//", "\\\\"))
             ):
                 raise ConfigValidationError(
                     f"{name} must be a local filesystem path"
@@ -408,9 +406,7 @@ def _resolve_path(value: Any, name: str, base: Path) -> str:
     raw = _string(value, name)
     assert raw is not None
     if (
-        re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw)
-        or raw.startswith("//")
-        or raw.startswith("\\\\")
+        re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw) or raw.startswith(("//", "\\\\"))
     ):
         raise ConfigValidationError(f"{name} must be a local filesystem path")
     path = Path(raw).expanduser()

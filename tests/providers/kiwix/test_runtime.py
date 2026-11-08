@@ -7,6 +7,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
 
@@ -24,7 +25,7 @@ from zimantic.providers.kiwix import (
 
 
 class _Response:
-    headers: dict[str, str] = {}
+    headers: ClassVar[dict[str, str]] = {}
 
     def __init__(self, payload: bytes) -> None:
         self.payload = payload

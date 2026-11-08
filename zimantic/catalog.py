@@ -21,7 +21,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def _canonical_provider_metadata(value: Any) -> str:
     else:
         parsed = dict(value)
     if not isinstance(parsed, dict):
-        raise ValueError("provider_metadata must be a JSON object")
+        raise TypeError("provider_metadata must be a JSON object")
     return json.dumps(parsed, sort_keys=True, separators=(",", ":"))
 
 
@@ -320,7 +320,7 @@ class SourceCatalog:
     def _rebuild_schema(self, version: int) -> None:
         if version:
             reason = (
-                "schema version %s" % version
+                f"schema version {version}"
                 if version != SCHEMA_VERSION
                 else "a different table layout"
             )
@@ -395,7 +395,7 @@ class SourceCatalog:
             lease.release()
             self._lease = None
 
-    def __enter__(self) -> SourceCatalog:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:

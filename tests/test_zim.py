@@ -626,7 +626,7 @@ class TextExtractionTests(unittest.TestCase):
             b"<div><dt>A heading</dt>"
             b"<dd>The definition is long enough to be captured as a block here.</dd></div>"
         )
-        block = list(iter_text_blocks(html))[0]
+        block = next(iter(iter_text_blocks(html)))
         self.assertIn("A heading The definition", block)
         self.assertNotIn("A headingThe", block)
 
@@ -1560,10 +1560,10 @@ class JavaScriptShellTests(unittest.TestCase):
 
     def test_meta_refresh_accepts_absolute_and_query_paths(self):
         stubs = (
-            b'<html><head><meta http-equiv="refresh" '
-            b'content="0;url=/index.html#/route"></head><body></body></html>',
-            b'<html><head><meta http-equiv="refresh" '
-            b'content="0;url=../index.html?x=1#/route"></head><body></body></html>',
+            (b'<html><head><meta http-equiv="refresh" '
+            b'content="0;url=/index.html#/route"></head><body></body></html>'),
+            (b'<html><head><meta http-equiv="refresh" '
+            b'content="0;url=../index.html?x=1#/route"></head><body></body></html>'),
         )
 
         class _RefreshArchive:

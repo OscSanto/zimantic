@@ -13,7 +13,7 @@ from collections.abc import Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .content.path import normalize_article_path
@@ -151,13 +151,13 @@ class Search:
     open_scope: Any | None = None
     embedder: Any = None
     _defer_faiss: bool = False
-    runtimes: dict[str, CollectionRuntime] = {}
-    collections: dict[str, CollectionInfo] = {}
-    _library_source_index: dict[str, SourceInfo] = {}
+    runtimes: ClassVar[dict[str, CollectionRuntime]] = {}
+    collections: ClassVar[dict[str, CollectionInfo]] = {}
+    _library_source_index: ClassVar[dict[str, SourceInfo]] = {}
     _discovery_batches: tuple[Any, ...] = ()
-    _collection_snapshots: dict[str, CollectionSnapshot] = {}
+    _collection_snapshots: ClassVar[dict[str, CollectionSnapshot]] = {}
     runtime_config: RuntimeConfig
-    providers: dict[str, Any] = {}
+    providers: ClassVar[dict[str, Any]] = {}
     _library_scan_at: float = 0.0
     _library_version_at: float = 0.0
     _library_scan_token: int = 0
@@ -1856,22 +1856,22 @@ class Search:
         sources = self._search_scope(source, collection).sources
         suggestions: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-        for source in sources:
+        for source_info in sources:
             remaining = limit - len(suggestions)
             if remaining <= 0:
                 break
-            runtime = runtimes.get(source.collection_key)
+            runtime = runtimes.get(source_info.collection_key)
             if runtime is None:
                 continue
             try:
-                items = runtime.suggest(source, query, remaining)
+                items = runtime.suggest(source_info, query, remaining)
             except Exception as error:
                 logger.warning(
                     "zimantic: title suggestions unavailable for %s: %s",
-                    source.key,
+                    source_info.key,
                     self.public_error(error),
                 )
-                logger.debug("suggest failed for %s: %s", source.key, error)
+                logger.debug("suggest failed for %s: %s", source_info.key, error)
                 continue
             for doc in items:
                 doc_id = str(doc.get("id") or "")

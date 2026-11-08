@@ -197,9 +197,7 @@ class KolibriContentStore:
             )
         if scope.kind == "ungrouped":
             return node.parent_id == scope.parent_id and node.kind != "topic"
-        if scope.kind in {"root", "collapsed"}:
-            return True
-        return False
+        return scope.kind in {"root", "collapsed"}
 
     def _selection(self, db, node: Any) -> tuple[FileSelection, tuple[FileRow, ...]]:
         files = files_for_node(db, node.id)

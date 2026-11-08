@@ -296,7 +296,7 @@ class CatalogTests(unittest.TestCase):
             db.execute("INSERT INTO sources VALUES ('stale', 1)")
             db.execute("CREATE TABLE zims (path TEXT PRIMARY KEY)")
             db.execute("INSERT INTO zims VALUES ('unrelated')")
-            db.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             db.commit()
             db.close()
 

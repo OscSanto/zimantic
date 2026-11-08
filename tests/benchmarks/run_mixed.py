@@ -43,7 +43,7 @@ def percentile(values: list[float], fraction: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, int(round(fraction * (len(ordered) - 1)))))
+    index = min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))
     return ordered[index]
 
 
@@ -231,8 +231,8 @@ def markdown(report: dict, identity: dict) -> str:
     lines.extend(
         [
             f"| Cold startup to HTTP-ready | {report['startup_seconds']} s |",
-            f"| Search p50 ({search['queries']} fixed queries) | "
-            f"{search['p50_seconds']} s |",
+            (f"| Search p50 ({search['queries']} fixed queries) | "
+            f"{search['p50_seconds']} s |"),
             f"| Search p95 | {search['p95_seconds']} s |",
             f"| Search failures | {search['failures']} |",
             f"| Peak RSS | {report['peak_rss_mib']} MiB |",

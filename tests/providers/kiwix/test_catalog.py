@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,7 +17,7 @@ from zimantic.providers.kiwix.catalog import (
 
 
 class _Response:
-    headers: dict[str, str] = {}
+    headers: ClassVar[dict[str, str]] = {}
 
     def __init__(self, payload: bytes) -> None:
         self.payload = payload
@@ -60,8 +61,8 @@ def test_catalog_limit_replaces_unbounded_count():
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
 def test_dtd_and_entity_declarations_are_rejected_before_expansion(encoding):
     payload = (
-        '<?xml version="1.0" encoding="%s"?>'
-        '<!DOCTYPE feed [<!ENTITY x "boom">]><feed>&x;</feed>' % encoding
+        f'<?xml version="1.0" encoding="{encoding}"?>'
+        '<!DOCTYPE feed [<!ENTITY x "boom">]><feed>&x;</feed>'
     ).encode(encoding)
     with pytest.raises(ValueError):
         _parse_remote_xml(payload)
@@ -70,8 +71,8 @@ def test_dtd_and_entity_declarations_are_rejected_before_expansion(encoding):
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
 def test_ordinary_documents_in_supported_encodings_parse(encoding):
     payload = (
-        '<?xml version="1.0" encoding="%s"?>'
-        "<feed><entry><title>Manual</title></entry></feed>" % encoding
+        f'<?xml version="1.0" encoding="{encoding}"?>'
+        "<feed><entry><title>Manual</title></entry></feed>"
     ).encode(encoding)
     root = _parse_remote_xml(payload)
     assert root.tag.rsplit("}", 1)[-1] == "feed"
@@ -79,7 +80,7 @@ def test_ordinary_documents_in_supported_encodings_parse(encoding):
 
 def test_remote_response_reader_enforces_a_hard_limit():
     class _UnboundedResponse:
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         def read(self, size=-1):
             return b"x" * 4

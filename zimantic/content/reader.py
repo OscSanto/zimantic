@@ -9,7 +9,7 @@ import time
 import unicodedata
 from collections.abc import Iterator
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
 if TYPE_CHECKING:
@@ -272,7 +272,7 @@ def _refresh_url(html: bytes):
 class _TextExtractor:
     """Collect prioritized, visible text blocks from HTML traversal events."""
 
-    CANDIDATE_PRIORITIES = {
+    CANDIDATE_PRIORITIES: ClassVar[dict[str, int]] = {
         "p": 0,
         "blockquote": 1,
         "pre": 1,
@@ -283,8 +283,8 @@ class _TextExtractor:
         "ol": 2,
         "li": 2,
     }
-    SKIP_TAGS = {"head", "script", "style", "template"}
-    CHROME_TAGS = {"aside", "footer", "header", "nav"}
+    SKIP_TAGS: ClassVar[set[str]] = {"head", "script", "style", "template"}
+    CHROME_TAGS: ClassVar[set[str]] = {"aside", "footer", "header", "nav"}
     # Tags that never have a closing tag; while skipping a container we must not
     # push them or the open/close bookkeeping would drift.
     VOID_TAGS = frozenset({
@@ -294,7 +294,7 @@ class _TextExtractor:
     # Block-level tags end one text run and begin another. Inserting a space at
     # each boundary stops runs of text from concatenating when the source has no
     # whitespace between elements (headings, <dt>/<dd>, list links, and so on).
-    SEPARATOR_TAGS = {
+    SEPARATOR_TAGS: ClassVar[set[str]] = {
         "p", "blockquote", "pre", "div", "section", "article", "main",
         "ol", "ul", "li", "dl", "dt", "dd",
         "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption",
@@ -1331,7 +1331,8 @@ def extract_pdf_excerpt(
                 break
             try:
                 text = page.get_text("text")
-            except Exception:
+            except Exception as error:
+                logger.debug("failed to extract PDF page text: %s", error)
                 continue
             normalized = " ".join(text.split())
             if not normalized:

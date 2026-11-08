@@ -17,6 +17,7 @@ import argparse
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Self
 from urllib.parse import parse_qs, urlsplit
 
 BOOKS = (
@@ -126,7 +127,7 @@ class KiwixFixture:
         self.httpd.server_close()
         self.thread.join(timeout=5)
 
-    def __enter__(self) -> KiwixFixture:
+    def __enter__(self) -> Self:
         return self.start()
 
     def __exit__(self, *_args) -> None:

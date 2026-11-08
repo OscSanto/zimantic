@@ -223,7 +223,7 @@ def test_manifest_cap_is_deterministic_across_enumeration_orders(
         def __init__(self, path):
             self._iterator = real_scandir(path)
             self._entries = sorted(
-                list(self._iterator), key=lambda entry: entry.name, reverse=True
+                self._iterator, key=lambda entry: entry.name, reverse=True
             )
 
         def __enter__(self):

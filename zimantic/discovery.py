@@ -13,7 +13,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from .contracts import SourceInfo
 from .providers.base import (
@@ -63,7 +63,7 @@ class DiscoveryResult:
     index_dir: Path | None = None
     index_dir_existed: bool = True
 
-    def __enter__(self) -> DiscoveryResult:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:

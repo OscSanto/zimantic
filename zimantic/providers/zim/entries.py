@@ -237,9 +237,7 @@ class ArchiveEntryProducer:
             raise RuntimeError(
                 f"cannot validate ZIM source {self.key}: {error}"
             ) from error
-        if self._uuid and current_uuid != self._uuid:
-            return False
-        return True
+        return not (self._uuid and current_uuid != self._uuid)
 
     def reusable_vectors(self, index_dir, db, cfg, embedder):
         from .legacy_index import open_legacy_vectors

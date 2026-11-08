@@ -77,8 +77,8 @@ def main():
         return out
 
     lines = [f"## Evaluation: {', '.join(names)}", "",
-             f"{len(qs)} queries ({args.split} split). Baseline: **{names[0]}**. "
-             "#1 / top 5 / top 20 = share of queries with the right article at that position or better.", ""]
+             (f"{len(qs)} queries ({args.split} split). Baseline: **{names[0]}**. "
+             "#1 / top 5 / top 20 = share of queries with the right article at that position or better."), ""]
     if note:
         lines += [f"**Note:** {note}", ""]
 

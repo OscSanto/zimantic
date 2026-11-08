@@ -54,9 +54,7 @@ def normalize_archive_path(path: str) -> str | None:
         return None
     normalized = posixpath.normpath(candidate)
     if (
-        normalized in {"", ".", ".."}
-        or normalized.startswith("../")
-        or normalized.startswith("/")
+        normalized in {"", ".", ".."} or normalized.startswith(("../", "/"))
     ):
         return None
     return normalized

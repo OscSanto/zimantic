@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from typing import Annotated
 from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -1271,10 +1272,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/suggest")
     def api_suggest(
-        q: str = Query(..., min_length=1, max_length=4096),
-        source: list[str] | None = Query(None),
-        collection: str | None = Query(None),
-        limit: int = Query(8, ge=1, le=20),
+        q: Annotated[str, Query(min_length=1, max_length=4096)],
+        source: Annotated[list[str] | None, Query()] = None,
+        collection: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=20)] = 8,
     ):
         try:
             items = search_class.suggest(q, source, limit, collection)
@@ -1290,11 +1291,11 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/search")
     def api_search(
-        q: str = Query(..., min_length=1, max_length=4096),
-        source: list[str] | None = Query(None),
-        collection: str | None = Query(None),
-        limit: int | None = Query(None, ge=1),
-        offset: int = Query(0, ge=0),
+        q: Annotated[str, Query(min_length=1, max_length=4096)],
+        source: Annotated[list[str] | None, Query()] = None,
+        collection: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1)] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
     ):
         source_filter = source[0] if source and len(source) == 1 else source
         try:
@@ -1337,11 +1338,11 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/search/stream")
     def api_search_stream(
-        q: str = Query(..., min_length=1, max_length=4096),
-        source: list[str] | None = Query(None),
-        collection: str | None = Query(None),
-        limit: int | None = Query(None, ge=1),
-        offset: int = Query(0, ge=0),
+        q: Annotated[str, Query(min_length=1, max_length=4096)],
+        source: Annotated[list[str] | None, Query()] = None,
+        collection: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1)] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
     ):
         try:
             search_class._validate_query(q)

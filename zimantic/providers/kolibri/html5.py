@@ -9,6 +9,7 @@ budgets.
 
 from __future__ import annotations
 
+import itertools
 import struct
 import time
 import zlib
@@ -282,7 +283,7 @@ class Html5Archive:
                     data_offset=data_offset,
                 )
             intervals.sort()
-            for previous, current in zip(intervals, intervals[1:]):
+            for previous, current in itertools.pairwise(intervals):
                 if current[0] < previous[1]:
                     raise Html5ZipError("overlapping HTML5 zip members")
             if "index.html" not in self.members or self.members["index.html"].is_dir:
@@ -385,10 +386,7 @@ class Html5Archive:
             raise Html5LimitError("HTML5 asset exceeds the serving limit")
         if not head_only and member.file_size > min(limit, self.max_member_bytes):
             raise Html5LimitError("HTML5 asset exceeds the serving limit")
-        target = min(
-            int(member.file_size) if head_only else int(member.file_size),
-            limit if head_only else limit,
-        )
+        target = min(int(member.file_size), limit)
         if head_only:
             target = min(target, 256 << 10)
         if member.compression == 0:

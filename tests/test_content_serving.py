@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 from urllib.parse import quote
 
@@ -370,7 +371,7 @@ def test_capture_asset_referer_decodes_a_colon_key_exactly_once():
     key = "files:modules:root"
 
     class _CaptureSearch:
-        cfg: dict = {}
+        cfg: ClassVar[dict] = {}
 
         def __init__(self):
             self.seen: list[tuple[str, str]] = []
@@ -410,7 +411,7 @@ def test_capture_asset_referer_decodes_a_colon_key_exactly_once():
 
 def test_source_without_a_content_store_returns_404():
     class _NoStore:
-        cfg: dict = {}
+        cfg: ClassVar[dict] = {}
 
         def content_store(self, identifier):
             raise ArticleNotFoundError("no store")

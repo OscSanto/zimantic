@@ -171,7 +171,7 @@ def encode_json(value: Any) -> str:
 
 def decode_json(value: Any) -> Any:
     if not isinstance(value, str):
-        raise ValueError("metadata JSON values must be text")
+        raise TypeError("metadata JSON values must be text")
     return json.loads(value)
 
 
@@ -202,7 +202,7 @@ def encode_bytes(value: bytes) -> str:
 
 def decode_bytes(value: Any) -> bytes:
     if not isinstance(value, str):
-        raise ValueError("binary metadata values must be text")
+        raise TypeError("binary metadata values must be text")
     return base64.b64decode(value.encode("ascii"), validate=True)
 
 

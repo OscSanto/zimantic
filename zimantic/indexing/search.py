@@ -14,6 +14,7 @@ their separate candidate orders contribute, not comparable raw scores.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -30,6 +31,7 @@ from .types import NativeHit
 
 RRF_K = 60
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
+logger = logging.getLogger(__name__)
 
 
 class AmbiguousPathError(ValueError):
@@ -415,7 +417,8 @@ def search(
                     max_bytes=limits.max_html_bytes,
                     deadline=deadline,
                 )
-            except Exception:
+            except Exception as error:
+                logger.debug("preview unavailable for %s: %s", source.key, error)
                 continue
             if lead:
                 doc["lead"] = lead

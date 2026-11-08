@@ -417,8 +417,8 @@ def tokenizer_probes(variants):
                 capabilities = {}
                 for name, sql, params in (
                     ("raw_content", "SELECT text FROM body WHERE body MATCH ?", ("needle",)),
-                    ("snippet", "SELECT snippet(body,0,'[',']','...',5) FROM body "
-                     "WHERE body MATCH ?", ("needle",)),
+                    ("snippet", ("SELECT snippet(body,0,'[',']','...',5) FROM body "
+                     "WHERE body MATCH ?"), ("needle",)),
                     ("phrase", "SELECT rowid FROM body WHERE body MATCH ?", ('"red blue"',)),
                 ):
                     try:

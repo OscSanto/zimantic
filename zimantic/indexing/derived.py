@@ -214,7 +214,7 @@ class DerivedTextConfig:
             raise ValueError("asr_threads must be zero or a positive integer")
         for name in ("asr_batched", "cache"):
             if not isinstance(getattr(self, name), bool):
-                raise ValueError(f"{name} must be true or false")
+                raise TypeError(f"{name} must be true or false")
         if not isinstance(self.asr_model, str) or not self.asr_model.strip():
             raise ValueError("asr_model must not be empty")
         if not self.ocr_languages:
@@ -236,7 +236,7 @@ def parse_derived_text(
     if data is None:
         return DerivedTextConfig()
     if not isinstance(data, Mapping):
-        raise ValueError("[derived_text] must be a table")
+        raise TypeError("[derived_text] must be a table")
     values = dict(data)
     unknown = sorted(set(values) - DERIVED_TEXT_KEYS)
     if unknown:
@@ -302,7 +302,7 @@ def parse_source_override(
 ) -> tuple[str, SourceDerivedOperations]:
     """Validate one exact-source ``[[collections.sources]]`` override."""
     if not isinstance(entry, Mapping):
-        raise ValueError("source override must be a table")
+        raise TypeError("source override must be a table")
     key = entry.get("key")
     if not isinstance(key, str) or not key.strip():
         raise ValueError("source override requires an exact non-empty key")

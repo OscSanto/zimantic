@@ -47,10 +47,7 @@ def normalize_relative_path(path: str, *, allow_empty: bool = False) -> str:
             return ""
         raise FilesPathError("empty path")
     if (
-        text.startswith("/")
-        or "\\" in text
-        or "\x00" in text
-        or text.startswith("//")
+        text.startswith(("/", "//")) or "\\" in text or "\x00" in text
     ):
         raise FilesPathError("invalid path")
     trailing = text.endswith("/")

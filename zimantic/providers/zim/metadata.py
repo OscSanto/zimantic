@@ -307,7 +307,8 @@ def metadata_from_archive(
             continue
         try:
             metadata[meta_key] = _text(archive.get_metadata(meta_key))
-        except Exception:
+        except Exception as error:
+            logger.debug("metadata %s unavailable for %s: %s", meta_key, path, error)
             continue
 
     tags = normalize_tags(metadata.get("Tags", ""))
