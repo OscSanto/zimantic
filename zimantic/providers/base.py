@@ -254,9 +254,6 @@ class IndexedRuntime(CollectionRuntime, ABC):
     def start_faiss(self) -> None: ...
 
     @abstractmethod
-    def refresh_if_stale(self) -> bool: ...
-
-    @abstractmethod
     def random_source(self) -> SourceInfo: ...
 
     @abstractmethod

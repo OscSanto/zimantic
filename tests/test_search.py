@@ -165,9 +165,6 @@ class _TestZimRuntime(IndexedRuntime, EnrichingRuntime):
     def start_faiss(self):
         pass
 
-    def refresh_if_stale(self):
-        return self.refresh()
-
     def random_source(self):
         from zimantic.content.store import ArticleNotFoundError
 
@@ -2214,14 +2211,18 @@ class GracefulDegradationTests(unittest.TestCase):
     def test_concurrent_probe_checks_share_cached_embeddings(self):
         from zimantic.embed import serialize_model_probes
 
-        db = sqlite3.connect(":memory:", check_same_thread=False)
-        index_schema.ensure_schema(db)
         probes = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
-        for key, value in serialize_model_probes(
+        metadata = serialize_model_probes(
             ["first probe", "second probe"], probes
-        ).items():
-            db.execute("INSERT INTO meta VALUES (?, ?)", (key, value))
-        db.commit()
+        )
+        # Concurrent index opens use separate connections, not one shared DB.
+        dbs = [
+            sqlite3.connect(":memory:", check_same_thread=False) for _ in range(2)
+        ]
+        for db in dbs:
+            index_schema.ensure_schema(db)
+            db.executemany("INSERT INTO meta VALUES (?, ?)", metadata.items())
+            db.commit()
 
         search = _bare_search({})
         search.embedder = object()
@@ -2255,14 +2256,15 @@ class GracefulDegradationTests(unittest.TestCase):
                         db,
                         Path("index.sqlite"),
                     )
-                    for _ in range(2)
+                    for db in dbs
                 ]
                 self.assertTrue(started.wait(10))
                 self.assertFalse(second_call.wait(2))
         finally:
             release.set()
             executor.shutdown(wait=True)
-            db.close()
+            for db in dbs:
+                db.close()
 
         results = [future.result() for future in futures]
         self.assertEqual(calls, 1)
@@ -2379,7 +2381,7 @@ class GracefulDegradationTests(unittest.TestCase):
         self.addCleanup(search.close)
         search.sources = {"manual": _zim_source("manual", "Manual")}
         runtime = search.runtimes[""]
-        with patch.object(runtime, "refresh_if_stale") as refresh:
+        with patch.object(runtime, "refresh") as refresh:
             self.assertEqual(search.library_dicts()[0]["key"], "manual")
             snapshot = search.listing_snapshot()
         refresh.assert_not_called()

@@ -65,7 +65,6 @@ from .store import KolibriContentStore
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_KOLIBRI_REFRESH_TTL = 120.0
 _PHRASE_MIMETYPES = frozenset(
     {"text/plain", "text/html", "application/xhtml+xml"}
 )
@@ -140,7 +139,6 @@ class KolibriRuntime(IndexedRuntime):
         self._state = "loading"
         self._error: str | None = None
         self._closed = False
-        self._scanned_at = 0.0
         self._last_refresh: float | None = None
         self._semantic = False
         self._defer_faiss = False
@@ -528,13 +526,6 @@ class KolibriRuntime(IndexedRuntime):
         ).start()
         return True
 
-    def refresh_if_stale(self, ttl: float = DEFAULT_KOLIBRI_REFRESH_TTL) -> bool:
-        with self._lock:
-            scanned_at = self._scanned_at
-        if scanned_at and time.monotonic() - scanned_at < ttl:
-            return True
-        return self.refresh(wait=True)
-
     def _refresh_once(self, *, wait: bool) -> bool:
         if not self._refresh_lock.acquire(blocking=wait):
             return False
@@ -592,7 +583,6 @@ class KolibriRuntime(IndexedRuntime):
                     self._by_key = {}
                     self._error = message
                     self._state = "error"
-                    self._scanned_at = time.monotonic()
                     self._last_refresh = time.time()
                     self._version += 1
                 for index in old:
@@ -684,7 +674,6 @@ class KolibriRuntime(IndexedRuntime):
                 }
                 self._error = discovery.error
                 self._state = "ready"
-                self._scanned_at = time.monotonic()
                 self._last_refresh = time.time()
                 if changed:
                     self._version += 1
@@ -985,7 +974,6 @@ class KolibriProvider:
 
 
 __all__ = [
-    "DEFAULT_KOLIBRI_REFRESH_TTL",
     "KolibriDiscoveryBatch",
     "KolibriProvider",
     "KolibriRuntime",

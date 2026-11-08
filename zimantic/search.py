@@ -110,10 +110,6 @@ SLOT_WAIT_SECONDS = 10.0
 # Bound how long an identical-query waiter (or an abandoned finalizer) waits
 # for a source future. A hung source must not hang every following request.
 SEARCH_CLAIM_WAIT_SECONDS = 60.0
-# The installed-library view recomputes its version on every conditional
-# request. A short cache keeps that from walking the whole ZIM tree each time
-# while still noticing files added or removed without a reload.
-LIBRARY_SCAN_TTL_SECONDS = 120.0
 HEALTH_CACHE_TTL_SECONDS = 2.0
 
 
@@ -162,9 +158,6 @@ class Search:
     _collection_snapshots: ClassVar[dict[str, CollectionSnapshot]] = {}
     runtime_config: RuntimeConfig
     providers: ClassVar[dict[str, Any]] = {}
-    _library_scan_at: float = 0.0
-    _library_version_at: float = 0.0
-    _library_scan_token: int = 0
     _model_fingerprint: str = ""
     _cache_generation: int = 0
     preview_cache: QueryCache | None = None
@@ -344,7 +337,6 @@ class Search:
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
             _int_config(cfg, "cache_bytes", DEFAULT_CACHE_BYTES, minimum=0),
         )
-        self._library_scan_at = 0.0
         # Provider/collection state: every provider path goes through a runtime.
         from .providers.registry import builtin_providers
 
@@ -582,7 +574,6 @@ class Search:
                 with self._state_lock:
                     self._cache_generation += 1
                     self._aggregate_revision += 1
-                self._invalidate_library_cache()
                 self.cache.clear()
                 preview_cache = self.preview_cache
                 if preview_cache is not None:
@@ -938,7 +929,6 @@ class Search:
                 )
             result = self.source_dicts()
         if changed:
-            self._invalidate_library_cache()
             self._remote_limit_warned = False
             self.cache.clear()
             preview_cache = self.preview_cache
@@ -1010,31 +1000,13 @@ class Search:
                 "token": (self._process_token, self._aggregate_revision),
             }
 
-    def _library_cache_lock(self) -> threading.Lock:
-        """Return the lock guarding the library scan/version caches."""
-        with self._state_lock:
-            lock = getattr(self, "_library_scan_lock", None)
-            if lock is None:
-                lock = threading.Lock()
-                self._library_scan_lock = lock
-            return lock
-
-    def _invalidate_library_cache(self) -> None:
-        """Invalidate the catalog and library response refresh intervals."""
-        lock = self._library_cache_lock()
-        with lock:
-            self._library_scan_at = 0.0
-            self._library_version_at = 0.0
-            # A scan that started before this point must not publish its stale
-            # result with a fresh timestamp.
-            self._library_scan_token = getattr(self, "_library_scan_token", 0) + 1
-
     def _library_records(self) -> list[dict[str, Any]]:
         """Return a sorted, detached library record list.
 
         ZIM runtimes include readable-but-unsearchable and unreadable archives
         that are not in the searchable source set.  Discovery failures remain
-        collection-level diagnostics, not per-source state.
+        collection-level diagnostics, not per-source state. This reads only
+        published metadata; discovery runs at startup or on explicit reload.
         """
         with self._state_lock:
             runtimes = list(self.runtimes.values())

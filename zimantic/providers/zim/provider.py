@@ -63,9 +63,6 @@ from .store import ArchiveContentStore
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LIBRARY_SCAN_TTL = 120.0
-
-
 class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
     """One configured ZIM root: catalog, archives, indexes, and serving."""
 
@@ -114,7 +111,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
         self._state = "loading"
         self._error: str | None = None
         self._closed = False
-        self._scanned_at = 0.0
         self._last_refresh: float | None = None
         self._semantic = False
         self._defer_faiss = False
@@ -455,17 +451,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
         ).start()
         return True
 
-    def refresh_if_stale(self, ttl: float = DEFAULT_LIBRARY_SCAN_TTL) -> bool:
-        # An open scope is fixed for the process lifetime. It has nothing new to
-        # discover and must not re-read archives or reopen indexes periodically.
-        if self._open_entries is not None:
-            return True
-        with self._lock:
-            scanned_at = self._scanned_at
-        if scanned_at and time.monotonic() - scanned_at < ttl:
-            return True
-        return self.refresh(wait=True)
-
     def _refresh_once(self, *, wait: bool) -> bool:
         if not self._refresh_lock.acquire(blocking=wait):
             return False
@@ -602,7 +587,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
                 record.key: record for record in scan.records.values()
             }
             self._unreadable = dict(scan.unreadable)
-            self._scanned_at = time.monotonic()
             self._last_refresh = time.time()
             self._error = None
             self._state = "ready"
@@ -995,7 +979,6 @@ class ZimProvider:
 
 
 __all__ = [
-    "DEFAULT_LIBRARY_SCAN_TTL",
     "ZimDiscoveryBatch",
     "ZimOpenDiscoveryBatch",
     "ZimOpenRuntime",
