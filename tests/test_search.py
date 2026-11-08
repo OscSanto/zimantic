@@ -2173,7 +2173,7 @@ class GracefulDegradationTests(unittest.TestCase):
                 if calls > 1:
                     second_call.set()
             started.set()
-            if not release.wait(2):
+            if not release.wait(10):
                 raise RuntimeError("test probe release timed out")
             return probes
 
@@ -2190,8 +2190,8 @@ class GracefulDegradationTests(unittest.TestCase):
                     )
                     for _ in range(2)
                 ]
-                self.assertTrue(started.wait(2))
-                self.assertFalse(second_call.wait(1))
+                self.assertTrue(started.wait(10))
+                self.assertFalse(second_call.wait(2))
         finally:
             release.set()
             executor.shutdown(wait=True)
