@@ -137,6 +137,15 @@ port = 8090
 # This is independent of max_preview_chars. Longer text is cut at a UTF-8
 # character boundary and counted in body_truncated_count.
 # max_body_text_bytes = 1_048_576
+# max_entries = 100000  # optional global default for local source indexing
+#
+# Extraction limits above, max_preview_chars, search tuning (candidate_count,
+# nprobe, min_cosine_similarity, source_timeout), and cache quotas can also be
+# set directly on [[collections]] or its exact-key sources entries. Unspecified
+# fields inherit global -> collection -> source; host-wide resources stay global.
+# Files-only indexing globs, independent of serving permissions:
+# index_include = ["**/*.html", "**/*.txt", "**/*.pdf"]
+# index_exclude = ["**/drafts/**"]
 
 # Maximum optional derived-preview cache bytes per source. Reaching it omits
 # new preview artifacts, never searchable postings.
@@ -203,7 +212,8 @@ port = 8090
 # emitted about every 700 ms, and the final ranking always includes every source;
 # lower this on slow CPUs.
 # max_stream_ranks = 16
-# Timeout for each Kiwix catalog and search request, in seconds.
+# Per-source search deadline, in seconds (fractional values are accepted).
+# The global value also bounds Kiwix catalog requests.
 # source_timeout = 12
 # Monotonic deadline for one admitted search (scheduling, ranking and bounded
 # previews). Default 30; must be positive.
@@ -225,6 +235,9 @@ port = 8090
 # The byte budget applies independently to the search and preview caches.
 # Desktop 32 MiB, mobile 8 MiB, supercomputer 256 MiB.
 # cache_bytes = 33_554_432
+# Scoped cache quotas remain inside these global ceilings. A mixed-source entry
+# counts against every participating source. cache_size = 0 disables admission;
+# cache_bytes = 0 means count-only caching.
 
 # COLLECTIONS
 #
@@ -278,6 +291,10 @@ port = 8090
 # max_sources = 64
 # max_entries = 100000
 # max_file_bytes = 268435456
+# index_exclude = ["**/drafts/**"]  # indexed content only, still servable
+# sources = [
+#   { key = "files:modules:root", max_body_text_bytes = 65536, cache_size = 32 },
+# ]
 #
 # Search and serve a local Kolibri installation. Supported target: Kolibri
 # v0.19.5 installed SQLite schema. Kolibri does not need to be running. Each

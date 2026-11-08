@@ -671,6 +671,137 @@ class SearchContractTests(unittest.TestCase):
         finally:
             search._executor.shutdown(wait=True)
 
+    def test_scoped_search_and_cache_changes_invalidate_only_the_relevant_scope(self):
+        from zimantic.contracts import SourceInfo as CanonicalSourceInfo
+
+        source = CanonicalSourceInfo(
+            "files:media:root", provider="files", collection_key="files:media"
+        )
+        other = CanonicalSourceInfo(
+            "files:other:root", provider="files", collection_key="files:other"
+        )
+        search = _bare_search(
+            {
+                "collection_settings": {"media": {"candidate_count": 2}},
+                "source_settings": {source.key: {"cache_size": 1}},
+            }
+        )
+        try:
+            search._cache_generation = 1
+            search.sources = {source.key: source, other.key: other}
+            selected = search._cache_key("alpha", (source.key,))
+            unrelated = search._cache_key("alpha", (other.key,))
+            search.cfg["source_settings"][source.key]["nprobe"] = 5
+            self.assertNotEqual(search._cache_key("alpha", (source.key,)), selected)
+            self.assertEqual(search._cache_key("alpha", (other.key,)), unrelated)
+            self.assertEqual(search._source_limit(100, source), 2)
+            self.assertEqual(search._source_limit(100, other), 16)
+            key = search._cache_key("alpha", (source.key,))
+            search.cache.put(
+                key, "result", size=1, quotas=search._cache_quotas([source])
+            )
+            search.cfg["source_settings"][source.key]["cache_size"] = 0
+            disabled_key = search._cache_key("alpha", (source.key,))
+            search.cache.put(
+                disabled_key, "result", size=1, quotas=search._cache_quotas([source])
+            )
+            self.assertIsNone(search.cache.get(disabled_key))
+        finally:
+            search._executor.shutdown(wait=True)
+
+    def test_scoped_source_deadlines_are_capped_and_late_results_are_cancelled(self):
+        from types import SimpleNamespace
+
+        from zimantic.contracts import (
+            SourceInfo as CanonicalSourceInfo,
+        )
+        from zimantic.contracts import (
+            SourceResult as CanonicalSourceResult,
+        )
+
+        source = CanonicalSourceInfo(
+            "files:media:root", provider="files", collection_key="files:media"
+        )
+        search = _bare_search(
+            {"source_settings": {source.key: {"source_timeout": 0.25}}}
+        )
+        requests = []
+
+        def execute(source, request):
+            requests.append(request)
+            return CanonicalSourceResult(source)
+
+        search.runtimes = {"files:media": SimpleNamespace(search=execute)}
+        try:
+            with patch("zimantic.search.time.monotonic", side_effect=[100, 100]):
+                result = search._search_source(source, "alpha", "", "", None, 4, 200)
+            self.assertEqual(requests[-1].deadline, 100.25)
+            self.assertNotEqual(result.status, "cancelled")
+            with patch("zimantic.search.time.monotonic", side_effect=[100, 101]):
+                result = search._search_source(source, "alpha", "", "", None, 4, 100.1)
+            self.assertEqual(requests[-1].deadline, 100.1)
+            self.assertEqual(result.status, "cancelled")
+        finally:
+            search._executor.shutdown(wait=True)
+
+    def test_scoped_preview_limits_and_disabled_quota_apply_to_hydration(self):
+        from types import SimpleNamespace
+
+        from zimantic.contracts import (
+            SourceInfo as CanonicalSourceInfo,
+        )
+        from zimantic.contracts import (
+            SourceResult as CanonicalSourceResult,
+        )
+
+        source = CanonicalSourceInfo(
+            "files:media:root", provider="files", collection_key="files:media"
+        )
+        search = _bare_search(
+            {
+                "source_settings": {
+                    source.key: {
+                        "max_preview_chars": 3,
+                        "max_html_bytes": 4,
+                        "cache_size": 0,
+                    }
+                }
+            }
+        )
+        calls = []
+
+        def preview(source, doc, *, max_chars, max_bytes, deadline):
+            calls.append((max_chars, max_bytes))
+            return "alpha"[:max_chars], "text/plain"
+
+        def enrich(*args, **kwargs):
+            self.assertEqual(kwargs["max_html_bytes"], 4)
+            return False
+
+        search.sources = {source.key: source}
+        search.runtimes = {
+            source.collection_key: SimpleNamespace(preview=preview, enrich=enrich)
+        }
+        search.preview_cache = QueryCache(16)
+        doc = {
+            "id": "item",
+            "path": "alpha",
+            "title": "Alpha",
+            "source_key": source.key,
+        }
+        try:
+            search._hydrate_results([doc])
+            self.assertEqual(doc["lead"], "alp")
+            doc["lead"] = ""
+            search._hydrate_results([doc])
+            self.assertEqual(calls, [(3, 4), (3, 4)])
+            self.assertEqual(search.preview_cache.stats()["size"], 0)
+            search._enrich_pool(
+                [CanonicalSourceResult(source, items=[doc])], "alpha", [doc], 1
+            )
+        finally:
+            search._executor.shutdown(wait=True)
+
     def test_hybrid_ranking_is_deterministic(self):
         source = SourceInfo("manual", "Manual", "manual", "local")
         doc = {
@@ -3433,6 +3564,33 @@ class CatalogLocationTests(unittest.TestCase):
 
 
 class QueryCacheTests(unittest.TestCase):
+    def test_scoped_quotas_evict_matching_entries_and_account_for_mixed_pools(self):
+        cache = QueryCache(4, max_bytes=100)
+        cache.put("other", "other", size=20, quotas={"b": (2, 60)})
+        cache.put("mixed", "mixed", size=30, quotas={"a": (1, 60), "b": (2, 60)})
+        cache.put("a", "a", size=20, quotas={"a": (1, 60)})
+        self.assertIsNone(cache.get("mixed"))
+        self.assertEqual(cache.get("other"), "other")
+        cache.put("b", "b", size=40, quotas={"b": (2, 60)})
+        cache.put("third", "third", size=10, quotas={"b": (2, 60)})
+        self.assertIsNone(cache.get("other"))
+        self.assertEqual(cache.get("a"), "a")
+        self.assertEqual(cache.stats()["bytes"], 70)
+
+    def test_scoped_admission_does_not_evict_for_unusable_entries_or_raise_global_ceilings(
+        self,
+    ):
+        cache = QueryCache(2, max_bytes=100)
+        cache.put("kept", "kept", size=20, quotas={"a": (2, 50)})
+        cache.put("oversized", "oversized", size=60, quotas={"a": (2, 50)})
+        cache.put("disabled", "disabled", size=10, quotas={"a": (0, 0)})
+        self.assertEqual(cache.stats()["size"], 1)
+        self.assertEqual(cache.get("kept"), "kept")
+        cache.put("new", "new", size=60, quotas={"b": (100, 1000)})
+        cache.put("last", "last", size=30, quotas={"c": (100, 1000)})
+        self.assertEqual(cache.stats()["size"], 2)
+        self.assertLessEqual(cache.stats()["bytes"], 100)
+
     def test_lru_evicts_least_recently_used(self):
         cache = QueryCache(2)
         cache.put("a", [1])

@@ -1045,7 +1045,9 @@ def build_index(
     without changing any existing caller contract.
     """
     started = time.monotonic()
-    cfg = cfg or {}
+    from ..scoped_settings import resolve_settings
+
+    cfg = resolve_settings(cfg or {}, producer, getattr(producer, "config", None))
     max_body_setting = (
         cfg.get("max_body_text_bytes", DEFAULT_MAX_BODY_TEXT_BYTES)
         if isinstance(cfg, Mapping)

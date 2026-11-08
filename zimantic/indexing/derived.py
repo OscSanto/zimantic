@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from ..scoped_settings import FILTER_KEYS, SCOPED_KEYS, parse_scoped_settings
 from .types import DerivedTextInput, DerivedTextProducer
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,7 @@ class SourceDerivedOperations:
     asr: str | None = None
     overrides: frozenset[str] = frozenset()
     options: Mapping[str, Any] = field(default_factory=dict)
+    settings: Mapping[str, Any] = field(default_factory=dict)
 
     def state(self) -> dict[str, str]:
         return {
@@ -281,6 +283,7 @@ class SourceDerivedOperations:
     def to_dict(self) -> dict[str, Any]:
         return {
             **self.state(),
+            **self.settings,
             **{
                 name: list(value) if name == "ocr_languages" else value
                 for name, value in self.options.items()
@@ -308,9 +311,12 @@ def parse_source_override(
             f"source override {key!r} does not belong to collection "
             f"{collection_name!r}"
         )
-    unknown = sorted(set(entry) - {"key", *DERIVED_ORDER, *DERIVED_TEXT_KEYS})
+    unknown = sorted(set(entry) - {"key", *DERIVED_ORDER, *DERIVED_TEXT_KEYS, *SCOPED_KEYS})
     if unknown:
         raise ValueError(f"unknown source override key(s): {', '.join(unknown)}")
+    settings = parse_scoped_settings(entry)
+    if not key.startswith("files:") and settings.keys() & FILTER_KEYS:
+        raise ValueError("index_include/index_exclude are supported only by Files")
     captions = entry.get("captions", "off")
     if not isinstance(captions, str) or captions not in {"off", "index"}:
         raise ValueError("captions accepts only 'off' or 'index'")
@@ -328,6 +334,7 @@ def parse_source_override(
         options=parse_derived_options(
             {name: value for name, value in entry.items() if name in DERIVED_TEXT_KEYS}
         ),
+        settings=settings,
     )
 
 

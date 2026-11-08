@@ -52,6 +52,79 @@ def _publish(tmp_path: Path, source) -> IndexLocator:
 
 
 class TestConfigSchema:
+    @pytest.mark.parametrize("provider", ["files", "kolibri", "zim", "kiwix"])
+    def test_scoped_settings_inherit_without_leaking_to_other_sources(
+        self, tmp_path, provider
+    ):
+        from zimantic.scoped_settings import resolve_settings
+
+        locator = (
+            'server = "http://localhost:8085"'
+            if provider == "kiwix"
+            else 'path = "media"'
+        )
+        path = _write(
+            tmp_path / "config.toml",
+            "max_entry_bytes = 128\nmax_body_text_bytes = 64\ncandidate_count = 32\n"
+            "cache_size = 10\ncache_bytes = 1024\nsource_timeout = 2.5\n"
+            f'[[collections]]\ntype = "{provider}"\nname = "media"\n{locator}\n'
+            "max_entry_bytes = 256\nmax_entries = 2\nmax_preview_chars = 9\n"
+            "min_cosine_similarity = 0.6\ncache_size = 4\nnprobe = 3\n"
+            f'sources = [{{ key = "{provider}:media:custom", max_entry_bytes = 512, '
+            "max_body_text_bytes = 16, candidate_count = 4, cache_bytes = 128 }]\n",
+        )
+        cfg = load_config(path, warn=lambda _: None)
+        assert not cfg["config_issues"]
+        custom = SimpleNamespace(
+            key=f"{provider}:media:custom", collection_key=f"{provider}:media"
+        )
+        other = SimpleNamespace(
+            key=f"{provider}:media:other", collection_key=f"{provider}:media"
+        )
+        effective = resolve_settings(cfg, custom)
+        inherited = resolve_settings(cfg, other)
+        assert effective["max_entry_bytes"] == 512
+        assert inherited["max_entry_bytes"] == 256
+        assert effective["max_entries"] == inherited["max_entries"] == 2
+        assert effective["max_body_text_bytes"] == 16
+        assert inherited["max_body_text_bytes"] == 64
+        assert effective["candidate_count"] == 4
+        assert inherited["candidate_count"] == 32
+        assert effective["cache_size"] == 4
+        assert effective["cache_bytes"] == 128
+        assert effective["max_preview_chars"] == 9
+        assert effective["min_cosine_similarity"] == 0.6
+        assert effective["nprobe"] == 3
+        assert effective["source_timeout"] == 2.5
+        assert cfg["max_entry_bytes"] == 128
+
+    @pytest.mark.parametrize("scope", ["global", "collection", "source"])
+    @pytest.mark.parametrize("option", [
+        "max_entry_bytes = 0", "cache_size = -1", "nprobe = true",
+        "min_cosine_similarity = 1.5", "source_timeout = inf",
+        'index_include = [""]',
+    ])
+    def test_invalid_scoped_settings_are_not_applied(self, tmp_path, scope, option):
+        collection = '[[collections]]\ntype = "files"\nname = "media"\npath = "media"\n'
+        if scope == "global":
+            text = f"{option}\n{collection}"
+        elif scope == "collection":
+            text = collection + option + "\n"
+        else:
+            text = (
+                collection + f'sources = [{{ key = "files:media:root", {option} }}]\n'
+            )
+        path = _write(tmp_path / "config.toml", text)
+        warnings = []
+        if scope == "source":
+            with pytest.raises(ConfigValidationError):
+                load_config(path, warn=warnings.append)
+        else:
+            cfg = load_config(path, warn=warnings.append)
+            assert warnings
+            if scope == "collection":
+                assert cfg["collections"] == ()
+
     def test_missing_config_is_an_explicit_empty_library(self, tmp_path):
         cfg = load_config(tmp_path / "missing.toml", warn=lambda _message: None)
         assert cfg["collections"] == ()

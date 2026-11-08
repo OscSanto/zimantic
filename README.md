@@ -443,6 +443,59 @@ limits apply to serving and indexing, but `secure_browsing` sandboxes only the
 `/content/` shell; a raw `/article/` document opened directly or in a permitted
 popup is not sandboxed and can run with the app's origin and persistent storage.
 
+### Scoped settings
+
+Extraction limits, search tuning, cache quotas, and Files indexing filters share
+one **global → collection → exact-source** resolver. Global defaults stay at the
+TOML root; put the same keys directly on a collection or in its `sources`
+entries. Only specified fields override inherited values.
+
+| Settings | Scope and effect |
+| --- | --- |
+| `max_entry_bytes`, `max_html_bytes`, `max_body_text_bytes`, `max_preview_chars`, `max_entries` | Per-source local extraction/indexing budgets; preview settings also apply during search |
+| `candidate_count`, `nprobe`, `min_cosine_similarity`, `source_timeout` | Per-source search effort, IVF probes, hybrid semantic threshold, and deadline |
+| `cache_size`, `cache_bytes` | Per-source quotas inside the shared query and preview caches; global values also bound each entire cache |
+| `max_derived_cache_bytes_per_source` | Per-source derived-preview artifact budget |
+| `index_include`, `index_exclude` | Files-only indexing globs; lists replace inherited lists, never change serving permissions |
+
+```toml
+max_body_text_bytes = 1_048_576
+candidate_count = 16
+cache_size = 256
+cache_bytes = 33_554_432
+
+[[collections]]
+type = "files"
+name = "media"
+path = "./media"
+max_body_text_bytes = 262_144
+source_timeout = 3.5
+index_exclude = ["**/drafts/**"]
+sources = [
+  { key = "files:media:root", max_body_text_bytes = 65_536, candidate_count = 8, cache_size = 32 },
+]
+```
+
+Use exact keys from `/sources`. Extraction/search budgets must be positive;
+`min_cosine_similarity` must be between -1 and 1. Cache quotas accept zero:
+`cache_size = 0` disables admission for that source, `cache_bytes = 0` means
+count-only caching, and `max_derived_cache_bytes_per_source = 0` disables new
+derived-preview artifacts without removing searchable text. A mixed-source
+query-cache entry counts in full against each participating source's quota.
+Raising a scoped quota cannot raise the shared cache's global ceiling.
+
+`index_include` selects permitted primary Files items for indexing, including
+media title rows. An empty list restores the normal collection `include`
+selection for native documents. `index_exclude` adds indexing-only exclusions;
+the existing collection `exclude`, hidden-path, symlink, and confinement rules
+always remain in force for both indexing and serving.
+
+Build-affecting settings enter source fingerprints; search/preview policy enters
+cache keys. Host-wide model selection, worker pools, memory/concurrency controls,
+serving limits, and the overall `search_timeout_seconds` stay global. A source
+deadline cannot extend the overall deadline; native calls that cannot be
+interrupted are checked when they return.
+
 ### Derived text
 
 Derived text has three independent opt-ins, all off by default. Files and
@@ -542,7 +595,7 @@ Source keys use the configured `name` and root-relative identifiers, never the a
 
 All sources in one files collection share the collection-relative serving namespace. A child page can link to `../shared/style.css` and it resolves under the same source key; search results and library membership still belong to the source that indexed the item. Hidden paths, configured excludes, symlinks, and paths outside the configured root are never served. Unknown extensions are served as attachments with `X-Content-Type-Options: nosniff`; SVG opened directly is sandboxed with a restrictive CSP.
 
-`include` selects native documents for indexing. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless enabled by the collection's `derived_text` defaults (see [Derived text](#derived-text)). Files whose extension is missing or unknown get a bounded MIME probe: the built-in signatures and `puremagic` are used for the prefix, and `lsar` identifies archive containers. This keeps extensionless media and servable “other” assets visible in the library content-type filters.
+`include` selects native documents for indexing by default. Scoped `index_include` and `index_exclude` can change indexing selection without changing serving permissions. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless enabled by the collection's `derived_text` defaults (see [Derived text](#derived-text)). Files whose extension is missing or unknown get a bounded MIME probe: the built-in signatures and `puremagic` are used for the prefix, and `lsar` identifies archive containers. This keeps extensionless media and servable “other” assets visible in the library content-type filters.
 
 `zimantic build` with no positional paths builds configured files collections as well as ZIM collections, using the same index generations, embeddings, and lock as ZIM builds. Serving does not require an index: permitted files remain browsable even when indexing was capped or skipped.
 

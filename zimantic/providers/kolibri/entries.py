@@ -195,11 +195,10 @@ class KolibriEntryProducer:
         self.storage_root = Path(os.path.realpath(Path(storage_root)))
         self.config = config
         self.fast = bool(fast)
-        self.cfg = dict(cfg or {})
+        from ...scoped_settings import resolve_settings
+
+        self.cfg = resolve_settings(cfg or {}, source, config)
         self.max_entries = _int_setting(self.cfg, "max_entries", 500_000)
-        configured = getattr(config, "max_entries", None)
-        if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
-            self.max_entries = configured
         self.global_max_entry_bytes = _int_setting(
             self.cfg, "max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES
         )

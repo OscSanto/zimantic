@@ -93,6 +93,39 @@ def test_meta_codec_is_type_stable():
     )
     with pytest.raises(ValueError):
         schema.decode_int(3)
+
+
+def test_scoped_search_tuning_reaches_semantic_filter_and_ivf_probes(tmp_path):
+    from zimantic.scoped_settings import search_limits
+
+    class Vectors:
+        nprobe = 1
+        nlist = 8
+
+        def search(self, query, count):
+            assert self.nprobe == 3
+            assert count == 4
+            return [[0.7]], [[1]]
+
+    source = _source()
+    locator = _build(
+        tmp_path, [EntryRecord(1, "Alpha", "excerpt", "alpha", None, "body")]
+    )
+    handle = _handle(locator, source)
+    handle.faiss_index = Vectors()
+    cfg = {
+        "collection_settings": {"test": {"candidate_count": 4, "nprobe": 3}},
+        "source_settings": {source.key: {"min_cosine_similarity": 0.6}},
+    }
+    request = SourceQuery("alpha", '"alpha"', "", [[1]], 2)
+    try:
+        tuned = search_limits(SearchLimits(), cfg, source, None)
+        assert search(source, handle, request, limits=tuned).semantic
+        assert handle.faiss_index.nprobe == 1
+        tuned.min_cosine_similarity = 0.8
+        assert not search(source, handle, request, limits=tuned).semantic
+    finally:
+        handle.close()
     with pytest.raises(ValueError):
         schema.decode_bool("true")
 

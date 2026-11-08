@@ -33,6 +33,7 @@ from .contracts import SourceInfo, SourceResult
 from .diagnostics import private_locators, public_cause, sanitize_public_text
 from .providers.base import CollectionInfo, CollectionSnapshot, ProviderContext, SourceQuery
 from .providers.config import ProviderConfig, RuntimeConfig, ZimConfig
+from .scoped_settings import resolve_settings, settings_key
 from .searching.config import (
     DEFAULT_MAX_ARTICLE_BYTES,
     _float_config,
@@ -1696,7 +1697,14 @@ class Search:
         normalized_selection = (
             tuple(sorted(selection)) if selection is not None else None
         )
-        return (generation, normalized, normalized_selection)
+        with self._state_lock:
+            sources = getattr(self, "sources", {})
+            policies = tuple(
+                (key, settings_key(self.cfg, sources[key]))
+                for key in sorted(sources)
+                if selection is None or key in selection
+            )
+        return (generation, normalized, normalized_selection, policies)
 
     def _page_size(self, limit: int | None) -> int:
         default = self.page_size
@@ -1715,7 +1723,9 @@ class Search:
             self.max_results,
         )
 
-    def _source_limit(self, total_sources: int) -> int:
+    def _source_limit(
+        self, total_sources: int, source: SourceInfo | None = None
+    ) -> int:
         """Candidates to request from each source before fusion.
 
         The ranked pool is global, so a source only needs enough candidates to
@@ -1730,7 +1740,25 @@ class Search:
         if total_sources <= 1:
             return pool_target
         share = math.ceil(pool_target / total_sources)
-        return min(pool_target, max(self.candidate_count, share))
+        candidates = resolve_settings(self.cfg, source).get(
+            "candidate_count", self.candidate_count
+        )
+        return min(pool_target, max(candidates, share))
+
+    def _cache_quotas(self, sources) -> dict[str, tuple[int, int]]:
+        cache = getattr(self, "cache", None)
+        return {
+            source.key: (
+                settings.get(
+                    "cache_size", getattr(cache, "maxsize", DEFAULT_CACHE_SIZE)
+                ),
+                settings.get(
+                    "cache_bytes", getattr(cache, "max_bytes", DEFAULT_CACHE_BYTES)
+                ),
+            )
+            for source in sources
+            for settings in [resolve_settings(self.cfg, source)]
+        }
 
     @staticmethod
     def _source_counts(pool: list[dict[str, Any]]) -> dict[str, int]:
@@ -2222,8 +2250,12 @@ class Search:
             cacheable
             and current_generation == generation
             and (deadline is None or time.monotonic() < deadline)
+            and not any(result.status == "cancelled" for result in source_results)
         ):
-            self.cache.put(cache_key, cache_value)
+            self.cache.put(
+                cache_key, cache_value,
+                quotas=self._cache_quotas(result.source for result in source_results),
+            )
         return state, cache_value
 
     def _run_search_owner(
@@ -2325,7 +2357,6 @@ class Search:
             max_stream_ranks = max(1, self.max_stream_ranks)
             rank_interval = max(1, math.ceil(total_sources / max_stream_ranks))
             update_interval = self.stream_update_interval
-            source_limit = self._source_limit(total_sources)
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
             started_at = time.monotonic()
@@ -2397,7 +2428,7 @@ class Search:
                             title_query,
                             fulltext_query,
                             query_vector,
-                            source_limit,
+                            self._source_limit(total_sources, source),
                             deadline,
                         )
                     except Exception:
@@ -2662,13 +2693,19 @@ class Search:
         limit: int,
         deadline: float | None = None,
     ) -> SourceResult:
+        settings = resolve_settings(self.cfg, source)
+        source_deadline = time.monotonic() + settings.get(
+            "source_timeout", self.source_timeout
+        )
         request = SourceQuery(
             query=query,
             title_query=title_query,
             fulltext_query=fulltext_query,
             query_vector=query_vector,
             limit=limit,
-            deadline=deadline,
+            deadline=min(deadline, source_deadline)
+            if deadline is not None
+            else source_deadline,
         )
         with self._state_lock:
             runtime = self.runtimes.get(source.collection_key)
@@ -2686,6 +2723,10 @@ class Search:
                 source=source,
                 error=f"search failed: {self.public_error(error)}",
                 status="error",
+            )
+        if time.monotonic() >= request.deadline:
+            return SourceResult(
+                source=source, error="search deadline expired", status="cancelled"
             )
         if result.error:
             result.error = str(self.public_text(result.error))
@@ -2713,7 +2754,7 @@ class Search:
             runtime = runtimes.get(source.collection_key)
             index = getattr(runtime, "indexes", {}).get(source.key) if runtime else None
             generation = getattr(index, "generation", None) or ""
-            return (source.key, generation, doc["path"])
+            return (source.key, generation, doc["path"], settings_key(self.cfg, source))
 
         for doc in docs:
             source = sources.get(doc.get("source_key"))
@@ -2733,13 +2774,14 @@ class Search:
             if source is None or runtime is None:
                 return source_key, source_docs, {}
             previews: dict[str, tuple[str, str | None]] = {}
+            settings = resolve_settings(self.cfg, source)
             for doc in source_docs:
                 try:
                     lead, mimetype = runtime.preview(
                         source,
                         doc,
-                        max_chars=self.preview_chars,
-                        max_bytes=PREVIEW_HTML_BYTES,
+                        max_chars=settings.get("max_preview_chars", self.preview_chars),
+                        max_bytes=min(settings.get("max_html_bytes", PREVIEW_HTML_BYTES), PREVIEW_HTML_BYTES),
                         deadline=None,
                     )
                 except Exception as error:
@@ -2769,7 +2811,9 @@ class Search:
                 if mimetype:
                     doc["mimetype"] = mimetype
                 if source is not None:
-                    preview_cache.put(cache_key(source, doc), lead)
+                    preview_cache.put(
+                        cache_key(source, doc), lead, quotas=self._cache_quotas([source])
+                    )
 
     def _enrich_pool(
         self,
@@ -2821,6 +2865,7 @@ class Search:
             enricher = getattr(runtime, "enrich", None)
             if not callable(enricher):
                 return False
+            settings = resolve_settings(self.cfg, source)
             return bool(
                 enricher(
                     source,
@@ -2828,7 +2873,7 @@ class Search:
                     docs,
                     phrase_ids=phrase_ids,
                     phrase_words=phrase_words,
-                    max_html_bytes=self.max_html_bytes,
+                    max_html_bytes=settings.get("max_html_bytes", self.max_html_bytes),
                     max_article_bytes=self.max_article_bytes,
                 )
             )

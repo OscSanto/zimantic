@@ -208,7 +208,7 @@ class FilesRuntime(CollectionRuntime):
                 source,
                 index,
                 request,
-                limits=self._search_limits(),
+                limits=self._search_limits(source),
                 url_builder=generic_search.default_url_builder(
                     self.web_base_path
                 ),
@@ -484,20 +484,23 @@ class FilesRuntime(CollectionRuntime):
             if cfg is not None:
                 self._cfg = dict(cfg)
 
-    def _search_limits(self) -> generic_search.SearchLimits:
-        return generic_search.SearchLimits(
-            candidate_count=self._candidate_count,
-            preview_chars=self._preview_chars,
-            max_html_bytes=self._max_html_bytes,
-            max_article_bytes=self._max_article_bytes,
-            min_cosine_similarity=self._min_cosine_similarity,
-            web_base_path=self.web_base_path,
-            nprobe=(
-                int(self._cfg["nprobe"])
-                if self._cfg.get("nprobe") is not None
-                else None
+    def _search_limits(
+        self, source: SourceInfo | None = None
+    ) -> generic_search.SearchLimits:
+        from ...scoped_settings import search_limits
+
+        return search_limits(
+            generic_search.SearchLimits(
+                candidate_count=self._candidate_count,
+                preview_chars=self._preview_chars,
+                max_html_bytes=self._max_html_bytes,
+                max_article_bytes=self._max_article_bytes,
+                min_cosine_similarity=self._min_cosine_similarity,
+                web_base_path=self.web_base_path,
             ),
-            cfg=self._cfg,
+            self._cfg,
+            source,
+            self.config,
         )
 
     def start_faiss(self) -> None:

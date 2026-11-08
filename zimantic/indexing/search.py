@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import quote
@@ -44,6 +45,20 @@ class SearchLimits:
     web_base_path: str = ""
     nprobe: int | None = None
     cfg: Mapping[str, Any] | None = None
+
+
+def vector_search(index: Any, query: Any, count: int, nprobe: int | None):
+    """Apply an IVF override without leaking it to another concurrent request."""
+    vectors = index.faiss_index
+    if nprobe is None or not hasattr(vectors, "nprobe"):
+        return vectors.search(query, count)
+    with getattr(index, "lock", nullcontext()):
+        previous = vectors.nprobe
+        vectors.nprobe = max(1, min(nprobe, getattr(vectors, "nlist", nprobe) or nprobe))
+        try:
+            return vectors.search(query, count)
+        finally:
+            vectors.nprobe = previous
 
 
 def _source_title(source: SourceInfo) -> str:
@@ -292,7 +307,7 @@ def search(
     query_vector = getattr(request, "query_vector", None)
     if query_vector is not None and faiss_index is not None:
         try:
-            similarities, ids = faiss_index.search(query_vector, count)
+            similarities, ids = vector_search(index, query_vector, count, limits.nprobe)
             semantic_ids = [
                 (float(score), int(rowid))
                 for score, rowid in zip(similarities[0], ids[0])

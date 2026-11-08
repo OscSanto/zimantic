@@ -7,7 +7,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ...diagnostics import public_cause
@@ -130,6 +130,7 @@ class KiwixRuntime(CollectionRuntime):
         *,
         backend: Any | None = None,
         source_timeout: float = _DEFAULT_SOURCE_TIMEOUT,
+        cfg: Mapping[str, Any] | None = None,
         urlopen_fn: Any | None = None,
         sleep_fn: Any | None = None,
         retry_backoff: float = DEFAULT_KIWIX_CATALOG_RETRY_BACKOFF,
@@ -141,6 +142,7 @@ class KiwixRuntime(CollectionRuntime):
         self._backend = backend
         self._on_change = on_change
         self._source_timeout = max(0.1, float(source_timeout))
+        self._cfg = dict(cfg or {})
         self._urlopen = urlopen_fn
         self._sleep = sleep_fn
         self._retry_backoff = max(0.01, float(retry_backoff))
@@ -191,6 +193,9 @@ class KiwixRuntime(CollectionRuntime):
             return SourceResult(
                 source=source, error="Kiwix collection is closed", status="error"
             )
+        from ...scoped_settings import resolve_settings
+
+        settings = resolve_settings(self._cfg, source, self.config)
         return kiwix_search.search(
             source,
             request,
@@ -199,7 +204,7 @@ class KiwixRuntime(CollectionRuntime):
                 self.config.max_response_bytes
                 or DEFAULT_MAX_KIWIX_RESPONSE_BYTES
             ),
-            source_timeout=self._source_timeout,
+            source_timeout=settings.get("source_timeout", self._source_timeout),
             urlopen_fn=self._urlopen,
         )
 
@@ -451,6 +456,7 @@ class KiwixDiscoveryBatch(DiscoveryBatch):
             collection,
             self._config,
             source_timeout=source_timeout,
+            cfg=settings,
             on_change=self._ctx.on_sources_changed,
         )
         # Discovery never waits for the network.  The runtime serves its last

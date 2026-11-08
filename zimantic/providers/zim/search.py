@@ -19,7 +19,7 @@ from ...content.reader import (
 from ...content.zim_paths import ZimPathError, resolve_zim_path
 from ...diagnostics import public_cause
 from ...contracts import SourceInfo, SourceResult, encode_document_id
-from ...indexing.search import body_search, fuse_fulltext
+from ...indexing.search import body_search, fuse_fulltext, vector_search
 from ...libzim_compat import search_paths
 from ...searching.query import _title_prefix_query, _title_query
 from ...searching.ranking import source_items
@@ -198,9 +198,7 @@ def _search_locked(
 
     if request.query_vector is not None and index.faiss_index is not None:
         try:
-            similarities, ids = index.faiss_index.search(
-                request.query_vector, count
-            )
+            similarities, ids = vector_search(index, request.query_vector, count, ctx.nprobe)
             semantic_ids = [
                 (float(score), int(rowid))
                 for score, rowid in zip(similarities[0], ids[0])

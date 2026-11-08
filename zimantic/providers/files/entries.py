@@ -300,10 +300,15 @@ class FilesEntryProducer:
         self.loose_only = bool(loose_only)
         self.config = config
         self.fast = bool(fast)
-        self.cfg = dict(cfg or {})
+        from ...scoped_settings import resolve_settings
+
+        self.cfg = resolve_settings(cfg or {}, source, config)
         self.include = tuple(getattr(config, "include", ()) or ())
-        self.exclude = tuple(getattr(config, "exclude", ()) or ())
-        self.max_entries = _max_entries(config)
+        self.index_include = tuple(self.cfg.get("index_include", ()) or ())
+        if self.index_include:
+            self.include = self.index_include
+        self.exclude = (*tuple(getattr(config, "exclude", ()) or ()), *self.cfg.get("index_exclude", ()))
+        self.max_entries = _int_setting(self.cfg, "max_entries", _max_entries(config))
         self.max_file_bytes = _max_file_bytes(config)
         self.global_max_entry_bytes = _int_setting(
             self.cfg, "max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES
@@ -406,7 +411,9 @@ class FilesEntryProducer:
                 family = media_family_for_path(relative) or media_family_for_mimetype(
                     mimetype
                 )
-                if family is None and not matches_any(self.include, relative):
+                if (self.index_include and not matches_any(self.index_include, relative)) or (
+                    family is None and not matches_any(self.include, relative)
+                ):
                     continue
                 if len(items) >= self.max_entries:
                     truncated = True
@@ -469,7 +476,9 @@ class FilesEntryProducer:
                 family = media_family_for_path(name) or media_family_for_mimetype(
                     mimetype
                 )
-                if family is None and not matches_any(self.include, name):
+                if (self.index_include and not matches_any(self.index_include, name)) or (
+                    family is None and not matches_any(self.include, name)
+                ):
                     continue
                 if len(items) >= self.max_entries:
                     truncated = True

@@ -14,6 +14,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
+from ..scoped_settings import FILTER_KEYS, SCOPED_KEYS, parse_scoped_settings
+
 ProviderKind = Literal["zim", "kiwix", "files", "kolibri"]
 Granularity = Literal["collection", "children"]
 DerivedOperation = Literal["off", "index", "tesseract", "whisper"]
@@ -190,6 +192,7 @@ class ZimConfig:
     name: str
     path: str
     label: str | None = None
+    settings: Mapping[str, Any] = field(default_factory=dict)
     max_entries: int | None = None
     traversal: TraversalLimits = field(default_factory=TraversalLimits)
     kind: Literal["zim"] = field(default="zim", init=False)
@@ -209,6 +212,7 @@ class KiwixConfig:
     name: str
     server: str
     label: str | None = None
+    settings: Mapping[str, Any] = field(default_factory=dict)
     catalog_path: str | None = None
     catalog_limit: int | None = None
     max_catalog_entries: int | None = None
@@ -228,6 +232,7 @@ class FilesConfig:
     name: str
     path: str
     label: str | None = None
+    settings: Mapping[str, Any] = field(default_factory=dict)
     derived_text: CollectionDerivedTextConfig | None = None
     granularity: Granularity = "collection"
     include: tuple[str, ...] = ()
@@ -259,6 +264,7 @@ class KolibriConfig:
     name: str
     path: str
     label: str | None = None
+    settings: Mapping[str, Any] = field(default_factory=dict)
     derived_text: CollectionDerivedTextConfig | None = None
     granularity: Granularity = "children"
     database_path: str | None = None
@@ -488,7 +494,13 @@ def _common(entry: Mapping[str, Any]) -> dict[str, Any]:
     name = validate_name(entry.get("name"))
     label = _string(entry.get("label"), "label", optional=True)
     traversal = _traversal(entry, name)
-    return {"name": name, "label": label, "traversal": traversal}
+    try:
+        settings = parse_scoped_settings(entry)
+        if entry.get("type") != "files" and settings.keys() & FILTER_KEYS:
+            raise ValueError("index_include/index_exclude are supported only by Files")
+    except ValueError as error:
+        raise ConfigValidationError(str(error)) from error
+    return {"name": name, "label": label, "traversal": traversal, "settings": settings}
 
 
 def _parse_zim(entry: Mapping[str, Any], base: Path) -> ZimConfig:
@@ -534,7 +546,7 @@ def _parse_kiwix(entry: Mapping[str, Any], base: Path) -> KiwixConfig:
     )
 
 
-_COMMON_ENTRY_KEYS = frozenset(
+_COMMON_ENTRY_KEYS = SCOPED_KEYS | frozenset(
     {
         "type",
         "name",
@@ -558,7 +570,7 @@ _KIWIX_KEYS = _COMMON_ENTRY_KEYS | {
     "max_remote_sources",
 }
 
-_FILES_KEYS = frozenset(
+_FILES_KEYS = SCOPED_KEYS | frozenset(
     {
         "type",
         "name",
@@ -605,7 +617,7 @@ def _parse_files(entry: Mapping[str, Any], base: Path) -> FilesConfig:
     )
 
 
-_KOLIBRI_KEYS = frozenset(
+_KOLIBRI_KEYS = SCOPED_KEYS | frozenset(
     {
         "type",
         "name",

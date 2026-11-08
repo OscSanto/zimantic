@@ -139,6 +139,71 @@ def test_stable_ids_and_resume_fingerprint(tmp_path):
     assert first.validate_snapshot() is False
 
 
+def test_scoped_index_filters_and_extraction_limits_do_not_change_serving(tmp_path):
+    from zimantic.providers.files.store import FilesContentStore
+
+    root = tmp_path / "modules"
+    root.mkdir()
+    for name in ("kept.txt", "skip.txt", "notes.md", "denied.txt"):
+        (root / name).write_text("alpha omega", encoding="utf-8")
+    config = files_config(
+        root,
+        granularity="collection",
+        exclude=("denied.txt",),
+        settings={"max_body_text_bytes": 32, "index_include": ("**/*.md",)},
+    )
+    source = _source(config, "files:modules:root")
+    overrides = {
+        "max_body_text_bytes": 8,
+        "max_preview_chars": 6,
+        "index_include": ("**/*.txt",),
+        "index_exclude": ("skip.txt",),
+    }
+    cfg = {
+        "max_body_text_bytes": 64,
+        "collections": (config,),
+        "source_settings": {source.info.key: overrides},
+    }
+    producer = _producer(root, config, source, cfg=cfg)
+    assert producer.count == 1
+    row = producer.entry_at(0)
+    assert row.path == "kept.txt"
+    assert "omega" not in row.excerpt
+    locator = IndexLocator(tmp_path / "indexes")
+    build_index(producer, locator, None, cfg)
+    assert _body_hits(locator, source.info, "alpha")
+    assert not _body_hits(locator, source.info, "omega")
+    assert _meta(locator, source.info)["body_truncated_count"] == "1"
+    overrides["candidate_count"] = 99
+    assert _producer(root, config, source, cfg=cfg).fingerprint == producer.fingerprint
+    overrides["max_body_text_bytes"] = 32
+    changed = _producer(root, config, source, cfg=cfg)
+    assert changed.fingerprint != producer.fingerprint
+    build_index(changed, locator, None, cfg)
+    assert _body_hits(locator, source.info, "omega")
+    overrides.update(index_include=(), index_exclude=(), max_entries=1)
+    capped = _producer(root, config, source, cfg=cfg)
+    assert capped.count == 1
+    assert capped.truncated
+    store = FilesContentStore(
+        source.info,
+        root,
+        membership_root="",
+        loose_only=False,
+        config=config,
+        max_article_bytes=1 << 20,
+    )
+    try:
+        assert store.exists("skip.txt")
+        assert (
+            store.read("notes.md", head_only=False, max_bytes=1024).content
+            == b"alpha omega"
+        )
+        assert not store.exists("denied.txt")
+    finally:
+        store.close()
+
+
 def test_interrupted_build_resumes_with_the_same_manifest(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()

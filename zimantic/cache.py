@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 import threading
 from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Any
 
 DEFAULT_CACHE_SIZE = 256
@@ -58,6 +59,7 @@ class QueryCache:
         self.max_bytes = max(0, int(max_bytes))
         self._data: OrderedDict[Any, Any] = OrderedDict()
         self._sizes: dict[Any, int] = {}
+        self._scopes: dict[Any, frozenset[str]] = {}
         self._bytes = 0
         self._lock = threading.Lock()
         self.hits = 0
@@ -78,7 +80,19 @@ class QueryCache:
             self.hits += 1
             return self._data[key]
 
-    def put(self, key: Any, value: Any, size: int | None = None) -> None:
+    def _discard(self, key: Any) -> None:
+        self._data.pop(key, None)
+        self._bytes -= self._sizes.pop(key, 0)
+        self._scopes.pop(key, None)
+
+    def put(
+        self,
+        key: Any,
+        value: Any,
+        size: int | None = None,
+        *,
+        quotas: Mapping[str, tuple[int, int]] | None = None,
+    ) -> None:
         if self.disabled:
             return
         if size is None:
@@ -88,27 +102,42 @@ class QueryCache:
             # An entry bigger than the whole byte budget can never fit. Drop it
             # rather than evicting every other entry trying to make room (which
             # would leave the cache empty).
-            if self.max_bytes and size > self.max_bytes:
+            quotas = quotas or {}
+            if (self.max_bytes and size > self.max_bytes) or any(
+                count <= 0 or (budget and size > budget)
+                for count, budget in quotas.values()
+            ):
                 return
-            previous = self._data.pop(key, None)
-            if previous is not None:
-                self._bytes -= self._sizes.pop(key, 0)
+            self._discard(key)
+            for source, (count, budget) in quotas.items():
+                entries = [
+                    key for key in self._data if source in self._scopes.get(key, ())
+                ]
+                total = sum(self._sizes[key] for key in entries)
+                for position, old_key in enumerate(entries):
+                    if len(entries) - position < count and (
+                        not budget or total + size <= budget
+                    ):
+                        break
+                    total -= self._sizes[old_key]
+                    self._discard(old_key)
             # Evict least-recently-used entries before inserting so the new entry
             # is never the one evicted to satisfy the budget.
             while self._data and (
                 len(self._data) >= self.maxsize
                 or (self.max_bytes and self._bytes + size > self.max_bytes)
             ):
-                old_key, _ = self._data.popitem(last=False)
-                self._bytes -= self._sizes.pop(old_key, 0)
+                self._discard(next(iter(self._data)))
             self._data[key] = value
             self._sizes[key] = size
+            self._scopes[key] = frozenset(quotas)
             self._bytes += size
 
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
             self._sizes.clear()
+            self._scopes.clear()
             self._bytes = 0
 
     def stats(self) -> dict[str, int]:

@@ -59,7 +59,12 @@ class ArchiveEntryProducer:
         self.provider_id = getattr(source, "provider_id", None)
         self.path = Path(path)
         self.fast = bool(fast)
-        self.cfg = dict(cfg or {})
+        from ...scoped_settings import resolve_settings
+
+        defaults = dict(cfg or {})
+        if max_entries is not None:
+            defaults["max_entries"] = max_entries
+        self.cfg = resolve_settings(defaults, source)
         self.catalog_path = Path(catalog_path) if catalog_path else None
         self.max_html_bytes = _setting(
             self.cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES
@@ -85,7 +90,7 @@ class ArchiveEntryProducer:
         except (OSError, ValueError):
             self._uuid = ""
         self._archive_entry_count = self._entry_count()
-        configured_cap = max_entries
+        configured_cap = self.cfg.get("max_entries", max_entries)
         if configured_cap is None:
             configured_cap = getattr(source, "max_entries", None)
         if isinstance(configured_cap, int) and not isinstance(configured_cap, bool):
@@ -263,6 +268,7 @@ class ArchiveEntryProducer:
     def _fingerprint(self) -> str:
         from ...indexing.derived import source_operations
 
+        operations = source_operations(self.cfg, self)
         payload = {
             "provider": self.provider,
             "key": self.key,
@@ -277,7 +283,9 @@ class ArchiveEntryProducer:
             "max_preview_chars": self.max_preview_chars,
             "max_body_text_bytes": self.max_body_text_bytes,
             "derived_text": self.cfg.get("derived_text"),
-            "derived_operations": source_operations(self.cfg, self),
+            "derived_operations": (
+                {**operations.state(), **operations.options} if operations else None
+            ),
             "derived_engines": sorted(
                 str(name)
                 for name in (self.cfg.get("derived_engines") or {})

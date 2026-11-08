@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 from .paths import default_config_path, xdg_data_dir
+from .scoped_settings import SCOPED_KEYS, parse_scoped_settings
 from .searching.config import DEFAULT_MAX_ARTICLE_BYTES
 
 DEFAULT_EMBEDDING_TOKENS = 256
@@ -126,7 +127,7 @@ PROFILES = {"mobile": MOBILE, "desktop": DESKTOP, "supercomputer": SUPERCOMPUTER
 # but remain user-settable, so they must stay known.
 KNOWN_KEYS = (
     frozenset(key for profile in PROFILES.values() for key in profile)
-    | {
+    | SCOPED_KEYS | {
         "nprobe",
         "build_workers",
         "embedding_workers",
@@ -184,6 +185,12 @@ def _typed_user_values(
         if key in {"collections", "derived_text"}:
             continue
         if key not in KNOWN_KEYS:
+            continue
+        if key in SCOPED_KEYS:
+            try:
+                values.update(parse_scoped_settings({key: value}))
+            except ValueError as error:
+                warn(f"zimantic: warning: config key {key!r} in {path}: {error}; using the profile default")
             continue
         default = defaults.get(key)
         corrected = _coerce_config_value(key, value, default)
@@ -369,7 +376,6 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     for key in (
         "max_explicit_collection_sources",
         "search_timeout_seconds",
-        "source_timeout",
         "collection_source_limit",
     ):
         value = cfg.get(key)
@@ -408,7 +414,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # Use the validated values in ``cfg``, not the raw user mapping: an
     # invalid worker type is skipped above and must still get a computed
     # default instead of leaving the key missing.
-    for key in ("build_workers", "embedding_workers", "build_embed_threads", "embedding_batch_tokens", "max_body_text_bytes", "max_derived_cache_bytes_per_source"):
+    for key in ("build_workers", "embedding_workers", "build_embed_threads", "embedding_batch_tokens"):
         if key in cfg and (not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1):
             if key in {"build_workers", "embedding_workers"}:
                 warn(
@@ -489,6 +495,9 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     }
     cfg["derived_source_operations"] = overrides
     cfg["derived_collection_operations"] = collection_operations
+    cfg["source_settings"] = {key: dict(value.settings) for key, value in overrides.items()}
+    cfg["collection_settings"] = {entry.name: dict(entry.settings) for entry in collections}
+    envelope["collection_settings"] = cfg["collection_settings"]
     cfg["collections"] = tuple(collections)
     cfg["config_dir"] = str(config_dir)
     cfg["config_diagnostics"] = diagnostics
