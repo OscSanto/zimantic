@@ -12,7 +12,6 @@ import sqlite3
 from typing import Any
 from urllib.parse import quote
 
-from ..libzim_compat import get_entry_by_id
 from .reader import _READABLE_MIMETYPES
 
 RANDOM_ARTICLE_ATTEMPTS = 128
@@ -109,7 +108,6 @@ def random_indexed_article(
 def random_fallback_article(
     index: Any,
     attempts: int = RANDOM_ARTICLE_ATTEMPTS,
-    get_entry_fn: Any = get_entry_by_id,
 ) -> str | None:
     """Pick a uniformly random readable entry from an unindexed archive."""
     archive = index.ensure_open()
@@ -119,7 +117,7 @@ def random_fallback_article(
     for _ in range(attempts):
         point = secrets.randbelow(upper)
         try:
-            entry = get_entry_fn(archive, point)
+            entry = archive.get_entry_by_id(point)
         except (KeyError, RuntimeError, ValueError, IndexError):
             continue
         if is_random_article_entry(entry):
@@ -129,7 +127,7 @@ def random_fallback_article(
         ids = []
         for point in range(upper):
             try:
-                entry = get_entry_fn(archive, point)
+                entry = archive.get_entry_by_id(point)
             except (KeyError, RuntimeError, ValueError, IndexError):
                 continue
             if is_random_article_entry(entry):
@@ -138,7 +136,7 @@ def random_fallback_article(
     if not ids:
         return None
     try:
-        entry = get_entry_fn(archive, ids[secrets.randbelow(len(ids))])
+        entry = archive.get_entry_by_id(ids[secrets.randbelow(len(ids))])
     except (KeyError, RuntimeError, ValueError, IndexError):
         return None
     return entry.path

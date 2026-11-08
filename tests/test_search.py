@@ -2355,9 +2355,13 @@ class GracefulDegradationTests(unittest.TestCase):
 
 
 class RandomArticleServingTests(unittest.TestCase):
-    def test_fallback_uses_get_entry_by_id_from_search_module(self):
+    def test_fallback_uses_public_get_entry_by_id(self):
         class _Archive:
             entry_count = 1
+
+            @staticmethod
+            def get_entry_by_id(_index):
+                return _Entry()
 
         class _Index:
             random_article_ids = None
@@ -2375,10 +2379,7 @@ class RandomArticleServingTests(unittest.TestCase):
                 return types.SimpleNamespace(mimetype="text/html")
 
         search = _bare_search({})
-        with patch(
-            "zimantic.libzim_compat.get_entry_by_id", return_value=_Entry()
-        ):
-            self.assertEqual(search._random_fallback_article(_Index()), "Article")
+        self.assertEqual(search._random_fallback_article(_Index()), "Article")
 
 
 class PaginationTests(unittest.TestCase):
@@ -3850,12 +3851,10 @@ def _test_random_indexed_article(self, index, db):
 
 def _test_random_fallback_article(self, index):
     from zimantic.content.serving import RANDOM_ARTICLE_ATTEMPTS, random_fallback_article
-    from zimantic.libzim_compat import get_entry_by_id
 
     return random_fallback_article(
         index,
         attempts=RANDOM_ARTICLE_ATTEMPTS,
-        get_entry_fn=get_entry_by_id,
     )
 
 

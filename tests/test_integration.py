@@ -19,7 +19,6 @@ from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic import build as build_module
 from zimantic.indexing.locator import IndexLocator
-from zimantic.libzim_compat import get_entry_by_id
 from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
 from zimantic.providers.zim.entries import ArchiveEntryProducer
 from zimantic.search import Search
@@ -502,7 +501,7 @@ class LocalIntegrationTests(unittest.TestCase):
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
-                entry = get_entry_by_id(archive, i)
+                entry = archive.get_entry_by_id(i)
                 if entry.path == "Alpha":
                     article_id = i
                 elif not entry.is_redirect:
@@ -549,7 +548,7 @@ class LocalIntegrationTests(unittest.TestCase):
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
-                entry = get_entry_by_id(archive, i)
+                entry = archive.get_entry_by_id(i)
                 if entry.path == "Alpha":
                     article_id = i
                 elif not entry.is_redirect:

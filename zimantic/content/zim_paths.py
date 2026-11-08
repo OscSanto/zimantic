@@ -1,9 +1,8 @@
 """Bounded, namespace-aware ZIM path resolution.
 
-libzim 3 and 4 expose slightly different namespaces and redirect surfaces.  The
-resolver keeps one canonical final path, treats redirect aliases as aliases of
-that path, and fails closed when several distinct final items claim the same
-canonical path.
+The resolver keeps one canonical final path, treats redirect aliases as
+aliases of that path, and fails closed when several distinct final items claim
+the same canonical path.
 """
 
 from __future__ import annotations

@@ -20,7 +20,6 @@ from ...content.zim_paths import ZimPathError, resolve_zim_path
 from ...diagnostics import public_cause
 from ...contracts import SourceInfo, SourceResult, encode_document_id
 from ...indexing.search import body_search, fuse_fulltext, vector_search
-from ...libzim_compat import search_paths
 from ...searching.query import _title_prefix_query, _title_query
 from ...searching.ranking import source_items
 
@@ -307,7 +306,10 @@ def _search_locked(
                     search = searcher.search(
                         _query_object(request.fulltext_query or request.query)
                     )
-                    paths = search_paths(search, 0, count)
+                    paths = [
+                        str(result.path)
+                        for result in search.get_results(0, count)
+                    ]
                 except (RuntimeError, ValueError) as error:
                     errors.append(f"full-text search unavailable: {error}")
         if archive is not None:

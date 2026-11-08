@@ -34,7 +34,6 @@ from ...content.zim_paths import (
     ZimPathNotFoundError,
     resolve_zim_path,
 )
-from ...libzim_compat import get_entry_by_id
 from .metadata import find_archive_icon_path
 
 logger = logging.getLogger(__name__)
@@ -383,12 +382,10 @@ class ArchiveContentStore:
                 return random_fallback_article(
                     self.index,
                     attempts=RANDOM_ARTICLE_ATTEMPTS,
-                    get_entry_fn=get_entry_by_id,
                 )
             return random_fallback_article(
                 _ArchiveOnly(self.ensure_archive()),
                 attempts=RANDOM_ARTICLE_ATTEMPTS,
-                get_entry_fn=get_entry_by_id,
             )
         finally:
             self._release()

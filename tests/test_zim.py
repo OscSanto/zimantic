@@ -131,7 +131,7 @@ class _Entry:
 
 
 class _Archive:
-    def _get_entry_by_id(self, index):
+    def get_entry_by_id(self, index):
         return _Entry()
 
 
@@ -168,7 +168,7 @@ def _pdf_archive(content: bytes, *, title: str = "Annual Report", path: str = "f
             return _PdfItem()
 
     class _PdfArchive:
-        def _get_entry_by_id(self, _index):
+        def get_entry_by_id(self, _index):
             return _PdfEntry()
 
     return _PdfArchive()
@@ -205,7 +205,7 @@ def _phet_archive(html: bytes, script: bytes, *, path: str, title: str):
             return _ScriptItem()
 
     class _PhetArchive:
-        def _get_entry_by_id(self, _index):
+        def get_entry_by_id(self, _index):
             return _HtmlEntry()
 
         def has_entry_by_path(self, requested):
@@ -458,7 +458,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _LargeItem()
 
         class _LargeArchive:
-            def _get_entry_by_id(self, index):
+            def get_entry_by_id(self, index):
                 return _LargeEntry()
 
         self.assertIsNone(read_entry(_LargeArchive(), 0, max_entry_bytes=99))
@@ -486,7 +486,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _EmptyItem()
 
         class _EmptyArchive:
-            def _get_entry_by_id(self, index):
+            def get_entry_by_id(self, index):
                 return _EmptyEntry()
 
         self.assertIsNone(read_entry(_EmptyArchive(), 0))
@@ -616,7 +616,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _PlainItem()
 
         class _PlainArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _PlainEntry()
 
         row = _read_entry(_PlainArchive(), 0)
@@ -642,7 +642,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _MarkdownItem()
 
         class _MarkdownArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _MarkdownEntry()
 
         row = _read_entry(_MarkdownArchive(), 0)
@@ -663,7 +663,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _TinyItem()
 
         class _TinyArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _TinyEntry()
 
         self.assertIsNone(read_entry(_TinyArchive(), 0))
@@ -687,7 +687,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _LicenseItem()
 
         class _LicenseArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _LicenseEntry()
 
         self.assertIsNone(read_entry(_LicenseArchive(), 0))
@@ -709,7 +709,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _ArticleItem()
 
         class _ArticleArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _ArticleEntry()
 
         row = _read_entry(_ArticleArchive(), 0)
@@ -733,7 +733,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _WordItem()
 
         class _WordArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _WordEntry()
 
         row = _read_entry(_WordArchive(), 0)
@@ -756,7 +756,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _AssetItem()
 
         class _AssetArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _AssetEntry()
 
         self.assertIsNone(read_entry(_AssetArchive(), 0))
@@ -782,7 +782,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _CheatsheetItem()
 
         class _CheatsheetArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _CheatsheetEntry()
 
         row = _read_entry(_CheatsheetArchive(), 0)
@@ -807,7 +807,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _LogoItem()
 
         class _LogoArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _LogoEntry()
 
         self.assertIsNone(read_entry(_LogoArchive(), 0))
@@ -829,7 +829,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _TemplateItem()
 
         class _TemplateArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _TemplateEntry()
 
         self.assertIsNone(read_entry(_TemplateArchive(), 0))
@@ -891,7 +891,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _ShellItem()
 
         class _ShellArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _ShellEntry()
 
         self.assertIsNone(read_entry(_ShellArchive(), 0))
@@ -981,7 +981,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _ScriptItem()
 
         class _PhetArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _PhetEntry()
 
             def has_entry_by_path(self, path):
@@ -1077,7 +1077,7 @@ class TextExtractionTests(unittest.TestCase):
                 return _MetaItem()
 
         class _MetaArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _MetaEntry()
 
         self.assertEqual(_read_entry(_MetaArchive(), 0)[2], "A short summary of the topic for search.")
@@ -1118,7 +1118,7 @@ class _DisambiguationEntry:
 
 
 class _DisambiguationArchive:
-    def _get_entry_by_id(self, _index):
+    def get_entry_by_id(self, _index):
         return _DisambiguationEntry()
 
 
@@ -1203,7 +1203,7 @@ class _JsonEntry:
 class _SpaArchive:
     """Minimal Archive exposing one app-shell article and its content JSON."""
 
-    def _get_entry_by_id(self, _index):
+    def get_entry_by_id(self, _index):
         return _HtmlEntry("Collected Poems", "index/page_42", SPA_STUB)
 
     def has_entry_by_path(self, path):
@@ -1229,7 +1229,7 @@ def _media_archive(stub, title, stub_path, companion_path, companion_body):
             return _SpaItem(stub)
 
     class _MediaArchive:
-        def _get_entry_by_id(self, _index):
+        def get_entry_by_id(self, _index):
             return _StubEntry()
 
         def has_entry_by_path(self, path):
@@ -1244,7 +1244,7 @@ def _media_archive(stub, title, stub_path, companion_path, companion_body):
 
 
 class _ShellArchive:
-    def _get_entry_by_id(self, _index):
+    def get_entry_by_id(self, _index):
         return _HtmlEntry("index.html", "index.html", SHELL_HTML)
 
 
@@ -1387,7 +1387,7 @@ class JavaScriptShellTests(unittest.TestCase):
                 return _SpaItem(stub)
 
         class _MarkdownArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _StubEntry()
 
             def has_entry_by_path(self, path):
@@ -1443,7 +1443,7 @@ class JavaScriptShellTests(unittest.TestCase):
                         return _SpaItem(stub)
 
                 class _MarkdownArchive:
-                    def _get_entry_by_id(self, _index):
+                    def get_entry_by_id(self, _index):
                         return _StubEntry()
 
                     def has_entry_by_path(self, path):
@@ -1490,7 +1490,7 @@ class JavaScriptShellTests(unittest.TestCase):
                 return _LoaderItem()
 
         class _LoaderArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _LoaderEntry()
 
         row = _read_entry(_LoaderArchive(), 0)
@@ -1522,7 +1522,7 @@ class JavaScriptShellTests(unittest.TestCase):
         first = _Redirect("A", "Alias title", second)
 
         class _ChainArchive:
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return first
 
         row = _read_entry(_ChainArchive(), 0)
@@ -1541,7 +1541,7 @@ class JavaScriptShellTests(unittest.TestCase):
             def __init__(self, stub):
                 self.stub = stub
 
-            def _get_entry_by_id(self, _index):
+            def get_entry_by_id(self, _index):
                 return _HtmlEntry(
                     "Alias", "content/page_1.html", self.stub
                 )

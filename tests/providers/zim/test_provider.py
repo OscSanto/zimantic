@@ -62,8 +62,6 @@ def test_native_order_preserves_ids_redirects_and_original_entry_cap(tmp_path):
 
     from zimantic.providers.zim.entries import ArchiveEntryProducer
 
-    if not hasattr(Archive, "iter_efficient"):
-        pytest.skip("native efficient iterator requires libzim 4.1")
     path = tmp_path / "ordered.zim"
     with Creator(path) as creator:
         creator.add_item(_Page("Zulu", "Zulu", ALPHA_HTML))
@@ -93,24 +91,6 @@ def test_native_order_preserves_ids_redirects_and_original_entry_cap(tmp_path):
         ) == capped_expected
     finally:
         capped.close()
-
-
-def test_older_bindings_use_id_order_but_cannot_resume_native_order(tmp_path):
-    from types import SimpleNamespace
-
-    from zimantic.providers.zim.entries import ArchiveEntryProducer
-
-    path = tmp_path / "older.zim"
-    path.write_bytes(b"fake")
-    archive = SimpleNamespace(entry_count=2)
-    producer = ArchiveEntryProducer(SimpleNamespace(key="old"), path, archive=archive)
-    try:
-        assert producer.prepare_iteration() == "id"
-        assert producer.prepare_iteration("id") == "id"
-        with pytest.raises(RuntimeError, match="requires libzim 4.1"):
-            producer.prepare_iteration("efficient-v1")
-    finally:
-        producer.close()
 
 
 def _context(index_dir: Path, *, archive_factory=Archive) -> ProviderContext:

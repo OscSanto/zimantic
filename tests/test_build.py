@@ -309,7 +309,7 @@ class BuildPipelineTests(unittest.TestCase):
             self.assertEqual(_meta(locator, _source())[DONE], "full")
             self.assertEqual(len(_docs(locator, _source())), 8)
 
-    def test_resume_keeps_old_id_order_and_rejects_changed_native_order(self):
+    def test_resume_requires_order_fingerprint_and_rejects_changed_order(self):
         rows = [EntryRecord(i, f"T{i}", "", f"p{i}") for i in range(4)]
 
         class OrderedProducer(Producer):
@@ -319,7 +319,7 @@ class BuildPipelineTests(unittest.TestCase):
                 self.requested_order = order
                 return order or "efficient-v1"
 
-        for legacy in (False, True):
+        for missing_manifest in (False, True):
             with tempfile.TemporaryDirectory() as tmp:
                 first = OrderedProducer(rows, interrupt_at=2)
                 with self.assertRaises(KeyboardInterrupt):
@@ -327,16 +327,18 @@ class BuildPipelineTests(unittest.TestCase):
                 directory = IndexLocator(tmp).source_directory(
                     "files", "files:test", "files:test:manual-0123"
                 )
-                if legacy:
+                if missing_manifest:
                     with sqlite3.connect(directory / "staging-fast.sqlite") as db:
                         db.execute("DELETE FROM meta WHERE key IN ('entry_order', 'entry_order_fingerprint')")
                 resumed = OrderedProducer(rows)
-                resumed.order_fingerprint = "order-b"
-                if legacy:
-                    locator = _build(resumed, tmp, fast=True)
-                    self.assertEqual(resumed.requested_order, "id")
-                    self.assertEqual(len(_docs(locator, _source())), 4)
+                if missing_manifest:
+                    with self.assertRaisesRegex(
+                        build_module.SnapshotChangedError,
+                        "no reading-order fingerprint",
+                    ):
+                        _build(resumed, tmp, fast=True)
                 else:
+                    resumed.order_fingerprint = "order-b"
                     with self.assertRaisesRegex(build_module.SnapshotChangedError, "reading order changed"):
                         _build(resumed, tmp, fast=True)
 

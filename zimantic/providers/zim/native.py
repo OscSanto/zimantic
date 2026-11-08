@@ -6,7 +6,6 @@ import threading
 from typing import Any, Sequence
 
 from ...indexing.types import NativeHit
-from ...libzim_compat import search_results
 
 
 class ZimNativeSearcher:
@@ -52,15 +51,15 @@ class ZimNativeSearcher:
 
         with self._lock:
             search = self._searcher.search(Query().set_query(query))
-            results = search_results(search, 0, count)
+            results = search.get_results(0, count)
         return [
             NativeHit(
-                path=str(result.get("path") or ""),
-                title=str(result.get("title") or ""),
+                path=str(result.path or ""),
+                title=str(result.title or ""),
                 rank=position,
             )
             for position, result in enumerate(results, 1)
-            if result.get("path")
+            if result.path
         ]
 
     def close(self) -> None:

@@ -177,20 +177,15 @@ class ArchiveEntryProducer:
     def prepare_iteration(self, order: str | None = None) -> str:
         """Keep canonical ids and caps while reading content in native order.
 
-        libzim 4.1 exposes iter_efficient(); older distro bindings retain id
-        order. Only metadata is read here, never compressed article bodies.
-        The cheap entries follow the article phase, whose progress has an ETA.
+        Only metadata is read here, never compressed article bodies. The cheap
+        entries follow the article phase, whose progress has an ETA.
         """
+        if order not in (None, "efficient-v1"):
+            raise ValueError(f"unsupported ZIM entry order {order!r}")
         self._order = None
         self.article_work_count = None
         self.order_fingerprint = ""
-        iterator = getattr(self._open(), "iter_efficient", None)
-        if order == "id" or not callable(iterator):
-            if order not in (None, "id"):
-                raise RuntimeError("resuming efficient order requires libzim 4.1")
-            return "id"
-        if order not in (None, "efficient-v1"):
-            raise ValueError(f"unsupported ZIM entry order {order!r}")
+        iterator = self._open().iter_efficient
         import numpy as np
 
         def entries():
@@ -209,9 +204,7 @@ class ArchiveEntryProducer:
         if len(ids) != self.count or not np.array_equal(
             np.sort(ids), np.arange(self.count, dtype=np.uint32)
         ):
-            if order is not None:
-                raise RuntimeError("native ZIM iterator no longer matches the resume manifest")
-            return "id"
+            raise RuntimeError("native ZIM iterator does not enumerate every archive entry")
         self._order = np.concatenate((ids[work], ids[~work]))
         self.article_work_count = int(work.sum())
         self.order_fingerprint = hashlib.sha256(self._order.tobytes()).hexdigest()

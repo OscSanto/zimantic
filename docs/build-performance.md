@@ -218,9 +218,9 @@ candidate matching and ranking remain unchanged.
   prefix ranges. The efficient ordering is intentionally unspecified publicly.
 - Use that native iterator, not the PR's raw entry-table parser. Canonical row
   ids and the original entry cap stay unchanged. Record the chosen order and
-  its digest; reject a changed native ordering on resume rather than applying
-  a saved storage ordinal to id order. Older interrupted builds/bindings keep
-  id order. Existing completed indexes are not invalidated just for this change.
+  its digest; reject a changed native ordering or an incomplete resume manifest
+  rather than applying a saved storage ordinal to a different order. Existing
+  completed indexes are not invalidated just for this change.
 - The PR's 512-*article* windows could retain arbitrarily many redirects or
   title-only rows. Retain bounded *row* windows and the existing shared body
   budget instead. Flush/drain before waiting for budget held by the same build.

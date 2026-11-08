@@ -751,7 +751,7 @@ When more than one ZIM is selected, the article toolbar shows separate previous/
 
 **Query threads.** The desktop default uses at most four usable physical cores, leaving one for other work (minimum one thread); this gives three on a four-core Pi 5/500. Mobile and supercomputer profiles retain two and eight. One thread is not a good serving default: longer queries benefited substantially from parallelism. More than four can help near-limit queries but hurt typical short searches; override `embed_threads` for that workload. These are balanced defaults, not a universal optimum for every model or device.
 
-With **python-libzim 4.1+**, ZIM builds use its native `iter_efficient()` (cluster-order) iterator. Article work is followed by a cheap redirects/assets phase without an ETA; article progress counts committed work rather than read-ahead entries. The order and its fingerprint are recorded for safe resume; older interrupted builds and older distro bindings retain id order. No raw ZIM-table parsing is needed. See [build performance and quality measurements](docs/build-performance.md).
+With **python-libzim 4.1+**, ZIM builds use its native `iter_efficient()` (cluster-order) iterator. Article work is followed by a cheap redirects/assets phase without an ETA; article progress counts committed work rather than read-ahead entries. The order and its fingerprint are recorded for safe resume; interrupted builds without that manifest must be rebuilt. No raw ZIM-table parsing is needed. See [build performance and quality measurements](docs/build-performance.md).
 
 **Disk space.** Keep about **20% of total ZIM file size** free when building indexes.
 

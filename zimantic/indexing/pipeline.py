@@ -1131,9 +1131,16 @@ def build_index(
             prepare = getattr(producer, "prepare_iteration", None)
             if callable(prepare):
                 recorded_order = state.meta.get(index_schema.ENTRY_ORDER)
-                order = prepare(recorded_order or ("id" if start else None))
+                recorded_fingerprint = state.meta.get(
+                    index_schema.ENTRY_ORDER_FINGERPRINT
+                )
+                if start and (not recorded_order or not recorded_fingerprint):
+                    raise SnapshotChangedError(
+                        f"{source.key}: staged index has no reading-order "
+                        "fingerprint; rebuild it"
+                    )
+                order = prepare(recorded_order)
                 order_fingerprint = getattr(producer, "order_fingerprint", "")
-                recorded_fingerprint = state.meta.get(index_schema.ENTRY_ORDER_FINGERPRINT)
                 if recorded_fingerprint and recorded_fingerprint != order_fingerprint:
                     raise SnapshotChangedError(
                         f"{source.key}: entry reading order changed; refusing an unsafe resume"
