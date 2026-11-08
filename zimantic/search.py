@@ -32,7 +32,7 @@ from .content.store import (
 from .contracts import SourceInfo, SourceResult
 from .diagnostics import private_locators, public_cause, sanitize_public_text
 from .providers.base import CollectionInfo, CollectionSnapshot, ProviderContext, SourceQuery
-from .providers.config import ProviderConfig, RuntimeConfig, ZimConfig
+from .providers.config import ProviderConfig, RuntimeConfig
 from .scoped_settings import resolve_settings, settings_key
 from .searching.config import (
     DEFAULT_MAX_ARTICLE_BYTES,
@@ -639,25 +639,8 @@ class Search:
             return self._library_source_index.get(str(identifier))
 
     def _configured_provider_entries(self) -> tuple[ProviderConfig, ...]:
-        runtime_config = getattr(self, "runtime_config", None)
-        if isinstance(runtime_config, RuntimeConfig) and (
-            runtime_config.collections or runtime_config.config_path is not None
-        ):
-            # An explicit empty collection list from a real config file is a
-            # valid empty configuration; never revive the historical zim_dir
-            # shorthand here.  A synthetic RuntimeConfig constructed for a
-            # direct Search caller/test has no config_path and may still use the
-            # internal zim_dir fallback below.
-            return tuple(runtime_config.collections)
-        # Compatibility for direct Search callers/tests that still pass the
-        # internal zim_dir setting. The TOML loader never accepts the flat key
-        # from users.  A Kiwix collection exists only through an explicit
-        # [[collections]] entry.
-        computed: list[ProviderConfig] = []
-        zim_dir = self.cfg.get("zim_dir")
-        if zim_dir:
-            computed.append(ZimConfig(name="library", path=str(zim_dir)))
-        return tuple(computed)
+        runtime_config = self.runtime_config
+        return tuple(runtime_config.collections) if runtime_config else ()
 
     def refresh_collections(self, *, wait: bool = False) -> list[dict[str, Any]]:
         """Rerun provider discovery for configured entries and publish snapshots."""

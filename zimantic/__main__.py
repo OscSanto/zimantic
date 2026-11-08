@@ -494,20 +494,6 @@ def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path
     return sorted(accepted, key=zim_sizes.__getitem__)
 
 
-def _configured_zim_roots(cfg: dict) -> list[Path]:
-    entries = cfg.get("collections") or ()
-    roots = [
-        Path(entry.path)
-        for entry in entries
-        if getattr(entry, "kind", None) == "zim"
-    ]
-    # The historical zim_dir fallback is only for a config with no explicit
-    # collections. A files-only config must not scan the default ZIM root.
-    if not roots and not entries and cfg.get("zim_dir"):
-        roots = [Path(cfg["zim_dir"])]
-    return roots
-
-
 def _configured_files_collections(cfg: dict) -> list:
     return [
         entry

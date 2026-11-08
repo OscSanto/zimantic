@@ -85,6 +85,14 @@ def _bare_search(cfg):
     return search
 
 
+def _zim_runtime_config(path):
+    from zimantic.providers.config import RuntimeConfig, ZimConfig
+
+    return RuntimeConfig(
+        collections=(ZimConfig(name="library", path=str(path)),)
+    )
+
+
 def _zim_source(key, title, **kwargs):
     kwargs.setdefault("searchable", True)
     return SourceInfo(key=key, provider="zim", title=title, **kwargs)
@@ -2990,10 +2998,8 @@ class SourceScopeTests(unittest.TestCase):
 
     def test_search_uses_an_in_memory_catalog_without_index_dir(self):
         with _temp_dir(self) as tmp:
-            zim_path = tmp / "manual.zim"
-            zim_path.write_bytes(b"not inspected")
             search = Search(
-                {"zim_dir": str(tmp)},
+                {"runtime_config": _zim_runtime_config(tmp)},
                 semantic=False,
                 archive_factory=object,
             )
@@ -3001,7 +3007,6 @@ class SourceScopeTests(unittest.TestCase):
 
             runtime = next(iter(search.runtimes.values()))
             self.assertEqual(runtime.catalog.db_path, Path(":memory:"))
-            self.assertEqual(search._scan_zim_paths(), {"manual": zim_path})
 
     def test_unknown_source_selection_is_a_client_error(self):
         with _temp_dir(self) as tmp:
@@ -3510,7 +3515,11 @@ class CatalogLocationTests(unittest.TestCase):
     def test_search_passes_its_archive_factory_to_the_catalog(self):
         with _temp_dir(self) as tmp:
             search = Search(
-                {"zim_dir": str(Path(tmp) / "missing")},
+                {
+                    "runtime_config": _zim_runtime_config(
+                        Path(tmp) / "missing"
+                    )
+                },
                 semantic=False,
                 archive_factory=object,
             )
@@ -3525,7 +3534,6 @@ class CatalogLocationTests(unittest.TestCase):
             index_dir.mkdir()
             cfg = {
                 "index_dir": str(index_dir),
-                "zim_dir": str(root / "zims"),
                 "candidate_count": 16,
                 "page_size": 50,
                 "max_results": 10,
@@ -3546,7 +3554,7 @@ class CatalogLocationTests(unittest.TestCase):
             )
             cfg = {
                 "index_dir": str(index_dir),
-                "zim_dir": str(index_dir),
+                "runtime_config": _zim_runtime_config(index_dir),
                 "candidate_count": 16,
                 "page_size": 10,
                 "max_results": 100,
