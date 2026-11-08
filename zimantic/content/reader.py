@@ -42,11 +42,14 @@ def resolve_archive_href(
     return normalize_archive_path(candidate)
 
 
-from libzim.reader import set_cluster_cache_max_size
-
-# libzim undercounts this cache: its 16 MB default really used ~170 MB.
-# 1 MB used ~4 MB and was not slower.
-set_cluster_cache_max_size(1 << 20)  # 1*2^20 = ~1MB
+try:
+    from libzim.reader import set_cluster_cache_max_size
+except ImportError:
+    pass
+else:
+    # libzim undercounts this cache: its 16 MB default really used ~170 MB.
+    # 1 MB used ~4 MB and was not slower.
+    set_cluster_cache_max_size(1 << 20)  # 1*2^20 = ~1MB
 
 # Best-effort budget for one entry parse (HTML or PDF). Parsers check a shared
 # deadline cooperatively during DOM traversal/PDF pages and return the partial

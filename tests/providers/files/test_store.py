@@ -12,6 +12,7 @@ from zimantic.content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
+from zimantic.providers.files import common as files_common
 from zimantic.providers.files.discovery import (
     discover_sources,
     files_dir_key,
@@ -140,6 +141,30 @@ def test_hidden_excluded_traversal_symlink_and_invalid_paths(tmp_path):
         assert store.resolve("algebra/assets/style.css").mimetype == "text/css"
     finally:
         store.close()
+
+
+def test_path_based_confinement_fallback_rejects_symlinks(tmp_path, monkeypatch):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "inside.txt").write_text("inside", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    link = root / "outside.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(files_common, "_no_follow_supported", lambda: False)
+
+    opened = files_common.open_confined(root, "inside.txt")
+    try:
+        assert opened.handle.read() == b"inside"
+    finally:
+        opened.handle.close()
+    with pytest.raises(files_common.FilesConfinedError):
+        files_common.confined_stat(root, "outside.txt")
+    with pytest.raises(files_common.FilesConfinedError):
+        files_common.open_confined(root, "outside.txt")
 
 
 def test_cross_source_asset_and_child_prefix(tmp_path):

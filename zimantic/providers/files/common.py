@@ -555,10 +555,52 @@ def _no_follow_supported() -> bool:
     )
 
 
+def _fallback_confined_path(
+    root_path: Path, parts: tuple[str, ...]
+) -> tuple[Path, os.stat_result]:
+    """Best-effort path check where descriptor-relative opens are unavailable.
+
+    Symlinks and reparse points are rejected, but path-based checks cannot
+    protect against concurrent filesystem replacement.
+    """
+    try:
+        root_info = os.lstat(root_path)
+        if (
+            not stat_module.S_ISDIR(root_info.st_mode)
+            or _is_reparse_point(root_info)
+        ):
+            raise FilesConfinedError("root is not a real directory")
+        root_real = Path(os.path.realpath(root_path))
+        current = root_path
+        info = root_info
+        for index, part in enumerate(parts):
+            current = current / part
+            info = os.lstat(current)
+            if _is_reparse_point(info):
+                raise FilesConfinedError("symlink or reparse point is not allowed")
+            if index < len(parts) - 1 and not stat_module.S_ISDIR(info.st_mode):
+                raise FilesConfinedError("path component is not a directory")
+        resolved = Path(os.path.realpath(current))
+        if not is_within(resolved, root_real):
+            raise FilesConfinedError("path resolves outside the configured root")
+        return current, info
+    except FilesConfinedError:
+        raise
+    except (OSError, ValueError) as error:
+        raise FilesConfinedError(str(error)) from error
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    reparse_point = getattr(info, "st_file_attributes", 0) & 0x400
+    return stat_module.S_ISLNK(info.st_mode) or bool(reparse_point)
+
+
 def confined_stat(root: Path | str, relative_path: str) -> os.stat_result:
     """``stat`` one collection-relative path without following symlinks."""
     root_path = Path(root)
     parts = path_components(relative_path)
+    if not _no_follow_supported():
+        return _fallback_confined_path(root_path, parts)[1]
     if not parts:
         try:
             return os.stat(root_path, follow_symlinks=False)
@@ -589,12 +631,6 @@ def confined_stat(root: Path | str, relative_path: str) -> os.stat_result:
             if current != root_fd:
                 os.close(current)
             os.close(root_fd)
-    # A check-then-open realpath fallback is not race-safe.  Fail closed rather
-    # than pretend confinement is enforced on a platform without descriptor-
-    # relative no-follow opens.
-    raise FilesConfinedError(
-        "race-safe filesystem confinement is unavailable on this platform"
-    )
 
 
 def open_confined(root: Path | str, relative_path: str) -> OpenedFile:
@@ -642,15 +678,28 @@ def open_confined(root: Path | str, relative_path: str) -> OpenedFile:
             if current != root_fd:
                 os.close(current)
             os.close(root_fd)
-    info = confined_stat(root_path, relative_path)
+    checked_path, info = _fallback_confined_path(root_path, parts)
     if not stat_module.S_ISREG(info.st_mode):
         raise FilesConfinedError("not a regular file")
-    path = Path(os.path.realpath(root_path)) / Path(*parts)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        fd = os.open(checked_path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
     except OSError as error:
         raise FilesConfinedError(str(error)) from error
-    return OpenedFile(os.fdopen(fd, "rb"), os.fstat(fd))
+    owned_fd: int | None = fd
+    try:
+        opened_info = os.fstat(fd)
+        if (
+            not stat_module.S_ISREG(opened_info.st_mode)
+            or (opened_info.st_dev, opened_info.st_ino)
+            != (info.st_dev, info.st_ino)
+        ):
+            raise FilesConfinedError("file changed while it was being opened")
+        handle = os.fdopen(fd, "rb")
+        owned_fd = None
+        return OpenedFile(handle, opened_info)
+    finally:
+        if owned_fd is not None:
+            os.close(owned_fd)
 
 
 def list_directory(root: Path | str, relative_dir: str = "") -> list[os.DirEntry]:
