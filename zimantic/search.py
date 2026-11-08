@@ -408,6 +408,8 @@ class Search:
 
     def _bind_runtime(self, runtime: CollectionRuntime) -> None:
         """Give a provider runtime the core-owned search services it needs."""
+        if isinstance(runtime, IsolatedFulltextRuntime):
+            runtime.set_fulltext_pool(self.fulltext_pool)
         if not isinstance(runtime, IndexedRuntime):
             return
         runtime.bind_search(
@@ -499,15 +501,30 @@ class Search:
         threading.Thread(target=_load, name="zimantic-faiss", daemon=True).start()
 
     def start_fulltext_isolation(self) -> None:
-        """Run native full-text searches in helper processes, per runtime."""
-        from .fulltext import DEFAULT_WORKERS
+        """Share one bounded native-search pool across ZIM collections."""
+        from .fulltext import FulltextPool
+        from .settings import default_fulltext_workers
 
-        workers = min(DEFAULT_WORKERS, max(1, self.source_workers))
         with self._state_lock:
-            runtimes = list(self.runtimes.values())
-        for runtime in runtimes:
-            if isinstance(runtime, IsolatedFulltextRuntime):
-                runtime.start_fulltext_isolation(workers)
+            if self._closed:
+                return
+            runtimes = [
+                runtime for runtime in self.runtimes.values()
+                if isinstance(runtime, IsolatedFulltextRuntime)
+            ]
+            if self.fulltext_pool is None:
+                configured = self.cfg.get("fulltext_workers")
+                workers = (
+                    configured if isinstance(configured, int)
+                    and not isinstance(configured, bool) and configured > 0
+                    else default_fulltext_workers(source_workers=self.source_workers)
+                )
+                self.fulltext_pool = FulltextPool(workers)
+                logger.info(
+                    "zimantic: native full-text budget: %d shared helper slot(s)", workers
+                )
+            for runtime in runtimes:
+                runtime.set_fulltext_pool(self.fulltext_pool)
 
     def reload(
         self, *, scan_catalog: bool = True, refresh: bool = True

@@ -26,6 +26,8 @@ zimantic catalog                      # library metadata and absolute backing pa
 zimantic catalog "wikipedia" --provider zim --media-type text
 zimantic catalog --collection modules --relative --json
 zimantic catalog --limit 20 --offset 20  # second page of title-sorted entries
+zimantic diagnose zims/               # isolated native-search smoke tests
+zimantic diagnose zims/x.zim --checksum --query hawaii --json
 zimantic prune --dry-run              # report orphaned Zimantic indexes
 zimantic prune --yes                  # delete only those under the build lock
 zimantic serve                        # web page; unindexed ZIMs use native full-text search
@@ -78,6 +80,41 @@ The scope is read-only and process-scoped. `open` never builds, resumes, publish
 When more than one ZIM is selected, the article toolbar shows separate previous/next ZIM arrows. They open the adjacent archive's homepage in command-line order and wrap at both ends. These arrows are independent of the search-result and parent-page arrows. They also appear in error shells. `--fast` disables the model and FAISS for this process, just like `serve --fast`; without it, title and full-text search work immediately while semantic search may become available when the model is ready.
 
 `zimantic serve` continues to use the persistent catalog, configured collections, PID file, and SIGHUP reload behavior. Stop the `open` process with Ctrl-C or SIGTERM; it closes its indexes and removes nothing from the user's library.
+
+## Diagnosing ZIM archives
+
+`zimantic diagnose` opens each named archive in a disposable helper, optionally
+checks its checksum, and iterates native search results:
+
+```bash
+zimantic diagnose zims/
+zimantic diagnose zims/osm-hawaii-2026-09-26.zim --query hawaii --checksum
+zimantic diagnose a.zim b.zim --query water --query history --json
+```
+
+Files and recursively expanded folders are deduplicated, with at most
+`--max-sources` archives (64 by default). The command does not load configuration,
+models or FAISS, start a server, or write catalogs/indexes. It processes archives
+one at a time so a crash cannot hide reports for the remaining files.
+
+Default probes are `water`, `history`, and `science`; repeat `--query` to replace
+them, especially with the query that failed in the server. Each probe iterates
+up to `--limit` results (16 by default). `--checksum` reads the entire archive.
+`--timeout` bounds all checks on each archive (30 seconds by default).
+An archive without native full-text search is reported explicitly, not treated
+as corrupt.
+
+The exit status is zero when all selected archives pass, and one for any
+error, crash, timeout, or resource kill. JSON reports contain an `archives`
+array with the path, status, checks, elapsed time, and failure diagnostics.
+On failure, stderr breadcrumbs identify the archive and last native operation.
+SIGKILL is reported as a possible resource limit, not proof of corruption.
+Like `catalog`, this CLI output intentionally includes private paths.
+
+These are smoke tests, not a guarantee for every query. A valid checksum
+does not imply a logically consistent full-text index: the Hawaii archive
+passed its checksum and still aborted during result iteration for `hawaii`.
+Diagnostics are on demand, not an expensive mandatory startup scan.
 
 ## Build behavior and locking
 
@@ -180,4 +217,6 @@ Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` 
 
 For large libraries, `search_workers` controls how many ZIM indexes are searched in parallel. `max_stream_ranks` limits completion-spaced intermediate ranking passes. Timed snapshots are additionally emitted about every 700 ms so a slow query keeps updating, and the final result still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. The automatic profiles use 8 workers and 16 completion-spaced passes on desktops, and 2 workers and 8 passes on low-memory devices.
 
-Native ZIM full-text search uses reusable helper processes, capped at `min(4, search_workers)` per ZIM collection, rather than running libzim in the server's source threads. With libzim 4.1.0, malformed full-text results can abort the interpreter, and reader calls hold the GIL. Helpers both contain those crashes and provide real native-search parallelism: a four-worker benchmark was 3.4–4 times faster than threads, at a higher memory cost. A native crash logs the archive basename and disables that archive's native search until reload; other available channels remain usable. Budget memory for the server and its helpers. See [the architecture rationale and benchmark](architecture.md#native-zim-full-text-search-uses-helper-processes).
+Native ZIM full-text search uses one reusable helper pool shared across all ZIM collections, rather than running libzim in the server's source threads. `fulltext_workers` sets its server-wide budget independently of `search_workers`; when omitted, CPU affinity/quota and available RAM (including cgroup limits) determine the budget. Explicit positive values override that estimate. Restart the server after changing it.
+
+With libzim 4.1.0, malformed full-text results can abort the interpreter, and reader calls hold the GIL. Helpers both contain those crashes and provide real native-search parallelism: a four-worker benchmark was 3.4–4 times faster than threads, at a higher memory cost. A native crash logs the archive basename and disables that archive's native search until reload; other available channels remain usable. A helper killed by SIGKILL, including a cgroup OOM kill, does not blacklist the archive. Budget memory for the server and its helpers. See [the architecture rationale and benchmarks](architecture.md#native-zim-full-text-search-uses-helper-processes).

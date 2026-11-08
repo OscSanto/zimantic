@@ -53,3 +53,49 @@ opening `review-key.json`. Archive decompression and file I/O are excluded.
 
 See [the November 7 results](results/html-parsers-2026-11-07.json) and
 [quality/memory caveats](../../docs/build-performance.md#html-parser-comparison-november-7-2026).
+
+## Native-search worker budgets
+
+`run_native.py` compares 1, 2, 4, 8, and automatically budgeted helpers under
+transient `systemd-run --user` services. A working systemd user manager with
+CPU and memory controllers is required; it does not require root:
+
+```sh
+uv run python tests/benchmarks/run_native.py \
+    zims/wikipedia_en_top_mini_2026-09.zim \
+    zims/wikipedia_en_geography_maxi_2026-07.zim \
+    zims/wikisource_en_all_nopic_2026-09.zim \
+    zims/libretexts.org_en_stats_2026-01.zim \
+    --legacy --output tests/benchmarks/results/native-workers.json
+```
+
+`--limits` accepts CPU-quota:RAM-MiB pairs, such as `1:512 2:1024`.
+Each trial caps CPU time, sets `MemoryMax` and `MemorySwapMax=0`, disables
+core dumps, and limits service runtime to 90 seconds. `--legacy` also measures
+two helpers per collection, reproducing the old multiplicative budget.
+Trials run sequentially and their transient units are collected.
+
+The fixed 12-query mix has a 16-hit limit, eight source threads, one 96-search
+warm-up and 96 measured searches, with two fresh-service trials per
+configuration. `--workers`, `--source-workers`, `--requests`, and `--repeats`
+are adjustable. `--resident-mib 256` touches and retains a 256 MiB allocation
+after resolving the automatic budget, simulating server/model residency.
+Reports preserve observed cgroup CPU/RAM budgets, search
+throughput/p50/p95, CPU throttling, cgroup memory peaks and OOM counters,
+sampled process-tree PSS, failures, and exact-result digest agreement.
+Durations include backend queue waits but not time queued in the source executor.
+
+These are native-search microbenchmarks, not whole-server memory or
+Raspberry Pi performance guarantees. They do not load models/FAISS or hydrate
+previews. OS caches remain warm: the harness never drops shared host caches,
+and cached file pages can be charged outside the service's cgroup.
+MemoryMax therefore tests cgroup-accounted memory pressure, not every
+physical page used by the archive. PSS is reported separately.
+
+See the [native-only matrix](results/native-workers-2026-11-08.json),
+[resident-headroom matrix](results/native-budgets-2026-11-08.json), and
+[interpretation and limit audit](../../docs/architecture.md#constrained-workerbudget-comparison-november-8-2026).
+The native-only matrix records the initial four-helper automatic ceiling;
+the headroom matrix uses the revised eight-helper ceiling. Additional
+[short failure-report validation](results/native-oom-2026-11-08.json)
+retains systemd's termination result when the probe cannot finish.

@@ -10,6 +10,7 @@ from .scoped_settings import SCOPED_KEYS, parse_scoped_settings
 from .searching.config import DEFAULT_MAX_ARTICLE_BYTES
 
 DEFAULT_EMBEDDING_TOKENS = 256
+MAX_AUTO_FULLTEXT_WORKERS = 8
 
 # Accepted embed_device values. Kept here (instead of embed.py) so config values
 # are validated at load time, before a model is loaded and even in --fast mode.
@@ -33,8 +34,8 @@ EMBED_DEVICES = frozenset(
 # fall back to the profile that matches the machine running Zimantic.
 # Keys that do not differ per machine live in _COMMON; each profile only
 # overrides the tuning keys that vary (memory, parallelism, cache and
-# result-pool sizes). build_workers and embedding_workers are deliberately not
-# profile keys: load_config computes them from the host unless the user sets them.
+# result-pool sizes). Build, embedding and full-text worker counts are computed
+# from the host by load_config unless the user sets them.
 _COMMON = {
     "model_dir": "./model/int8",
     "index_dir": "./indexes",
@@ -130,6 +131,7 @@ KNOWN_KEYS = (
         "nprobe",
         "build_workers",
         "embedding_workers",
+        "fulltext_workers",
         "collection_source_limit",
     }
 )
@@ -139,6 +141,7 @@ _OPTIONAL_INT_KEYS = frozenset(
         "nprobe",
         "build_workers",
         "embedding_workers",
+        "fulltext_workers",
         "collection_source_limit",
     }
 )
@@ -287,6 +290,25 @@ def default_embedding_workers(
     return min(8, cpu_limit, memory_limit)
 
 
+def default_fulltext_workers(
+    cores: int | None = None,
+    memory_gb: float | None = None,
+    *,
+    source_workers: int | None = None,
+) -> int:
+    """Budget the shared native-search pool, including cgroup limits."""
+    from .hardware import detect
+
+    hw = detect() if cores is None or memory_gb is None else None
+    cpu_limit = max(1, cores if cores is not None else hw.threads)
+    if source_workers is not None:
+        cpu_limit = min(cpu_limit, max(1, source_workers))
+    available = int(memory_gb * (1 << 30)) if memory_gb is not None else hw.ram_available
+    # Leave room for the server/model; native working sets vary by archive.
+    memory_limit = max(1, (available - (256 << 20)) // (128 << 20))
+    return min(MAX_AUTO_FULLTEXT_WORKERS, cpu_limit, memory_limit)
+
+
 def profile_for_hardware() -> str:
     """Pick mobile/desktop/supercomputer from a simple hardware heuristic."""
     cores = os.cpu_count() or 1
@@ -406,9 +428,9 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # Use the validated values in ``cfg``, not the raw user mapping: an
     # invalid worker type is skipped above and must still get a computed
     # default instead of leaving the key missing.
-    for key in ("build_workers", "embedding_workers", "build_embed_threads", "embedding_batch_tokens"):
+    for key in ("build_workers", "embedding_workers", "fulltext_workers", "build_embed_threads", "embedding_batch_tokens"):
         if key in cfg and (not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1):
-            if key in {"build_workers", "embedding_workers"}:
+            if key in {"build_workers", "embedding_workers", "fulltext_workers"}:
                 warn(
                     f"zimantic: warning: config key {key!r} in {config_path} "
                     "must be at least 1; using the automatic default"
@@ -429,6 +451,10 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
             build_workers=build_workers if isinstance(build_workers, int) else None,
             build_embed_threads=build_embed_threads if isinstance(build_embed_threads, int) else None,
             token_budget=cfg["embedding_batch_tokens"],
+        )
+    if "fulltext_workers" not in cfg:
+        cfg["fulltext_workers"] = default_fulltext_workers(
+            source_workers=cfg["search_workers"]
         )
     # Every collection is explicit.  A missing or empty config is an explicitly
     # empty library, not an implicit scan of the historical zim_dir default.

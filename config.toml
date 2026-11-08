@@ -198,6 +198,10 @@ port = 8090
 # wall-clock time when many ZIMs are on separate storage, but increase
 # concurrent I/O and SQLite connections.
 # search_workers = 8
+# Server-wide native ZIM helper budget, shared by every collection. Independent
+# of search_workers. Omit to budget from CPU affinity/quota and available RAM.
+# A positive explicit value overrides the automatic budget; benchmark increases.
+# fulltext_workers = 2
 # Maximum simultaneous user searches. Desktop 4, mobile 2, supercomputer 8.
 # Several people can search at once up to this many; each search may still use
 # all source workers. Lower it on a Pi.

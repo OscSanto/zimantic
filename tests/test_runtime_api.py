@@ -83,6 +83,17 @@ class LibzimRuntimeApiTests(unittest.TestCase):
         self.assertTrue(entry.path)
         self.assertTrue(entry.title)
 
+    def test_diagnostic_helper_checks_checksum_and_native_results(self):
+        from zimantic.diagnose import diagnose_archive
+
+        before = self.zim_path.read_bytes()
+        report = diagnose_archive(self.zim_path, queries=["tires"], checksum=True)
+        self.assertEqual(report["status"], "ok", report)
+        self.assertTrue(report["checksum_checked"])
+        if self.archive.has_fulltext_index:
+            self.assertGreater(report["searches"][0]["hits"], 0)
+        self.assertEqual(self.zim_path.read_bytes(), before)
+
     def test_private_entry_index_matches_path_lookup(self):
         entry = get_entry_by_id(self.archive, 0)
         by_path = self.archive.get_entry_by_path(entry.path)

@@ -279,10 +279,10 @@ class EnrichingRuntime(ABC):
 
 
 class IsolatedFulltextRuntime(ABC):
-    """Declared capability for helper-process native full-text search."""
+    """A runtime that borrows the core-owned native full-text pool."""
 
     @abstractmethod
-    def start_fulltext_isolation(self, workers: int | None = None) -> None: ...
+    def set_fulltext_pool(self, pool: Any | None) -> None: ...
 
 
 @runtime_checkable

@@ -180,6 +180,23 @@ def _open(tmp_path: Path, root: Path, *, index_dir: Path | None = None):
     return config, batch, runtime
 
 
+def test_runtime_borrows_pool_without_closing_or_resetting_other_sources(tmp_path):
+    from unittest.mock import Mock
+
+    _create_zim(tmp_path / "manual.zim")
+    _config, batch, runtime = _open(tmp_path, tmp_path / "manual.zim")
+    pool = Mock()
+    runtime.set_fulltext_pool(pool)
+    try:
+        runtime.refresh(wait=True)
+        pool.clear_broken.assert_not_called()
+        runtime.close()
+        pool.close.assert_not_called()
+    finally:
+        runtime.close()
+        batch.close()
+
+
 def test_source_key_uses_basename_for_a_single_file_collection(tmp_path):
     zims = tmp_path / "zims"
     zims.mkdir()

@@ -114,20 +114,115 @@ validation alone cannot prove that every native search query is safe.
 
 ### Worker budget
 
-Each ZIM runtime lazily starts at most `min(4, search_workers)` helpers.
-The default desktop profile therefore permits four; the mobile profile
-permits two. Each helper caches at most four archive/searcher pairs.
-Multiple ZIM collections have separate pools, so their memory costs can
-accumulate. Deployment budgets must include helpers, not just the server's
-own RSS.
+`Search` owns one helper pool shared by every ZIM collection. Runtimes borrow
+it, including newly discovered runtimes after reload; closing a collection
+does not close the shared pool. Server shutdown stops its helpers and cancels
+queued source work without allowing the closed pool to spawn replacements.
+Slots are configured even when startup discovery has no usable ZIM sources;
+subprocesses start only when native search first uses those slots.
+Each helper still caches at most four archive/searcher pairs. Deployment
+budgets must include helpers, not just the server's own RSS.
 
-Keep the current caps: this comparison supports using processes and shows
-useful scaling from one to four workers, but does not establish an optimum
-at two or eight workers, on low-memory hardware, or for cold storage.
-Reducing `search_workers` also reduces other source scheduling, not just
-native ZIM concurrency. Reconsider the process/thread choice only after
-testing bindings that both translate the relevant exceptions and release
-the GIL; fixing only one of those leaves the other reason intact.
+`fulltext_workers` is an independent global setting, not a multiplier per
+collection. Its automatic budget uses usable CPU threads, source-executor
+capacity, and available RAM, including ancestor cgroup quotas and
+memory limits, with a ceiling of eight helpers. The estimate reserves
+256 MiB for the server/model and
+128 MiB per helper, always permitting at least one helper. This is a
+conservative heuristic, not an OOM guarantee for arbitrary archives or models.
+An explicit positive integer overrides the automatic budget, including its
+CPU, memory, source-thread and eight-helper bounds. Allocating more native
+helpers than source threads usually wastes cache memory without increasing
+parallelism.
+The estimate retains server/model headroom even in `--fast` mode; a
+lexical-only deployment can override it after measuring its full memory use.
+
+Resource kills must not masquerade as archive corruption. Native fatal
+signals such as SIGABRT and SIGSEGV disable the offending archive's native
+search until reload, but SIGKILL/SIGTERM do not blacklist it. Periodic
+collection refresh does not reset the shared broken-archive set.
+
+Reconsider the process/thread choice only after testing bindings that both
+translate the relevant exceptions and release the GIL; fixing only one of
+those leaves the other reason intact. On-demand
+[`zimantic diagnose`](usage.md#diagnosing-zim-archives) uses disposable
+helpers for checksum and query probes, without delaying startup.
+
+### Constrained worker/budget comparison, November 8, 2026
+
+[`run_native.py`](../tests/benchmarks/run_native.py) ran 132 full-workload trials
+over the same four archives and query mix, with eight source threads, 96
+warm-up searches and 96 measured searches per trial. Each configuration had
+two fresh systemd user services. CPUQuota simulated 1, 2, 4, or 8 usable
+CPUs; MemoryMax ranged from 256 MiB to 2 GiB, with swap disabled.
+The services were isolated and collected after each run; host caches were
+not dropped. This simulates resource budgets, not Raspberry Pi instruction
+speed, storage, or complete web-server performance.
+
+The [native-only matrix](../tests/benchmarks/results/native-workers-2026-11-08.json)
+used the initial four-helper automatic ceiling:
+
+| CPU quota | MemoryMax | 1 helper: searches/s | 2 helpers | 4 helpers | 8 helpers |
+|---|---:|---:|---:|---:|---:|
+| 1 CPU | 256 MiB | 47 | 47 | failed | failed |
+| 1 CPU | 512 MiB | 48 | 47 | 45 | failed |
+| 2 CPUs | 512 MiB | 48 | 94 | 93 | failed |
+| 2 CPUs | 1 GiB | 48 | 92 | 89 | 75 |
+| 4 CPUs | 1 GiB | 49 | 92 | 169 | 157 |
+| 8 CPUs | 2 GiB | 49 | 93 | 175 | 294 |
+
+Values are medians of successful trials. Extra helpers beyond the CPU quota
+provided no benefit or reduced throughput, while increasing memory.
+Eight helpers on eight CPUs did improve throughput substantially, so the
+automatic ceiling increased from four to eight, bounded by CPU, source-thread
+capacity, and memory rather than an unconditional eight-process default.
+Counts above eight remain explicit overrides, not a measured recommendation.
+
+The [headroom matrix](../tests/benchmarks/results/native-budgets-2026-11-08.json)
+then retained 256 MiB of touched anonymous memory to simulate server/model
+residency and checked the revised automatic budget:
+
+| CPU quota | MemoryMax | Automatic helpers | Searches/s | Median peak cgroup memory |
+|---|---:|---:|---:|---:|
+| 1 CPU | 512 MiB | 1 | 48 | 376 MiB |
+| 2 CPUs | 512 MiB | 1 | 48 | 390 MiB |
+| 4 CPUs | 1 GiB | 4 | 172 | 656 MiB |
+| 8 CPUs | 1 GiB | 5 | 211 | 756 MiB |
+| 8 CPUs | 2 GiB | 8 | 289 | 1,020 MiB |
+
+All automatic trials completed. Two helpers also worked at 2 CPUs/512 MiB
+(93 searches/s), but their approximately 466 MiB cgroup peak left little
+room for variable model work, previews, and indexes. The conservative
+automatic budget keeps one there. Four/eight helpers failed at 512 MiB,
+and eight failed at 1 GiB with the resident allocation.
+
+Sharing also improved utilization at the same total helper count. On
+8 CPUs/2 GiB with the resident allocation, one shared eight-helper pool
+managed 295 searches/s versus 197 for four per-collection two-helper pools.
+The old per-collection allocation failed under smaller limits. Native-only
+OOM counters confirmed killed helpers without blacklisting any archive.
+When the service itself was killed before completing, the report preserves
+that failure rather than inventing throughput or memory measurements.
+Successful result digests agreed across both matrices.
+
+Cgroup peaks include all memory charged to the service, but warm cached
+archive pages may remain charged elsewhere. Process-tree PSS is recorded
+separately. These measurements are a budget heuristic, not a guarantee that
+arbitrary archives, models, or concurrent article reads fit the same limits.
+
+### Other limits containing four
+
+The old native process ceiling was a heuristic, not a requirement of libzim
+or Python. It is now centralized in the automatic budget and has no duplicate
+standalone-pool ceiling. Other fours measure different work and should not
+be changed together:
+
+| Setting or limit | Meaning | Current rationale |
+|---|---|---|
+| `MAX_CACHED_ARCHIVES = 4` | Archive/searcher pairs cached by each helper | Bounds retained handles and memory; the four-archive workload does not establish an optimum for larger libraries, so this LRU cap is not retuned |
+| `max_concurrent_searches = 4` on desktop | Admitted user searches, not native processes | Bounds model work, previews, and request backlog; configurable and separate from this benchmark |
+| Desktop query embedding threads capped at four | ONNX threads per query | Short-query synchronization tradeoff; `embed_threads` overrides it, and [embedding measurements](usage.md#build-behavior-and-locking) are separate |
+| Automatic build worker CPU/RAM divisors of four | Approximately four CPU threads/four GiB per source build | A build resource heuristic, not a four-worker maximum; unrelated to the native-search pool |
 
 ## Resource limits and status
 

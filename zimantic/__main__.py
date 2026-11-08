@@ -246,6 +246,36 @@ def _make_parser() -> argparse.ArgumentParser:
         help="reject folders with more than N archives (default: 64)",
     )
 
+    diagnose_cmd = commands.add_parser(
+        "diagnose", help="check named ZIM files in disposable crash-isolated helpers"
+    )
+    _add_verbosity_argument(diagnose_cmd)
+    diagnose_cmd.add_argument(
+        "paths", nargs="+", type=Path, metavar="PATH",
+        help="ZIM file or folder; does not load config or write indexes/catalogs",
+    )
+    diagnose_cmd.add_argument(
+        "--query", action="append", metavar="TEXT",
+        help="native-search probe; repeatable (default: water, history, science)",
+    )
+    diagnose_cmd.add_argument(
+        "--checksum", action="store_true",
+        help="also verify the archive checksum (reads the entire archive)",
+    )
+    diagnose_cmd.add_argument(
+        "--timeout", type=float, default=30.0, metavar="SECONDS",
+        help="time limit for all checks on each archive (default: 30)",
+    )
+    diagnose_cmd.add_argument(
+        "--limit", type=int, default=16, metavar="N",
+        help="iterate up to N native hits per probe (default: 16)",
+    )
+    diagnose_cmd.add_argument("--json", action="store_true", help="write reports as JSON")
+    diagnose_cmd.add_argument(
+        "--max-sources", type=int, default=64, metavar="N",
+        help="reject selections with more than N archives (default: 64)",
+    )
+
     build = commands.add_parser(
         "build", help="build indexes for configured collections or selected ZIM files"
     )
@@ -1570,6 +1600,51 @@ def _run_sources(args, cfg: dict) -> None:
         result.close()
 
 
+def _run_diagnose(args, parser: argparse.ArgumentParser) -> None:
+    import json
+    import math
+
+    from .diagnose import DEFAULT_QUERIES, diagnose_archive
+    from .open_scope import OpenScopeError, expand_open_paths
+
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("--timeout must be a finite positive number")
+    if args.limit < 1:
+        parser.error("--limit must be positive")
+    queries = args.query if args.query is not None else DEFAULT_QUERIES
+    if any(not query.strip() for query in queries):
+        parser.error("--query must not be empty")
+    try:
+        paths = expand_open_paths(args.paths, max_sources=args.max_sources)
+    except OpenScopeError as error:
+        parser.error(str(error))
+    reports = []
+    for path in paths:
+        logger.info("zimantic: checking %s", path.name)
+        report = diagnose_archive(
+            path, queries=queries, checksum=args.checksum,
+            timeout=args.timeout, count=args.limit,
+        )
+        reports.append(report)
+        if not args.json:
+            if report["status"] == "ok":
+                probes = report.get("searches", [])
+                search = (
+                    f"{len(probes)} search probe(s), {sum(item['hits'] for item in probes)} hit(s)"
+                    if report.get("has_fulltext_index") else "no native full-text index"
+                )
+                checksum = "checksum verified" if report["checksum_checked"] else "checksum not checked"
+                print(f"OK {path.name}: {search}; {checksum}", flush=True)
+            else:
+                print(f"{report['status'].upper()} {path.name}: {report['error']}", flush=True)
+                if report.get("diagnostics"):
+                    print(report["diagnostics"].rstrip(), file=sys.stderr)
+    if args.json:
+        print(json.dumps({"archives": reports}, indent=2, ensure_ascii=False))
+    if any(report["status"] != "ok" for report in reports):
+        raise SystemExit(1)
+
+
 def _run_catalog(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     import json
 
@@ -2138,6 +2213,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_sources(args, cfg)
         elif args.command == "catalog":
             _run_catalog(args, cfg, parser)
+        elif args.command == "diagnose":
+            _run_diagnose(args, parser)
         elif args.command == "prune":
             _run_prune(args, cfg, parser)
         elif args.command == "model":

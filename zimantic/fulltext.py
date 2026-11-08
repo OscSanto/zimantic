@@ -17,6 +17,7 @@ import atexit
 import json
 import logging
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -32,19 +33,17 @@ def _archive_name(path: str | None) -> str:
     return Path(str(path or "")).name or "<archive>"
 
 _WORKER_MODULE = "zimantic.fulltext_worker"
-# Worker processes are relatively cheap (one archive cache each), but they are
-# still extra interpreters. Four is enough to hide most of the IPC latency
-# without duplicating every archive on a small host.
-DEFAULT_WORKERS = 4
 FULLTEXT_TIMEOUT_SECONDS = 30.0
 
 
 class _Worker:
     """One helper process, used by one search thread at a time."""
 
-    def __init__(self) -> None:
+    def __init__(self, closed: threading.Event) -> None:
         self._process: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
+        self._process_lock = threading.Lock()
+        self._closed = closed
         self._archive_failure = False
 
     @property
@@ -58,20 +57,27 @@ class _Worker:
             and process.poll() is not None
             and process.returncode is not None
             and process.returncode < 0
+            and -process.returncode in {
+                getattr(signal, name, None)
+                for name in ("SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE")
+            }
         )
 
     def _ensure_process(self) -> subprocess.Popen[str]:
-        if self._process is None or self._process.poll() is not None:
-            self._process = subprocess.Popen(
-                [sys.executable, "-m", _WORKER_MODULE],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                # Inherit stderr so an abort message still reaches the server log.
-                stderr=None,
-                text=True,
-                bufsize=1,
-            )
-        return self._process
+        with self._process_lock:
+            if self._closed.is_set():
+                raise OSError("native full-text pool is closed")
+            if self._process is None or self._process.poll() is not None:
+                self._process = subprocess.Popen(
+                    [sys.executable, "-m", _WORKER_MODULE],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    # Inherit stderr so an abort message still reaches the server log.
+                    stderr=None,
+                    text=True,
+                    bufsize=1,
+                )
+            return self._process
 
     def search(
         self,
@@ -140,6 +146,8 @@ class _Worker:
                 self._archive_failure = self._process_was_aborted(process)
                 line = ""
             if not line:
+                if self._closed.is_set():
+                    return None
                 self._archive_failure |= self._process_was_aborted(process)
                 logger.warning(
                     "zimantic: native full-text worker exited without a response "
@@ -177,8 +185,9 @@ class _Worker:
             ]
 
     def close(self) -> None:
-        process = self._process
-        self._process = None
+        with self._process_lock:
+            process = self._process
+            self._process = None
         if process is None:
             return
         try:
@@ -205,12 +214,17 @@ class _Worker:
 class FulltextPool:
     """A small pool of helper processes for native full-text searches."""
 
-    def __init__(self, workers: int = DEFAULT_WORKERS) -> None:
+    def __init__(self, workers: int | None = None) -> None:
+        if workers is None:
+            from .settings import default_fulltext_workers
+
+            workers = default_fulltext_workers()
         count = max(1, int(workers))
+        self._closed = threading.Event()
         self._idle: queue.Queue[_Worker] = queue.Queue()
         self._all: list[_Worker] = []
         for _ in range(count):
-            worker = _Worker()
+            worker = _Worker(self._closed)
             self._all.append(worker)
             self._idle.put(worker)
         self._broken: set[str] = set()
@@ -242,7 +256,7 @@ class FulltextPool:
         version: object = None,
     ) -> list[dict[str, str]] | None:
         """Return result paths and titles from one helper process."""
-        if self.is_broken(zim_path):
+        if self._closed.is_set() or self.is_broken(zim_path):
             return None
         try:
             worker = self._idle.get(timeout=FULLTEXT_TIMEOUT_SECONDS)
@@ -253,8 +267,13 @@ class FulltextPool:
             )
             logger.debug("full-text worker unavailable for %s", zim_path)
             return None
+        archive_failure = False
         try:
-            results = worker.search_results(zim_path, query, count, version)
+            results = (
+                None if self._closed.is_set()
+                else worker.search_results(zim_path, query, count, version)
+            )
+            archive_failure = worker.archive_failure
         except Exception as error:  # never let helper plumbing fail a search
             logger.warning(
                 "zimantic: full-text helper failed for %s: %s",
@@ -265,7 +284,7 @@ class FulltextPool:
             results = None
         finally:
             self._idle.put(worker)
-        if results is None and worker.archive_failure:
+        if results is None and archive_failure and not self._closed.is_set():
             with self._broken_lock:
                 first_failure = zim_path not in self._broken
                 self._broken.add(zim_path)
@@ -285,6 +304,8 @@ class FulltextPool:
             self._broken.clear()
 
     def close(self) -> None:
+        self._closed.set()
+        atexit.unregister(self.close)
         for worker in self._all:
             worker.close()
         with self._broken_lock:

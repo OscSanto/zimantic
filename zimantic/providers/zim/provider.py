@@ -318,13 +318,7 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
             self.indexes.clear()
         for index in indexes:
             index.close()
-        pool = self._fulltext_pool
         self._fulltext_pool = None
-        if pool is not None:
-            try:
-                pool.close()
-            except Exception:
-                pass
         try:
             self._catalog.close()
         except Exception:
@@ -404,17 +398,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
     def set_preview_cache(self, cache: Any | None) -> None:
         with self._lock:
             self._preview_cache = cache
-
-    def start_fulltext_isolation(self, workers: int | None = None) -> None:
-        if self._fulltext_pool is not None:
-            return
-        from ...fulltext import DEFAULT_WORKERS, FulltextPool
-
-        with self._lock:
-            if self._fulltext_pool is None:
-                self._fulltext_pool = FulltextPool(
-                    workers or DEFAULT_WORKERS
-                )
 
     def start_faiss(self) -> None:
         """Load deferred FAISS vectors for this runtime's indexes."""
@@ -529,10 +512,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
                     self._publish(scan, reopen=False)
                 return False
             self._publish(scan, reopen=True)
-            if self._fulltext_pool is not None:
-                clear = getattr(self._fulltext_pool, "clear_broken", None)
-                if callable(clear):
-                    clear()
             return True
         finally:
             self._refresh_lock.release()

@@ -100,6 +100,7 @@ def _bare_search(cfg):
     search.sources = {}
     search._state_lock = threading.RLock()
     search._reload_lock = threading.Lock()
+    search._closed = False
     search.source_timeout = 12
     search.candidate_count = cfg.get("candidate_count", 16)
     search.page_size = cfg.get("page_size", 10)
@@ -318,6 +319,23 @@ class _TestZimRuntime(IndexedRuntime, EnrichingRuntime):
 
 
 class RuntimeCapabilityTests(unittest.TestCase):
+    def test_late_native_runtime_borrows_pool_when_startup_had_no_sources(self):
+        class _IsolatedRuntime(IsolatedFulltextRuntime):
+            def set_fulltext_pool(self, pool):
+                self.pool = pool
+
+        search = _bare_search({"fulltext_workers": 1})
+        search.runtimes = {}
+        with patch("zimantic.fulltext.FulltextPool") as pool_factory:
+            try:
+                search.start_fulltext_isolation()
+                late = _IsolatedRuntime()
+                search._bind_runtime(late)
+                self.assertIs(late.pool, search.fulltext_pool)
+                pool_factory.assert_called_once_with(1)
+            finally:
+                search.close()
+
     def test_binding_requires_a_declared_indexed_runtime(self):
         search = _bare_search({})
         try:
@@ -354,25 +372,32 @@ class RuntimeCapabilityTests(unittest.TestCase):
         finally:
             search._executor.shutdown(wait=True)
 
-    def test_fulltext_startup_only_calls_declared_isolation_runtimes(self):
+    def test_fulltext_startup_shares_one_budget_across_declared_runtimes(self):
         class _IsolatedRuntime(IsolatedFulltextRuntime):
-            def start_fulltext_isolation(self, workers=None):
-                self.workers = workers
+            def set_fulltext_pool(self, pool):
+                self.pool = pool
 
-        search = _bare_search({})
+        search = _bare_search({"fulltext_workers": 6})
         isolated = _IsolatedRuntime()
-        with patch.object(
-            isolated, "start_fulltext_isolation", wraps=isolated.start_fulltext_isolation
-        ) as start:
+        second = _IsolatedRuntime()
+        with patch("zimantic.fulltext.FulltextPool") as pool_factory:
             search.runtimes = {
                 "isolated": isolated,
-                "other": types.SimpleNamespace(start_fulltext_isolation=start),
+                "second": second,
+                "other": types.SimpleNamespace(set_fulltext_pool=unittest.mock.Mock()),
             }
             try:
                 search.start_fulltext_isolation()
-                self.assertEqual(isolated.workers, 2)
-                start.assert_called_once_with(2)
+                search.start_fulltext_isolation()
+                pool_factory.assert_called_once_with(6)
+                self.assertIs(isolated.pool, search.fulltext_pool)
+                self.assertIs(second.pool, search.fulltext_pool)
+                search.runtimes["other"].set_fulltext_pool.assert_not_called()
+                late = _IsolatedRuntime()
+                search._bind_runtime(late)
+                self.assertIs(late.pool, search.fulltext_pool)
             finally:
+                search.fulltext_pool.close()
                 search._executor.shutdown(wait=True)
 
 

@@ -37,6 +37,8 @@ build_embed_threads = 2
 min_cosine_similarity = 0.85
 
 search_workers = 2
+# Native helpers are shared across collections; leave their CPU/RAM budget automatic.
+# fulltext_workers = 1
 max_concurrent_searches = 2
 candidate_count = 16
 max_stream_ranks = 8

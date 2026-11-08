@@ -226,3 +226,4 @@ evaluation/results/
 /.build.lock
 /.catalog.lock
 /modules
+/tests/benchmarks/results

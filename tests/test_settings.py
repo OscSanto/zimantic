@@ -9,6 +9,7 @@ from zimantic.settings import (
     PROFILES,
     default_build_workers,
     default_embedding_workers,
+    default_fulltext_workers,
     load_config,
     normalize_web_base_path,
     profile_for_hardware,
@@ -68,6 +69,17 @@ class HardwareProfileTests(unittest.TestCase):
         self.assertEqual(default_embedding_workers(4, 8, 1, None), 3)
         self.assertEqual(default_embedding_workers(20, 0.5, 5, None), 1)
         self.assertEqual(default_embedding_workers(20, 1, 5, None, 8000), 1)
+
+    def test_fulltext_workers_respect_cpu_memory_and_cgroups(self):
+        from zimantic.hardware import Hardware
+
+        self.assertEqual(default_fulltext_workers(1, 8), 1)
+        self.assertEqual(default_fulltext_workers(4, 0.5), 2)
+        self.assertEqual(default_fulltext_workers(20, 8), 8)
+        self.assertEqual(default_fulltext_workers(20, 8, source_workers=2), 2)
+        self.assertEqual(default_fulltext_workers(4, 0.125), 1)
+        with patch("zimantic.hardware.detect", return_value=Hardware(2, 2, 1 << 30, 384 << 20)):
+            self.assertEqual(default_fulltext_workers(), 1)
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -296,18 +308,30 @@ class LoadConfigTests(unittest.TestCase):
     def test_zero_worker_counts_warn_and_fall_back_to_automatic_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
-            path.write_text("build_workers = 0\nembedding_workers = 0\n", encoding="utf-8")
+            path.write_text("build_workers = 0\nembedding_workers = 0\nfulltext_workers = 0\n", encoding="utf-8")
             warnings = []
             with (
                 patch.object(settings, "profile_for_hardware", return_value="desktop"),
                 patch.object(settings, "default_build_workers", return_value=5),
                 patch.object(settings, "default_embedding_workers", return_value=3),
+                patch.object(settings, "default_fulltext_workers", return_value=2),
             ):
                 cfg = load_config(path, warn=warnings.append)
         self.assertEqual(cfg["build_workers"], 5)
         self.assertEqual(cfg["embedding_workers"], 3)
+        self.assertEqual(cfg["fulltext_workers"], 2)
         self.assertTrue(any("build_workers" in message for message in warnings))
         self.assertTrue(any("embedding_workers" in message for message in warnings))
+        self.assertTrue(any("fulltext_workers" in message for message in warnings))
+
+    def test_explicit_fulltext_workers_are_not_capped_by_source_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("search_workers = 2\nfulltext_workers = 8\n", encoding="utf-8")
+            with patch.object(settings, "default_fulltext_workers") as automatic:
+                cfg = load_config(path, warn=lambda _: None)
+            automatic.assert_not_called()
+        self.assertEqual(cfg["fulltext_workers"], 8)
 
     def test_worker_defaults_are_dynamic_but_explicit_values_override(self):
         with patch.object(settings, "profile_for_hardware", return_value="desktop"):
