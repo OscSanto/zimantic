@@ -366,6 +366,51 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(cfg["embed_device"], "auto")
         self.assertTrue(any("embed_device" in message for message in warnings))
 
+    def test_collection_derived_text_defaults_and_source_overrides(self):
+        from types import SimpleNamespace
+
+        from zimantic.indexing.derived import source_operations
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                '[[collections]]\n'
+                'type = "files"\n'
+                'name = "media"\n'
+                'path = "media"\n'
+                'derived_text = { captions = "index", ocr = "tesseract", asr = "whisper" }\n'
+                'sources = [\n'
+                '  { key = "files:media:captions-off", captions = "off" },\n'
+                '  { key = "files:media:ocr-off", ocr = "off" },\n'
+                ']\n',
+                encoding="utf-8",
+            )
+            cfg = load_config(path, warn=lambda _: None)
+
+        def source(key):
+            return SimpleNamespace(key=key, collection_key="files:media")
+
+        inherited = source_operations(cfg, source("files:media:default"))
+        self.assertEqual(inherited.state(), {
+            "captions": "index",
+            "ocr": "tesseract",
+            "asr": "whisper",
+        })
+        captions_off = source_operations(
+            cfg, source("files:media:captions-off")
+        )
+        self.assertEqual(captions_off.state(), {
+            "captions": "off",
+            "ocr": "tesseract",
+            "asr": "whisper",
+        })
+        ocr_off = source_operations(cfg, source("files:media:ocr-off"))
+        self.assertEqual(ocr_off.state(), {
+            "captions": "index",
+            "ocr": "off",
+            "asr": "whisper",
+        })
+
     def test_unknown_keys_warn_but_known_keys_still_apply(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

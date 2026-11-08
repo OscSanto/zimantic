@@ -311,13 +311,17 @@ sudo apt install tesseract-ocr tesseract-ocr-eng
 [derived_text]
 ocr_languages = ["eng"]
 
-[[collections.sources]]
-key = "files:modules:root"   # find the exact key from /sources
-ocr = "tesseract"
+[[collections]]
+type = "files"
+name = "media"
+path = "./media"
+derived_text = { ocr = "tesseract" }
 ```
 
 OCR reads the same trained-data files as the `tesseract` command. List the
-languages in the derived-text config and enable OCR for an exact source:
+languages in the global derived-text config. Collection defaults are supported
+for files and Kolibri collections; ZIM embedded-media enrichment is not
+implemented.
 
 ```toml
 [derived_text]
@@ -439,15 +443,43 @@ limits apply to serving and indexing, but `secure_browsing` sandboxes only the
 `/content/` shell; a raw `/article/` document opened directly or in a permitted
 popup is not sandboxed and can run with the app's origin and persistent storage.
 
-Derived text is three independent opt-ins, all off unless an exact source names
-one:
+### Derived text
+
+Derived text has three independent opt-ins, all off by default. Files and
+Kolibri collections can set defaults inline on the collection:
 
 ```toml
-[[collections.sources]]
-key = "files:modules:root"
-captions = "index"     # .srt/.vtt sidecars; embedded tracks with local ffmpeg
-ocr = "tesseract"      # images and image-only PDF pages
-asr = "whisper"        # audio/video speech-to-text
+[[collections]]
+type = "files"
+name = "media"
+path = "./media"
+derived_text = { captions = "index", ocr = "tesseract", asr = "whisper" }
+```
+
+Accepted operation values are:
+
+| Setting | Values | Effect |
+| --- | --- | --- |
+| `captions` | `"off"`, `"index"` | Index sidecar and available embedded captions |
+| `ocr` | `"off"`, `"tesseract"` | OCR images and image-only PDF pages |
+| `asr` | `"off"`, `"whisper"` | Transcribe audio/video locally |
+
+`asr_engine` separately selects the Whisper backend: `"auto"`,
+`"whisper.cpp"`, or `"faster-whisper"`.
+
+**Advanced: per-source overrides.** Use `sources` only when a source needs
+different operations from its collection defaults. Each entry overrides only
+the operation fields it specifies:
+
+```toml
+[[collections]]
+type = "files"
+name = "media"
+path = "./media"
+derived_text = { captions = "index", ocr = "tesseract", asr = "whisper" }
+sources = [
+  { key = "files:media:root", ocr = "off" },
+]
 ```
 
 Setting one does not enable the others. Engines run locally at build time only
@@ -486,7 +518,7 @@ max_entries = 100000
 max_file_bytes = 268435456
 ```
 
-`granularity = "children"` makes each immediate child directory its own source, plus one source for loose files directly in the root. Use it when the tree has a handful of stable top-level units; otherwise keep `collection` so the library stays bounded. If the number of child sources exceeds `max_sources`, the whole collection collapses to one source with a distinct key and a warning. The collapsed and normal states use different source keys. Rebuild the index and update any `[[collections.sources]]` override that uses the other key.
+`granularity = "children"` makes each immediate child directory its own source, plus one source for loose files directly in the root. Use it when the tree has a handful of stable top-level units; otherwise keep `collection` so the library stays bounded. If the number of child sources exceeds `max_sources`, the whole collection collapses to one source with a distinct key and a warning. The collapsed and normal states use different source keys. Rebuild the index and update any `sources` override that uses the other key.
 
 `max_entries` bounds the indexed manifest and marks the source truncated when more candidates exist; all permitted files remain servable. `max_file_bytes` is combined with the global `max_entry_bytes` to bound document extraction, and `max_sources` bounds the child-source list.
 
@@ -494,17 +526,7 @@ Source keys use the configured `name` and root-relative identifiers, never the a
 
 All sources in one files collection share the collection-relative serving namespace. A child page can link to `../shared/style.css` and it resolves under the same source key; search results and library membership still belong to the source that indexed the item. Hidden paths, configured excludes, symlinks, and paths outside the configured root are never served. Unknown extensions are served as attachments with `X-Content-Type-Options: nosniff`; SVG opened directly is sandboxed with a restrictive CSP.
 
-`include` selects native documents for indexing. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless an exact source override enables them. Files whose extension is missing or unknown get a bounded MIME probe: the built-in signatures and `puremagic` are used for the prefix, and `lsar` identifies archive containers. This keeps extensionless media and servable “other” assets visible in the library content-type filters:
-
-```toml
-# Discover the exact key first (for example from `/sources`).
-[[collections.sources]]
-key = "files:modules:root"
-captions = "index"     # .srt/.vtt sidecars (embedded tracks use the shared
-                       # ffmpeg adapter when one is available)
-ocr = "tesseract"      # images and image-only PDF pages
-asr = "whisper"        # audio/video
-```
+`include` selects native documents for indexing. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless enabled by the collection's `derived_text` defaults (see [Derived text](#derived-text)). Files whose extension is missing or unknown get a bounded MIME probe: the built-in signatures and `puremagic` are used for the prefix, and `lsar` identifies archive containers. This keeps extensionless media and servable “other” assets visible in the library content-type filters.
 
 `zimantic build` with no positional paths builds configured files collections as well as ZIM collections, using the same index generations, embeddings, and lock as ZIM builds. Serving does not require an index: permitted files remain browsable even when indexing was capped or skipped.
 
@@ -538,16 +560,11 @@ html5_zip_timeout_seconds = 10
 
 Each installed channel is one collection (`kolibri:<name>:<channel_id>`). With `granularity = "children"`, each top-level topic becomes a source, direct leaf items under the channel root form an `Ungrouped` source, and a channel with no topics gets one whole-channel source. `granularity = "collection"` always uses one source per channel. If the topic count exceeds `max_sources`, the whole channel collapses to one source with the distinct `:collapsed` key and a warning; `max_entries` bounds the indexed manifest and marks the source truncated while all permitted items remain servable. Source keys are `kolibri:<name>:<channel_id>:node:<node_id>`, `:ungrouped`, `:root`, or `:collapsed`.
 
-Items are leaf content nodes with locally available files, plus exercises whose public description is non-empty. Topics are grouping only. Titles, public descriptions, HTML/PDF/plain documents, and an HTML5 app's entry page are indexed. Audio and video bodies contribute no text unless an exact source override enables captions, OCR, or ASR:
+Items are leaf content nodes with locally available files, plus exercises whose public description is non-empty. Topics are grouping only. Titles, public descriptions, HTML/PDF/plain documents, and an HTML5 app's entry page are indexed. Audio and video bodies contribute no text unless enabled by the collection's `derived_text` defaults (see [Derived text](#derived-text)).
 
-```toml
-# Discover the exact key first (for example from `/sources`).
-[[collections.sources]]
-key = "kolibri:kolibri:<channel_id>:root"
-captions = "index"     # existing .vtt/.srt tracks and embedded text tracks
-ocr = "tesseract"      # images and image-only PDF pages
-asr = "whisper"        # audio/video when captions did not provide usable text
-```
+Discover the exact key first (for example from `/sources`). Captions can use
+existing `.vtt`/`.srt` tracks and embedded text tracks; ASR transcribes
+audio/video when captions did not provide usable text.
 
 The provider **never writes to Kolibri**. It copies the installed database through a private, owner-only, SQLite-consistent snapshot outside the installation and storage roots; committed WAL data is included, and a concurrently changing source causes a bounded retry or a fail-closed diagnostic instead of a torn read. Snapshots are shared across a channel discovery batch, removed after their last reader, and capped by the configured size, disk, and time budgets. A failed refresh keeps the last complete published batch and reports the error. The installation database and its WAL/SHM/journal sidecars are not modified, migrated, vacuumed, or checkpointed.
 

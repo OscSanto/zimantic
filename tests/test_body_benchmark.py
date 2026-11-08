@@ -1,7 +1,10 @@
+import json
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
+from scripts import bench_body_tradeoffs as benchmark
 from scripts.bench_body_tradeoffs import (
     bm25_search, body_query, compact_search, compare, summary, variant_patches,
 )
@@ -64,6 +67,45 @@ def test_benchmark_overlap_handles_empty_results():
 
 def test_benchmark_p95_for_small_trial_counts():
     assert summary([1.0, 2.0])["p95"] == 2.0
+
+
+def test_benchmark_peak_rss_without_resource(monkeypatch):
+    monkeypatch.setitem(benchmark.sys.modules, "resource", None)
+    assert benchmark.peak_rss_mib() is None
+
+
+@pytest.mark.parametrize("platform,rss", [("linux", 2048), ("darwin", 2097152)])
+def test_benchmark_peak_rss_units(monkeypatch, platform, rss):
+    def getrusage(who):
+        assert who == 0
+        return SimpleNamespace(ru_maxrss=rss)
+
+    monkeypatch.setitem(
+        benchmark.sys.modules, "resource",
+        SimpleNamespace(RUSAGE_SELF=0, getrusage=getrusage),
+    )
+    monkeypatch.setattr(benchmark.sys, "platform", platform)
+    assert benchmark.peak_rss_mib() == 2.0
+
+
+def test_benchmark_worker_without_cpu_affinity(monkeypatch, tmp_path, capsys):
+    zim = tmp_path / "archive.zim"
+    zim.write_bytes(b"fixture")
+    output = tmp_path / "output"
+    monkeypatch.delattr(benchmark.os, "sched_getaffinity", raising=False)
+    monkeypatch.delattr(benchmark.os, "sched_setaffinity", raising=False)
+    monkeypatch.setattr(benchmark.sys, "argv", [
+        "bench_body_tradeoffs.py", str(zim), "--output", str(output),
+        "--worker", "build",
+    ])
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    monkeypatch.setattr(benchmark, "build", lambda args: {"peak_rss_mib": None})
+
+    benchmark.main()
+
+    assert json.loads((output / "build.json").read_text()) == {"peak_rss_mib": None}
+    assert json.loads(capsys.readouterr().out) == {"peak_rss_mib": None}
+    assert benchmark.os.environ["OMP_NUM_THREADS"] == "4"
 
 
 @pytest.mark.parametrize("variant", ["head-bm25", "stored-bm25"])

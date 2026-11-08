@@ -242,6 +242,59 @@ def test_files_and_kolibri_are_both_supported(tmp_path):
     assert any("unknown key" in message for message in parsed.diagnostics)
 
 
+def test_collection_derived_text_is_supported_only_by_local_content_providers(
+    tmp_path,
+):
+    from zimantic.providers.config import (
+        FilesConfig,
+        KolibriConfig,
+        parse_collections,
+    )
+
+    parsed = parse_collections(
+        {
+            "collections": [
+                {
+                    "type": "files",
+                    "name": "media",
+                    "path": "media",
+                    "derived_text": {
+                        "captions": "index",
+                        "ocr": "tesseract",
+                        "asr": "whisper",
+                    },
+                },
+                {
+                    "type": "zim",
+                    "name": "library",
+                    "path": "zims",
+                    "derived_text": {"ocr": "tesseract"},
+                },
+                {
+                    "type": "kolibri",
+                    "name": "learning",
+                    "path": "kolibri",
+                    "derived_text": {"asr": "whisper"},
+                },
+            ]
+        },
+        config_dir=tmp_path,
+    )
+    assert len(parsed.collections) == 2
+    files = parsed.collections[0]
+    assert isinstance(files, FilesConfig)
+    assert files.derived_text is not None
+    assert files.derived_text.captions == "index"
+    assert files.derived_text.ocr == "tesseract"
+    assert files.derived_text.asr == "whisper"
+    kolibri = parsed.collections[1]
+    assert isinstance(kolibri, KolibriConfig)
+    assert kolibri.derived_text is not None
+    assert kolibri.derived_text.asr == "whisper"
+    assert any("ZIM collections do not support derived_text" in issue.message
+               for issue in parsed.issues)
+
+
 def test_kolibri_limits_and_granularity_are_validated(tmp_path):
     from zimantic.providers.config import (
         ConfigValidationError,

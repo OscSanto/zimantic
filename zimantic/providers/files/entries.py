@@ -321,9 +321,9 @@ class FilesEntryProducer:
             self.cfg, "max_body_text_bytes", DEFAULT_MAX_BODY_TEXT_BYTES
         )
         self.max_visited, self.traversal_timeout = _traversal_limits(config)
-        operations = (self.cfg.get("derived_source_operations") or {}).get(
-            self.key
-        )
+        from ...indexing.derived import source_operations
+
+        operations = source_operations(self.cfg, self.source)
         self.operations = operations
         self.captions_enabled = bool(getattr(operations, "captions", False))
         self.ocr_enabled = bool(getattr(operations, "ocr", None))

@@ -142,8 +142,8 @@ port = 8090
 # new preview artifacts, never searchable postings.
 # max_derived_cache_bytes_per_source = 536_870_912
 
-# Optional build-time derived-text engines. Operations stay off unless an
-# exact [[collections.sources]] override enables them.
+# Optional build-time derived-text engines. Operations stay off unless a
+# collection derived_text default or an exact source override enables them.
 # [derived_text]
 # max_caption_bytes = 1_048_576
 # ocr_languages = ["eng"]
@@ -262,7 +262,7 @@ port = 8090
 # default granularity keeps the whole root as one source; "children" makes each
 # immediate child directory a source plus one source for loose root files.
 # Source keys change when a large collection collapses past max_sources, so a
-# rebuild and an updated [[collections.sources]] key are required after that.
+# rebuild and an updated source override key are required after that.
 #
 # [[collections]]
 # type = "files"
@@ -305,14 +305,12 @@ port = 8090
 # database_path = "/library/kolibri/db.sqlite3"
 # storage = "/library/kolibri/content/storage"
 #
-# Optional exact-source enrichment overrides. Discover the key first; absent
-# switches stay off. captions reads .srt/.vtt sidecars and embedded text tracks
-# (embedded tracks use the shared ffmpeg adapter when available), ocr reads
-# images and image-only PDF pages, and asr transcribes audio/video. The same
-# switches work for Kolibri sources, for example:
-# key = "kolibri:kolibri:<channel_id>:root"
-# [[collections.sources]]
-# key = "files:modules:root"
-# captions = "index"
-# ocr = "tesseract"
-# asr = "whisper"
+# Advanced: optional exact-source enrichment overrides. Discover the key first;
+# absent switches inherit the collection defaults (or stay off if not set). captions
+# reads .srt/.vtt sidecars and embedded text tracks (embedded tracks use the
+# shared ffmpeg adapter when available), ocr reads images and image-only PDF
+# pages, and asr transcribes audio/video. For example, inside a [[collections]]
+# entry:
+# sources = [
+#   { key = "files:modules:root", captions = "index", ocr = "tesseract", asr = "whisper" },
+# ]

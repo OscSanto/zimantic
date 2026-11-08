@@ -14,7 +14,6 @@ import json
 import math
 import os
 import random
-import resource
 import sqlite3
 import statistics
 import subprocess
@@ -52,6 +51,15 @@ QUERIES = [
     "how do moderators handle spam?", "how can I grow an online community?",
     "what should we do about inactive members?", "the", "a", "zyxnonexistent",
 ]
+
+
+def peak_rss_mib():
+    try:
+        import resource
+    except ImportError:
+        return None
+    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / divisor
 
 
 def summary(values):
@@ -238,7 +246,7 @@ def build(args):
     metrics.update(
         build_seconds=time.perf_counter() - began,
         cpu_seconds=time.process_time() - cpu_began,
-        peak_rss_mib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+        peak_rss_mib=peak_rss_mib(),
         report=report.to_dict(),
     )
     lease = locator.paths(source)
@@ -367,7 +375,7 @@ def runtime(args):
             metrics["components"]["results"] = components
         finally:
             db.close()
-    metrics["peak_rss_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    metrics["peak_rss_mib"] = peak_rss_mib()
     return metrics
 
 
@@ -539,8 +547,10 @@ def main():
         parser.error("full repeats cannot be negative")
     if args.worker == "runtime" and (args.queries is None or args.database is None):
         parser.error("runtime worker requires --queries and --database")
-    cpus = sorted(os.sched_getaffinity(0))[:args.threads]
-    os.sched_setaffinity(0, cpus)
+    cpus = None
+    if hasattr(os, "sched_getaffinity") and hasattr(os, "sched_setaffinity"):
+        cpus = sorted(os.sched_getaffinity(0))[:args.threads]
+        os.sched_setaffinity(0, cpus)
     os.environ["OMP_NUM_THREADS"] = str(args.threads)
     if args.worker:
         if args.worker == "build":

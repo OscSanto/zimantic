@@ -439,6 +439,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     diagnostics = parsed.diagnostics if parsed is not None else ()
     issues = parsed.issues if parsed is not None else ()
     from .indexing.derived import (
+        SourceDerivedOperations,
         parse_derived_text,
         parse_source_overrides,
         resolve_workers,
@@ -451,6 +452,16 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
             collection_names=[entry.name for entry in collections],
             warn=warn,
         )
+        collection_operations = {}
+        for entry in collections:
+            derived = getattr(entry, "derived_text", None)
+            if derived is None:
+                continue
+            collection_operations[entry.name] = SourceDerivedOperations(
+                captions=derived.captions == "index",
+                ocr=None if derived.ocr == "off" else derived.ocr,
+                asr=None if derived.asr == "off" else derived.asr,
+            )
     except ValueError as error:
         from .providers.config import ConfigValidationError
 
@@ -482,6 +493,10 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     envelope["source_operations"] = {
         key: operations.state() for key, operations in overrides.items()
     }
+    envelope["collection_derived_text"] = {
+        name: operations.state()
+        for name, operations in collection_operations.items()
+    }
     cfg["derived_text"] = derived_text
     cfg["derived_text_workers"] = {
         "configured": derived_text.workers,
@@ -489,6 +504,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         "bound": worker_bound,
     }
     cfg["derived_source_operations"] = overrides
+    cfg["derived_collection_operations"] = collection_operations
     cfg["collections"] = tuple(collections)
     cfg["config_dir"] = str(config_dir)
     cfg["config_diagnostics"] = diagnostics

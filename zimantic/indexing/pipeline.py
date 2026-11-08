@@ -964,9 +964,9 @@ def _finish_build(
 def _derived_baseline(
     cfg: Mapping[str, Any], producer: Any, *, fast: bool
 ) -> dict[str, Any]:
-    operations = (cfg.get("derived_source_operations") or {}).get(
-        getattr(producer, "key", ""), None
-    )
+    from .derived import source_operations
+
+    operations = source_operations(cfg, producer)
     states: dict[str, str] = {
         "captions": "off",
         "ocr": "off",
@@ -1085,9 +1085,9 @@ def build_index(
         derived_refs: dict[int, list[tuple[str, int, str]]] = {}
         derived_stage = cfg.get("derived_stage")
         if derived_stage is None and not fast and not completed_staging:
-            operations = (cfg.get("derived_source_operations") or {}).get(
-                getattr(producer, "key", ""), None
-            )
+            from .derived import source_operations
+
+            operations = source_operations(cfg, producer)
             if operations is not None and getattr(
                 operations, "any_enabled", False
             ):

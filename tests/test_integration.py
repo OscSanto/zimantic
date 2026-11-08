@@ -279,7 +279,7 @@ class LocalIntegrationTests(unittest.TestCase):
             result = response.json()[0]
             self.assertEqual(result["title"], "Beta")
             self.assertEqual(result["path"], "Beta")
-            self.assertEqual(result["url"], f"/content/{quote(_zim_key("manual"), safe='')}/Beta")
+            self.assertEqual(result["url"], f"/content/{quote(_zim_key('manual'), safe='')}/Beta")
             self.assertEqual(result["mimetype"], "text/html")
             self.assertEqual(response.headers["x-total-count"], "1")
 
@@ -480,7 +480,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(search.source_keys(), [_zim_key("manual")])
             result = _search_results(search, "rotors", limit=1)[0]
             self.assertEqual(result["title"], "Beta")
-            self.assertEqual(result["url"], f"/content/{quote(_zim_key("manual"), safe='')}/Beta")
+            self.assertEqual(result["url"], f"/content/{quote(_zim_key('manual'), safe='')}/Beta")
             report = search.health()["indexes"][0]
             self.assertFalse(report["index_file"])
             self.assertFalse(report["capabilities"]["title"])

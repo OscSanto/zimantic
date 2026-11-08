@@ -252,6 +252,7 @@ class SourceDerivedOperations:
     captions: bool = False
     ocr: str | None = None
     asr: str | None = None
+    overrides: frozenset[str] = frozenset()
 
     def state(self) -> dict[str, str]:
         return {
@@ -285,18 +286,19 @@ def parse_source_override(
     if unknown:
         raise ValueError(f"unknown source override key(s): {', '.join(unknown)}")
     captions = entry.get("captions", "off")
-    if captions not in {"off", "index"}:
+    if not isinstance(captions, str) or captions not in {"off", "index"}:
         raise ValueError("captions accepts only 'off' or 'index'")
     ocr = entry.get("ocr", "off")
     asr = entry.get("asr", "off")
-    if ocr not in {"off", "tesseract"}:
+    if not isinstance(ocr, str) or ocr not in {"off", "tesseract"}:
         raise ValueError("ocr accepts only 'off' or 'tesseract'")
-    if asr not in {"off", "whisper"}:
+    if not isinstance(asr, str) or asr not in {"off", "whisper"}:
         raise ValueError("asr accepts only 'off' or 'whisper'")
     return str(key), SourceDerivedOperations(
         captions=captions == "index",
         ocr=None if ocr == "off" else "tesseract",
         asr=None if asr == "off" else "whisper",
+        overrides=frozenset(set(entry) & {"captions", "ocr", "asr"}),
     )
 
 
@@ -342,6 +344,39 @@ def parse_source_overrides(
         configured_keys.add(key)
         result[key] = operations
     return result
+
+
+def source_operations(
+    cfg: Mapping[str, Any], source: Any
+) -> SourceDerivedOperations | None:
+    """Resolve exact-source settings over collection-level derived-text defaults."""
+    key = str(getattr(source, "key", ""))
+    source_override = (cfg.get("derived_source_operations") or {}).get(key)
+    collection_key = str(getattr(source, "collection_key", ""))
+    parts = collection_key.split(":", 2)
+    collection_name = parts[1] if len(parts) > 1 else ""
+    defaults = (cfg.get("derived_collection_operations") or {}).get(
+        collection_name
+    )
+    if source_override is None or defaults is None:
+        return source_override or defaults
+    return SourceDerivedOperations(
+        captions=(
+            source_override.captions
+            if "captions" in source_override.overrides
+            else defaults.captions
+        ),
+        ocr=(
+            source_override.ocr
+            if "ocr" in source_override.overrides
+            else defaults.ocr
+        ),
+        asr=(
+            source_override.asr
+            if "asr" in source_override.overrides
+            else defaults.asr
+        ),
+    )
 
 
 # -- cache -----------------------------------------------------------------
@@ -936,5 +971,6 @@ __all__ = [
     "parse_source_overrides",
     "read_cached_text",
     "resolve_workers",
+    "source_operations",
     "spool_input",
 ]

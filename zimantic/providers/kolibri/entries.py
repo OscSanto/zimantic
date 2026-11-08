@@ -219,7 +219,9 @@ class KolibriEntryProducer:
         self.traversal_timeout = float(
             getattr(traversal, "traversal_timeout_seconds", 300)
         )
-        operations = (self.cfg.get("derived_source_operations") or {}).get(self.key)
+        from ...indexing.derived import source_operations
+
+        operations = source_operations(self.cfg, self.info)
         self.operations = operations
         self.captions_enabled = bool(getattr(operations, "captions", False))
         self.ocr_enabled = bool(getattr(operations, "ocr", None))

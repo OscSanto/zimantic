@@ -56,4 +56,4 @@ indexed build, search, and reader-lease tests remain in the release matrix.
 Collections group sources. Items remain within their source. The library loads
 sources in bounded pages. If a collection exceeds its source cap, it collapses
 to one source with a different key. Rebuild the index and update any exact
-`[[collections.sources]]` override that uses the other state's key.
+`sources` override that uses the other state's key.

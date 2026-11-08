@@ -261,6 +261,8 @@ class ArchiveEntryProducer:
     # -- identity ----------------------------------------------------------
 
     def _fingerprint(self) -> str:
+        from ...indexing.derived import source_operations
+
         payload = {
             "provider": self.provider,
             "key": self.key,
@@ -275,11 +277,7 @@ class ArchiveEntryProducer:
             "max_preview_chars": self.max_preview_chars,
             "max_body_text_bytes": self.max_body_text_bytes,
             "derived_text": self.cfg.get("derived_text"),
-            "derived_operations": (
-                self.cfg.get("derived_source_operations", {}).get(self.key)
-                if hasattr(self.cfg.get("derived_source_operations", {}), "get")
-                else None
-            ),
+            "derived_operations": source_operations(self.cfg, self),
             "derived_engines": sorted(
                 str(name)
                 for name in (self.cfg.get("derived_engines") or {})

@@ -125,6 +125,35 @@ class TraversalLimits:
         _positive_int(self.traversal_timeout_seconds, "traversal_timeout_seconds")
 
 
+@dataclass(frozen=True)
+class CollectionDerivedTextConfig:
+    captions: Literal["off", "index"] = "off"
+    ocr: Literal["off", "tesseract"] = "off"
+    asr: Literal["off", "whisper"] = "off"
+
+
+def _derived_text(value: Any) -> CollectionDerivedTextConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ConfigValidationError("derived_text must be a table")
+    unknown = sorted(set(value) - {"captions", "ocr", "asr"})
+    if unknown:
+        raise ConfigValidationError(
+            "unknown derived_text key(s): " + ", ".join(unknown)
+        )
+    captions = value.get("captions", "off")
+    ocr = value.get("ocr", "off")
+    asr = value.get("asr", "off")
+    if not isinstance(captions, str) or captions not in {"off", "index"}:
+        raise ConfigValidationError("derived_text.captions accepts 'off' or 'index'")
+    if not isinstance(ocr, str) or ocr not in {"off", "tesseract"}:
+        raise ConfigValidationError("derived_text.ocr accepts 'off' or 'tesseract'")
+    if not isinstance(asr, str) or asr not in {"off", "whisper"}:
+        raise ConfigValidationError("derived_text.asr accepts 'off' or 'whisper'")
+    return CollectionDerivedTextConfig(captions=captions, ocr=ocr, asr=asr)
+
+
 def _traversal(entry: Mapping[str, Any], name: str) -> TraversalLimits:
     table = entry.get("traversal")
     if table is not None and not isinstance(table, Mapping):
@@ -188,6 +217,7 @@ class FilesConfig:
     name: str
     path: str
     label: str | None = None
+    derived_text: CollectionDerivedTextConfig | None = None
     granularity: Granularity = "collection"
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
@@ -218,6 +248,7 @@ class KolibriConfig:
     name: str
     path: str
     label: str | None = None
+    derived_text: CollectionDerivedTextConfig | None = None
     granularity: Granularity = "children"
     database_path: str | None = None
     storage: str | None = None
@@ -450,6 +481,10 @@ def _common(entry: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _parse_zim(entry: Mapping[str, Any], base: Path) -> ZimConfig:
+    if "derived_text" in entry:
+        raise ConfigValidationError(
+            "ZIM collections do not support derived_text"
+        )
     common = _common(entry)
     return ZimConfig(
         path=_resolve_path(entry.get("path"), "path", base),
@@ -459,6 +494,10 @@ def _parse_zim(entry: Mapping[str, Any], base: Path) -> ZimConfig:
 
 
 def _parse_kiwix(entry: Mapping[str, Any], base: Path) -> KiwixConfig:
+    if "derived_text" in entry:
+        raise ConfigValidationError(
+            "Kiwix collections do not support derived_text"
+        )
     common = _common(entry)
     defaults = PROVIDER_DEFAULTS["kiwix"]
     return KiwixConfig(
@@ -489,6 +528,7 @@ _COMMON_ENTRY_KEYS = frozenset(
         "type",
         "name",
         "label",
+        "derived_text",
         "traversal",
         "max_visited_entries",
         "traversal_timeout_seconds",
@@ -519,6 +559,7 @@ _FILES_KEYS = frozenset(
         "max_sources",
         "max_entries",
         "max_file_bytes",
+        "derived_text",
         "traversal",
         "max_visited_entries",
         "traversal_timeout_seconds",
@@ -548,6 +589,7 @@ def _parse_files(entry: Mapping[str, Any], base: Path) -> FilesConfig:
             entry.get("max_file_bytes", defaults["max_file_bytes"]),
             "max_file_bytes",
         ),
+        derived_text=_derived_text(entry.get("derived_text")),
         **common,
     )
 
@@ -563,6 +605,7 @@ _KOLIBRI_KEYS = frozenset(
         "storage",
         "max_sources",
         "max_entries",
+        "derived_text",
         "max_snapshot_bytes",
         "snapshot_disk_budget_bytes",
         "snapshot_timeout_seconds",
@@ -651,6 +694,7 @@ def _parse_kolibri(entry: Mapping[str, Any], base: Path) -> KolibriConfig:
             ),
             "html5_zip_timeout_seconds",
         ),
+        derived_text=_derived_text(entry.get("derived_text")),
         **common,
     )
 
@@ -895,6 +939,7 @@ __all__ = [
     "SAFE_NAME",
     "ConfigIssue",
     "ConfigValidationError",
+    "CollectionDerivedTextConfig",
     "DerivedOperation",
     "FilesConfig",
     "Granularity",
