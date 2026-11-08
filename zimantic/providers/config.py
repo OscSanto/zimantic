@@ -134,7 +134,7 @@ def _derived_text(value: Any) -> CollectionDerivedTextConfig | None:
         options = parse_derived_options(
             {name: item for name, item in value.items() if name in DERIVED_TEXT_KEYS}
         )
-    except ValueError as error:
+    except (TypeError, ValueError) as error:
         raise ConfigValidationError(f"derived_text: {error}") from error
     return CollectionDerivedTextConfig(
         captions=captions, ocr=ocr, asr=asr, options=options

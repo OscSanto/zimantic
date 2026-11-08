@@ -193,8 +193,8 @@ port = 8090
 # search_timeout_seconds = 30
 # Source chips shown per collection group in the search filter before "Other".
 # source_filter_limit = 10
-# Bounded first page of preview sources loaded for one library collection card.
-# collection_source_limit = 10
+# Sources loaded per library collection page (up to 1000).
+# collection_source_limit = 1000
 # Global request-work cap for an explicitly selected Kiwix collection. A
 # single explicit source is never capped. Reaching it reports a partial scope.
 # max_explicit_collection_sources = 500

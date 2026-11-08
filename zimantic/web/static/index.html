@@ -87,44 +87,53 @@
 
             <section id="libraryView" hidden role="main" aria-labelledby="libraryHeading">
                 <div class="library-heading">
-                    <div>
-                        <h2 id="libraryHeading" data-i18n="Your library">Your library</h2>
-                    </div>
-                    <div class="library-toolbar">
-                        <button id="libraryShuffle" class="library-button" type="button" data-i18n="Shuffle">Shuffle</button>
-                        <label class="library-filter-select">
-                            <span data-i18n="Provider">Provider</span>
-                            <select id="libraryProviderFilter" aria-label="Filter by provider" data-i18n-aria-label="Filter by provider">
-                                <option value="" data-i18n="All providers">All providers</option>
-                                <option value="zim">ZIM</option>
-                                <option value="files" data-i18n="Files">Files</option>
-                                <option value="kolibri" data-i18n="Kolibri">Kolibri</option>
-                                <option value="kiwix" data-i18n="Kiwix">Kiwix</option>
-                            </select>
-                        </label>
-                        <label class="library-filter-select">
-                            <span data-i18n="Content type">Content type</span>
-                            <select id="libraryMediaFilter" aria-label="Filter by content type" data-i18n-aria-label="Filter by content type">
-                                <option value="" data-i18n="All content">All content</option>
-                                <option value="text" data-i18n="Text">Text</option>
-                                <option value="video" data-i18n="Video">Video</option>
-                                <option value="audio" data-i18n="Audio">Audio</option>
-                                <option value="image" data-i18n="Images">Images</option>
-                                <option value="other" data-i18n="Other">Other</option>
-                            </select>
-                        </label>
-                        <input
-                            id="libraryFilter"
-                            type="search"
-                            placeholder="Filter library"
-                            aria-label="Filter library"
-                            data-i18n-placeholder="Filter library"
-                            data-i18n-aria-label="Filter library"
-                        />
-                        <span id="libraryStatus" class="status" aria-live="polite"></span>
-                    </div>
+                    <h2 id="libraryHeading" data-i18n="Your library">Your library</h2>
                 </div>
-                <div id="libraryGrid" class="library-grid"></div>
+                <div class="library-toolbar">
+                    <button id="libraryShuffle" class="library-button" type="button" data-i18n="Shuffle">Shuffle</button>
+                    <label class="library-filter-select">
+                        <span data-i18n="Provider">Provider</span>
+                        <select id="libraryProviderFilter" aria-label="Filter by provider" data-i18n-aria-label="Filter by provider">
+                            <option value="" data-i18n="All providers">All providers</option>
+                            <option value="zim">ZIM</option>
+                            <option value="files" data-i18n="Files">Files</option>
+                            <option value="kolibri" data-i18n="Kolibri">Kolibri</option>
+                            <option value="kiwix" data-i18n="Kiwix">Kiwix</option>
+                        </select>
+                    </label>
+                    <label class="library-filter-select">
+                        <span data-i18n="Content type">Content type</span>
+                        <select id="libraryMediaFilter" aria-label="Filter by content type" data-i18n-aria-label="Filter by content type">
+                            <option value="" data-i18n="All content">All content</option>
+                            <option value="text" data-i18n="Text">Text</option>
+                            <option value="video" data-i18n="Video">Video</option>
+                            <option value="audio" data-i18n="Audio">Audio</option>
+                            <option value="image" data-i18n="Images">Images</option>
+                            <option value="other" data-i18n="Other">Other</option>
+                        </select>
+                    </label>
+                    <input
+                        id="libraryFilter"
+                        type="search"
+                        placeholder="Filter library"
+                        aria-label="Filter library"
+                        data-i18n-placeholder="Filter library"
+                        data-i18n-aria-label="Filter library"
+                    />
+                    <span id="libraryStatus" class="status" aria-live="polite"></span>
+                </div>
+                <div class="scope-line" id="libraryScopeLine" hidden>
+                    <span id="libraryScopeLineText" aria-live="polite"></span>
+                    <button
+                        id="libraryScopeLineReset"
+                        class="secondary scope-line-reset"
+                        type="button"
+                        data-i18n="Reset all filters"
+                    >
+                        Reset all filters
+                    </button>
+                </div>
+                <div id="libraryGrid"></div>
             </section>
 
             <details id="settingsDetails" class="settings">

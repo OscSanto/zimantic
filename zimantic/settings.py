@@ -64,10 +64,10 @@ _COMMON = {
     "port": 8090,
     "web_base_path": "",
     "page_size": 10,
-    # UI display budget for source chips per collection group and the bounded
-    # first page of preview sources loaded for one collection card.
+    # UI display budget for source chips per collection group and the library
+    # source page size per collection.
     "source_filter_limit": 10,
-    "collection_source_limit": 10,
+    "collection_source_limit": 1000,
     # Global request-work cap for an explicitly selected Kiwix collection.
     "max_explicit_collection_sources": 500,
     "embed_device": "auto",
@@ -512,7 +512,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
                 asr=None if derived.asr == "off" else derived.asr,
                 options=derived.options,
             )
-    except ValueError as error:
+    except (TypeError, ValueError) as error:
         from .providers.config import ConfigValidationError
 
         raise ConfigValidationError(f"derived_text: {error}") from error

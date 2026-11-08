@@ -252,6 +252,9 @@ class TestConfigSchema:
             'asr_engine = "unknown"',
             'asr_model = 3',
             'cache = "false"',
+            'cache = 0',
+            'asr_batched = "false"',
+            'asr_batched = 1',
             'workers = true',
         ],
     )

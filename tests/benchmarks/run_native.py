@@ -4,12 +4,10 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import platform
 import re
 import statistics
@@ -18,6 +16,8 @@ import sys
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))

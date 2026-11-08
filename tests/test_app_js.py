@@ -16,6 +16,226 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
+    def test_library_renders_all_loaded_sources_and_filters_source_media(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+class Node {{
+  constructor() {{ this.children = []; this.dataset = {{}}; this.classList = {{add() {{}}}}; }}
+  append(...children) {{ this.children.push(...children); }}
+  appendChild(child) {{ this.append(child); }}
+  replaceChildren() {{ this.children = []; }}
+  addEventListener() {{}}
+  setAttribute() {{}}
+}}
+const document = {{createElement: () => new Node()}};
+const elements = {{
+  libraryGrid: new Node(), libraryStatus: new Node(),
+  libraryScopeLine: new Node(), libraryScopeLineText: new Node(),
+  libraryFilter: {{value: ""}}, libraryProviderFilter: {{value: ""}}, libraryMediaFilter: {{value: ""}},
+}};
+const $ = (id) => elements[id];
+const t = (text) => text;
+const libraryTitle = (source) => source.key;
+const libraryHomepageUrl = () => "";
+const sourceStemName = () => "";
+const collectionLabelFor = () => "";
+const formatLibrarySize = () => "";
+const libraryLanguage = () => "";
+const librarySearchText = (source) => source.key;
+const collectionDisplayName = (collection) => collection.title;
+const collections = [
+  {{key: "small", title: "Small", provider: "files", source_count: 766}},
+  {{key: "large", title: "Large", provider: "files", source_count: 1001, media_types: ["other"]}},
+];
+const libraryCollections = collections;
+const makeSources = (count, media) => Array.from({{length: count}}, (_, i) => ({{
+  key: `${{media}}-${{i}}`, provider: "files", media_types: [media],
+}}));
+const small = makeSources(766, "text"), large = makeSources(1001, "video");
+const libraryCollectionPages = new Map([
+  ["small", {{sources: small, total: 766, hasMore: false}}],
+  ["large", {{sources: large.slice(0, 1000), total: 1001, hasMore: true, loading: false}}],
+]);
+const librarySources = [...small, ...large.slice(0, 1000)];
+{_function_source(source, "function providerLabel(", "function collectionFor(")}
+{_function_source(source, "function libraryFilterTerms()", "function resultKey(")}
+const find = (node, cls) => node.className === cls ? node :
+  node.children.map((child) => find(child, cls)).find(Boolean);
+const summarize = () => elements.libraryGrid.children.map((section) => ({{
+  key: section.dataset.libraryCollection,
+  count: find(section, "library-grid library-collection-grid").children.length,
+  meta: find(section, "library-collection-meta").textContent,
+  details: find(section, "library-card-details").textContent,
+  buttons: find(section, "library-collection-actions").children.map((button) => button.textContent),
+  note: find(section, "library-collection-note")?.textContent,
+}}));
+renderLibrary();
+const initial = summarize();
+const initiallyHidden = elements.libraryScopeLine.hidden;
+libraryCollectionPages.get("large").loading = true;
+renderLibrary();
+const loadingDisabled = find(elements.libraryGrid.children[1], "library-collection-actions").children[1].disabled;
+libraryCollectionPages.set("large", {{sources: large, total: 1001, hasMore: false}});
+renderLibrary();
+const appended = summarize();
+elements.libraryMediaFilter.value = "video";
+libraryCollectionPages.set("large", {{sources: large.slice(0, 1), total: 11, hasMore: true}});
+renderLibrary();
+console.log(JSON.stringify({{
+  initial, initiallyHidden, loadingDisabled, appended, filtered: summarize(),
+  scopeText: elements.libraryScopeLineText.textContent,
+  scopeHidden: elements.libraryScopeLine.hidden,
+  status: elements.libraryStatus.textContent,
+  placeholder: elements.libraryFilter.placeholder,
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual([item["count"] for item in payload["initial"]], [766, 1000])
+        self.assertEqual(payload["initial"][0]["buttons"], ["Search collection"])
+        self.assertEqual(
+            payload["initial"][1]["buttons"], ["Search collection", "Load more sources"]
+        )
+        self.assertEqual(payload["initial"][1]["meta"], "Files · 1,001 sources")
+        self.assertEqual(payload["initial"][1]["details"], "Files · Video")
+        self.assertEqual(payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources.")
+        self.assertTrue(payload["loadingDisabled"])
+        self.assertEqual(payload["appended"][1]["count"], 1001)
+        self.assertEqual(payload["appended"][1]["buttons"], ["Search collection"])
+        self.assertEqual([item["key"] for item in payload["filtered"]], ["large"])
+        self.assertEqual(payload["filtered"][0]["note"], "Showing 1 of 11 sources.")
+        self.assertEqual(payload["filtered"][0]["meta"], "Files · 11 sources")
+        self.assertTrue(payload["initiallyHidden"])
+        self.assertFalse(payload["scopeHidden"])
+        self.assertEqual(payload["scopeText"], "Filtered by: Content type: Video")
+        self.assertEqual(payload["status"], "1 collection · 1 loaded source")
+        self.assertEqual(payload["placeholder"], "Filter 1 source")
+
+    def test_library_scope_reset_clears_all_filters_and_pending_reload(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/library?keep=1&filter=old&provider=zim&media=audio");
+const elements = {{
+  libraryScopeLine: {{hidden: true}}, libraryScopeLineText: {{textContent: ""}},
+  libraryFilter: {{value: " Trees "}}, libraryProviderFilter: {{value: "files"}},
+  libraryMediaFilter: {{value: "video"}},
+}};
+const $ = (id) => elements[id];
+const appPath = (path) => path;
+const t = (text) => text;
+const replaceQueryParam = (key, value) => {{
+  if (value) location.searchParams.set(key, value);
+  else location.searchParams.delete(key);
+}};
+let libraryFilterTimer = null, reloads = 0;
+const timers = new Map();
+const setTimeout = (callback) => {{ timers.set(1, callback); return 1; }};
+const clearTimeout = (id) => timers.delete(id);
+const loadLibraryData = () => {{ reloads++; }};
+{_function_source(source, "function providerLabel(", "function collectionFor(")}
+{_function_source(source, "function updateLibraryFilterUrl()", "function sortLibrarySources(")}
+{_function_source(source, "function renderLibraryScopeLine()", "function renderLibrary()")}
+scheduleLibraryReload();
+const active = {{
+  hidden: elements.libraryScopeLine.hidden, text: elements.libraryScopeLineText.textContent,
+  params: Object.fromEntries(location.searchParams), reloads, timers: timers.size,
+}};
+resetLibraryFilters();
+console.log(JSON.stringify({{
+  active, reset: {{
+    hidden: elements.libraryScopeLine.hidden, text: elements.libraryScopeLineText.textContent,
+    values: ["libraryFilter", "libraryProviderFilter", "libraryMediaFilter"].map((id) => elements[id].value),
+    params: Object.fromEntries(location.searchParams), reloads, timers: timers.size, libraryFilterTimer,
+  }},
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["active"]["hidden"])
+        self.assertEqual(
+            payload["active"]["text"],
+            "Filtered by: Provider: Files · Content type: Video · Filter: Trees",
+        )
+        self.assertEqual(
+            payload["active"]["params"],
+            {"keep": "1", "filter": "Trees", "provider": "files", "media": "video"},
+        )
+        self.assertEqual(payload["active"]["reloads"], 0)
+        self.assertEqual(payload["active"]["timers"], 1)
+        self.assertEqual(
+            payload["reset"],
+            {
+                "hidden": True,
+                "text": "",
+                "values": ["", "", ""],
+                "params": {"keep": "1"},
+                "reloads": 1,
+                "timers": 0,
+                "libraryFilterTimer": None,
+            },
+        )
+
+    def test_library_loading_appends_pages_and_restarts_changed_snapshots(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/library");
+const PAGE_SIZE = 10, COLLECTION_SOURCE_LIMIT = 1000;
+const libraryCollectionPages = new Map();
+const collectionByKey = (key) => ({{key}});
+const currentLibraryFilters = () => ({{media: "text"}});
+const renderLibrary = () => {{}};
+const refreshLibrarySourceList = () => {{}};
+const isCanonicalSourceRecord = (record) => Boolean(record.key);
+const appPath = (path) => path;
+const records = Array.from({{length: 1001}}, (_, i) => ({{key: `source-${{i}}`}}));
+let version = "v1";
+const requests = [];
+const fetch = async (url) => {{
+  const limit = Number(url.searchParams.get("limit"));
+  const offset = Number(url.searchParams.get("offset"));
+  requests.push({{limit, offset, media: url.searchParams.get("media_type")}});
+  const items = records.slice(offset, offset + limit);
+  return {{
+    ok: true, json: async () => items,
+    headers: new Map([
+      ["X-Total-Count", String(records.length)], ["X-Has-More", String(offset + items.length < records.length)],
+      ["X-Snapshot-Version", version],
+    ]),
+  }};
+}};
+{_function_source(source, "function listingParams(", "async function fetchPagedJson(")}
+{_function_source(source, "async function loadCollectionSources(", "async function loadLibraryData(")}
+(async () => {{
+  await loadCollectionSources("library");
+  const initial = libraryCollectionPages.get("library").sources.length;
+  version = "v2";
+  await loadCollectionSources("library", {{append: true}});
+  const restarted = libraryCollectionPages.get("library").sources.length;
+  await Promise.all([
+    loadCollectionSources("library", {{append: true}}),
+    loadCollectionSources("library", {{append: true}}),
+  ]);
+  const state = libraryCollectionPages.get("library");
+  console.log(JSON.stringify({{initial, restarted, count: state.sources.length, hasMore: state.hasMore, requests}}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["initial"], 1000)
+        self.assertEqual(payload["restarted"], 1000)
+        self.assertEqual(payload["count"], 1001)
+        self.assertFalse(payload["hasMore"])
+        self.assertEqual([item["offset"] for item in payload["requests"]], [0, 1000, 0, 1000])
+        self.assertTrue(
+            all(item["limit"] == 1000 and item["media"] == "text" for item in payload["requests"])
+        )
+
     def test_library_empty_state_distinguishes_filtered_from_unconfigured(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -38,7 +258,7 @@ let collections = [];
 let query = "";
 const libraryCollectionViews = () => [];
 const libraryFilterTerms = () => query;
-{_function_source(source, "function renderLibrary()", "function resultKey(")}
+{_function_source(source, "function renderLibraryScopeLine()", "function resultKey(")}
 const renderCase = (filter, configuredCollections) => {{
   query = filter;
   collections = configuredCollections;

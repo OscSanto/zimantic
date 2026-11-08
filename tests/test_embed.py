@@ -206,11 +206,10 @@ class LowMemoryArenaTests(unittest.TestCase):
                 return_value=embed.hardware.Hardware(
                     4, 4, int(memory_gb * (1 << 30)), int(memory_gb * (1 << 30))
                 ),
-            ),
+            ),tempfile.TemporaryDirectory() as tmp
         ):
-            with tempfile.TemporaryDirectory() as tmp:
-                _sentencepiece_dir(tmp)
-                embed.Embedder(tmp, low_memory=low_memory)
+            _sentencepiece_dir(tmp)
+            embed.Embedder(tmp, low_memory=low_memory)
         return captured["arena"]
 
     def test_low_ram_host_disables_cpu_arena(self):

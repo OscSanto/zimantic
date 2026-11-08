@@ -478,34 +478,23 @@ ol.results {
     width: 100%;
 }
 .library-heading {
-    align-items: start;
-    display: flex;
-    justify-content: space-between;
-    gap: 16px;
     margin: 26px 0 18px;
 }
 .library-heading h2 {
     font-size: 1.35rem;
     margin: 0;
 }
-.library-heading .subtitle {
-    margin: 2px 0 0;
-}
-.library-heading .status {
-    margin: 0;
-    white-space: nowrap;
-}
 .library-toolbar {
     align-items: center;
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    justify-content: flex-end;
+    margin-bottom: 18px;
 }
 .library-toolbar .status {
     flex-basis: 100%;
     margin: 0;
-    text-align: right;
+    text-align: left;
 }
 .library-button {
     background: var(--panel);
@@ -606,7 +595,7 @@ ol.results {
 .library-grid {
     display: grid;
     gap: 16px;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
 }
 .library-card {
     background: var(--panel);
@@ -1043,11 +1032,6 @@ summary {
     }
     .view-nav {
         flex-direction: column;
-    }
-    .library-heading {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 0;
     }
     .library-toolbar {
         align-items: flex-start;

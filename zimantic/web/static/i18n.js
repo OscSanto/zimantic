@@ -63,6 +63,8 @@
             "Content type": "Tipo de contenido",
             "Filter by content type": "Filtrar por tipo de contenido",
             "All content": "Todo el contenido",
+            "Filtered by": "Filtrado por",
+            "Reset all filters": "Restablecer todos los filtros",
             "Text": "Texto",
             "Video": "Vídeo",
             "Audio": "Audio",

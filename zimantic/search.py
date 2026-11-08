@@ -281,7 +281,7 @@ class Search:
             cfg, "source_filter_limit", DEFAULT_SOURCE_FILTER_LIMIT
         )
         self.collection_source_limit = _int_config(
-            cfg, "collection_source_limit", self.source_filter_limit
+            cfg, "collection_source_limit", 1000
         )
         self.max_explicit_collection_sources = _int_config(
             cfg,

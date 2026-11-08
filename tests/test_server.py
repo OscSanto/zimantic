@@ -191,7 +191,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(config["page_size"], 10)
         self.assertEqual(config["max_results"], 100)
         self.assertEqual(config["source_filter_limit"], 10)
-        self.assertEqual(config["collection_source_limit"], 10)
+        self.assertEqual(config["collection_source_limit"], 1000)
         self.assertEqual(config["max_explicit_collection_sources"], 500)
         self.assertEqual(config["providers"], ["zim", "kiwix", "files", "kolibri"])
         self.assertIn("the", config["stopwords"])
@@ -215,6 +215,33 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["x-offset"], "0")
         self.assertEqual(response.json()[0]["key"], "manual")
+
+    def test_library_supports_thousand_source_pages_with_filtered_totals(self):
+        class LargeLibrarySearch(FakeSearch):
+            def source_dicts(self):
+                template = super().source_dicts()[0]
+                return [
+                    {**template, "key": f"source-{index:04d}", "title": f"Source {index:04d}"}
+                    for index in range(1001)
+                ] + [{**template, "key": "video", "media_types": ["video"]}]
+
+        with TestClient(create_app(LargeLibrarySearch())) as client:
+            params = {"limit": 1000, "collection": "zim:library", "media_type": "text"}
+            first = client.get("/library.json", params=params)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(len(first.json()), 1000)
+            self.assertEqual(first.headers["x-total-count"], "1001")
+            self.assertEqual(first.headers["x-has-more"], "true")
+            more = client.get("/library.json", params={**params, "offset": 1000})
+            self.assertEqual(more.status_code, 200)
+            self.assertEqual([record["key"] for record in more.json()], ["source-1000"])
+            self.assertEqual(more.headers["x-has-more"], "false")
+            self.assertEqual(
+                first.headers["x-snapshot-version"], more.headers["x-snapshot-version"]
+            )
+            self.assertEqual(
+                client.get("/library.json", params={"limit": 1001}).status_code, 422
+            )
 
     def test_collections_endpoint_is_paged_and_reports_snapshot(self):
         response = self.client.get("/collections.json", params={"limit": 1})

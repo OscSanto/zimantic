@@ -8,8 +8,9 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 DEFAULT_QUERIES = ("water", "history", "science")
 

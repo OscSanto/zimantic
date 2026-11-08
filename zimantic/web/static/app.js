@@ -97,7 +97,7 @@
             const THUMB_LIMIT = 128 * 1024;
             const THUMB_CONCURRENCY = 4;
             let SOURCE_FILTER_LIMIT = 10;
-            let COLLECTION_SOURCE_LIMIT = 10;
+            let COLLECTION_SOURCE_LIMIT = 1000;
             const SOURCE_FILTER_QUERY_LIMIT = 30;
             let sourceFilterShowAll = false;
             let sourceFilterShowOther = false;
@@ -110,7 +110,6 @@
             let collections = [];
             let libraryCollections = [];
             const libraryCollectionPages = new Map();
-            const libraryExpandedCollections = new Set();
             const libraryCollectionRefreshes = new Map();
             let libraryLoadSequence = 0;
             let libraryFilterTimer = null;
@@ -879,11 +878,23 @@
 
             function scheduleLibraryReload() {
                 updateLibraryFilterUrl();
+                renderLibraryScopeLine();
                 clearTimeout(libraryFilterTimer);
                 libraryFilterTimer = setTimeout(() => {
                     libraryFilterTimer = null;
                     loadLibraryData();
                 }, 250);
+            }
+
+            function resetLibraryFilters() {
+                $("libraryFilter").value = "";
+                $("libraryProviderFilter").value = "";
+                $("libraryMediaFilter").value = "";
+                clearTimeout(libraryFilterTimer);
+                libraryFilterTimer = null;
+                updateLibraryFilterUrl();
+                renderLibraryScopeLine();
+                loadLibraryData();
             }
 
             function sortLibrarySources(sources) {
@@ -1007,6 +1018,7 @@
                     details.className = "library-card-details";
                     const detailValues = [
                         providerLabel(source.provider),
+                        ...mediaTypeLabels(source.media_types),
                         libraryLanguage(source),
                         formatLibrarySize(source.size),
                         Number(source.item_count) > 0
@@ -1117,10 +1129,7 @@
                             return false;
                         }
                         if (media) {
-                            const families = Array.isArray(view.collection?.media_types)
-                                ? view.collection.media_types
-                                : [];
-                            if (!families.includes(media)) return false;
+                            return view.members.length > 0 || !view.state || view.state.loading;
                         }
                         return true;
                     }
@@ -1152,19 +1161,44 @@
                 return t("No sources match these filters.");
             }
 
+            function renderLibraryScopeLine() {
+                const line = $("libraryScopeLine");
+                const text = $("libraryScopeLineText");
+                if (!line || !text) return;
+                const filters = [];
+                const provider = $("libraryProviderFilter")?.value || "";
+                const media = $("libraryMediaFilter")?.value || "";
+                const query = $("libraryFilter")?.value.trim() || "";
+                if (provider) {
+                    filters.push(`${t("Provider")}: ${providerLabel(provider)}`);
+                }
+                if (media) {
+                    filters.push(`${t("Content type")}: ${mediaTypeLabels([media]).join("")}`);
+                }
+                if (query) {
+                    filters.push(`${t("Filter")}: ${query}`);
+                }
+                line.hidden = !filters.length;
+                text.textContent = filters.length
+                    ? `${t("Filtered by")}: ${filters.join(" · ")}`
+                    : "";
+            }
+
             function renderLibrary() {
                 const grid = $("libraryGrid");
                 const status = $("libraryStatus");
                 if (!grid || !status) return;
+                renderLibraryScopeLine();
+                const views = libraryCollectionViews();
+                const loadedCount = views.reduce((count, view) => count + view.members.length, 0);
                 const filter = $("libraryFilter");
                 if (filter) {
-                    const count = librarySources.length;
+                    const count = loadedCount;
                     filter.placeholder = `${t("Filter")} ${count.toLocaleString()} ${t(
                         count === 1 ? "source" : "sources",
                     )}`;
                 }
                 grid.replaceChildren();
-                const views = libraryCollectionViews();
                 const hasFilters = Boolean(
                     libraryFilterTerms() ||
                         $("libraryProviderFilter")?.value ||
@@ -1172,11 +1206,7 @@
                 );
                 if (!views.length) {
                     status.textContent = hasFilters
-                        ? `0 ${t("collections")} · ${librarySources.length} ${t(
-                              librarySources.length === 1
-                                  ? "loaded source"
-                                  : "loaded sources",
-                          )}`
+                        ? `0 ${t("collections")} · 0 ${t("loaded sources")}`
                         : "";
                     const empty = document.createElement("p");
                     empty.className = "empty";
@@ -1198,8 +1228,8 @@
                 }
                 status.textContent = `${views.length} ${t(
                     views.length === 1 ? "collection" : "collections",
-                )} · ${librarySources.length} ${t(
-                    librarySources.length === 1
+                )} · ${loadedCount} ${t(
+                    loadedCount === 1
                         ? "loaded source"
                         : "loaded sources",
                 )}`;
@@ -1217,8 +1247,11 @@
                     heading.appendChild(title);
                     const meta = document.createElement("p");
                     meta.className = "library-collection-meta";
-                    const sourceCount = Number(collection.source_count);
-                    const families = mediaTypeLabels(collection.media_types);
+                    const sourceCount = Number(
+                        hasFilters
+                            ? state?.total ?? members.length
+                            : collection.source_count,
+                    );
                     meta.textContent = [
                         providerLabel(collection.provider),
                         Number.isFinite(sourceCount)
@@ -1226,7 +1259,6 @@
                                   sourceCount === 1 ? "source" : "sources",
                               )}`
                             : "",
-                        families.join(" · "),
                     ]
                         .filter(Boolean)
                         .join(" · ");
@@ -1249,27 +1281,13 @@
                         search.dataset.librarySearchCollection = key;
                         actions.appendChild(search);
                     }
-                    const expanded = libraryExpandedCollections.has(key);
-                    const loadedCount = state?.sources.length || 0;
-                    if (
-                        !expanded &&
-                        (Number(collection.source_count) > loadedCount ||
-                            loadedCount > COLLECTION_SOURCE_LIMIT)
-                    ) {
-                        const open = document.createElement("button");
-                        open.type = "button";
-                        open.className = "library-button";
-                        open.textContent = `${t("Show all")} ${Number(
-                            collection.source_count,
-                        ).toLocaleString()} ${t("sources")}`;
-                        open.dataset.libraryExpandCollection = key;
-                        actions.appendChild(open);
-                    } else if (expanded && state?.hasMore) {
+                    if (state?.hasMore) {
                         const more = document.createElement("button");
                         more.type = "button";
                         more.className = "library-button";
                         more.textContent = t("Load more sources");
                         more.dataset.libraryMoreCollection = key;
+                        more.disabled = state.loading;
                         actions.appendChild(more);
                     }
                     header.appendChild(actions);
@@ -1283,22 +1301,15 @@
                     } else {
                         const groupGrid = document.createElement("div");
                         groupGrid.className = "library-grid library-collection-grid";
-                        const visibleMembers = expanded
-                            ? members
-                            : members.slice(0, COLLECTION_SOURCE_LIMIT);
-                        groupGrid.append(...libraryCardsFor(visibleMembers));
+                        groupGrid.append(...libraryCardsFor(members));
                         section.appendChild(groupGrid);
-                        if (
-                            !expanded &&
-                            (Number(collection.source_count) > visibleMembers.length ||
-                                loadedCount > visibleMembers.length)
-                        ) {
+                        if (state?.hasMore) {
                             const note = document.createElement("p");
                             note.className = "library-collection-note";
-                            note.textContent = `${t("Showing")} ${visibleMembers.length.toLocaleString()} ${t(
+                            note.textContent = `${t("Showing")} ${members.length.toLocaleString()} ${t(
                                 "of",
                             )} ${Number(
-                                collection.source_count,
+                                state.total,
                             ).toLocaleString()} ${t("sources")}.`;
                             section.appendChild(note);
                         }
@@ -4266,18 +4277,6 @@
                     if (collection) searchWithinLibraryCollection(collection);
                     return;
                 }
-                const expand = target?.closest("button[data-library-expand-collection]");
-                if (expand) {
-                    const key = expand.dataset.libraryExpandCollection;
-                    libraryExpandedCollections.add(key);
-                    renderLibrary();
-                    loadCollectionSources(key, {
-                        append: false,
-                        filters: currentLibraryFilters(),
-                        sequence: libraryLoadSequence,
-                    });
-                    return;
-                }
                 const more = target?.closest("button[data-library-more-collection]");
                 if (more) {
                     loadCollectionSources(more.dataset.libraryMoreCollection, {
@@ -4315,6 +4314,7 @@
             $("libraryFilter").addEventListener("input", scheduleLibraryReload);
             $("libraryProviderFilter").addEventListener("change", scheduleLibraryReload);
             $("libraryMediaFilter").addEventListener("change", scheduleLibraryReload);
+            $("libraryScopeLineReset").addEventListener("click", resetLibraryFilters);
             $("libraryShuffle").addEventListener("click", shuffleLibrary);
 
             $("pager").addEventListener("click", (event) => {
@@ -4816,6 +4816,7 @@
                 if (!key) return;
                 const collection = collectionByKey(key);
                 const previous = libraryCollectionPages.get(key);
+                if (append && previous?.loading) return;
                 const offset = append ? previous?.sources.length || 0 : 0;
                 const state = {
                     ...(previous || {}),
@@ -4834,7 +4835,7 @@
                 renderLibrary();
                 try {
                     const result = await fetchJsonPage(appPath("/library.json"), {
-                        limit: COLLECTION_SOURCE_LIMIT,
+                        limit: Math.min(COLLECTION_SOURCE_LIMIT, 1000),
                         offset,
                         collection: key,
                         ...filters,
@@ -4898,7 +4899,6 @@
                 if (reset) {
                     libraryCollectionPages.clear();
                     librarySources = [];
-                    libraryExpandedCollections.clear();
                     if (!filtered) {
                         const cachedCollections = readCollectionCache();
                         if (cachedCollections) {
@@ -4934,7 +4934,7 @@
                     if (!libraryCollections.length) {
                         const fallback = await fetchPagedJson(appPath("/library.json"), {
                             ...filters,
-                            limit: COLLECTION_SOURCE_LIMIT,
+                            limit: Math.min(COLLECTION_SOURCE_LIMIT, 1000),
                         });
                         if (sequence !== libraryLoadSequence) return;
                         if (!fallback.every(isCanonicalSourceRecord)) {

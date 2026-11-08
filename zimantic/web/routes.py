@@ -466,7 +466,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                     getattr(
                         search_class,
                         "collection_source_limit",
-                        source_filter_limit,
+                        1000,
                     )
                 ),
                 "max_explicit_collection_sources": int(
@@ -522,6 +522,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         memo_key: str,
         version,
         filter_sources_fn,
+        max_page_size: int = 200,
     ):
         snapshot_token = _token_string(
             snapshot.get("token") or _snapshot_version()
@@ -547,7 +548,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             (snapshot_token, version),
             lambda: filtered,
             memos,
-            min(limit or default_page, 200),
+            min(limit or default_page, max_page_size),
             offset,
             snapshot=snapshot_token,
             cacheable=cacheable,
@@ -629,7 +630,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         media_type: str | None = Query(default=None),
         collection: str | None = Query(default=None),
         q: str | None = Query(default=None, max_length=4096),
-        limit: int | None = Query(default=None, ge=1, le=200),
+        limit: int | None = Query(default=None, ge=1, le=1000),
         offset: int = Query(default=0, ge=0),
     ):
         snapshot = _capture_listing()
@@ -651,6 +652,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             memo_key="library",
             version=version,
             filter_sources_fn=filter_sources,
+            max_page_size=1000,
         )
 
     @app.get("/health")
