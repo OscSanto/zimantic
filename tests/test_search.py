@@ -2374,6 +2374,19 @@ class GracefulDegradationTests(unittest.TestCase):
         self.assertEqual(library[0]["title"], "A broken book")
         search._executor.shutdown(wait=True)
 
+    def test_listing_does_not_refresh_provider_discovery(self):
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search.sources = {"manual": _zim_source("manual", "Manual")}
+        runtime = search.runtimes[""]
+        with patch.object(runtime, "refresh_if_stale") as refresh:
+            self.assertEqual(search.library_dicts()[0]["key"], "manual")
+            snapshot = search.listing_snapshot()
+        refresh.assert_not_called()
+        self.assertEqual(snapshot["library"][0]["key"], "manual")
+        self.assertEqual(snapshot["sources"][0]["key"], "manual")
+        self.assertEqual(snapshot["token"], ("test", 0))
+
 
     def test_failed_archive_open_is_not_retried(self):
         with _temp_dir(self) as tmp:

@@ -601,6 +601,8 @@ ol.results {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 12px;
+    contain-intrinsic-size: auto 420px;
+    content-visibility: auto;
     display: flex;
     flex-direction: column;
     min-width: 0;

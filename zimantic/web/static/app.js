@@ -104,12 +104,14 @@
             const SOURCE_CACHE_KEY = "zimantic.sources.v4";
             const LIBRARY_CACHE_KEY = "zimantic.library.v7";
             const COLLECTION_CACHE_KEY = "zimantic.collections.v1";
+            const LIBRARY_PAGE_CACHE_KEY = "zimantic.library-pages.v1";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let librarySources = [];
             let collections = [];
             let libraryCollections = [];
             const libraryCollectionPages = new Map();
+            let libraryCardCache = new WeakMap();
             const libraryCollectionRefreshes = new Map();
             let libraryLoadSequence = 0;
             let libraryFilterTimer = null;
@@ -898,11 +900,14 @@
             }
 
             function sortLibrarySources(sources) {
+                const titleCollator = new Intl.Collator(undefined, {
+                    sensitivity: "base",
+                    numeric: true,
+                });
                 return [...sources].sort((left, right) => {
-                    const byTitle = libraryTitle(left).localeCompare(
+                    const byTitle = titleCollator.compare(
+                        libraryTitle(left),
                         libraryTitle(right),
-                        undefined,
-                        { sensitivity: "base", numeric: true },
                     );
                     if (byTitle) return byTitle;
                     return String(
@@ -947,6 +952,8 @@
 
             function libraryCardsFor(sources) {
                 return sources.map((source) => {
+                    const cached = libraryCardCache.get(source);
+                    if (cached) return cached;
                     const title = libraryTitle(source);
                     const openUrl = libraryHomepageUrl(source);
                     const stem = sourceStemName(source);
@@ -1050,6 +1057,7 @@
                     actions.appendChild(detailsButton);
                     body.appendChild(actions);
                     card.append(preview, body);
+                    libraryCardCache.set(source, card);
                     return card;
                 });
             }
@@ -4809,6 +4817,42 @@
                 );
             }
 
+            function restoreLibraryCache() {
+                const cachedCollections = readCollectionCache();
+                if (!cachedCollections) return;
+                collections = cachedCollections;
+                libraryCollections = [...cachedCollections];
+                const known = new Set(cachedCollections.map((record) => record.key));
+                for (const page of readJsonCache(LIBRARY_PAGE_CACHE_KEY) || []) {
+                    if (
+                        !page ||
+                        !known.has(page.key) ||
+                        !Array.isArray(page.sources) ||
+                        !page.sources.every(
+                            (source) =>
+                                isCanonicalSourceRecord(source) &&
+                                collectionKeyFor(source) === page.key,
+                        ) ||
+                        !Number.isInteger(page.total) ||
+                        page.total < page.sources.length ||
+                        typeof page.hasMore !== "boolean" ||
+                        typeof page.version !== "string"
+                    ) {
+                        continue;
+                    }
+                    libraryCollectionPages.set(page.key, {
+                        sources: page.sources,
+                        total: page.total,
+                        hasMore: page.hasMore,
+                        version: page.version,
+                        loading: false,
+                        error: null,
+                    });
+                }
+                refreshLibrarySourceList();
+                renderLibrary();
+            }
+
             async function loadCollectionSources(
                 key,
                 { append = false, filters = currentLibraryFilters(), sequence = 0, retry = false } = {},
@@ -4828,11 +4872,8 @@
                     loading: true,
                     error: null,
                 };
-                if (!append) {
-                    state.sources = [];
-                }
                 libraryCollectionPages.set(key, state);
-                renderLibrary();
+                if (append) renderLibrary();
                 try {
                     const result = await fetchJsonPage(appPath("/library.json"), {
                         limit: Math.min(COLLECTION_SOURCE_LIMIT, 1000),
@@ -4899,14 +4940,7 @@
                 if (reset) {
                     libraryCollectionPages.clear();
                     librarySources = [];
-                    if (!filtered) {
-                        const cachedCollections = readCollectionCache();
-                        if (cachedCollections) {
-                            collections = cachedCollections;
-                            libraryCollections = [...cachedCollections];
-                            renderLibrary();
-                        }
-                    }
+                    if (!filtered) restoreLibraryCache();
                 }
                 try {
                     const records = await fetchPagedJson(appPath("/collections.json"), {
@@ -4919,6 +4953,11 @@
                     }
                     collections = records;
                     libraryCollections = [...records];
+                    const known = new Set(records.map((record) => record.key));
+                    for (const key of libraryCollectionPages.keys()) {
+                        if (!known.has(key)) libraryCollectionPages.delete(key);
+                    }
+                    refreshLibrarySourceList();
                     if (!filtered) writeJsonCache(COLLECTION_CACHE_KEY, records);
                     renderLibrary();
                     await mapWithConcurrency(
@@ -4942,8 +4981,22 @@
                         }
                         if (!filtered) writeJsonCache(LIBRARY_CACHE_KEY, fallback);
                         librarySources = sortLibrarySources(fallback);
+                        renderLibrary();
                     }
-                    if (sequence === libraryLoadSequence) renderLibrary();
+                    if (sequence === libraryLoadSequence && !filtered) {
+                        writeJsonCache(
+                            LIBRARY_PAGE_CACHE_KEY,
+                            [...libraryCollectionPages.entries()]
+                                .filter(([, page]) => !page.error || page.sources.length)
+                                .map(([key, page]) => ({
+                                    key,
+                                    sources: page.sources,
+                                    total: page.total,
+                                    hasMore: page.hasMore,
+                                    version: page.version,
+                                })),
+                        );
+                    }
                 } catch (error) {
                     if (sequence !== libraryLoadSequence) return;
                     renderLibrary();
@@ -4992,6 +5045,12 @@
                 if (!libraryView && !state.question && !state.modal) {
                     $("question").focus();
                 }
+                if (libraryView) {
+                    const filters = currentLibraryFilters();
+                    if (!filters.provider && !filters.media && !filters.q) {
+                        restoreLibraryCache();
+                    }
+                }
                 // Source discovery is read-only; refreshing the index/catalog set is an
                 // admin action done only via `zimantic reload` or SIGHUP.
                 try {
@@ -5030,7 +5089,7 @@
                         }
                     }
                     if (libraryView) {
-                        await loadLibraryData();
+                        await loadLibraryData({ reset: false });
                     } else {
                         const data = await fetchCachedJson(
                             appPath("/sources"),
@@ -5112,6 +5171,7 @@
             }
 
             $("localePicker")?.addEventListener("change", () => {
+                libraryCardCache = new WeakMap();
                 if (!$("libraryView").hidden) renderLibrary();
                 if (current) {
                     renderView();

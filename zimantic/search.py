@@ -1038,14 +1038,6 @@ class Search:
         """
         with self._state_lock:
             runtimes = list(self.runtimes.values())
-        for runtime in runtimes:
-            if isinstance(runtime, IndexedRuntime):
-                try:
-                    runtime.refresh_if_stale()
-                except Exception:
-                    pass
-        with self._state_lock:
-            runtimes = list(self.runtimes.values())
             fallback = list(self.sources.values())
         library: dict[str, SourceInfo] = {}
         for runtime in runtimes:

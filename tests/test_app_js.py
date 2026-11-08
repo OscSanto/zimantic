@@ -57,6 +57,7 @@ const libraryCollectionPages = new Map([
   ["large", {{sources: large.slice(0, 1000), total: 1001, hasMore: true, loading: false}}],
 ]);
 const librarySources = [...small, ...large.slice(0, 1000)];
+const libraryCardCache = new WeakMap();
 {_function_source(source, "function providerLabel(", "function collectionFor(")}
 {_function_source(source, "function libraryFilterTerms()", "function resultKey(")}
 const find = (node, cls) => node.className === cls ? node :
@@ -71,9 +72,11 @@ const summarize = () => elements.libraryGrid.children.map((section) => ({{
 }}));
 renderLibrary();
 const initial = summarize();
+const firstCard = find(elements.libraryGrid.children[0], "library-grid library-collection-grid").children[0];
 const initiallyHidden = elements.libraryScopeLine.hidden;
 libraryCollectionPages.get("large").loading = true;
 renderLibrary();
+const reusedCard = find(elements.libraryGrid.children[0], "library-grid library-collection-grid").children[0] === firstCard;
 const loadingDisabled = find(elements.libraryGrid.children[1], "library-collection-actions").children[1].disabled;
 libraryCollectionPages.set("large", {{sources: large, total: 1001, hasMore: false}});
 renderLibrary();
@@ -82,7 +85,7 @@ elements.libraryMediaFilter.value = "video";
 libraryCollectionPages.set("large", {{sources: large.slice(0, 1), total: 11, hasMore: true}});
 renderLibrary();
 console.log(JSON.stringify({{
-  initial, initiallyHidden, loadingDisabled, appended, filtered: summarize(),
+  initial, initiallyHidden, reusedCard, loadingDisabled, appended, filtered: summarize(),
   scopeText: elements.libraryScopeLineText.textContent,
   scopeHidden: elements.libraryScopeLine.hidden,
   status: elements.libraryStatus.textContent,
@@ -102,6 +105,7 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["initial"][1]["details"], "Files · Video")
         self.assertEqual(payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources.")
         self.assertTrue(payload["loadingDisabled"])
+        self.assertTrue(payload["reusedCard"])
         self.assertEqual(payload["appended"][1]["count"], 1001)
         self.assertEqual(payload["appended"][1]["buttons"], ["Search collection"])
         self.assertEqual([item["key"] for item in payload["filtered"]], ["large"])
@@ -234,6 +238,126 @@ const fetch = async (url) => {{
         self.assertEqual([item["offset"] for item in payload["requests"]], [0, 1000, 0, 1000])
         self.assertTrue(
             all(item["limit"] == 1000 and item["media"] == "text" for item in payload["requests"])
+        )
+
+    def test_library_cache_renders_before_fetch_and_revalidates_without_clearing_cards(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const PAGE_SIZE = 10, COLLECTION_SOURCE_LIMIT = 1000;
+const COLLECTION_CACHE_KEY = "collections", LIBRARY_PAGE_CACHE_KEY = "pages";
+const libraryCollectionPages = new Map();
+let collections = [], libraryCollections = [], librarySources = [], libraryLoadSequence = 0;
+let filters = {{provider: "", media: "", q: ""}};
+const elements = {{
+  libraryProviderFilter: {{value: ""}}, libraryMediaFilter: {{value: ""}},
+  libraryStatus: {{textContent: ""}},
+}};
+const $ = (id) => elements[id];
+const t = (text) => text;
+const libraryFilterTerms = () => filters.q;
+const appPath = (path) => path;
+const sortLibrarySources = (records) => records;
+const collectionKeyFor = (record) => record.collection.key;
+const collectionByKey = (key) => collections.find((record) => record.key === key);
+const isCanonicalSourceRecord = (record) => Boolean(record.key && record.provider);
+const isCanonicalCollectionRecord = (record) => Boolean(record.key && record.provider);
+const cachedCollections = [
+  {{key: "keep", provider: "zim", label: "Keep"}},
+  {{key: "removed", provider: "zim", label: "Removed"}},
+];
+const makeSource = (key, collection) => ({{key, provider: "zim", collection: {{key: collection}}}});
+const page = (key, sources) => ({{key, sources, total: sources.length, hasMore: false, version: "old"}});
+const storage = new Map([
+  [COLLECTION_CACHE_KEY, cachedCollections],
+  [LIBRARY_PAGE_CACHE_KEY, [
+    page("keep", [makeSource("cached", "keep")]),
+    page("removed", [makeSource("removed", "removed")]),
+    page("unknown", [makeSource("unknown", "unknown")]),
+    {{...page("keep", [makeSource("wrong-group", "removed")])}},
+    {{...page("keep", [makeSource("invalid", "keep")]), total: -1}},
+    null,
+  ]],
+]);
+const readCollectionCache = () => storage.get(COLLECTION_CACHE_KEY);
+const readJsonCache = (key) => storage.get(key);
+const writeJsonCache = (key, value) => storage.set(key, value);
+const renders = [];
+const renderLibrary = () => renders.push(librarySources.map((record) => record.key));
+let resolveCollections, resolveSources, rejectSources, sourceRequest;
+const fetchPagedJson = () => new Promise((resolve) => {{ resolveCollections = resolve; }});
+const fetchJsonPage = (path, options) => {{
+  sourceRequest = options;
+  return new Promise((resolve, reject) => {{
+    resolveSources = resolve;
+    rejectSources = reject;
+  }});
+}};
+{_function_source(source, "async function mapWithConcurrency(", "async function initialize()")}
+(async () => {{
+  const loading = loadLibraryData();
+  const beforeFetch = [...librarySources.map((record) => record.key)];
+  const cachedState = {{...libraryCollectionPages.get("keep")}};
+  resolveCollections([cachedCollections[0]]);
+  await new Promise(setImmediate);
+  const whileRefreshing = {{
+    keys: librarySources.map((record) => record.key),
+    loading: libraryCollectionPages.get("keep").loading,
+    removed: libraryCollectionPages.has("removed"),
+  }};
+  resolveSources({{items: [makeSource("fresh", "keep")], total: 2, hasMore: true, version: "new"}});
+  await loading;
+  const saved = storage.get(LIBRARY_PAGE_CACHE_KEY);
+  filters.q = "filtered";
+  const filtering = loadLibraryData();
+  const duringFilter = librarySources.length;
+  resolveCollections([cachedCollections[0]]);
+  await new Promise(setImmediate);
+  resolveSources({{items: [makeSource("filtered", "keep")], total: 1, hasMore: false, version: "new"}});
+  await filtering;
+  const duringFilteringCacheUnchanged = saved === storage.get(LIBRARY_PAGE_CACHE_KEY);
+  const filterSent = sourceRequest.q;
+  filters.q = "";
+  const offline = loadLibraryData();
+  resolveCollections([cachedCollections[0]]);
+  await new Promise(setImmediate);
+  rejectSources(new Error("offline"));
+  await offline;
+  console.log(JSON.stringify({{
+    beforeFetch, cachedState, whileRefreshing, saved,
+    renders, duringFilter, filterSent,
+    cacheUnchanged: duringFilteringCacheUnchanged,
+    offlineSources: librarySources.map((record) => record.key),
+    offlineCache: storage.get(LIBRARY_PAGE_CACHE_KEY),
+    offlineError: libraryCollectionPages.get("keep").error,
+  }}));
+}})().catch((error) => {{console.error(error); process.exitCode = 1;}});
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["beforeFetch"], ["cached", "removed"])
+        self.assertEqual(payload["cachedState"]["version"], "old")
+        self.assertEqual(
+            payload["whileRefreshing"],
+            {"keys": ["cached"], "loading": True, "removed": False},
+        )
+        self.assertEqual(payload["saved"][0]["sources"][0]["key"], "fresh")
+        self.assertEqual(payload["saved"][0]["version"], "new")
+        self.assertEqual(payload["saved"][0]["total"], 2)
+        self.assertTrue(payload["saved"][0]["hasMore"])
+        self.assertEqual(payload["duringFilter"], 0)
+        self.assertEqual(payload["filterSent"], "filtered")
+        self.assertTrue(payload["cacheUnchanged"])
+        self.assertEqual(payload["offlineSources"], ["fresh"])
+        self.assertEqual(payload["offlineCache"], payload["saved"])
+        self.assertEqual(payload["offlineError"], "offline")
+        self.assertEqual(
+            payload["renders"],
+            [
+                ["cached", "removed"], ["cached"], ["fresh"], [], ["filtered"],
+                ["fresh"], ["fresh"], ["fresh"],
+            ],
         )
 
     def test_library_empty_state_distinguishes_filtered_from_unconfigured(self):
