@@ -246,7 +246,12 @@ class BuildPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
                 locator = _build(Producer(good), tmp, embedder=_Embedder())
-            generation = locator.paths(_source()).generation
+            lease = locator.paths(_source())
+            assert lease is not None
+            try:
+                generation = lease.generation
+            finally:
+                lease.close()
             with (
                 self.assertLogs("zimantic.indexing.pipeline", level="WARNING") as logs,
                 self.assertRaisesRegex(RuntimeError, "parse failed"),
@@ -260,7 +265,12 @@ class BuildPipelineTests(unittest.TestCase):
             self.assertTrue(
                 any("previous published generation" in message for message in logs.output)
             )
-            self.assertEqual(locator.paths(_source()).generation, generation)
+            lease = locator.paths(_source())
+            assert lease is not None
+            try:
+                self.assertEqual(lease.generation, generation)
+            finally:
+                lease.close()
             self.assertEqual(_docs(locator, _source()), [(1, "Old", "old")])
             directory = locator.source_directory(
                 "files", "files:test", "files:test:manual-0123"
@@ -344,8 +354,12 @@ class BuildPipelineTests(unittest.TestCase):
                     "files", "files:test", "files:test:manual-0123"
                 )
                 if missing_manifest:
-                    with sqlite3.connect(directory / "staging-fast.sqlite") as db:
+                    db = sqlite3.connect(directory / "staging-fast.sqlite")
+                    try:
                         db.execute("DELETE FROM meta WHERE key IN ('entry_order', 'entry_order_fingerprint')")
+                        db.commit()
+                    finally:
+                        db.close()
                 resumed = OrderedProducer(rows)
                 if missing_manifest:
                     with self.assertRaisesRegex(
@@ -404,7 +418,12 @@ class BuildPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
                 locator = _build(Producer(rows), tmp, embedder=_Embedder())
-            generation = locator.paths(_source()).generation
+            lease = locator.paths(_source())
+            assert lease is not None
+            try:
+                generation = lease.generation
+            finally:
+                lease.close()
 
             fake = type("usage", (), {"free": 1, "total": 1, "used": 0})()
             with (
@@ -417,7 +436,12 @@ class BuildPipelineTests(unittest.TestCase):
                     embedder=_Embedder(),
                     force=True,
                 )
-            self.assertEqual(locator.paths(_source()).generation, generation)
+            lease = locator.paths(_source())
+            assert lease is not None
+            try:
+                self.assertEqual(lease.generation, generation)
+            finally:
+                lease.close()
 
     def test_corrupt_staging_generation_is_discarded_and_rebuilt(self):
         rows = [EntryRecord(1, "T", "e", "p", None, "body")]
@@ -726,8 +750,11 @@ class EmbeddingPipelineTests(unittest.TestCase):
                         directory = IndexLocator(tmp).source_directory(
                             "files", "files:test", "files:test:manual-0123"
                         )
-                        with sqlite3.connect(directory / "staging-full.sqlite") as db:
+                        db = sqlite3.connect(directory / "staging-full.sqlite")
+                        try:
                             self.assertEqual(db.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 0)
+                        finally:
+                            db.close()
                     finally:
                         release_slow.set()
                         if not fourth_finished.is_set():

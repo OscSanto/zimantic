@@ -198,7 +198,11 @@ class SourceCatalog:
                 self._lease.acquire(shared=True)
             self._initialize_database(db_path)
         except (OSError, sqlite3.Error) as error:
+            lease = getattr(self, "_lease", None)
+            if lease is not None:
+                lease.release()
             if db_path is None or not _is_catalog_corruption(error):
+                self._lease = None
                 try:
                     self.db.close()
                 except (AttributeError, sqlite3.Error):
@@ -217,8 +221,15 @@ class SourceCatalog:
             except (AttributeError, sqlite3.Error):
                 pass
             database_path = Path(db_path)
-            for suffix in ("", "-wal", "-shm"):
-                Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+            if lease is not None:
+                lease.acquire(shared=False)
+            try:
+                for suffix in ("", "-wal", "-shm"):
+                    Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+            finally:
+                if lease is not None:
+                    lease.release()
+                    lease.acquire(shared=True)
             self.db_path = database_path
             self._initialize_database(database_path)
 

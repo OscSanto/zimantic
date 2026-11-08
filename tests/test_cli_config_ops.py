@@ -513,11 +513,14 @@ class TestSourcesAndPrune:
     def test_build_list_does_not_take_the_build_lock(self, tmp_path, monkeypatch, capsys):
         (tmp_path / "modules").mkdir()
         (tmp_path / "modules" / "a.html").write_text("hello", encoding="utf-8")
+        config_dir = tmp_path / "zimantic"
+        config_dir.mkdir()
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         _write(
-            tmp_path / "config.toml",
-            'index_dir = "indexes"\n'
+            config_dir / "config.toml",
+            f"index_dir = {json.dumps(str(tmp_path / 'indexes'))}\n"
             '[[collections]]\ntype = "files"\nname = "modules"\n'
-            'path = "modules"\n',
+            'path = "../modules"\n',
         )
         monkeypatch.chdir(tmp_path)
         main(["build", "--list"])

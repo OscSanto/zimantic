@@ -352,17 +352,24 @@ class IndexLocator:
                 fd = os.open(lease_path, os.O_RDONLY)
             except OSError:
                 continue
+            removable = False
             try:
                 if not _lock_exclusive(fd):
                     continue
                 latest = self._read_manifest(directory) or {}
                 if generation_dir.name == (latest.get("generation") or current):
                     continue
-                shutil.rmtree(generation_dir)
-                removed.append(generation_dir)
+                removable = True
             finally:
                 _unlock(fd)
                 os.close(fd)
+            if removable:
+                # Windows does not allow deleting a file while its lock handle
+                # is open. The manifest no longer points here, so after the
+                # exclusive check/recheck readers can only observe a stale
+                # generation and will retry against the current manifest.
+                shutil.rmtree(generation_dir)
+                removed.append(generation_dir)
         return removed
 
 
