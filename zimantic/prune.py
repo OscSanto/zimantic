@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._filelock import lock_file, unlock_file
 from .discovery import DiscoveryResult
+from ._filelock import lock_file, unlock_file
 from .indexing.locator import MANIFEST_VERSION, IndexLocator
 from .providers.config import BUILTIN_PROVIDERS, ConfigIssue
 

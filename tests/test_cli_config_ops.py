@@ -512,6 +512,172 @@ class TestSourcesAndPrune:
         assert not (tmp_path / ".build.lock").exists()
         assert config.exists()
 
+    def _catalog_config(self, tmp_path, monkeypatch, collections):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        cwd = tmp_path / "working"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        config = default_config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        return _write(
+            config,
+            f"index_dir = {json.dumps(str(tmp_path / 'indexes'))}\n" + collections,
+        )
+
+    def test_catalog_filters_before_paging_and_reports_membership_paths(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import sys
+
+        root = tmp_path / "modules"
+        for name in ("Alpha", "Beta"):
+            child = root / name
+            child.mkdir(parents=True)
+            _write(child / "index.html", f"<p>{name}</p>")
+        _write(root / "loose.txt", "Loose text")
+        config = self._catalog_config(
+            tmp_path, monkeypatch,
+            '[[collections]]\ntype = "files"\nname = "modules"\n'
+            f'path = {json.dumps(str(root))}\ngranularity = "children"\n'
+            'label = "Reference shelf"\n'
+            '[[collections]]\ntype = "files"\nname = "other"\n'
+            f'path = {json.dumps(str(root))}\n',
+        )
+        indexes = tmp_path / "indexes"
+        indexes.mkdir()
+        sentinel = indexes / "untouched.txt"
+        _write(sentinel, "existing index state")
+        before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+        monkeypatch.setitem(sys.modules, "zimantic.embed", None)
+        monkeypatch.setitem(sys.modules, "zimantic.search", None)
+        main([
+            "catalog", "REFERENCE", "--provider", "files",
+            "--collection", "files:modules", "--media-type", "text",
+            "--limit", "1", "--offset", "1", "--json",
+        ])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["total"] == 3
+        assert payload["offset"] == payload["limit"] == 1
+        assert len(payload["sources"]) == 1
+        source = payload["sources"][0]
+        assert source["title"] == "Beta"
+        assert source["searchable"] is False
+        assert source["paths"] == {"path": str(root / "Beta")}
+        assert source["collection"]["key"] == "files:modules"
+        assert [item["key"] for item in payload["collections"]] == ["files:modules"]
+        assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+        assert config.exists()
+
+        main(["catalog", "--collection", "modules", "--relative", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert {item["paths"]["path"] for item in payload["sources"]} == {
+            os.path.relpath(root / name, Path.cwd()) for name in ("Alpha", "Beta", "")
+        }
+        main(["catalog", "--source", source["key"], "--relative"])
+        output = capsys.readouterr().out
+        assert "Beta" in output
+        assert f"path: {os.path.relpath(root / 'Beta', Path.cwd())}" in output
+        assert "not searchable" in output
+        assert not (indexes / ".build.lock").exists()
+
+        main(["catalog", "bEtA", "--collection", "modules", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert [item["key"] for item in payload["sources"]] == [source["key"]]
+        main(["catalog", "--media-type", "video", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["total"] == 0
+        assert payload["sources"] == []
+
+    def test_catalog_zim_reports_nested_and_unreadable_archives(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from providers.zim.test_provider import _create_zim
+
+        root = tmp_path / "zims"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        archive = nested / "manual.zim"
+        _create_zim(archive)
+        broken = root / "broken.zim"
+        broken.write_bytes(b"not an archive")
+        self._catalog_config(
+            tmp_path, monkeypatch,
+            '[[collections]]\ntype = "zim"\nname = "books"\n'
+            f'path = {json.dumps(str(root))}\n',
+        )
+        main(["catalog", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["total"] == 2
+        assert {item["paths"]["path"] for item in payload["sources"]} == {
+            str(archive), str(broken)
+        }
+        assert any(item["searchable"] is False for item in payload["sources"])
+        assert not (tmp_path / "indexes").exists()
+
+    def test_catalog_kolibri_reports_original_not_snapshot_paths(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from providers.kolibri.helpers import make_two_channel_fixture
+
+        fixture = make_two_channel_fixture(tmp_path)
+        try:
+            self._catalog_config(
+                tmp_path, monkeypatch,
+                '[[collections]]\ntype = "kolibri"\nname = "lessons"\n'
+                f'path = {json.dumps(str(fixture.home))}\n',
+            )
+            main(["catalog", "--json"])
+            payload = json.loads(capsys.readouterr().out)
+            assert payload["sources"]
+            assert all(item["paths"] == {
+                "path": str(fixture.home),
+                "database_path": str(fixture.db_path),
+                "storage": str(fixture.storage),
+            } for item in payload["sources"])
+            assert not (tmp_path / "indexes").exists()
+        finally:
+            fixture.dispose()
+
+    def test_catalog_remote_entries_keep_urls_without_local_paths(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from providers.kiwix.test_runtime import _FakeKiwix, _feed
+        import zimantic.providers.kiwix.catalog as catalog
+
+        fake = _FakeKiwix(catalog=_feed(["manual"]))
+        monkeypatch.setattr(catalog, "urlopen", fake)
+        self._catalog_config(
+            tmp_path, monkeypatch,
+            '[[collections]]\ntype = "kiwix"\nname = "remote"\n'
+            'server = "http://kiwix"\n',
+        )
+        main(["catalog", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["total"] == 1
+        assert payload["sources"][0]["paths"] == {}
+        assert payload["sources"][0]["homepage"] == "http://kiwix/content/manual"
+        assert not (tmp_path / "indexes").exists()
+
+    @pytest.mark.parametrize("arguments", [
+        ["--limit", "0"], ["--offset", "-1"], ["--provider", "unknown"],
+        ["--media-type", "unknown"],
+    ])
+    def test_catalog_rejects_invalid_filters(self, arguments):
+        with pytest.raises(SystemExit) as raised:
+            main(["catalog", *arguments])
+        assert raised.value.code == 2
+
+    def test_catalog_empty_and_no_matches(self, tmp_path, monkeypatch, capsys):
+        self._catalog_config(tmp_path, monkeypatch, "")
+        main(["catalog", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["sources"] == payload["collections"] == []
+        assert payload["total"] == 0
+        main(["catalog", "missing"])
+        assert capsys.readouterr().out == "No matching library entries.\n"
+        assert not (tmp_path / "indexes").exists()
+
     def test_build_list_does_not_take_the_build_lock(self, tmp_path, monkeypatch, capsys):
         (tmp_path / "modules").mkdir()
         (tmp_path / "modules" / "a.html").write_text("hello", encoding="utf-8")

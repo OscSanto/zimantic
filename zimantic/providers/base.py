@@ -227,6 +227,10 @@ class IndexedRuntime(CollectionRuntime, ABC):
 
     indexes: Mapping[str, IndexHandle]
 
+    def source_paths(self, source: SourceInfo) -> Mapping[str, Path]:
+        """Private backing locations, when available, for CLI use only."""
+        return {}
+
     @abstractmethod
     def bind_search(
         self,

@@ -191,6 +191,11 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
         with self._lock:
             return tuple(source.info for source in self._library)
 
+    def source_paths(self, source: SourceInfo) -> dict[str, Path]:
+        with self._lock:
+            member = self._by_key.get(source.key)
+        return {"path": self.root / member.membership_root} if member is not None else {}
+
     def search(self, source: SourceInfo, request: SourceQuery) -> SourceResult:
         if self._closed:
             return SourceResult(

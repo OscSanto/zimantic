@@ -181,6 +181,10 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
         with self._lock:
             return self._library_sources
 
+    def source_paths(self, source: SourceInfo) -> dict[str, Path]:
+        record = self._record_for(source)
+        return {"path": Path(record.path)} if record is not None and record.path else {}
+
     @property
     def catalog(self) -> SourceCatalog:
         return self._catalog

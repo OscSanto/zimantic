@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._filelock import lock_file, unlock_file
 from .catalog import (
     SCHEMA_VERSION,
     SOURCE_COLUMNS,
@@ -33,7 +34,6 @@ from .catalog import (
 )
 from .diagnostics import public_cause
 from .locking import catalog_lease_path
-from ._filelock import lock_file, unlock_file
 
 logger = logging.getLogger(__name__)
 

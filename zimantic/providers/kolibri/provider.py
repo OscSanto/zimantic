@@ -214,6 +214,13 @@ class KolibriRuntime(IndexedRuntime):
         with self._lock:
             return tuple(source.info for source in self._library)
 
+    def source_paths(self, source: SourceInfo) -> dict[str, Path]:
+        with self._lock:
+            if source.key not in self._by_key:
+                return {}
+        home, database, storage = _paths(self.config)
+        return {"path": home, "database_path": database, "storage": storage}
+
     def search(self, source: SourceInfo, request: SourceQuery) -> SourceResult:
         if self._closed:
             return SourceResult(

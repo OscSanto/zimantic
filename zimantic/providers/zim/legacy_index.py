@@ -270,6 +270,7 @@ def open_legacy_vectors(producer, index_dir, db, cfg, embedder):
             flags = faiss.IO_FLAG_READ_ONLY
             if os.name != "nt":
                 flags |= faiss.IO_FLAG_MMAP
+            # Windows FAISS builds cannot mmap legacy IVF inverted lists.
             index = faiss.read_index(str(faiss_path), flags)
             if index.metric_type != faiss.METRIC_INNER_PRODUCT or not index.is_trained:
                 raise LegacyIndexError("unsupported v0 FAISS metric or training state")

@@ -359,6 +359,43 @@ def _make_parser() -> argparse.ArgumentParser:
         help="select this exact source key; repeatable",
     )
 
+    catalog_cmd = commands.add_parser(
+        "catalog",
+        help="browse and filter library metadata and local paths (read-only, no server needed)",
+    )
+    _add_verbosity_argument(catalog_cmd)
+    catalog_cmd.add_argument(
+        "query",
+        nargs="?",
+        help="case-insensitive substring of source or collection display metadata",
+    )
+    catalog_cmd.add_argument("--json", action="store_true", help="write metadata and paths as JSON")
+    catalog_cmd.add_argument(
+        "--relative",
+        action="store_true",
+        help="show paths relative to cwd (default: absolute; other Windows drives stay absolute)",
+    )
+    catalog_cmd.add_argument(
+        "--provider", action="append", default=[], metavar="KIND",
+        help="select provider types (zim, files, kolibri, kiwix); repeatable",
+    )
+    catalog_cmd.add_argument(
+        "--collection", action="append", default=[], metavar="KEY|NAME",
+        help="select an exact collection key or configured entry name; repeatable",
+    )
+    catalog_cmd.add_argument(
+        "--source", action="append", default=[], metavar="KEY",
+        help="select an exact source key; repeatable",
+    )
+    from .media_types import MEDIA_TYPE_ORDER
+
+    catalog_cmd.add_argument(
+        "--media-type", choices=MEDIA_TYPE_ORDER,
+        help="select sources with this content family",
+    )
+    catalog_cmd.add_argument("--limit", type=int, metavar="N", help="maximum entries (default: all)")
+    catalog_cmd.add_argument("--offset", type=int, default=0, metavar="N", help="skip N matching entries")
+
     prune_cmd = commands.add_parser(
         "prune",
         help="report or delete Zimantic indexes for unconfigured sources",
@@ -1506,6 +1543,105 @@ def _run_sources(args, cfg: dict) -> None:
         result.close()
 
 
+def _run_catalog(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
+    import json
+
+    from .discovery import discover_collections
+    from .providers.base import IndexedRuntime
+    from .providers.config import ConfigValidationError
+    from .web.listing import filter_collections, filter_sources
+
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
+    if args.offset < 0:
+        parser.error("--offset must not be negative")
+    try:
+        entries = _selected_configured_entries(
+            cfg,
+            provider_selectors=args.provider,
+            collection_selectors=args.collection,
+            source_selectors=args.source,
+        )
+    except ConfigValidationError as error:
+        parser.error(str(error))
+    with discover_collections(
+        cfg, entries=entries, wait=True, persist_catalog=False
+    ) as result:
+        _log_discovery_diagnostics(result, cfg)
+        collections: list[dict[str, Any]] = []
+        sources: dict[str, dict[str, Any]] = {}
+        owners: dict[str, tuple[Any, Any]] = {}
+        collection_selectors = set(args.collection)
+        source_selectors = set(args.source)
+        for discovered in result.collections:
+            if not _collection_matches_selector(
+                discovered.entry, discovered.collection.key, collection_selectors
+            ):
+                continue
+            collections.append(_public_collection_record(discovered, cfg))
+            for source in discovered.runtime.library_sources():
+                if source_selectors and source.key not in source_selectors:
+                    continue
+                sources[source.key] = source.to_dict(include_metadata=True)
+                owners[source.key] = (discovered.runtime, source)
+        matching = filter_sources(
+            sources.values(), media_type=args.media_type, query=args.query,
+            collections=collections,
+        )
+        collections = filter_collections(
+            collections, sources.values(), media_type=args.media_type, query=args.query,
+        )
+        end = None if args.limit is None else args.offset + args.limit
+        page = matching[args.offset:end]
+        cwd = Path.cwd()
+        for record in page:
+            runtime, source = owners[record["key"]]
+            paths = runtime.source_paths(source) if isinstance(runtime, IndexedRuntime) else {}
+            record["paths"] = {
+                name: (
+                    _config_relative_path(path.absolute(), cwd)
+                    if args.relative else str(path.absolute())
+                )
+                for name, path in paths.items()
+            }
+        if args.json:
+            print(json.dumps(
+                {
+                    "collections": collections,
+                    "sources": page,
+                    "total": len(matching),
+                    "offset": args.offset,
+                    "limit": args.limit,
+                },
+                indent=2, ensure_ascii=False,
+            ))
+            return
+        if not page:
+            print("No matching library entries.")
+        if args.limit is not None or args.offset:
+            print(f"{len(page)} of {len(matching)} matching entries (offset {args.offset})")
+        for record in page:
+            marker = "" if record["searchable"] else ", not searchable"
+            print(f"{record['key']}  {record.get('title') or ''} [{record['provider']}{marker}]")
+            for field in (
+                "description", "long_description", "creator", "publisher",
+                "language", "date", "tags", "category", "license", "size",
+                "media_types", "item_count", "indexed_count", "index_freshness",
+                "homepage",
+            ):
+                value = record.get(field)
+                if value is None or value == "" or value == []:
+                    continue
+                if isinstance(value, list):
+                    value = ", ".join(value)
+                print(f"  {field}: {value}")
+            for name, path in record["paths"].items():
+                print(f"  {name}: {path}")
+        for collection in collections:
+            if collection.get("error"):
+                print(f"{collection['key']}: {collection['error']}", file=sys.stderr)
+
+
 def _print_discovery_tree(
     result,
     *,
@@ -1945,7 +2081,7 @@ def main(argv: list[str] | None = None) -> None:
     _configure_logging(log_level)
 
     # `reload` only needs the PID file, and `model --list` only needs the registry.
-    if args.command in {"build", "serve", "open", "sources", "prune"} or (
+    if args.command in {"build", "serve", "open", "sources", "catalog", "prune"} or (
         args.command == "model" and not args.list
     ):
         from .providers.config import ConfigValidationError
@@ -1972,6 +2108,8 @@ def main(argv: list[str] | None = None) -> None:
         _run_open(args, cfg, parser)
     elif args.command == "sources":
         _run_sources(args, cfg)
+    elif args.command == "catalog":
+        _run_catalog(args, cfg, parser)
     elif args.command == "prune":
         _run_prune(args, cfg, parser)
     elif args.command == "model":
