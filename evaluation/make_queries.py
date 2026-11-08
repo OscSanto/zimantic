@@ -63,13 +63,14 @@ def is_article(entry) -> bool:
 
 def generate(args):
     from libzim.reader import Archive
+    from zimantic.libzim_compat import get_entry_by_id
     zim_path = Path(args.zim)
     zim, name, rng = Archive(str(zim_path)), zim_path.stem, random.Random(args.seed)
     rows, counts, budget = [], Counter(), args.n * args.attempts
     wanted = [s for s in SETS if s in args.sets]
     while budget and any(counts[s] < args.n for s in wanted):
         budget -= 1
-        entry = zim._get_entry_by_id(rng.randrange(zim.entry_count))
+        entry = get_entry_by_id(zim, rng.randrange(zim.entry_count))
         if entry.is_redirect:
             if "alias" not in wanted or counts["alias"] >= args.n:
                 continue

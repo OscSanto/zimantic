@@ -128,6 +128,14 @@ class SourceDiscoveryTests(unittest.TestCase):
         with stub({}) as server:
             self.assertEqual(run.zimantic_config(server.url, 5), {})
 
+    def test_canonical_sources_exclude_other_providers_and_unindexed_zims(self):
+        self.assertEqual(run.source_names([
+            {"key": "zim:library:one", "provider": "zim", "searchable": True},
+            {"key": "zim:library:two", "provider": "zim", "searchable": False},
+            {"key": "files:library:one", "provider": "files", "searchable": True},
+            {"key": "kiwix:library:one", "provider": "kiwix", "searchable": True},
+        ]), {"zim:library:one"})
+
 
 class ResultSourceTests(unittest.TestCase):
     def test_hits_are_matched_to_the_requested_zim(self):
@@ -226,6 +234,34 @@ class RunnerTests(unittest.TestCase):
             data = json.loads((out / "combined.json").read_text())
             self.assertEqual(data["results"]["other_2025-01|suite/title/000"]["rank"], 1)
             self.assertEqual(data["results"]["zim_a_2026-01|suite/title/000"]["rank"], 1)
+
+    def test_canonical_source_key_scopes_requests_and_filters_foreign_hits(self):
+        key = "zim:library:archive-abc123"
+
+        def search(query):
+            self.assertEqual(query["source"], [key])
+            self.assertEqual(query["zim"], ["zim_a_2026-01"])
+            return 200, [
+                {"path": "Alpha", "source": "Display title", "source_key": key},
+                {"path": "Beta", "source": "Other title", "source_key": "zim:other"},
+            ]
+
+        with tempfile.TemporaryDirectory() as tmp, stub({
+            "/sources": lambda query: (200, [
+                {"key": key, "provider": "zim", "searchable": True},
+            ]),
+            "/search": search,
+        }) as server:
+            root = Path(tmp)
+            queries = self._queries(root)
+            with redirect_stdout(io.StringIO()):
+                run.main(["--engine", "zimantic", "--url", server.url, "--label", "canonical",
+                          "--queries", str(queries), "--results-dir", str(root / "results"),
+                          "--zims", "zim_a_2026-01", "--source-key", key])
+            data = json.loads((root / "results" / "canonical.json").read_text())
+            self.assertEqual(data["meta"]["source_key"], key)
+            self.assertEqual(data["results"]["zim_a_2026-01|suite/title/000"]["rank"], 1)
+            self.assertIsNone(data["results"]["zim_a_2026-01|suite/foreign/000"]["rank"])
 
 
 class KiwixTests(unittest.TestCase):

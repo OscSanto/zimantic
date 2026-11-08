@@ -118,9 +118,94 @@ Useful options for `run.py`: `--zims`, `--suites`, `--sets`, `--langs` (run a su
 results file), `--results-dir` (write the results somewhere other than `evaluation/results`). Results
 are saved as `<results-dir>/<label>.json`.
 
+Current servers expose canonical source keys rather than archive filenames.
+For a single-ZIM run, map the query file's ZIM name explicitly:
+
+```bash
+uv run python evaluation/run.py --engine zimantic --url http://127.0.0.1:8090 \
+  --label small-zim --zims communitybuilding.stackexchange.com_en_all_2026-08 \
+  --source-key '<key from /sources>'
+```
+
+This sends the canonical `source` filter and checks each hit against that key;
+display titles are not archive identities.
+
 For a fair comparison, both runs use the same ZIM files. Each run also uses
 indexes built by its own code when the index format or build behavior differs.
 Record any index difference with the comparison.
+
+### Small-ZIM body-index comparison
+
+```bash
+uv run python scripts/bench_body_quality.py \
+  zims/communitybuilding.stackexchange.com_en_all_2026-08.zim \
+  --output /tmp/body-quality
+```
+
+The harness uses this runner and `compare.py`, the unchanged dev/test split,
+and real HTTP search with previews and final ranking. It compares HEAD,
+compact contentless FTS5, and native-only body retrieval in both normal hybrid
+search and a semantic-disabled diagnostic. It reuses the 20 labelled Community
+Building questions from `tests/benchmarks/community_queries.json`, derives
+exact-title, keyword and misspelling queries, and uses `make_queries.py` for
+20 first-sentence and 20 deep-sentence queries: 120 fixed English queries total.
+It writes indexes, query files, result files, method/config metadata,
+selected-split comparison reports, and answer-rank changes (`qualitative.json`)
+under the output directory, and stops its isolated servers afterwards.
+Caches are disabled; all variants use the same model, thread budget and
+query set. This intentionally overrides the multi-ZIM/multilingual release
+scope below: it is a quick qualitative smoke comparison, not a release gate.
+
+HEAD here is the historical positional control; the production default is now
+compact Unicode61 with `remove_diacritics 2`.
+
+For storage/BM25 selection, then tokenizers on the preferred layout:
+
+```bash
+uv run python scripts/bench_body_quality.py \
+  zims/communitybuilding.stackexchange.com_en_all_2026-08.zim \
+  --output /tmp/body-content --report-split dev \
+  --variants compact stored stored-default head-bm25 stored-bm25
+
+uv run python scripts/bench_body_quality.py \
+  zims/communitybuilding.stackexchange.com_en_all_2026-08.zim \
+  --output /tmp/body-tokenizers --report-split dev \
+  --variants compact compact-unicode61 compact-porter compact-ascii trigram
+```
+
+The first selected variant is the baseline. `stored` preserves the current
+Unicode61 diacritic setting while changing storage; `stored-default` uses
+literal `fts5(text)`. BM25 controls retain positions and stored token counts.
+Trigram retains full detail because its compact form rejects our long query
+tokens. `tokenizer-probes.json` records synthetic capability differences, not
+labelled accuracy.
+
+Freeze choices using dev, then run `evaluation/compare.py --split test` on the
+saved results with the same generated `--queries` directory; no rebuild or
+server is needed. For example:
+
+```bash
+uv run python evaluation/compare.py \
+  /tmp/body-content/results/compact-hybrid.json \
+  /tmp/body-content/results/stored-default-hybrid.json \
+  /tmp/body-content/results/head-bm25-hybrid.json \
+  --queries /tmp/body-content/queries --split test --by set suite
+```
+
+Measure build/provider costs separately without repeatedly loading the model:
+
+```bash
+uv run python scripts/bench_body_tradeoffs.py \
+  zims/communitybuilding.stackexchange.com_en_all_2026-08.zim \
+  --output /tmp/body-runtime \
+  --variants head compact stored-default compact-porter compact-ascii trigram \
+  --build-repeats 3 --full-repeats 0 --query-repeats 3
+```
+
+Use `--queries` to reuse a previous provider-probe JSON file. These timings
+exclude query embeddings, previews, and HTTP; relevance comes from the quality
+harness, not the probe-overlap counts. See the
+[measured storage/ranking/tokenizer comparison](../docs/build-performance.md#default-stored-content-versus-contentless-including-bm25).
 
 ### Reference results
 

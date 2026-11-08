@@ -11,7 +11,7 @@ from zimantic.indexing import schema
 from zimantic.indexing.migrate import migrate_legacy_index
 from zimantic.indexing.pipeline import BodyBudget, build_index
 from zimantic.indexing import pipeline as build_module
-from zimantic.indexing.search import AmbiguousPathError, SearchLimits, search
+from zimantic.indexing.search import AmbiguousPathError, SearchLimits, body_search, search
 from zimantic.indexing.types import EntryRecord
 from zimantic.indexing.locator import IndexLocator
 from zimantic.providers.base import SourceQuery
@@ -97,6 +97,30 @@ def test_meta_codec_is_type_stable():
         schema.decode_bool("true")
 
 
+@pytest.mark.parametrize("positional", [False, True])
+def test_body_search_preserves_matching_with_compact_and_existing_indexes(positional):
+    with sqlite3.connect(":memory:") as db:
+        schema.ensure_schema(db)
+        if positional:
+            db.execute("DROP TABLE body")
+            db.execute(
+                "CREATE VIRTUAL TABLE body USING fts5("
+                "text, content='', tokenize='unicode61 remove_diacritics 2')"
+            )
+        else:
+            assert "body_docsize" not in schema.table_names(db)
+        db.executemany("INSERT INTO body(rowid, text) VALUES (?, ?)", [
+            (9, "CAFÉ \u1ed9 zebra"),
+            (2, "cafe o unrelated"),
+            (1, "zebra unrelated"),
+        ])
+        assert body_search(db, "cafe o zebra", 16) == [(9, 1.0)]
+        assert body_search(db, "zebra", 16) == [(1, 1.0), (9, 2.0)]
+        assert body_search(db, "zebra", 1) == [(1, 1.0)]
+        assert body_search(db, "cafe missing", 16) == []
+        assert body_search(db, "", 16) == []
+
+
 def test_generic_search_finds_title_and_body_without_embeddings_or_native():
     body = ("filler " * 300) + "latebodyterm"
     rows = [
@@ -108,6 +132,7 @@ def test_generic_search_finds_title_and_body_without_embeddings_or_native():
         source = _source()
         handle = _handle(locator, source)
         try:
+            assert "body_docsize" not in schema.table_names(handle.db_for_thread())
             result = search(
                 source,
                 handle,
@@ -410,7 +435,7 @@ def test_derived_stage_writes_cache_references_and_provenance():
             provenance = __import__("json").loads(meta["derived_text"])
             assert provenance["operations"]["captions"] == "ready"
             body = db.execute(
-                "SELECT rowid FROM body WHERE text MATCH '\"Caption\"'"
+                "SELECT rowid FROM body WHERE body MATCH '\"Caption\"'"
             ).fetchall()
             assert body == [(1,)]
         finally:
@@ -473,7 +498,7 @@ def test_legacy_integer_done_migrates_and_preserves_rowids():
                 (1, "Alpha")
             ]
             assert db.execute(
-                "SELECT rowid FROM body WHERE text MATCH '\"stored\"'"
+                "SELECT rowid FROM body WHERE body MATCH '\"stored\"'"
             ).fetchall() == [(1,)]
             meta = dict(db.execute("SELECT key, value FROM meta"))
             assert meta["done"] == "full"

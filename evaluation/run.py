@@ -47,9 +47,12 @@ def perma_ref(name: str) -> str:
     return ZIM_DATE.sub("", name)
 
 
-def zimantic(url, zim, query, k, timeout):
+def zimantic(url, zim, query, k, timeout, source_key=None):
     """url is the API base: <server>/api for v0.1.x, <server> for newer versions."""
-    params = urllib.parse.urlencode({"q": query, "zim": zim, "limit": k})
+    params = {"q": query, "zim": zim, "limit": k}
+    if source_key is not None:
+        params["source"] = source_key
+    params = urllib.parse.urlencode(params)
     for attempt in range(10):
         try:
             with urllib.request.urlopen(f"{url}/search?{params}", timeout=timeout) as response:
@@ -83,9 +86,11 @@ def source_names(payload):
         # archives (library.json) are not searchable either.
         if entry.get("mode") not in (None, "local"):
             continue
+        if entry.get("provider") not in (None, "zim"):
+            continue
         if not entry.get("available", True) or not entry.get("searchable", True):
             continue
-        for field in ("local_name", "name", "book"):
+        for field in ("local_name", "name", "book", "key"):
             value = entry.get(field)
             if isinstance(value, str) and value:
                 names.add(value)
@@ -200,6 +205,7 @@ def main(argv=None):
     ap.add_argument("--queries", default=str(Q.QUERIES), help="queries folder")
     ap.add_argument("--results-dir", default=str(RESULTS), help="where to write <label>.json")
     ap.add_argument("--zims", nargs="*", help="only these ZIMs (default: all with query files)")
+    ap.add_argument("--source-key", help="canonical Zimantic source key; requires exactly one --zims name")
     ap.add_argument("--suites", nargs="*"); ap.add_argument("--sets", nargs="*"); ap.add_argument("--langs", nargs="*")
     ap.add_argument("--split", choices=("all", "dev", "test"), default="all")
     ap.add_argument("--k", type=int, default=20, help="results requested per query (default 20)")
@@ -208,6 +214,8 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--append", action="store_true", help="add to an existing results file instead of replacing it")
     args = ap.parse_args(argv)
+    if args.source_key and (args.engine != "zimantic" or not args.zims or len(args.zims) != 1):
+        ap.error("--source-key requires --engine zimantic and exactly one --zims name")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
@@ -233,7 +241,9 @@ def main(argv=None):
         except urllib.error.URLError as error:
             sys.exit(f"could not reach {args.url}: {error}")
         config = zimantic_config(args.url, args.timeout)
-        missing = sorted({q["zim"] for q in todo} - served)
+        missing = sorted({
+            q["zim"] for q in todo if (args.source_key or q["zim"]) not in served
+        })
         if missing:
             print(f"not searchable on this server, left out of this run: {', '.join(missing)}")
             todo = [q for q in todo if q["zim"] in served]
@@ -261,13 +271,17 @@ def main(argv=None):
             continue
         t = time.perf_counter()
         try:
-            hits = search(endpoint, q["zim"], q["query"], args.k, args.timeout)
+            if args.source_key:
+                hits = search(endpoint, q["zim"], q["query"], args.k, args.timeout,
+                              source_key=args.source_key)
+            else:
+                hits = search(endpoint, q["zim"], q["query"], args.k, args.timeout)
         except Unsupported as error:
             unsupported[q["zim"]] = str(error)
             print(f"  {q['zim']}: unsupported by this engine ({error}); skipping it")
             continue
         ms = 1000 * (time.perf_counter() - t)
-        wanted = [hit for hit in hits if belongs(hit, q["zim"])]
+        wanted = [hit for hit in hits if belongs(hit, args.source_key or q["zim"])]
         if len(wanted) < len(hits):
             foreign[q["zim"]] += len(hits) - len(wanted)
         top = resolve(q["zim"], [hit["path"] for hit in wanted])[: args.k]
@@ -282,6 +296,8 @@ def main(argv=None):
               "the server did not scope the search to the requested ZIM")
     meta = {"label": args.label, "engine": args.engine, "url": args.url, "commit": args.commit, "k": args.k,
             "date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), "unsupported": unsupported}
+    if args.source_key:
+        meta["source_key"] = args.source_key
     if isinstance(config.get("max_results"), int):
         meta["max_results"] = config["max_results"]
     out_dir.mkdir(parents=True, exist_ok=True)

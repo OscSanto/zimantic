@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare contentless and stored-content body FTS on a synthetic corpus.
+"""Compare compact contentless and stored-content body FTS on a synthetic corpus.
 
 This is the phase-04 local benchmark hook.  It deliberately uses only SQLite so
 it can run on a build host without libzim, FAISS, or a model.  The phase-09
@@ -40,7 +40,8 @@ def _database(path: Path, rows: list[str], *, stored: bool) -> sqlite3.Connectio
     else:
         db.execute(
             "CREATE VIRTUAL TABLE body USING fts5("
-            "text, content='', tokenize='unicode61 remove_diacritics 2')"
+            "text, content='', detail=none, columnsize=0, "
+            "tokenize='unicode61 remove_diacritics 2')"
         )
     with db:
         db.executemany(
@@ -57,7 +58,7 @@ def _query_time(db: sqlite3.Connection, rows: list[str], limit: int) -> float:
     started = time.perf_counter()
     for query in queries:
         expression = " AND ".join(f'"{word}"' for word in query.split())
-        db.execute("SELECT rowid FROM body WHERE text MATCH ? LIMIT 10", (expression,)).fetchall()
+        db.execute("SELECT rowid FROM body WHERE body MATCH ? LIMIT 10", (expression,)).fetchall()
     return (time.perf_counter() - started) / max(1, len(queries))
 
 

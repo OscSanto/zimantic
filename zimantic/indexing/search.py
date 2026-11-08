@@ -8,8 +8,8 @@ and reports the source as partial rather than opening a guessed row.
 
 The module keeps the existing four ``SourceResult`` channels: semantic,
 keyword, full-text, and items.  Body lexical hits and optional native full-text
-hits are fused into the existing full-text channel by reciprocal rank; their
-BM25 and native scores are not comparable.
+hits are fused into the existing full-text channel by reciprocal rank; only
+their separate candidate orders contribute, not comparable raw scores.
 """
 
 from __future__ import annotations
@@ -186,14 +186,14 @@ def fetch_docs(
 def body_search(
     db: sqlite3.Connection, query: str, limit: int
 ) -> list[tuple[int, float]]:
-    """Return ``(rowid, bm25)`` body hits in deterministic rank order."""
+    """Return ``(rowid, position)`` body matches in candidate order."""
     words = _query_words(query)
     if not words:
         return []
     expression = " AND ".join(f'"{word}"' for word in words)
     try:
         rows = db.execute(
-            "SELECT rowid FROM body WHERE text MATCH ? LIMIT ?",
+            "SELECT rowid FROM body WHERE body MATCH ? LIMIT ?",
             (expression, max(1, int(limit))),
         ).fetchall()
     except sqlite3.Error:

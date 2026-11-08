@@ -4,6 +4,207 @@ This ports the ideas from [OscSanto/zimantic#3](https://github.com/OscSanto/zima
 credited to OscSanto, into the current provider-neutral index pipeline rather
 than cherry-picking the older ZIM-only builder.
 
+## Advisory index size goal
+
+Aim to keep each source's total published index size (`index.sqlite` plus
+`index.faiss`, when present) **below 10% of the original source file size**.
+This is an optimization goal, not a hard cap: preserve search coverage and
+quality rather than silently truncating content, disabling channels, or
+rejecting a build to meet it. Models, the shared catalog, optional preview
+caches, and transient staging/retained generations are separate storage costs;
+budget for those too.
+
+Report the index-to-source byte ratio alongside build time and search quality.
+Small, highly compressed text archives can exceed the goal substantially:
+the 6,331,350-byte Community Building ZIM measured 79.1% at HEAD `a27dd69`,
+56.1% with compact body FTS, and 46.3% with native-only body retrieval.
+None meets the goal; removing body FTS alone is insufficient on this fixture.
+
+## Body FTS alternatives and search quality
+
+The benchmark variants change the body channel only. Title FTS and semantic
+vectors remain unchanged. New production indexes now use compact Unicode61
+with `remove_diacritics 2`. Existing positional indexes remain readable and
+resume-compatible; rebuilding is needed to obtain the smaller layout. In this
+comparison, HEAD denotes the historical positional control, which the harness
+continues to reproduce explicitly rather than using the moving production
+default.
+
+| Variant | Conventional description | SQLite options |
+|---|---|---|
+| HEAD | Positional contentless FTS5 inverted index | [`content=''`](https://www.sqlite.org/fts5.html#contentless_tables), [`detail=full`](https://www.sqlite.org/fts5.html#the_detail_option), [`columnsize=1`](https://www.sqlite.org/fts5.html#the_columnsize_option); the latter two are defaults |
+| Compact | Non-positional, document-id-only contentless FTS5 inverted index | `content=''`, [`detail=none`](https://www.sqlite.org/fts5.html#the_detail_option), [`columnsize=0`](https://www.sqlite.org/fts5.html#the_columnsize_option) |
+| Native-only | Archive-native full-text retrieval (Xapian, through libzim) | No SQLite body table; [libzim full-text search](https://libzim.readthedocs.io/en/latest/usage.html#full-text-searching-in-entries) |
+
+HEAD and compact use the same [`unicode61`](https://www.sqlite.org/fts5.html#unicode61_tokenizer)
+tokenizer with `remove_diacritics 2`. The SQLite body query performs exact-token
+Boolean AND matching, not BM25 ordering. Its candidates and native candidates
+are fused by reciprocal rank fusion (RRF). Compact drops positions and stored
+token counts unused by that query; it must use table-level MATCH, and cannot
+support SQLite phrase/NEAR queries, column filters, or normal length-aware BM25
+with this contentless configuration.
+
+The earlier 48-query provider-only probe changed 32 top-10 lists under
+native-only: 10 were reorderings of the same members, 22 changed membership,
+and only 7 changed the first result. This is not a count of relevance failures,
+and those probes did not include semantic retrieval or final HTTP ranking.
+
+The follow-up uses the [existing evaluation method](../evaluation/README.md#small-zim-body-index-comparison)
+on the same small archive, real HTTP search and a fixed synthetic query set.
+There are 120 English queries, 41 dev and 79 test; no settings were tuned.
+All variants have identical embedding vectors. Reported results are test-only:
+
+| Mode / variant | #1 | Top 5 | Top 20 | MRR | Fixed / broken at #1 vs HEAD |
+|---|---:|---:|---:|---:|---:|
+| Hybrid HEAD | 79.7% | 92.4% | 96.2% | 0.854 | baseline |
+| Hybrid compact | 79.7% | 92.4% | 96.2% | 0.854 | 0 / 0 |
+| Hybrid native-only | 75.9% | 87.3% | 93.7% | 0.812 | 0 / 3 |
+| Lexical HEAD | 58.2% | 63.3% | 63.3% | 0.604 | baseline |
+| Lexical compact | 58.2% | 63.3% | 63.3% | 0.604 | 0 / 0 |
+| Lexical native-only | 51.9% | 57.0% | 58.2% | 0.539 | 0 / 5 |
+
+Compact matches every stored top-20 list in both modes, including dev queries.
+For a deep sentence mentioning Zulip and LaTeX, the expected Slack-alternatives
+question falls from #1 to #8 under native-only hybrid search; without semantic
+retrieval it disappears. The moderator-permissions question likewise drops
+from #1 to outside the hybrid top 20. A second lost hybrid target is a user
+profile, not a question; these generated labels are not exhaustive relevance
+judgements.
+
+The four lost lexical deep-sentence targets expose a tokenizer/query mismatch:
+normalization turns contractions into fragments (`didn't` -> `didn`,
+`doesn't` -> `doesn`, `We're` -> `we re`, `don't` -> `don`). SQLite matches those
+fragments, but the native index does not match them in the target documents.
+The native index does find the underlying articles for other terms, including
+Zulip and DARPANet. These losses are not proof that native retrieval intrinsically
+lacks the article text; a native-only approach also needs compatible query
+handling. That follow-up was not tuned on these test queries.
+
+Treat the rates as a small-ZIM smoke comparison: labels are synthetic and
+incomplete, generated sentences can be awkward or include profiles, and
+aggregate differences are smaller than this sample's reported uncertainty.
+Concrete regressions still identify behavior to preserve.
+
+### Default stored content versus contentless, including BM25
+
+[`content=''` is not the default](https://www.sqlite.org/fts5.html#external_content_and_contentless_tables).
+Ordinary `fts5(text)` stores a second copy of the indexed text in its content
+shadow table. This supports raw text reads, snippets/highlights, and normal
+updates/deletes. Classic contentless tables return NULL for text, cannot supply
+snippets, and have update/delete restrictions. Our published indexes are rebuilt,
+and previews still read the archive: this experiment does **not** implement
+preview reuse from stored FTS text.
+
+Raw content, positions, and document lengths are separate choices:
+
+| Body layout | Raw text | Positions | Stored token counts | Useful SQLite BM25 |
+|---|---|---|---|---|
+| HEAD contentless | No | Yes | Yes | Yes |
+| Compact contentless | No | No | No | No; the probe returns tied `-0.0` scores |
+| Default stored content | Yes | Yes | Yes | Yes |
+
+HEAD already has the information needed for
+[`bm25(body)`](https://www.sqlite.org/fts5.html#the_bm25_function), but its current
+body query does not use it. The BM25 experiment changes only candidate ordering:
+`ORDER BY bm25(body), rowid` (SQLite's better scores are more negative), followed
+by the existing RRF and final ranking. It retains the same Boolean AND query;
+this is not a redesign of retrieval or fusion.
+
+First compare compact against `stored`, holding `unicode61 remove_diacritics 2`
+constant to isolate storage, plus their positional BM25 controls. Separately,
+`stored-default` uses literal `fts5(text)`, including bare default Unicode61.
+Both stored variants match **all 120 compact top-20 lists in both modes**.
+Stored content itself adds no quality here.
+
+Compact remained preferred on the 41 dev queries: all storage/ranking variants
+tied at 85.4% hybrid #1, but BM25 reduced lexical #1 from 68.3% to 63.4%
+(0 fixed, 2 broken). With choices frozen, the 79 held-out test queries give:
+
+| Mode / body variant | #1 | Top 5 | Top 20 | MRR | Fixed / broken #1 vs compact |
+|---|---:|---:|---:|---:|---:|
+| Hybrid compact / either stored variant | 79.7% | 92.4% | 96.2% | 0.854 | 0 / 0 |
+| Hybrid contentless or stored BM25 | 79.7% | 91.1% | 96.2% | 0.846 | 0 / 0 |
+| Lexical compact / either stored variant | 58.2% | 63.3% | 63.3% | 0.604 | 0 / 0 |
+| Lexical contentless or stored BM25 | 57.0% | 62.0% | 63.3% | 0.587 | 0 / 1 |
+
+BM25 improves no labelled test answer rank: four hybrid ranks worsen and five
+lexical ranks worsen. For the generated first-sentence query about finding a
+common chat venue, BM25 promotes the chat-rooms tag listing above the actual
+Slack question in the body channel. After fusion, the intended question moves
+from #1 to #3 lexical and #2 to #4 hybrid. The listing contains related material;
+single-answer labels do not judge every alternative's relevance.
+
+A dedicated warm SQL-only sweep on the same physical indexes (48 queries,
+three trials of 20 repetitions, limit 16) measured median body queries at
+**0.0175 ms unranked versus 0.0335 ms BM25** for contentless HEAD; stored content
+was effectively identical at 0.0174/0.0336 ms. That small extra cost does not
+materially change HTTP latency: test hybrid medians were 112-115 ms across the
+storage/BM25 controls. These HTTP timings are single evaluation passes, not
+counterbalanced latency trials. There is no measured BM25 quality improvement
+on this fixture, not evidence that BM25 is generally worse.
+
+### Tokenizers and repeated build/runtime measurements
+
+The second stage compares the dev-preferred compact layout across
+[Unicode61](https://www.sqlite.org/fts5.html#unicode61_tokenizer),
+[Porter](https://www.sqlite.org/fts5.html#porter_tokenizer), and
+[ASCII](https://www.sqlite.org/fts5.html#ascii_tokenizer). The
+[trigram](https://www.sqlite.org/fts5.html#the_trigram_tokenizer) control is
+contentless with **full detail**, `columnsize=0`: SQLite rejects query tokens
+longer than three characters with trigram `detail=none`. It is substring
+retrieval, not the same word-token compact layout, and cannot match terms shorter
+than three characters. Query normalization was not changed to accommodate it.
+
+Unicode61 `remove_diacritics 2` was retained before inspecting test results.
+Bare Unicode61 and ASCII tied on English dev; Porter and trigram worsened #1.
+Held-out results:
+
+| Body tokenizer | Hybrid #1 / MRR | Hybrid fixed / broken #1 | Lexical #1 / MRR | Lexical fixed / broken #1 |
+|---|---:|---:|---:|---:|
+| Unicode61, `remove_diacritics 2` | 79.7% / 0.854 | baseline | 58.2% / 0.604 | baseline |
+| Bare Unicode61 (`remove_diacritics 1`) | 79.7% / 0.854 | 0 / 0 | 58.2% / 0.604 | 0 / 0 |
+| Porter over Unicode61 `remove_diacritics 2` | 77.2% / 0.839 | 0 / 2 | 55.7% / 0.589 | 0 / 2 |
+| ASCII | 79.7% / 0.854 | 0 / 0 | 58.2% / 0.604 | 0 / 0 |
+| Trigram, full detail | 77.2% / 0.825 | 0 / 2 | 53.2% / 0.552 | 0 / 4 |
+
+Bare Unicode61 and ASCII match all 120 stored top-20 lists here, but synthetic
+capability probes expose differences that this English archive cannot score:
+Unicode61's default diacritic mode misses `ộ` when queried as `o`; mode 2
+matches. ASCII misses accent folding and Unicode punctuation/emoji boundaries.
+Porter matches `corrected`/`correction`, but also conflates
+`university`/`universe`. Trigram matches `keep` inside `bookkeeping`, but misses
+`AI`. These probes describe semantics, not an additional relevance score.
+Porter also moves the misspelled rules-question target from #1 to #2 hybrid;
+one of its two lost hybrid targets is a generated user-profile label.
+
+On the same four-logical-CPU, warm-cache host, rotated fresh-process lexical
+builds (three per variant) and 48-query provider trials (three processes, three
+repetitions each) measured:
+
+| Body variant | Lexical build median | Full build, single observation | Full SQLite MiB | SQLite + FAISS / ZIM | Warm helper-provider median |
+|---|---:|---:|---:|---:|---:|
+| HEAD contentless, full detail | 9.52 s | 28.51 s | 2.56 | 79.1% | 3.62 ms |
+| Compact Unicode61, mode 2 | 9.48 s | 28.63 s | 1.17 | 56.1% | 3.60 ms |
+| Default stored FTS5 / Unicode61 | 9.63 s | 29.59 s | 7.17 | 155.4% | 3.62 ms |
+| Compact Porter | 9.45 s | 28.99 s | 1.07 | 54.5% | 3.59 ms |
+| Compact ASCII | 9.43 s | 28.78 s | 1.19 | 56.3% | 3.67 ms |
+| Contentless trigram, full detail | 9.96 s | 29.25 s | 10.71 | 214.0% | 3.65 ms |
+
+Full-build observations come from the HTTP study; the HEAD-layout observation
+used BM25, which does not affect building. Do not infer a full-build speedup
+from these single observations. Lexical-build SQLite files omit about 0.10 MiB
+of vector metadata; the sizes above include it and the identical 2.21 MiB FAISS.
+Provider timings exclude embedding, previews and HTTP. Trigram body SQL was
+about 0.194 ms versus compact's 0.067 ms in those provider trials, despite
+similar total provider medians.
+
+Default storage costs about **6.1 times compact's SQLite space** for identical
+results; small build/runtime differences are not compelling. Porter saves
+about 8% of SQLite bytes but loses labelled #1 results. Keep compact Unicode61
+mode 2 as the measured candidate, not ASCII or trigram; none reaches the
+advisory 10% total-index goal. Compact is now the default for new indexes;
+candidate matching and ranking remain unchanged.
+
 ## Review and libzim API verification
 
 - The storage-order API claim is true for **python-libzim 4.0.0**, but false for

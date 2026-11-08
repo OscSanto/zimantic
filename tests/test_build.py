@@ -110,7 +110,7 @@ def _body_hits(locator, source, term):
         db = sqlite3.connect(lease.sqlite_path)
         try:
             return db.execute(
-                "SELECT rowid FROM body WHERE text MATCH ?", (f'"{term}"',)
+                "SELECT rowid FROM body WHERE body MATCH ?", (f'"{term}"',)
             ).fetchall()
         finally:
             db.close()

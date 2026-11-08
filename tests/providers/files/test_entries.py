@@ -107,7 +107,7 @@ def _body_hits(locator: IndexLocator, source, term: str) -> list[int]:
             return [
                 int(row[0])
                 for row in db.execute(
-                    "SELECT rowid FROM body WHERE text MATCH ?", (f'"{term}"',)
+                    "SELECT rowid FROM body WHERE body MATCH ?", (f'"{term}"',)
                 )
             ]
         finally:
