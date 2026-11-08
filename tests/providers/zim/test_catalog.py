@@ -289,11 +289,14 @@ class CatalogTests(unittest.TestCase):
 
     def test_foreign_schema_is_rebuilt(self):
         # A database that claims the current version but uses another layout
-        # (e.g. IIAB's iiab_zim_catalog.py) must be rebuilt, not queried.
+        # must be rebuilt, not queried.
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "catalog.sqlite"
             db = sqlite3.connect(db_path)
-            db.execute("CREATE TABLE zims (path TEXT PRIMARY KEY, size INTEGER)")
+            db.execute("CREATE TABLE sources (path TEXT PRIMARY KEY, size INTEGER)")
+            db.execute("INSERT INTO sources VALUES ('stale', 1)")
+            db.execute("CREATE TABLE zims (path TEXT PRIMARY KEY)")
+            db.execute("INSERT INTO zims VALUES ('unrelated')")
             db.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
             db.commit()
             db.close()
@@ -304,6 +307,10 @@ class CatalogTests(unittest.TestCase):
                     row["name"]
                     for row in catalog.db.execute("PRAGMA table_info(sources)")
                 }
+                self.assertEqual(
+                    catalog.db.execute("SELECT path FROM zims").fetchone()["path"],
+                    "unrelated",
+                )
             self.assertEqual(columns, set(SOURCE_COLUMNS))
 
     def test_missing_directory_keeps_the_cache(self):

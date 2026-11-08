@@ -66,8 +66,7 @@ def _is_catalog_corruption(error: BaseException) -> bool:
 _SCHEMA_LOCK = threading.Lock()
 
 # Columns of the generic sources table. Verified before trusting
-# ``user_version``, so an old ZIM-specific catalog or one written by a
-# different tool is rebuilt rather than queried with incompatible columns.
+# ``user_version``, so an incompatible layout is rebuilt rather than queried.
 SOURCE_COLUMNS = (
     "provider", "collection_key", "key", "path", "provider_id", "size",
     "mtime", "title", "description", "long_description", "language",
@@ -330,9 +329,6 @@ class SourceCatalog:
                 reason,
                 SCHEMA_VERSION,
             )
-        # The catalog is disposable: drop old provider-specific tables outright
-        # rather than migrating rows or leaving a compatibility view.
-        self.db.execute("DROP TABLE IF EXISTS zims")
         self.db.execute("DROP TABLE IF EXISTS sources")
         self.db.execute(
             """

@@ -439,7 +439,9 @@ deferring a failure to the first query. A sufficiently new SQLite build can
 still be compiled without FTS5. `catalog.sqlite` beside `index_dir` is the
 private ZIM archive metadata cache.
 Files and Kolibri do not write it, and Kiwix has no persistent local catalog. A
-catalog with an unsupported schema is discarded and rebuilt by a full ZIM scan.
+catalog with an unsupported schema is rebuilt by a full ZIM scan. Old
+provider-specific tables are not removed automatically; to reclaim their space,
+stop Zimantic and delete the disposable catalog and any SQLite sidecars.
 Use one schema version for a catalog at a time. Index
 identity is logical (`provider`, `collection key`, `source key`), never an
 absolute source path. Removing or renaming a collection does not delete its
@@ -668,7 +670,7 @@ rsync -a --files-from=/tmp/index-generations.txt indexes/ pi@rpi:~/.local/share/
 
 `rsync -a` copies only files whose size or mtime differs. Do not copy `staging-*.sqlite`, `*.tmp`, `*.sqlite-wal`, or `*.sqlite-shm`; staging files are unfinished builds, not published generations. Copy a complete generation directory and then its `current` manifest so a reload never opens a half-written pair. Run `zimantic reload` afterwards.
 
-`catalog.sqlite` is optional for the copy. It contains metadata and icons, never vectors, and a missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute locators, so copying it avoids a scan only when the target resolves a collection to the same absolute paths; otherwise those rows are not reused and the ZIMs are rescanned. The scan opens each ZIM once for metadata, illustration, and counts, not article bodies. A catalog with a different schema is discarded and rebuilt under the cross-process catalog lease. Both `build` and `serve` can create it.
+`catalog.sqlite` is optional for the copy. It contains metadata and icons, never vectors, and a missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute locators, so copying it avoids a scan only when the target resolves a collection to the same absolute paths; otherwise those rows are not reused and the ZIMs are rescanned. The scan opens each ZIM once for metadata, illustration, and counts, not article bodies. A catalog with a different schema is rebuilt under the cross-process catalog lease. Both `build` and `serve` can create it.
 
 ## Usage
 

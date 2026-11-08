@@ -248,7 +248,7 @@ port = 8090
 #     generations/<uuid>/index.faiss   (only when vectors exist)
 # catalog.sqlite is the private ZIM metadata cache beside index_dir. Files and
 # Kolibri do not write it, and Kiwix keeps no persistent local catalog. A
-# catalog with an older schema is discarded and rebuilt by a full ZIM scan.
+# catalog with an older schema is rebuilt by a full ZIM scan.
 #
 # [[collections]]
 # type = "zim"
