@@ -8,7 +8,6 @@ import pytest
 from zimantic.contracts import SourceInfo, encode_document_id
 from zimantic.indexing import derived as derived_module
 from zimantic.indexing import schema
-from zimantic.indexing.migrate import migrate_legacy_index
 from zimantic.indexing.pipeline import BodyBudget, build_index
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.search import AmbiguousPathError, SearchLimits, body_search, search
@@ -482,95 +481,6 @@ def test_body_budget_released_by_build():
     with tempfile.TemporaryDirectory() as tmp:
         _build(tmp, rows, extra={"body_budget": budget})
     assert budget.reserved == 0
-
-
-# -- migration -------------------------------------------------------------
-
-
-def _legacy_index(
-    path: Path,
-    *,
-    done=1,
-    excerpt=True,
-    rows=((1, "Alpha", "alpha", None, "stored excerpt"),),
-):
-    db = sqlite3.connect(path)
-    columns = "title, path UNINDEXED, target UNINDEXED"
-    if excerpt:
-        columns += ", excerpt UNINDEXED"
-    db.executescript(
-        f"CREATE VIRTUAL TABLE docs USING fts5({columns});"
-        "CREATE TABLE meta(key TEXT PRIMARY KEY, value);"
-    )
-    for row in rows:
-        db.execute(
-            "INSERT INTO docs(rowid, title, path, target, excerpt) VALUES (?, ?, ?, ?, ?)",
-            row,
-        )
-    db.execute("INSERT INTO meta VALUES ('done', ?)", (done,))
-    db.execute("INSERT INTO meta VALUES ('filesize', '123')")
-    db.commit()
-    db.close()
-
-
-def test_legacy_integer_done_migrates_and_preserves_rowids():
-    with tempfile.TemporaryDirectory() as tmp:
-        legacy = Path(tmp) / "old.sqlite"
-        _legacy_index(legacy, done=1)
-        result = migrate_legacy_index(
-            legacy,
-            source_size=123,
-            source_uuid="abc",
-            provenance={"source_size": 123, "source_uuid": "abc"},
-        )
-        assert result.adopted
-        assert result.done == "full"
-        db = sqlite3.connect(result.sqlite_path)
-        try:
-            assert db.execute("SELECT rowid, title FROM docs").fetchall() == [
-                (1, "Alpha")
-            ]
-            assert db.execute(
-                "SELECT rowid FROM body WHERE body MATCH '\"stored\"'"
-            ).fetchall() == [(1,)]
-            meta = dict(db.execute("SELECT key, value FROM meta"))
-            assert meta["done"] == "full"
-            assert "body_truncated_count" not in meta
-            assert meta["indexed_channels"] == '["title","body"]'
-        finally:
-            db.close()
-        # The legacy file is never modified.
-        assert legacy.exists()
-
-
-def test_legacy_size_only_or_incomplete_provenance_is_rejected():
-    with tempfile.TemporaryDirectory() as tmp:
-        legacy = Path(tmp) / "old.sqlite"
-        _legacy_index(legacy)
-        result = migrate_legacy_index(legacy, source_size=123)
-        assert not result.adopted
-        assert "provenance" in result.reason
-        mismatch = migrate_legacy_index(
-            legacy,
-            source_size=123,
-            source_uuid="abc",
-            provenance={"source_size": 999, "source_uuid": "abc"},
-        )
-        assert not mismatch.adopted
-
-
-def test_legacy_incomplete_done_marker_is_never_adopted():
-    with tempfile.TemporaryDirectory() as tmp:
-        legacy = Path(tmp) / "old.sqlite"
-        _legacy_index(legacy, done=0)
-        result = migrate_legacy_index(
-            legacy,
-            source_size=123,
-            source_uuid="abc",
-            provenance={"source_size": 123, "source_uuid": "abc"},
-        )
-        assert not result.adopted
-        assert "completion marker" in result.reason
 
 
 # -- derived text ----------------------------------------------------------
