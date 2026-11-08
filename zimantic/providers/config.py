@@ -168,23 +168,18 @@ def _derived_text(value: Any) -> CollectionDerivedTextConfig | None:
 
 
 def _traversal(entry: Mapping[str, Any], name: str) -> TraversalLimits:
-    table = entry.get("traversal")
-    if table is not None and not isinstance(table, Mapping):
+    table = entry.get("traversal", {})
+    if not isinstance(table, Mapping):
         raise ConfigValidationError(f"collections[{name!r}].traversal must be a table")
-    source = dict(table or {})
-    # Flat bounds normalize into the traversal object.
-    for key in ("max_visited_entries", "traversal_timeout_seconds"):
-        if key in entry:
-            if key in source:
-                raise ConfigValidationError(
-                    f"collections[{name!r}] sets {key} both flat and in traversal"
-                )
-            source[key] = entry[key]
-    values: dict[str, int] = {}
-    for key in ("max_visited_entries", "traversal_timeout_seconds"):
-        if key in source:
-            values[key] = _positive_int(source[key], f"{name}.{key}")
-    return TraversalLimits(**values)
+    unknown = sorted(set(table) - {"max_visited_entries", "traversal_timeout_seconds"})
+    if unknown:
+        raise ConfigValidationError(
+            "unknown traversal key(s): " + ", ".join(unknown)
+        )
+    return TraversalLimits(**{
+        key: _positive_int(value, f"{name}.traversal.{key}")
+        for key, value in table.items()
+    })
 
 
 @dataclass(frozen=True)
@@ -553,8 +548,6 @@ _COMMON_ENTRY_KEYS = SCOPED_KEYS | frozenset(
         "label",
         "derived_text",
         "traversal",
-        "max_visited_entries",
-        "traversal_timeout_seconds",
         "sources",
     }
 )
@@ -584,8 +577,6 @@ _FILES_KEYS = SCOPED_KEYS | frozenset(
         "max_file_bytes",
         "derived_text",
         "traversal",
-        "max_visited_entries",
-        "traversal_timeout_seconds",
         "sources",
     }
 )
@@ -638,8 +629,6 @@ _KOLIBRI_KEYS = SCOPED_KEYS | frozenset(
         "max_html5_zip_total_bytes",
         "html5_zip_timeout_seconds",
         "traversal",
-        "max_visited_entries",
-        "traversal_timeout_seconds",
         "sources",
     }
 )
@@ -869,13 +858,12 @@ def parse_collections(
             )
             continue
         names[name] = names.get(name, 0) + 1
-        unknown = sorted(set(entry) - spec.allowed_keys)
-        if unknown:
-            diagnostics.append(
-                f"collection {name!r}: unknown key(s) ignored: "
-                + ", ".join(unknown)
-            )
         try:
+            unknown = sorted(set(entry) - spec.allowed_keys)
+            if unknown:
+                raise ConfigValidationError(
+                    "unknown key(s): " + ", ".join(unknown)
+                )
             parsed = spec.parse(entry, base)
         except ConfigValidationError as error:
             message = f"collection {name!r}: {error}"

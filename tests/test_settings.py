@@ -71,6 +71,46 @@ class HardwareProfileTests(unittest.TestCase):
 
 
 class LoadConfigTests(unittest.TestCase):
+    def test_dotted_traversal_limits_apply_to_each_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "\n".join(
+                    f'[[collections]]\ntype = "{kind}"\nname = "{kind}"\n'
+                    + ('server = "http://localhost:8085"\n' if kind == "kiwix"
+                       else 'path = "library"\n')
+                    + "traversal.max_visited_entries = 23\n"
+                    + "traversal.traversal_timeout_seconds = 5\n"
+                    for kind in ("zim", "files", "kolibri", "kiwix")
+                ),
+                encoding="utf-8",
+            )
+            cfg = load_config(path, warn=lambda _: None)
+        self.assertEqual(len(cfg["collections"]), 4)
+        for collection in cfg["collections"]:
+            self.assertEqual(collection.traversal.max_visited_entries, 23)
+            self.assertEqual(collection.traversal.traversal_timeout_seconds, 5)
+
+    def test_flat_and_unknown_traversal_keys_reject_the_collection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            for option in (
+                "max_visited_entries = 23",
+                "traversal_timeout_seconds = 5",
+                "traversal.max_visited_entry = 23",
+            ):
+                with self.subTest(option=option):
+                    path.write_text(
+                        '[[collections]]\ntype = "files"\nname = "files"\n'
+                        f'path = "library"\n{option}\n',
+                        encoding="utf-8",
+                    )
+                    cfg = load_config(path, warn=lambda _: None)
+                    self.assertEqual(cfg["collections"], ())
+                    self.assertTrue(any(
+                        "unknown" in issue.message for issue in cfg["config_issues"]
+                    ))
+
     @unittest.skipIf(os.name == "nt", "XDG config paths are Unix-only")
     def test_xdg_defaults_and_relative_overrides_use_data_home(self):
         with tempfile.TemporaryDirectory() as tmp:

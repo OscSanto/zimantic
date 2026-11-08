@@ -372,6 +372,8 @@ name = "modules"
 path = "/library/www/html/modules"
 label = "Modules"
 granularity = "collection"       # or "children"
+traversal.max_visited_entries = 1000000
+traversal.traversal_timeout_seconds = 300
 
 [[collections]]
 type = "kolibri"
@@ -397,14 +399,18 @@ same files on the next invocation. Do not put global scalar keys after a table
 header; after `[[collections]]` or `[derived_text]` a key belongs to that table.
 
 Provider limits default in the provider and can be overridden per entry
-(`max_sources`, `max_entries`, `max_file_bytes`, `max_visited_entries`,
-`traversal_timeout_seconds`, Kiwix `catalog_limit`/`max_catalog_entries`, and the
+(`max_sources`, `max_entries`, `max_file_bytes`, `traversal.max_visited_entries`,
+`traversal.traversal_timeout_seconds`, Kiwix `catalog_limit`/`max_catalog_entries`, and the
 Kolibri snapshot/HTML5 zip limits). `max_sources` and `max_entries` bound
 discovery and indexing, not serving: a permitted file remains browsable even
 when indexing was capped. Exceeding `max_sources` collapses a files/Kolibri
 collection to one source with a distinct key and a warning; exceeding
 `max_entries` marks the source truncated. Rebuild the index when the source
 collapses or returns to its normal state.
+
+Traversal limits belong to the nested `traversal` table; the dotted keys above
+configure it without a separate table header. Unknown collection or traversal
+keys reject that collection instead of silently using defaults.
 
 Global bounds stay global: `max_explicit_collection_sources` (default 500)
 limits work for an explicitly selected Kiwix collection and reports partial

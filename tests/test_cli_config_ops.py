@@ -300,6 +300,11 @@ class TestConfigSchema:
                         "type": "files",
                         "name": "good",
                         "path": "good",
+                    },
+                    {
+                        "type": "files",
+                        "name": "typo",
+                        "path": "typo",
                         "typo_key": True,
                     },
                 ]
