@@ -233,6 +233,11 @@ class ArchiveEntryProducer:
             return False
         return True
 
+    def reusable_vectors(self, index_dir, db, cfg, embedder):
+        from .legacy_index import open_legacy_vectors
+
+        return open_legacy_vectors(self, index_dir, db, cfg, embedder)
+
     def close(self) -> None:
         if self._closed:
             return

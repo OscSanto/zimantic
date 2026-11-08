@@ -48,6 +48,7 @@ DEFAULT_MAX_BODY_TEXT_BYTES = 1 << 20
 DEFAULT_BODY_BUFFER_BYTES = 16 << 20
 DEFAULT_STAGING_RESERVE_BYTES = 1 << 20
 DEFAULT_EMBEDDING_BATCH_TOKENS = 1000
+_REUSED_VECTOR_SOURCE = "reused_vector_source"
 
 
 class BuildError(RuntimeError):
@@ -277,6 +278,7 @@ class _BuildState:
     source_fingerprint: str
     build_mode: str
     generation: str
+    allow_vector_reuse: bool
 
 
 def _cfg_int(cfg: Mapping[str, Any], key: str, default: int) -> int:
@@ -418,10 +420,12 @@ def _prepare_build_state(
     current: tuple[dict[str, str], Any] | None = None
     if not force:
         current = _read_published_state(locator, source)
+    allow_vector_reuse = not (directory / "current").exists()
     if current is not None:
         current_meta, lease = current
         lease.close()
         done = str(current_meta.get(index_schema.DONE, ""))
+        allow_vector_reuse = done == index_schema.DONE_FAST
         raw_derived = current_meta.get(index_schema.DERIVED_TEXT)
         partial_enrichment = bool(
             raw_derived and index_schema.decode_json(raw_derived).get("partial")
@@ -496,6 +500,7 @@ def _prepare_build_state(
                         source_fingerprint=fingerprint,
                         build_mode=mode,
                         generation=meta[index_schema.BUILD_GENERATION],
+                        allow_vector_reuse=allow_vector_reuse,
                     )
             db.close()
             db = _reset_staging(build_db_path, build_faiss_path)
@@ -594,6 +599,7 @@ def _prepare_build_state(
             source_fingerprint=fingerprint,
             build_mode=mode,
             generation=generation,
+            allow_vector_reuse=allow_vector_reuse,
         )
     except Exception:
         db.close()
@@ -616,6 +622,7 @@ def _index_entries(
     derived_refs: dict[int, list[tuple[str, int, str]]] | None = None,
     progress=None,
     token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
+    reuse_vectors=None,
 ) -> None:
     pending_embeddings: list[tuple[Future, list[EntryRecord], int, int]] = []
     count = int(_producer_attr(producer, "count", 0) or 0)
@@ -631,23 +638,35 @@ def _index_entries(
         nonlocal truncated_rows
         if embedding_pipeline is None:
             try:
-                truncated_rows += _save(
-                    db,
-                    embedder,
-                    rows,
-                    next_entry,
-                    fast=fast,
-                    derived_refs=derived_refs,
-                    token_budget=token_budget,
-                ) or 0
+                if reuse_vectors is None:
+                    truncated_rows += _save(
+                        db,
+                        embedder,
+                        rows,
+                        next_entry,
+                        fast=fast,
+                        derived_refs=derived_refs,
+                        token_budget=token_budget,
+                    ) or 0
+                else:
+                    vectors = _embed_rows(
+                        embedder, reuse_vectors.missing_rows(rows), token_budget
+                    )
+                    truncated_rows += _save_rows(
+                        db, rows, next_entry, vectors,
+                        fast=fast, derived_refs=derived_refs,
+                    )
                 if progress is not None:
                     progress.advance(next_entry)
             finally:
                 body_budget.release(reserved)
             return
         try:
+            embedding_rows = (
+                reuse_vectors.missing_rows(rows) if reuse_vectors else rows
+            )
             future = embedding_pipeline.submit([
-                row._replace(body="", body_truncated=False) for row in rows
+                row._replace(body="", body_truncated=False) for row in embedding_rows
             ])
         except BaseException:
             body_budget.release(reserved)
@@ -834,6 +853,7 @@ def _finish_build(
     model_fingerprint: str = "",
     model_probes: dict[str, str] | None = None,
     derived_text: Mapping[str, Any] | None = None,
+    reuse_vectors=None,
 ) -> None:
     db = state.db
     if db is None:
@@ -851,6 +871,10 @@ def _finish_build(
 
     if fast:
         faiss_digest = ""
+    elif reuse_vectors is not None:
+        vector_count = reuse_vectors.write(state.build_faiss_path)
+        _fsync_path(state.build_faiss_path)
+        faiss_digest = _file_digest(state.build_faiss_path)
     elif vector_count:
         _write_faiss(db, state.build_faiss_path)
         faiss_digest = _file_digest(state.build_faiss_path)
@@ -873,6 +897,7 @@ def _finish_build(
                 MODEL_PROBE_SHAPE_KEY,
                 index_schema.FAISS_DIGEST,
                 index_schema.DERIVED_TEXT,
+                _REUSED_VECTOR_SOURCE,
             ],
         )
         if fast:
@@ -1004,6 +1029,7 @@ def build_index(
     *,
     fast: bool = False,
     force: bool = False,
+    _allow_reuse: bool = True,
 ) -> BuildReport:
     """Build and publish one complete immutable index generation.
 
@@ -1049,6 +1075,47 @@ def build_index(
         if state.db is None:
             raise BuildError("build database is unavailable")
         completed_staging = state.meta.get(index_schema.DONE) in index_schema.DONE_VALUES
+        reuse_vectors = None
+        if not completed_staging:
+            start = int(state.meta.get(index_schema.NEXT, "0"))
+            previous_reuse = state.meta.get(_REUSED_VECTOR_SOURCE)
+            opener = getattr(producer, "reusable_vectors", None)
+            if (
+                _allow_reuse and state.allow_vector_reuse
+                and not fast and not force and callable(opener)
+                and (not start or previous_reuse)
+            ):
+                reuse_vectors = opener(locator.index_dir, state.db, cfg, embedder)
+            if previous_reuse and (
+                reuse_vectors is None or previous_reuse != reuse_vectors.token
+            ):
+                logger.warning(
+                    "%s: reusable vector source changed during an interrupted "
+                    "build; restarting", source.key,
+                )
+                state.db.close()
+                state.db = None
+                _clear_staging(state.build_db_path, state.build_faiss_path)
+                state = None
+                return build_index(
+                    producer, locator, embedder, cfg, fast=fast, force=force,
+                    _allow_reuse=False,
+                )
+            if reuse_vectors is not None:
+                _check_staging_space(
+                    state.build_db_path.parent,
+                    current_bytes=(
+                        reuse_vectors.storage_bytes
+                        + _directory_bytes(state.build_db_path.parent / "generations")
+                    ),
+                    reserve=_cfg_int(
+                        cfg, "staging_reserve_bytes", DEFAULT_STAGING_RESERVE_BYTES
+                    ),
+                )
+                with state.db:
+                    index_schema.write_meta(
+                        state.db, {_REUSED_VECTOR_SOURCE: reuse_vectors.token}
+                    )
         derived_metadata = _derived_baseline(cfg, producer, fast=fast)
         derived_refs: dict[int, list[tuple[str, int, str]]] = {}
         derived_stage = cfg.get("derived_stage")
@@ -1144,12 +1211,29 @@ def build_index(
                 token_budget=max(1, _cfg_int(
                     cfg, "embedding_batch_tokens", DEFAULT_EMBEDDING_BATCH_TOKENS
                 )),
+                reuse_vectors=reuse_vectors,
             )
             progress.close()
             progress = None
+            if reuse_vectors is not None and not reuse_vectors.valid():
+                logger.warning(
+                    "%s: v0 vector IDs or paths do not match the archive; "
+                    "rebuilding without them", source.key,
+                )
+                state.db.close()
+                state.db = None
+                _clear_staging(state.build_db_path, state.build_faiss_path)
+                state = None
+                return build_index(
+                    producer, locator, embedder, cfg, fast=fast, force=force,
+                    _allow_reuse=False,
+                )
             fingerprint = getattr(embedder, "fingerprint", "") if embedder else ""
             model_probes = None
-            if not fast and embedder is not None:
+            if reuse_vectors is not None:
+                fingerprint = reuse_vectors.fingerprint
+                model_probes = reuse_vectors.probes
+            elif not fast and embedder is not None:
                 try:
                     from ..embed import embed_model_probes, serialize_model_probes
 
@@ -1176,6 +1260,7 @@ def build_index(
                         len(refs) for refs in derived_refs.values()
                     ),
                 },
+                reuse_vectors=reuse_vectors,
             )
         if not producer.validate_snapshot():
             raise SnapshotChangedError(

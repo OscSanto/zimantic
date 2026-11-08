@@ -33,8 +33,8 @@
 # default) or model/fp16 (recommended with a GPU).
 # model_dir = "model/int8"
 #
-# Where indexes are written: <zim name>.sqlite and <zim name>.faiss for each ZIM.
-# catalog.sqlite lives beside this directory.
+# Where current index generations are written. Root-level v0 index pairs can be
+# reused by a full build. catalog.sqlite lives beside this directory.
 # index_dir = "indexes"
 
 # SERVER

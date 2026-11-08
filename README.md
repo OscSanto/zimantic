@@ -650,6 +650,27 @@ Keep the installation, storage, and private snapshot directory on local filesyst
 
 Set `database_path` and `storage` only when the active database or content directory is non-standard. The provider reads SQLite installations only: if `options.ini` declares PostgreSQL, the collection is unsupported. Zimantic does not read a separate SQLite file in that installation. Absolute configured paths stay private runtime locators and never appear in source keys, API payloads, or normal logs. `zimantic build` with no positional paths builds configured Kolibri channels along with ZIM and files collections. HTML5 serving supports the `html5_zip` preset (entry `index.html` at the zip root) with bounded streaming, path confinement, duplicate/symlink rejection, and zip-bomb limits; other viewer-dependent presets such as H5P or IMSCP are reported explicitly as unsupported. As with files collections, the browser can still be asked by untrusted app HTML to contact external URLs.
 
+### Upgrading v0 ZIM indexes
+
+First update the configuration to use `[[collections]]`; v0's `zim_dir` and
+`kiwix_server` settings are not migrated automatically. Keep `index_dir`
+pointing at the old indexes and run `zimantic build`, then `zimantic serve`.
+For a complete root-level v0 `<name>.sqlite` / `<name>.faiss` pair, a full
+build reuses compatible vectors, scans the ZIM to rebuild title and body search,
+and embeds any newly eligible articles. It publishes a current generation and
+leaves the old pair untouched. If new vectors are needed, the old FAISS index
+is loaded into memory to append them. A current full generation takes precedence
+over the old pair. `serve` does not migrate indexes; `build --fast` does not
+load FAISS or migrate vectors, and `build --force` rebuilds from scratch.
+
+Reuse requires matching source size, vector IDs and document paths, and either
+the same model fingerprint or matching model probes. v0 did not record a source
+content digest: matching filename, size, IDs, and paths cannot detect every
+same-size content replacement or verify the old extraction settings. Use
+`build --force` if the original ZIM, index, or build settings are uncertain.
+Missing, incomplete, incompatible, or unrecognized pairs are rebuilt normally.
+Once the new generation is verified, old root-level files can be removed manually.
+
 ### Copying finished indexes to another machine
 
 Embeddings live only in `index.faiss`. Its row IDs refer to `docs.rowid` in the matching `index.sqlite`, which holds titles, paths, the title and body full-text indexes, derived-text cache references, and build metadata. Copy the pair plus the source's `current` manifest; a `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and body lexical search only. A full index whose `.faiss` is missing still serves lexical results, but a later full build requires `--force` to replace it.
@@ -1084,11 +1105,11 @@ Each article's **excerpt** is extracted transiently for the embedding and discar
 
 The logical source key uses the provider, collection, and root-relative archive path, never an absolute filesystem path. Relocating a collection root without changing its relative layout preserves keys. Two archives can share a stem and size and still be distinct sources; each build writes an immutable generation and atomically replaces the `current` manifest. Build fingerprints use the archive UUID, size, and whole-second mtime as practical change detectors, not proof of identical bytes. A same-size write that restores the mtime can evade detection. Keep source content immutable or use an external snapshot when strong consistency matters. Indexes with stem-based paths are not served; build them with the current locator to restore indexed search. To copy a subset of finished indexes to another machine, see [Copying finished indexes to another machine](#copying-finished-indexes-to-another-machine).
 
-Only the current index schema and canonical metadata are supported. Older
-indexes, including positional body indexes, are not served or resumed; `build`
-rebuilds them without migration. Interrupted builds resume only within the current
-schema. Cross-model embedding probes still allow vector reuse between compatible
-model exports.
+Only the current index schema and canonical metadata are served or resumed.
+`build` can reuse vectors from recognized v0 root-level pairs as described
+above; other older indexes, including positional body indexes, are rebuilt.
+Interrupted builds resume only within the current schema. Cross-model embedding
+probes still allow vector reuse between compatible model exports.
 
 | ZIM size | Vector index | Why |
 |---|---|---|

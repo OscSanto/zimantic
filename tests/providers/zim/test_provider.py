@@ -507,3 +507,405 @@ def test_directory_collection_discovers_nested_zim_files_only(tmp_path):
     finally:
         runtime.close()
         batch.close()
+
+
+class _MigrationEmbedder:
+    def __init__(self, fingerprint="a" * 64, vector=(1, 0, 0, 0)):
+        self.fingerprint = fingerprint
+        self.vector = vector
+        self.encoded_count = 0
+
+    def truncate(self, text, prefix=""):
+        return text
+
+    def encode(self, texts):
+        return [[1, 2] for _ in texts]
+
+    def embed_encoded(self, inputs):
+        import numpy as np
+
+        self.encoded_count += len(inputs)
+        return np.tile(np.asarray(self.vector, dtype="float32"), (len(inputs), 1))
+
+    def embed(self, texts):
+        import numpy as np
+
+        return np.tile(np.asarray(self.vector, dtype="float32"), (len(texts), 1))
+
+
+def _migration_producer(zim_path, *, cfg=None, fast=False):
+    from types import SimpleNamespace
+
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
+
+    source = SimpleNamespace(
+        key=zim_source_key("library", zim_path.name),
+        provider="zim",
+        collection_key=zim_collection_key("library"),
+    )
+    return ArchiveEntryProducer(source, zim_path, cfg=cfg, fast=fast)
+
+
+def _write_v0_index(zim_path, index_dir, *, vector_count=2, problem=None, layout="flat"):
+    import json
+    import sqlite3
+
+    import faiss
+    import numpy as np
+
+    index_dir.mkdir(exist_ok=True)
+    producer = _migration_producer(zim_path)
+    try:
+        rows = [producer.entry_at(i) for i in range(producer.count)]
+    finally:
+        producer.close()
+    sqlite_path = index_dir / f"{zim_path.stem}.sqlite"
+    faiss_path = index_dir / f"{zim_path.stem}.faiss"
+    with sqlite3.connect(sqlite_path) as db:
+        db.execute(
+            "CREATE VIRTUAL TABLE docs USING fts5("
+            "title, path UNINDEXED, target UNINDEXED"
+            + ("" if problem == "schema" else ", tokenize='unicode61 remove_diacritics 2'")
+            + ")"
+        )
+        db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")
+        db.executemany(
+            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
+            [
+                (row.id, row.title, "wrong" if problem == "path" and i == 0 else row.path, row.target_id)
+                for i, row in enumerate(rows)
+            ],
+        )
+        db.executemany("INSERT INTO meta VALUES (?, ?)", [
+            ("done", 1),
+            ("filesize", str(zim_path.stat().st_size + (problem == "size"))),
+            ("model_fingerprint", "a" * 64),
+            ("model_probe_texts", json.dumps(["first", "second"])),
+            ("model_probe_vectors", np.tile(
+                np.asarray([1, 0, 0, 0], dtype="<f4"), (2, 1)
+            ).tobytes()),
+            ("model_probe_shape", "2x4"),
+        ])
+        if problem == "missing_probes":
+            db.execute("DELETE FROM meta WHERE key LIKE 'model_probe_%'")
+    if layout == "ivf":
+        index = faiss.index_factory(4, "IVF1,SQ8", faiss.METRIC_INNER_PRODUCT)
+        threads = faiss.omp_get_max_threads()
+        try:
+            faiss.omp_set_num_threads(1)
+            index.train(np.random.default_rng(42).random((64, 4), dtype=np.float32))
+        finally:
+            faiss.omp_set_num_threads(threads)
+    else:
+        index = faiss.index_factory(4, "IDMap,Flat", faiss.METRIC_INNER_PRODUCT)
+    index.add_with_ids(
+        np.tile(np.asarray([1, 0, 0, 0], dtype="float32"), (vector_count, 1)),
+        np.asarray([row.id for row in rows[:vector_count]], dtype="int64"),
+    )
+    faiss.write_index(index, str(faiss_path))
+    return sqlite_path, faiss_path
+
+
+@pytest.mark.parametrize("old_count", [1, 2])
+@pytest.mark.parametrize("layout", ["flat", "ivf"])
+def test_v0_vectors_are_reused_and_body_index_is_rebuilt(tmp_path, old_count, layout):
+    import sqlite3
+
+    import faiss
+
+    from zimantic.embed import load_model_probes
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+    from zimantic.indexing.search import body_search
+    from zimantic.providers.zim.discovery import ZimIndexOptions, open_generation_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    old_sqlite, old_faiss = _write_v0_index(
+        zim, index_dir, vector_count=old_count, layout=layout
+    )
+    original = old_faiss.read_bytes()
+    embedder = _MigrationEmbedder()
+    producer = _migration_producer(zim)
+    source = producer.source
+    locator = IndexLocator(index_dir)
+    report = build_index(producer, locator, embedder, {"batch_size": 1})
+    assert report.status == "published"
+    assert embedder.encoded_count == 2 - old_count
+    assert old_sqlite.exists() and old_faiss.read_bytes() == original
+    lease = locator.paths(source)
+    assert lease is not None
+    try:
+        if old_count == 2:
+            assert lease.faiss_path.read_bytes() == original
+        with sqlite3.connect(lease.sqlite_path) as db:
+            meta = dict(db.execute("SELECT key, value FROM meta"))
+            assert meta["semantic_vector_count"] == "2"
+            assert meta["model_fingerprint"] == embedder.fingerprint
+            assert load_model_probes(meta) is not None
+            assert len(body_search(db, "wheels", 10)) == 2
+        index = faiss.read_index(str(lease.faiss_path))
+        if layout == "flat":
+            ids = faiss.vector_to_array(index.id_map).tolist()
+        else:
+            pointer = index.invlists.get_ids(0)
+            try:
+                ids = faiss.rev_swig_ptr(pointer, index.invlists.list_size(0)).tolist()
+            finally:
+                index.invlists.release_ids(0, pointer)
+        assert sorted(ids) == [0, 1]
+    finally:
+        lease.close()
+    handle = open_generation_index(
+        source, index_dir=index_dir,
+        options=ZimIndexOptions(semantic=True, model_fingerprint=embedder.fingerprint),
+        expected_source_size=zim.stat().st_size,
+    )
+    assert handle is not None and handle.faiss_index is not None
+    handle.close()
+
+
+@pytest.mark.parametrize("problem", ["size", "path", "model", "schema"])
+def test_v0_mismatch_rebuilds_without_legacy_vectors(tmp_path, problem):
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _write_v0_index(zim, index_dir, problem=problem)
+    embedder = _MigrationEmbedder(
+        fingerprint="b" * 64 if problem == "model" else "a" * 64,
+        vector=(0, 1, 0, 0) if problem == "model" else (1, 0, 0, 0),
+    )
+    report = build_index(
+        _migration_producer(zim), IndexLocator(index_dir), embedder, {"batch_size": 1}
+    )
+    assert report.status == "published"
+    assert embedder.encoded_count == 2
+
+
+def test_v0_cross_model_probes_allow_reuse(tmp_path):
+    import threading
+
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+    from zimantic.providers.zim.discovery import ZimIndexOptions, open_generation_index
+    from zimantic.providers.zim.provider import ZimRuntime
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _write_v0_index(zim, index_dir)
+    embedder = _MigrationEmbedder(fingerprint="b" * 64)
+    producer = _migration_producer(zim)
+    source = producer.source
+    build_index(producer, IndexLocator(index_dir), embedder, {})
+    assert embedder.encoded_count == 0
+    runtime = object.__new__(ZimRuntime)
+    runtime._embedder_getter = lambda: embedder
+    runtime._embedder_ready_getter = None
+    runtime._probe_cache = {}
+    runtime._probe_cache_lock = threading.Lock()
+    handle = open_generation_index(
+        source, index_dir=index_dir,
+        options=ZimIndexOptions(
+            semantic=True,
+            model_fingerprint=embedder.fingerprint,
+            probe_compatible=runtime._probe_compatible,
+        ),
+        expected_source_size=zim.stat().st_size,
+    )
+    assert handle is not None and handle.faiss_index is not None
+    handle.close()
+
+
+def test_v0_missing_probes_are_rebuilt_with_the_same_model(tmp_path):
+    import sqlite3
+
+    from zimantic.embed import load_model_probes
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _write_v0_index(zim, index_dir, problem="missing_probes")
+    embedder = _MigrationEmbedder()
+    producer = _migration_producer(zim)
+    source = producer.source
+    locator = IndexLocator(index_dir)
+    build_index(producer, locator, embedder, {})
+    assert embedder.encoded_count == 0
+    lease = locator.paths(source)
+    try:
+        with sqlite3.connect(lease.sqlite_path) as db:
+            assert load_model_probes(dict(db.execute("SELECT key, value FROM meta")))
+    finally:
+        lease.close()
+
+
+def test_v0_vectors_are_not_reused_to_replace_a_current_full_index(tmp_path, monkeypatch):
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+    from zimantic.providers.zim import legacy_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _write_v0_index(zim, index_dir)
+    locator = IndexLocator(index_dir)
+    build_index(_migration_producer(zim), locator, _MigrationEmbedder(), {})
+    monkeypatch.setattr(
+        legacy_index, "open_legacy_vectors",
+        lambda *_args: pytest.fail("must not replace a current full index with v0 vectors"),
+    )
+    embedder = _MigrationEmbedder()
+    build_index(
+        _migration_producer(zim, cfg={"max_preview_chars": 321}),
+        locator, embedder, {},
+    )
+    assert embedder.encoded_count == 2
+
+
+@pytest.mark.parametrize("fast", [False, True])
+def test_force_and_fast_builds_do_not_reuse_v0_vectors(tmp_path, fast, monkeypatch):
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+    from zimantic.providers.zim import legacy_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _write_v0_index(zim, index_dir)
+    monkeypatch.setattr(
+        legacy_index, "open_legacy_vectors",
+        lambda *_args: pytest.fail("force and fast builds must not load v0 vectors"),
+    )
+    embedder = None if fast else _MigrationEmbedder()
+    build_index(
+        _migration_producer(zim), IndexLocator(index_dir), embedder, {},
+        fast=fast, force=not fast,
+    )
+    if embedder is not None:
+        assert embedder.encoded_count == 2
+
+
+def test_full_build_after_fast_build_reuses_v0_vectors(tmp_path):
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _write_v0_index(zim, index_dir)
+    locator = IndexLocator(index_dir)
+    build_index(_migration_producer(zim, fast=True), locator, None, {}, fast=True)
+    embedder = _MigrationEmbedder()
+    build_index(_migration_producer(zim), locator, embedder, {})
+    assert embedder.encoded_count == 0
+
+
+def test_v0_index_changed_during_migration_is_not_published(tmp_path):
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _, old_faiss = _write_v0_index(zim, index_dir)
+    producer = _migration_producer(zim)
+    original_entry_at = producer.entry_at
+    changed = False
+
+    def replace_index(index):
+        nonlocal changed
+        if index == 1 and not changed:
+            old_faiss.write_bytes(b"changed")
+            changed = True
+        return original_entry_at(index)
+
+    producer.entry_at = replace_index
+    embedder = _MigrationEmbedder()
+    report = build_index(producer, IndexLocator(index_dir), embedder, {"batch_size": 1})
+    assert report.status == "published"
+    assert changed and embedder.encoded_count == 2
+
+
+def test_v0_migration_checks_space_for_vector_copies(tmp_path, monkeypatch):
+    from collections import namedtuple
+
+    from zimantic.indexing import pipeline
+    from zimantic.indexing.locator import IndexLocator
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    old_sqlite, old_faiss = _write_v0_index(zim, index_dir)
+    original = old_faiss.read_bytes()
+    disk_usage = namedtuple("disk_usage", "total used free")
+    checks = iter([disk_usage(10**9, 0, 10**9), disk_usage(10**9, 0, 1)])
+    monkeypatch.setattr(pipeline.shutil, "disk_usage", lambda _path: next(checks))
+    with pytest.raises(pipeline.InsufficientSpaceError):
+        pipeline.build_index(
+            _migration_producer(zim), IndexLocator(index_dir), _MigrationEmbedder(), {}
+        )
+    assert old_sqlite.exists() and old_faiss.read_bytes() == original
+
+
+def test_v0_migration_does_not_follow_staging_faiss_symlink(tmp_path):
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _write_v0_index(zim, index_dir)
+    producer = _migration_producer(zim)
+    locator = IndexLocator(index_dir)
+    directory = locator.source_directory(
+        producer.source.provider, producer.source.collection_key, producer.source.key
+    )
+    directory.mkdir(parents=True)
+    sentinel = tmp_path / "unrelated"
+    sentinel.write_bytes(b"keep")
+    try:
+        (directory / "staging-full.faiss").symlink_to(sentinel)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    embedder = _MigrationEmbedder()
+    report = build_index(producer, locator, embedder, {})
+    assert report.status == "published"
+    assert embedder.encoded_count == 0
+    assert sentinel.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("replace_old", [False, True])
+def test_interrupted_v0_migration_resumes_or_restarts(tmp_path, replace_old):
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+
+    zim = tmp_path / "manual.zim"
+    _create_zim(zim)
+    index_dir = tmp_path / "indexes"
+    _, old_faiss = _write_v0_index(zim, index_dir)
+    embedder = _MigrationEmbedder()
+    producer = _migration_producer(zim)
+    original_entry_at = producer.entry_at
+
+    def interrupted(index):
+        if index == 1:
+            raise KeyboardInterrupt
+        return original_entry_at(index)
+
+    producer.entry_at = interrupted
+    with pytest.raises(KeyboardInterrupt):
+        build_index(producer, IndexLocator(index_dir), embedder, {"batch_size": 1})
+    if replace_old:
+        old_faiss.write_bytes(b"not a FAISS index")
+    report = build_index(
+        _migration_producer(zim), IndexLocator(index_dir), embedder, {"batch_size": 1}
+    )
+    assert report.status == "published"
+    assert embedder.encoded_count == (2 if replace_old else 0)
