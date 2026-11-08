@@ -1276,17 +1276,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         collection: str | None = Query(None),
         limit: int = Query(8, ge=1, le=20),
     ):
-        suggest = getattr(search_class, "suggest", None)
         try:
-            if callable(suggest):
-                items = suggest(q, source, limit, collection)
-            else:
-                # Older search backends and test doubles only expose the full
-                # search API; its first page is still a usable suggestion list.
-                page = search_class.search_page(
-                    q, source, limit, 0, collection, False
-                )
-                items = page.get("results", [])
+            items = search_class.suggest(q, source, limit, collection)
         except SearchBusyError as error:
             raise HTTPException(
                 status_code=503,

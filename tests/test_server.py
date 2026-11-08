@@ -23,6 +23,7 @@ class FakeSearch:
     def __init__(self):
         self.cache = QueryCache(4)
         self.search_page_calls = []
+        self.suggest_calls = []
         self.stream_calls = []
         self.refresh_calls = 0
 
@@ -99,6 +100,10 @@ class FakeSearch:
         if not query.strip():
             raise SearchQueryError("empty")
         return query
+
+    def suggest(self, query, source, limit, collection):
+        self.suggest_calls.append((query, source, limit, collection))
+        return [{"id": "manual:page", "title": "Page"}]
 
     def search_page(
         self,
@@ -910,14 +915,15 @@ class ServerTests(unittest.TestCase):
         )
         self.assertNotIn("\n[data-zimantic-toolbar] {", shell.text)
 
-    def test_suggest_falls_back_to_the_search_page_api(self):
+    def test_suggest_uses_the_suggestion_api(self):
+        search_calls = len(self.search.search_page_calls)
         response = self.client.get("/suggest?q=page&source=manual&limit=5")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()[0]["title"], "Page")
         self.assertEqual(
-            self.search.search_page_calls[-1],
-            ("page", ["manual"], 5, 0, None, False, None),
+            self.search.suggest_calls[-1], ("page", ["manual"], 5, None)
         )
+        self.assertEqual(len(self.search.search_page_calls), search_calls)
 
     def test_search_accepts_page_and_filter_parameters(self):
         response = self.client.get("/search?q=page&offset=10&source=manual&limit=5")
