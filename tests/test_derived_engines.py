@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from media_helpers import sample
 
 from zimantic.indexing import engines as engines_module
 from zimantic.indexing.engines import (
@@ -15,8 +16,6 @@ from zimantic.indexing.engines import (
     extract_embedded_captions,
     extract_ocr,
 )
-
-from media_helpers import sample
 
 
 def test_available_engines_requires_local_executables(monkeypatch):
@@ -223,5 +222,5 @@ def test_whisper_cpp_converts_to_wav_and_reads_txt(monkeypatch):
     assert conversion[conversion.index("-ac") + 1] == "1"
     cli = calls[1]
     assert cli[0] == "/usr/bin/whisper-cli"
-    assert cli[cli.index("-m") + 1] == "/models/ggml-base.en.bin"
+    assert Path(cli[cli.index("-m") + 1]) == Path("/models/ggml-base.en.bin")
     assert "-otxt" in cli

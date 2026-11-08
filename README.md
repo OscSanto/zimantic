@@ -1,8 +1,8 @@
 # Zimantic
 
-Zimantic is an offline search engine for Kiwix ZIM files, the compressed offline copies of Wikipedia and other sites published by Kiwix, and for configured directory trees such as an offline `/library/www/html/modules`. It retrieves articles by meaning rather than by exact keyword overlap, so it can answer questions, match a description written without the article's name, tolerate misspellings, and accept a query in a different language from the article. It runs entirely offline, including on hardware as small as a Raspberry Pi Zero 2 W.
+Zimantic is an offline search engine for Kiwix ZIM files and configured directory trees, such as an offline `/library/www/html/modules`. Semantic search finds articles from questions and descriptions, including misspellings and queries in another language. Zimantic runs offline on devices as small as a Raspberry Pi Zero 2 W.
 
-Meaning search performs best in widely spoken languages. Coverage varies by language; see [Compared with Kiwix search](#compared-with-kiwix-search).
+Semantic search performs best in widely spoken languages. Coverage varies by language; see [Compared with Kiwix search](#compared-with-kiwix-search).
 
 | Query | Kiwix search | Zimantic |
 |---|---|---|
@@ -14,23 +14,23 @@ Meaning search performs best in widely spoken languages. Coverage varies by lang
 
 ## Features
 
-- **Meaning search (semantic search).** Questions and descriptions match articles even when they share no words with the title.
+- **Semantic search.** Questions and descriptions match articles even when they share no words with the title.
 - **Alternate names and misspellings.** "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - **Multilingual queries.** One model covers 100+ languages, and a query in one language can find articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](#compared-with-kiwix-search).
 - **Collections and multiple sources.** Browse the library by collection and provider, search one collection as a unit, or combine individual sources. See [Source selection](#source-selection).
 - **Files collections.** Search and serve a configured directory tree, such as an offline copy of `/library/www/html/modules`, as one bounded collection. See [Files collections](#files-collections).
 - **Kolibri installations.** Search and serve a local Kolibri v0.19.5 installation directly, with one collection per installed channel and one source per top-level topic. See [Kolibri installations](#kolibri-installations).
-- **Hybrid ranking.** Meaning, title-word, and full-text retrieval are fused into a single ranking.
+- **Combined ranking.** Zimantic ranks semantic, title, and full-text results together. The full-text list combines SQLite body search with archive-native search when available.
 - **Merged results and bounded previews.** Redirects are merged into their target article, so each article appears once. Each result carries a bounded excerpt as its preview.
 - **Progressive results.** Sources run in parallel. The page shows a provisional merged list as each source finishes, then reranks it deterministically.
 - **Library view.** Browse ZIM collections, files collections, Kolibri channels, and remote Kiwix books at `/library`, grouped by collection with provider and content-type filters. See [Library view](#library-view).
 - **Low resource use.** Runs on low-resource devices such as a Raspberry Pi Zero 2 W (512 MB RAM) using roughly 250–325 MB while serving; see [Measured memory use](#measured-memory-use).
-- **Graceful degradation.** Title-word and full-text search work as soon as an index exists. Vectors are optional, and a ZIM with no index remains searchable through its native full-text index. A missing model, a missing FAISS file, or a different model whose probe embeddings do not match falls back to lexical search instead of failing the server. Native full-text searches run in helper processes, so an archive with an inconsistent full-text index cannot take the server down; only that archive loses native full-text results, and the server logs why.
+- **Search without vectors.** Title and body search work when their indexes exist. A ZIM without a Zimantic index can use its archive full-text index. If a model or FAISS file is unavailable, or model probes do not match, Zimantic uses the available lexical search. An invalid archive full-text index affects only that archive; the server logs the error and keeps running.
 - **Concurrent searches.** `max_concurrent_searches` bounds simultaneous searches. A request waits up to `slot_wait_seconds` for a free slot before reporting busy, so overlapping searches queue on slow hardware instead of failing immediately; abandoned browser streams skip queued source work and return their slot. Identical in-flight queries share one computation, and repeated queries are answered from an in-memory cache bounded by `cache_size` and `cache_bytes`. Explicit source and collection scopes are cached by their expanded source keys and publication generation; see [Source selection](#source-selection).
 - **Built-in article serving.** Result links open directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without requiring `kiwix-serve`.
 - **Web interface and JSON API.** Search from any browser on the network or from custom programs. Routes use short paths such as `/search`, `/suggest`, `/library`, `/collections.json`, `/content/<source-key>/<path>`, `/article/<source-key>/<path>`, and `/health`.
 
-Zimantic queries the local ZIM archives themselves, not a separate Kiwix index. `zimantic build` adds meaning vectors and a SQLite title-word index, but it is not a prerequisite for `zimantic serve`: an unbuilt ZIM is still searched through the archive's own full-text index, and articles, assets, and homepages are served directly from the archive. An optional [kiwix-serve](https://kiwix.org/en/applications/) instance is useful only for sources available through a Kiwix server, which Zimantic can search with kiwix-serve's full-text API.
+Zimantic searches local ZIM archives directly; it does not need a separate Kiwix index. `zimantic build` creates semantic vectors and a SQLite title index, but `zimantic serve` also searches an unbuilt ZIM through its archive full-text index. Zimantic serves articles, assets, and homepages directly from each archive. Use [kiwix-serve](https://kiwix.org/en/applications/) only for remote Kiwix sources.
 
 ## Requirements
 
@@ -650,7 +650,7 @@ Keep the installation, storage, and private snapshot directory on local filesyst
 
 Set `database_path` and `storage` only when the active database or content directory is non-standard. The provider reads SQLite installations only: if `options.ini` declares PostgreSQL, the collection is unsupported. Zimantic does not read a separate SQLite file in that installation. Absolute configured paths stay private runtime locators and never appear in source keys, API payloads, or normal logs. `zimantic build` with no positional paths builds configured Kolibri channels along with ZIM and files collections. HTML5 serving supports the `html5_zip` preset (entry `index.html` at the zip root) with bounded streaming, path confinement, duplicate/symlink rejection, and zip-bomb limits; other viewer-dependent presets such as H5P or IMSCP are reported explicitly as unsupported. As with files collections, the browser can still be asked by untrusted app HTML to contact external URLs.
 
-### Upgrading v0 ZIM indexes
+### Reusing v0 ZIM indexes
 
 First update the configuration to use `[[collections]]`; v0's `zim_dir` and
 `kiwix_server` settings are not migrated automatically. Keep `index_dir`
@@ -706,7 +706,7 @@ zimantic build zims/a.zim zims/b.zim  # several files
 zimantic build --workers 4            # build up to four independent ZIMs at once
 zimantic build /media/usb             # every .zim in a folder
 zimantic build zims/a.zim /media/usb  # mix files and folders
-zimantic build --fast                 # quick title-word + full-text index (no vectors)
+zimantic build --fast                 # title and ZIM full-text indexes (no vectors)
 zimantic build --wait-stable          # wait for changing download sizes, then index
 zimantic build --no-wait-lock         # exit 75 if another build holds the lock
 zimantic build --lock-timeout 600     # wait at most ten minutes for the lock
@@ -771,7 +771,7 @@ When more than one ZIM is selected, the article toolbar shows separate previous/
 
 ### Build behavior and locking
 
-**Fast indexes.** `build --fast` stores titles and paths without running the model or creating FAISS vectors. It reads a small bounded HTML prefix per entry so disambiguation suffixes, meta-refresh shell targets, and app-shell companion deep links are still recovered. It does not store article excerpts. Title-word and ZIM full-text search work; a normal `build` creates the vector index.
+**Fast indexes.** `build --fast` stores titles and paths without running the model or creating FAISS vectors. It reads a small bounded HTML prefix per entry to detect disambiguation suffixes, meta-refresh shell targets, and app-shell companion deep links. It does not store article excerpts or build the SQLite body index. Title search and ZIM full-text search work; a normal `build` also creates the body and vector indexes.
 
 **Stable files.** `build --wait-stable` polls source sizes until they stop changing before indexing. The systemd units below pass it so a file caught mid-download is not indexed. An explicit CLI build starts immediately.
 
@@ -830,7 +830,7 @@ Ready-to-copy user units in `deploy/` watch `zims/`, build indexes, and reload t
 
 - `deploy/zimantic.service` — the server, with `Restart=always`, restart rate limiting, and sandboxing. Copy it to `~/.config/systemd/user/`, then run `systemctl --user enable --now zimantic`.
 - `deploy/zimantic-indexing-fast.path` + `deploy/zimantic-indexing-fast.service` — watch `zims/` and run a fast build followed by `reload` as a ZIM becomes available.
-- `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run the full build (with meaning vectors) once a night.
+- `deploy/zimantic-indexing.service` + `deploy/zimantic-indexing.timer` — run a full build with semantic vectors once a night.
 
 The path-triggered fast build runs for each ZIM in `zims/`. The full build runs from 01:00–06:00 local time by default; set its `ExecCondition` and timer to select a different window. Both units pass `--no-wait-lock`, so a build that finds the index lock held exits 75 and the unit treats it as a skip instead of overlapping the build that is already running.
 
@@ -974,9 +974,9 @@ The phase-09 release fixture and Pi 4 benchmark harness live under
 `tests/fixtures/mixed_library/` and `tests/benchmarks/`.  A result recorded on
 the documented hardware is required; a missing result is unverified, not a pass.
 
-See [Zimantic 1.0 architecture](docs/release-notes-1.0.0.md) for the provider
-model and [current limitations](docs/known-issues.md) for the Kolibri schema
-and derived-text engine requirements.
+See [Architecture](docs/architecture.md) for the provider model and
+[Limitations](docs/limitations.md) for the Kolibri schema and derived-text
+requirements.
 
 ### Resource limits
 
@@ -1045,7 +1045,7 @@ zimantic build --force
 zimantic serve
 ```
 
-Vectors are model-specific. Each full index records a fingerprint of `model.onnx` and the tokenizer vocabulary. A server configured with a different model ignores those vectors and serves title and full-text results until the index is rebuilt. Rebuild after switching models, because otherwise meaning search is unavailable. A checksum warning for a non-default model is expected; the check is informational.
+Vectors are model-specific. Each full index records a fingerprint of `model.onnx` and the tokenizer vocabulary. A server configured with a different model ignores those vectors and serves title and full-text results until the index is rebuilt. Rebuild after switching models to restore semantic search. A checksum warning for a non-default model is informational.
 
 A full build also stores a small set of fixed probe sentences and their embeddings. When the model fingerprint differs, `serve` re-embeds those stored probes with the configured model and reuses the index if the mean cosine similarity is at least 0.99 (and the minimum is at least 0.98). This lets an index built with the FP32 export be served with the int8 export of the same model, for example. It does not accept a different model or tokenizer, and indexes built before this feature have no probes, so they still require the same model file. The check is deliberately conservative: a different fine-tune with the same architecture should fail it.
 
@@ -1076,7 +1076,7 @@ As a reference point, a clean benchmark using `wikipedia_en_100_2026-08.zim` (5,
 | Semantic server (`serve`) | 323.5 MiB |
 | Title and full-text server (`serve --fast`) | 65.6 MiB |
 
-The server benchmark loaded the embedding model, opened the single ZIM index, and handled health, source-discovery, and search requests. `serve --fast` omits the model and FAISS, so it uses much less memory but does not provide meaning-based search.
+The server benchmark loaded the embedding model, opened the single ZIM index, and handled health, source-discovery, and search requests. `serve --fast` omits the model and FAISS, so it uses much less memory but does not provide semantic search.
 
 **Where the memory goes.** With the default model, the ~118 MB int8 weights and the SentencePiece vocabulary (~50 MB of native memory) make up most of the footprint; the English-only `e5-small-v2` replaces both with a ~34 MB model and a small WordPiece vocabulary. They are loaded once and are not duplicated, and `gc.collect()` cannot release them because they are C++ allocations, not Python objects. ONNX Runtime also reads the file into a temporary buffer while loading (so there is a short-lived ~2× peak at startup), and its **CPU memory arena** keeps the working set of the largest embedding batch for the lifetime of the session. At `batch_size = 32` that arena alone can consume ~400 MB and retain it. On hosts with **2 GB RAM or less**, Zimantic therefore disables the arena and returns freed heap memory to the OS between batches (`malloc_trim` on glibc), capping build memory near the model size at a modest throughput cost. Machines with more RAM keep the arena for faster builds. `serve` embeds one query per active search; up to `max_concurrent_searches` queries can be in flight, but each query is a single short sequence, so the arena costs little there either way.
 
@@ -1094,7 +1094,7 @@ Each article's **excerpt** is extracted transiently for the embedding and discar
 
 **Other ZIMs** (Stack Exchange, Gutenberg, TED, and others) are supported when they contain readable text: HTML, XHTML, plain text, and PDFs. PDF text is read from the file's embedded text layer, so scanned documents without one are skipped.
 
-**Embedding.** Titles and transient excerpts are embedded with [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB). The model receives a fixed budget of 256 tokens. See [Using a different embedding model](#using-a-different-embedding-model) for other e5 models, their tokenizers, and their memory and speed trade-offs. Entries with no body text (title-only pages, for example JavaScript loader shells) remain searchable through title and full-text retrieval; they simply have no meaning vector. Search previews are generated independently from the local ZIM only for the final displayed page.
+**Embedding.** Zimantic embeds titles and temporary excerpts with [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, about 118 MB). The model uses a fixed budget of 256 tokens. See [Using a different embedding model](#using-a-different-embedding-model) for other e5 models, their tokenizers, and their memory and speed costs. Entries without body text, such as JavaScript loader pages, remain searchable by title and full text but have no semantic vector. Zimantic creates previews from the local ZIM only for results on the displayed page.
 
 **Storage.** Each ZIM gets an immutable generation under `index_dir/<provider>/<collection-slug>-<hash>/<source-slug>-<hash>/generations/<build-generation>/` (`index.sqlite`, optional `index.faiss`, and a `lease`), plus one shared catalog:
 
@@ -1128,20 +1128,20 @@ Use `--force` to rebuild a completed index when the ZIM has the same filename st
 
 At startup Zimantic reads the shared `catalog.sqlite` for source metadata, homepages, counts, and icons. It resolves the `current` manifest of each **finished** index generation whose archive is present and matches the build-time source fingerprint. A cold catalog is refreshed synchronously. The scan opens each ZIM that is not in the catalog, whose fingerprint differs, or whose prior scan failed. The server opens other archives and their libzim `Searcher` objects on the first search or article request. Zimantic also discovers ZIM files in `zim_dir` without a usable SQLite index and uses each archive's native full-text index as a fallback.
 
-An index whose ZIM is missing is ignored. A size mismatch makes the server set the index aside and serve the archive without an index. Run `build` to restore indexed search. A partial or stale index never masks the available ZIM. For each source, a finished SQLite index takes precedence over the filesystem fallback; an unfinished index uses that fallback. FAISS and vector files load in the background during startup, so title-word and full-text searches are available while meaning search initializes.
+The server ignores an index when its ZIM is missing. If the ZIM size does not match the index, the server uses the archive without that index. Run `build` to restore indexed search. A partial or stale index does not hide an available ZIM. For each source, a finished SQLite index takes precedence over the filesystem fallback; an unfinished index uses that fallback. FAISS vectors load in the background during startup, so title and full-text search work while semantic search initializes.
 
 The page automatically lists sources from every configured collection. A Kiwix collection discovers catalog sources and searches them with Kiwix full-text search. Catalog discovery is paged and capped per entry at `max_catalog_entries` (default 50,000); remote XML responses are capped at `max_response_bytes` (default 64 MiB). An unscoped search uses at most each entry's `max_remote_sources` (default 100); selecting a remote source explicitly always searches it. Selecting a Kiwix collection explicitly schedules sources in catalog order up to the global `max_explicit_collection_sources` (default 500) and the request deadline, and reports any partial scope instead of claiming completion. Catalog refresh runs in the background: a failed refresh keeps the last complete catalog addressable, retries with bounded backoff, and reports the failure on the collection's discovery state. A failed source search is reported only in that request's result, so the next request can try again immediately.
 
-**Graceful degradation.** `serve` works without running `build` first and without `catalog.sqlite`: startup scans the configured ZIM collections, rebuilds missing catalog metadata, and treats every usable archive as a search source. A finished index remains usable without FAISS: the server falls back to **title-word and ZIM full-text search**. A ZIM with no SQLite index is still searched through its native full-text index, but has no SQLite title-word ranking and no meaning search until it is built. Native full-text search usually matches titles too, but without the dedicated title-word ranking and title bonus. An unindexed ZIM that has no native full-text index has nothing to search, so it is skipped as a search source rather than advertised as an available but empty one; it still appears in `/library` with its catalog metadata, but `/sources` omits it and it cannot be selected for a search.
+**Search without an index.** `serve` works without a prior `build` and without `catalog.sqlite`. At startup, it scans configured ZIM collections and creates missing catalog metadata. A usable archive is a search source. An indexed ZIM without FAISS uses title and archive full-text search. A full index also provides SQLite body search. A ZIM without a SQLite index can use its native full-text index, but it has no SQLite title search, body search, or semantic search. Native full-text search can match titles, but it does not provide SQLite title ranking or its title bonus. If an unindexed ZIM has no native full-text index, it appears in `/library` but not `/sources` and is not searchable.
 
-| What exists for a local ZIM | Meaning (FAISS) | Title words (SQLite FTS5) | Native full-text (libzim) |
-|---|:---:|:---:|:---:|
-| Full index (`.sqlite` plus matching `.faiss`) | yes | yes | yes |
-| Fast index (`.sqlite` only) | no | yes | yes |
-| No index, archive has a native full-text index | no | no | yes |
-| No index, no native full-text index | no | no | no — library only, not searchable |
+| What exists for a local ZIM | Semantic search (FAISS) | Title search (SQLite FTS5) | Body search (SQLite FTS5) | Archive full-text search (libzim) |
+|---|:---:|:---:|:---:|:---:|
+| Full index (`.sqlite` plus matching `.faiss`) | yes | yes | yes | yes |
+| Fast index (`.sqlite` only) | no | yes | no | yes |
+| No index, archive has a native full-text index | no | no | no | yes |
+| No index, no native full-text index | no | no | no | no — library only, not searchable |
 
-`serve --fast` skips the model and all vectors, leaving title-word and full-text search. A normal `serve` loads the model in the background; if `model_dir` is missing or unreadable it logs a warning and keeps serving lexical results. Vectors built with a different embedding model are ignored in the same way. `kiwix-serve` is not involved in any local row of the table: the ZIM archive is searched directly, and its embedded full-text index is not a separate Kiwix index file. With a Kiwix `[[collections]]` entry configured, remote catalog sources are searched through kiwix-serve's full-text API instead.
+`serve --fast` skips the model and all vectors, leaving title and full-text search. A normal `serve` loads the model in the background; if `model_dir` is missing or unreadable it logs a warning and keeps serving lexical results. Vectors built with a different embedding model are ignored in the same way. For local sources, `kiwix-serve` is not involved: Zimantic searches the archive directly, and the archive's embedded full-text index is not a separate Kiwix index file. A Kiwix `[[collections]]` entry uses kiwix-serve's full-text API for remote sources.
 
 FastAPI serves a lightweight HTML page that is accessible from any browser at `http://<host>:8090` (the `port` in `config.toml`). To serve it under a path such as `/zimantic`, set `web_base_path = "/zimantic"` and point a reverse proxy at the server with that prefix stripped:
 
@@ -1168,27 +1168,27 @@ Reverse proxies must preserve the original request target rather than decoding o
 
    | Search | Finds | Good at | Time |
    |---|---|---|---|
-   | **Meaning** (FAISS) | Articles whose bounded content-excerpt vector is closest to the query (cosine similarity) | Questions, descriptions, other languages | ~13 ms |
-   | **Title words** (SQLite FTS5, BM25 ranking) | Titles containing every word of the query, including redirect titles | Exact titles, alternate names (via redirect titles) | ~4 ms |
-   | **Full text** (the ZIM's own Kiwix index) | Articles containing the words anywhere | Words buried deep inside an article | ~8 ms |
+   | **Semantic** (FAISS) | Articles whose bounded content-excerpt vector is closest to the query (cosine similarity) | Questions, descriptions, other languages | ~13 ms |
+   | **Title search** (SQLite FTS5, BM25 ranking) | Titles containing every word of the query, including redirect titles | Exact titles, alternate names (via redirect titles) | ~4 ms |
+   | **Full text** (SQLite body index and the archive's native index) | Articles that match either full-text source; the results are fused by rank | Words in the article body, including words deep in the archive | ~8 ms |
 
 3. **Collapse redirects.** Every redirect hit resolves to the article it points to, and duplicates are merged, so each article appears only once.
-4. **Filter weak meaning matches when a lexical alternative exists.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking, but only when that source also returned a title-word or full-text match. If a query has no lexical match at all, its best meaning candidates are kept, so a meaning-only query never becomes an empty result list. Lower the value in `config.toml` when a lexical match should not suppress broader meaning matches; cross-language queries often need 0.80 (see [Queries in another language](#queries-in-another-language)).
-5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores are not comparable: one is cosine similarity, another is a BM25 score, and the third is a position in Kiwix's list. RRF therefore ignores scores and uses positions only: an article earns `1 / (60 + its position)` from each list it appears in; the full-text contribution is doubled for queries of ten or more words. An article found near the top by several searches beats one that is first in just one. Redirects are collapsed before fusion, so an article can contribute at most once per search list. A bounded lexical bonus favors titles containing more query words, with compact titles preferred when coverage is equal. Exact phrases in titles or readable article text and source-specific intent rules (for example WikiHow queries) provide additional deterministic signals. Stack Exchange-style profile pages under `/users/` are demoted unless the query explicitly asks for a user or profile.
+4. **Filter weak semantic matches when a lexical alternative exists.** Semantic candidates below `min_cosine_similarity` (0.85 by default) are discarded before ranking only when the source also returns a title, body, or archive full-text match. If no lexical channel matches, Zimantic keeps the best semantic candidates. Lower the value in `config.toml` when a lexical match should not suppress broader semantic matches; cross-language queries often need 0.80 (see [Queries in another language](#queries-in-another-language)).
+5. **Merge the three lists with Reciprocal Rank Fusion (RRF).** The lists use different score scales: cosine similarity, BM25, and native full-text rank. RRF ignores scores and uses rank only: an article earns `1 / (60 + its position)` from each list it appears in. The full-text contribution is doubled for queries of ten or more words. An article that ranks near the top in several lists can beat one that ranks first in only one. Redirects are collapsed before fusion, so an article contributes at most once per list. A bounded lexical bonus favors titles that contain more query words, with shorter titles preferred when coverage is equal. Exact phrases in titles or readable article text and source-specific intent rules, such as WikiHow queries, provide additional signals. Stack Exchange-style profile pages under `/users/` rank lower unless the query asks for a user or profile.
 6. **Treat disambiguation pages specially.** At build time a page is flagged when its title ends in "(disambiguation)", when it renders the "This disambiguation page" footer, or when it carries a disambiguation category (the rendered `Category:` link or `wgCategories`). The required suffix is stored in the title, so no separate disambiguation metadata is needed. Fast builds read a bounded HTML prefix for these signals; a footer that appears only beyond that prefix may need a full build to be detected. A query that names the full title is treated as navigation, whether it uses `air (disambiguation)` or `air disambiguation`; a question that names the base title and ends in `?` is treated as navigation too. Those queries promote the page above the normal score range. Any other query that merely matches it is demoted so the real article wins.
 
 #### Queries in another language
 
-A query in Chinese, Hindi, Arabic, or another language against an English ZIM usually shares no words with the titles or article text, so meaning search is usually the only stage that can retrieve the right article. Cross-language cosine scores run lower than same-language scores, even when the result is correct: the whole distribution shifts down rather than the correct article disappearing. The floor only applies when a source also has a lexical match, so a pure cross-language query keeps its best meaning candidates even at 0.85. A spurious title or full-text match can still suppress them; lowering the threshold recovers those cases:
+A query in Chinese, Hindi, Arabic, or another language against an English ZIM often shares no words with its titles or article text. Semantic search can still retrieve the right article. Cross-language cosine scores are lower than same-language scores, even for correct results. The threshold applies only when a source also has a lexical match, so a query with no lexical match keeps its best semantic candidates at the default value of 0.85. A spurious lexical match can suppress them; a lower threshold can recover those results:
 
 ```toml
 # config.toml
 min_cosine_similarity = 0.80
 ```
 
-This is a recall/precision trade-off, not a separate language mode: lower values admit weaker meaning-only matches, while title-word and full-text matches are unaffected.
+This is a recall/precision trade-off, not a separate language mode. Lower values admit weaker semantic matches; they do not affect title, body, or archive full-text results.
 
-The lexical stages remain tuned for space-delimited, mostly English text. The stopword list includes English and Spanish, SQLite's `unicode61` tokenizer treats a run of Chinese characters as one title token, and the long-query full-text boost counts space-separated words. A long Chinese or Japanese question without spaces therefore gets little help from title-word matching or that boost; expect it to depend on meaning search and the similarity floor.
+Lexical search is tuned for mostly English text with space-delimited words. The stopword list includes English and Spanish. SQLite's `unicode61` tokenizer treats consecutive Chinese characters as one title token, and the long-query boost counts space-separated words. A long Chinese or Japanese query without spaces relies more on semantic search and its similarity threshold.
 
 Search ranks one pool of results (the larger of `max_results` and `candidate_count`) and caches it by query, expanded source keys, and publication generation. Every explicit source or collection selection defines the whole scope directly; it is never promoted to a broader search, and an unknown selector is an error rather than an implicit full-library search. Paging reuses the cached pool. An explicitly selected Kiwix collection is bounded by `max_explicit_collection_sources` and the `search_timeout_seconds` deadline, and reports partial `scheduled`/`completed` counts instead of claiming completion.
 
@@ -1200,15 +1200,15 @@ The streaming endpoint sends a provisional page as each source finishes. Paginat
 
 ![Ask a question, get the article](docs/images/1-questions.png)
 ![Ask in another language](docs/images/3-languages.png)
-![How often the right article comes first: Zimantic vs Kiwix](docs/images/0-scorecard.png)
+![How often the target article ranks first: Zimantic vs Kiwix](docs/images/0-scorecard.png)
 
 *Measured on WikiMed, the Wikipedia medical encyclopedia ZIM (`wikipedia_en_medicine_maxi_2026-04`, 70,523 articles), compared with kiwix-serve's full-text search.*
 
-The tables use three measures: **#1** means the wanted article is the first result, **Top 5** means it appears within the first five, and "not in top 20" means it does not appear in the first 20 results. Each percentage is the share of queries that met the measure.
+The tables use three measures: **#1** means the target article is the first result, **Top 5** means it appears within the first five, and "not in top 20" means it does not appear in the first 20 results. Each percentage is the share of queries that met the measure.
 
 ### Results by type of search
 
-| Type of search | Example query → article wanted | Kiwix | Zimantic | #1 Kiwix → Zimantic | Top 5 Kiwix → Zimantic | Queries |
+| Type of search | Example query → target article | Kiwix | Zimantic | #1 Kiwix → Zimantic | Top 5 Kiwix → Zimantic | Queries |
 |---|---|---|---|---|---|---|
 | Common single words | "tuberculosis" → *Tuberculosis* | #3 | **#1** | 33% → **100%** | 93% → **100%** | 15 |
 | Exact titles | "Malaria" → *Malaria* | #2 | **#1** | 72% → **100%** | 100% → 100% | 25 |

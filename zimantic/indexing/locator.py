@@ -202,7 +202,7 @@ class IndexLocator:
         generation = str(manifest.get("generation") or "")
         lease_path = directory / "generations" / generation / "lease"
         try:
-            fd = os.open(lease_path, os.O_RDONLY)
+            fd = os.open(lease_path, os.O_RDWR)
         except OSError as error:
             raise IndexLocatorError(f"generation lease is unavailable: {error}") from error
         try:
@@ -349,7 +349,7 @@ class IndexLocator:
                 continue
             lease_path = generation_dir / "lease"
             try:
-                fd = os.open(lease_path, os.O_RDONLY)
+                fd = os.open(lease_path, os.O_RDWR)
             except OSError:
                 continue
             removable = False

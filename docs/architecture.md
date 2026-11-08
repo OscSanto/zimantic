@@ -1,4 +1,4 @@
-# Zimantic 1.0 architecture
+# Architecture
 
 Zimantic uses one provider-neutral collection schema, one source identity, and
 one local content route.
@@ -18,7 +18,7 @@ one local content route.
   `indexed_count`, `truncated`, and `body_truncated_count`. ZIM, Files, and
   Kolibri content use `/content/{key}/{path}`.
 
-The supported configuration uses `[[collections]]` entries. Source selection
+Configuration uses `[[collections]]` entries. Source selection
 uses canonical source keys and the `source` query parameter. Local content uses
 `/content/{key}/...` or `/article/{key}/...`.
 
@@ -58,6 +58,6 @@ derived-cache size, search deadlines, and listing size.
 
 Index truncation uses `truncated` and `indexed_count`. Body-text truncation uses
 `body_truncated_count`. A truncated source still serves all permitted content.
-See [known issues](known-issues.md) for current limitations and
+See [limitations](limitations.md) for operational constraints and
 [benchmark instructions](../tests/benchmarks/README.md) for the Raspberry Pi 4
 measurement procedure.

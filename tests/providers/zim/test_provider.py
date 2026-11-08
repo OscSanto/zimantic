@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -138,7 +139,7 @@ def test_duplicate_stems_get_distinct_stable_keys(tmp_path):
     second = zims / "b" / "manual.zim"
     _create_zim(first)
     _create_zim(second)
-    config, batch, runtime = _open(tmp_path, zims)
+    _config, batch, runtime = _open(tmp_path, zims)
     try:
         keys = {source.key for source in runtime.library_sources()}
         assert keys == {
@@ -146,8 +147,14 @@ def test_duplicate_stems_get_distinct_stable_keys(tmp_path):
             zim_source_key("library", "b/manual.zim"),
         }
         before = keys
+        if os.name == "nt":
+            runtime.close()
+            batch.close()
         second.unlink()
-        assert runtime.refresh(wait=True)
+        if os.name == "nt":
+            _config, batch, runtime = _open(tmp_path, zims)
+        else:
+            assert runtime.refresh(wait=True)
         after = {source.key for source in runtime.library_sources()}
         assert after == {
             zim_source_key("library", "a/manual.zim"),

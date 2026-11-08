@@ -74,7 +74,7 @@ def _add_verbosity_argument(parser: argparse.ArgumentParser, default=argparse.SU
         "-v",
         action="count",
         default=default,
-        help="increase logging verbosity (-v for info, -vv for debug)",
+        help="show more log messages (-v: info, -vv: debug)",
     )
 
 
@@ -175,14 +175,14 @@ def _make_parser() -> argparse.ArgumentParser:
     # subcommands: build (files/folders, default zim_dir), serve, reload
     commands = parser.add_subparsers(dest="command", required=True)
 
-    serve_cmd = commands.add_parser("serve", help="run the search page and JSON API")
+    serve_cmd = commands.add_parser("serve", help="start the search page and JSON API")
     _add_verbosity_argument(serve_cmd)
     serve_cmd.add_argument(
         "--fast",
         action="store_true",
         help=(
-            "start immediately without the model or FAISS vectors "
-            "(title and ZIM full-text results only)"
+            "start without the model or FAISS vectors; search uses available "
+            "title and full-text indexes"
         ),
     )
     serve_cmd.add_argument(
@@ -190,15 +190,15 @@ def _make_parser() -> argparse.ArgumentParser:
         "--dev",
         dest="debug",
         action="store_true",
-        help="include ranking scores in results; in this mode SIGHUP restarts",
+        help="show ranking scores; SIGHUP restarts the server in this mode",
     )
     _add_device_argument(serve_cmd)
 
     open_cmd = commands.add_parser(
         "open",
         help=(
-            "open named ZIM files in a read-only local server "
-            "(no catalog, index, PID, or config writes)"
+            "serve named ZIM files locally without writing to the catalog, "
+            "indexes, PID file, or config"
         ),
     )
     _add_verbosity_argument(open_cmd)
@@ -207,14 +207,14 @@ def _make_parser() -> argparse.ArgumentParser:
         nargs="+",
         type=Path,
         metavar="PATH",
-        help="ZIM file or folder containing *.zim; folders are searched recursively",
+        help="ZIM file or folder; folders are searched recursively for *.zim files",
     )
     open_cmd.add_argument(
         "--port",
         type=int,
         default=0,
         metavar="PORT",
-        help="bind a fixed loopback port (default: an OS-assigned port)",
+        help="use this loopback port (default: choose a port)",
     )
     open_cmd.add_argument(
         "--no-browser",
@@ -225,8 +225,7 @@ def _make_parser() -> argparse.ArgumentParser:
         "--fast",
         action="store_true",
         help=(
-            "disable the model and FAISS for this process "
-            "(title and ZIM full-text results only)"
+            "disable the model and FAISS; search uses available title and full-text indexes"
         ),
     )
     open_cmd.add_argument(
@@ -241,11 +240,11 @@ def _make_parser() -> argparse.ArgumentParser:
         type=int,
         default=64,
         metavar="N",
-        help="refuse folder expansion above N archives (default: 64)",
+        help="reject folders with more than N archives (default: 64)",
     )
 
     build = commands.add_parser(
-        "build", help="index configured collections or ZIM files"
+        "build", help="build indexes for configured collections or selected ZIM files"
     )
     _add_verbosity_argument(build)
     build.add_argument(
@@ -254,9 +253,9 @@ def _make_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help=(
-            "ZIM files or folders containing *.zim; a folder means every .zim "
-            "under it (recursively). With no paths, build every configured "
-            "collection. Positional paths cannot be combined with selectors."
+            "ZIM files or folders containing *.zim; folders include all .zim "
+            "files below them. With no paths, build every configured collection. "
+            "Do not combine paths with selectors."
         ),
     )
     build.add_argument(
@@ -264,36 +263,36 @@ def _make_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="KIND",
-        help="only collections of this provider kind (zim, files, kolibri, kiwix); repeatable",
+        help="select collections by provider type (zim, files, kolibri, kiwix); repeatable",
     )
     build.add_argument(
         "--collection",
         action="append",
         default=[],
         metavar="KEY|NAME",
-        help="only this exact collection key or configured entry name; repeatable",
+        help="select this exact collection key or configured entry name; repeatable",
     )
     build.add_argument(
         "--source",
         action="append",
         default=[],
         metavar="KEY",
-        help="only this exact canonical source key; repeatable",
+        help="select this exact source key; repeatable",
     )
     build.add_argument(
         "--list",
         action="store_true",
-        help="preview selected/generated collections without writing config or building",
+        help="list selected collections without writing config or building indexes",
     )
     build.add_argument(
         "--fast",
         action="store_true",
-        help="title + ZIM full-text only: skip article bodies, the model and FAISS (much faster)",
+        help="skip article bodies, the model, and FAISS; build title and ZIM full-text indexes",
     )
     build.add_argument(
         "--force",
         action="store_true",
-        help="rebuild the selected ZIM indexes even if they are already complete",
+        help="rebuild selected indexes, even when they are complete",
     )
     _add_device_argument(build)
     build.add_argument(
@@ -310,14 +309,14 @@ def _make_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         metavar="N",
-        help="build up to N independent ZIMs concurrently (default: config build_workers)",
+        help="build up to N ZIM indexes at once (default: config build_workers)",
     )
     build.add_argument(
         "--no-wait-lock",
         action="store_true",
         help=(
-            "exit with status 75 instead of waiting when another build already "
-            "holds the index lock (for systemd.path and timer triggers)"
+            "exit with status 75 if another build holds the index lock "
+            "(for systemd.path and timer triggers)"
         ),
     )
     build.add_argument(
@@ -325,7 +324,7 @@ def _make_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SECONDS",
-        help="stop waiting for the index lock after SECONDS (default: wait forever)",
+        help="maximum seconds to wait for the index lock (default: no limit)",
     )
 
     sources_cmd = commands.add_parser(
@@ -336,51 +335,50 @@ def _make_parser() -> argparse.ArgumentParser:
     sources_cmd.add_argument(
         "--json",
         action="store_true",
-        help="emit collections and sources as one JSON document without paths",
+        help="write collections and sources as one JSON document without paths",
     )
     sources_cmd.add_argument(
         "--provider",
         action="append",
         default=[],
         metavar="KIND",
-        help="only collections of this provider kind; repeatable",
+        help="select collections by provider type; repeatable",
     )
     sources_cmd.add_argument(
         "--collection",
         action="append",
         default=[],
         metavar="KEY|NAME",
-        help="only this exact collection key or configured entry name; repeatable",
+        help="select this exact collection key or configured entry name; repeatable",
     )
     sources_cmd.add_argument(
         "--source",
         action="append",
         default=[],
         metavar="KEY",
-        help="only this exact canonical source key; repeatable",
+        help="select this exact source key; repeatable",
     )
 
     prune_cmd = commands.add_parser(
         "prune",
-        help="report or delete Zimantic-created indexes for unconfigured sources",
+        help="report or delete Zimantic indexes for unconfigured sources",
     )
     _add_verbosity_argument(prune_cmd)
     prune_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="report orphaned indexes without deleting anything (the default)",
+        help="list orphaned indexes without deleting them (default)",
     )
     prune_cmd.add_argument(
         "--yes",
         action="store_true",
-        help="delete the reported orphan indexes under the build and config locks",
+        help="delete reported indexes under the build and config locks",
     )
 
     reload_cmd = commands.add_parser(
         "reload",
         help=(
-            "ask a running serve process to rescan indexes and ZIMs (sends SIGHUP; "
-            "suitable for systemd.path or cron)"
+            "ask a running server to rescan indexes and ZIM files (sends SIGHUP)"
         ),
     )
     _add_verbosity_argument(reload_cmd)
@@ -396,7 +394,7 @@ def _make_parser() -> argparse.ArgumentParser:
 
     model_cmd = commands.add_parser(
         "model",
-        help="download ONNX model files and tokenizer vocabularies",
+        help="download ONNX model and tokenizer files",
     )
     _add_verbosity_argument(model_cmd)
     model_cmd.add_argument(
@@ -429,7 +427,7 @@ def _make_parser() -> argparse.ArgumentParser:
     model_cmd.add_argument(
         "--force",
         action="store_true",
-        help="re-download and replace existing files, even mismatched ones",
+        help=        "download files again and replace existing files, including files with a checksum mismatch",
     )
     model_cmd.add_argument(
         "--list",

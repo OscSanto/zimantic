@@ -1,8 +1,8 @@
-# Media fixtures
+# Media test fixtures
 
-These committed files cover the supported media families and optional
-text-derived scenarios. Tests use them directly and do not need `ffmpeg`,
-`espeak-ng`, or another generator tool.
+These files cover supported media families and optional text-extraction
+scenarios. Tests use them directly and do not require `ffmpeg`, `espeak-ng`,
+or a media generator.
 
 Run the generator to write the fixture tree:
 
@@ -10,8 +10,8 @@ Run the generator to write the fixture tree:
 python tests/fixtures/media/generate.py --force
 ```
 
-The generator is deterministic in structure, but not byte-for-byte. Media
-encoders include version metadata. `manifest.json` records each file's media
+The generator produces a consistent file layout, but not identical bytes.
+Media encoders add version metadata. `manifest.json` records each file's media
 family, MIME type, and scenario.
 
 ## Families

@@ -35,10 +35,10 @@ replace a measurement with the real providers.
 
 ## HTML parsing
 
-`run_html.py` compares the previous stdlib streaming parser with the production
-Lexbor extractor, lxml's streaming target/DOM, and Beautiful Soup + lxml while
-retaining the same text-selection rules. Optional comparison dependencies do
-not become application requirements:
+`run_html.py` compares the stdlib streaming parser, the production Lexbor
+extractor, lxml's streaming target and DOM, and Beautiful Soup + lxml. Each
+parser uses the same text-selection rules. Comparison-only dependencies are
+not application requirements:
 
 ```sh
 uv run --with lxml --with beautifulsoup4 python tests/benchmarks/run_html.py \
@@ -46,9 +46,9 @@ uv run --with lxml --with beautifulsoup4 python tests/benchmarks/run_html.py \
     --pages 12 --repeats 5 --output /tmp/zimantic-html
 ```
 
-The output includes repeated body/preview timings, exact-output agreement,
+The output includes repeated body and preview timings, exact-output agreement,
 empty-result regressions, fresh-process native-memory probes, and blinded
-review samples with original source HTML. Record subjective preferences before
+review samples with source HTML. Record preferences before
 opening `review-key.json`. Archive decompression and file I/O are excluded.
 
 See [the November 7 results](results/html-parsers-2026-11-07.json) and

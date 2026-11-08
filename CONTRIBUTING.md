@@ -2,7 +2,7 @@
 
 Zimantic is an offline, multilingual search engine for Kiwix ZIM files. It runs
 on small devices, including Raspberry Pi computers. Contributions include bug
-reports, fixes, documentation, evaluation queries, and features.
+reports, code, documentation, evaluation queries, and features.
 
 ## Project goals
 
@@ -59,10 +59,10 @@ uv sync
   configuration, commands, and published measurements. Use measurements from
   the documented version.
 - **Compatibility:** Document supported configuration, index, and command
-  formats. Only current formats are supported; backward compatibility and
-  migrations are not guaranteed at this stage. Reject unsupported formats with
-  a clear diagnostic directing users to update configuration or regenerate
-  caches/indexes. Cross-model embedding-probe reuse remains supported.
+  formats. Zimantic supports documented formats only; it does not guarantee
+  backward compatibility or migrations. Reject unsupported formats with a
+  clear diagnostic that tells users to update configuration or rebuild caches
+  and indexes. Cross-model embedding-probe reuse is supported.
 
 ## Code style
 
@@ -101,8 +101,8 @@ the seam in `zimantic/providers/`:
   an empty successful result.
 
 The contract tests in `tests/providers/` and collection/source serializers
-define these contracts. Current compatibility limits are documented in
-[`docs/known-issues.md`](docs/known-issues.md).
+define these contracts. Compatibility limits are documented in
+[`docs/limitations.md`](docs/limitations.md).
 
 ### Adding an in-tree provider
 
@@ -141,8 +141,8 @@ Every in-tree provider meets the same contracts:
 
 ## Hardening and release gates
 
-Provider, path, MIME, range, XML, SQLite, and build/index work keeps the
-phase-09 gates green:
+Provider, path, MIME, range, XML, SQLite, and build/index changes must pass
+these checks:
 
 - Run the full suite with `python -m pytest`.
 - Add an adversarial test for each path, MIME, range, archive, or database
@@ -161,12 +161,12 @@ phase-09 gates green:
   collection, health, and `zimantic sources --json` payloads.
 - Security review covers path, zip, MIME, and range handling before release.
 
-The mixed-library release fixture is versioned under
+The mixed-library benchmark fixture is versioned under
 `tests/fixtures/mixed_library/` and the harness under `tests/benchmarks/`.
 Generate it with `python tests/fixtures/mixed_library/generate.py --root
 /tmp/zimantic-mixed --force`. Record Raspberry Pi 4 results with
 `tests/benchmarks/run_mixed.py`. A missing hardware result is unverified, not
-a pass. Release notes list required config, catalog, and index rebuilds and
+a pass. Document required configuration, catalog, and index rebuilds, and
 unsupported compatibility paths.
 
 ## Release and deploy
@@ -191,9 +191,9 @@ The deploy target updates the checkout, reinstalls the package, restarts
 `zimantic.service`, and checks the HTTP service and installed package version.
 
 For a development deploy, stage the files to send. The deploy applies them to
-the existing remote checkout without checking out a tag. Before it applies the
-patch, the deploy resets tracked files in the remote checkout to `HEAD`. This
-removes earlier development-deploy edits:
+the existing remote checkout without checking out a tag. Before applying the
+patch, it resets tracked files in the remote checkout to `HEAD`. This removes
+tracked edits on that checkout:
 
 ```bash
 git add path/to/file

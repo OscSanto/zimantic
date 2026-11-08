@@ -1,18 +1,23 @@
 import sqlite3
 import tempfile
+from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from zimantic.contracts import SourceInfo, encode_document_id
 from zimantic.indexing import derived as derived_module
-from zimantic.indexing import schema
-from zimantic.indexing.pipeline import BodyBudget, build_index
 from zimantic.indexing import pipeline as build_module
-from zimantic.indexing.search import AmbiguousPathError, SearchLimits, body_search, search
-from zimantic.indexing.types import EntryRecord
+from zimantic.indexing import schema
 from zimantic.indexing.locator import IndexLocator
+from zimantic.indexing.pipeline import BodyBudget, build_index
+from zimantic.indexing.search import (
+    AmbiguousPathError,
+    SearchLimits,
+    body_search,
+    search,
+)
+from zimantic.indexing.types import EntryRecord
 from zimantic.providers.base import SourceQuery
 from zimantic.searching.index import IndexHandle
 
@@ -158,7 +163,12 @@ def test_invalid_published_indexes_are_rejected_and_rebuilt(tmp_path, invalid):
     original_generation = lease.generation
     replacement = tmp_path / "replacement.sqlite"
     try:
-        with sqlite3.connect(lease.sqlite_path) as old, sqlite3.connect(replacement) as db:
+        with (
+            closing(sqlite3.connect(lease.sqlite_path)) as old,
+            closing(sqlite3.connect(replacement)) as db,
+            old,
+            db,
+        ):
             old.backup(db)
             if invalid == "version":
                 schema.write_meta(db, {schema.SCHEMA_VERSION: str(schema.CURRENT_SCHEMA_VERSION - 1)})
@@ -216,7 +226,7 @@ def test_obsolete_or_invalid_staging_restarts_without_resuming(tmp_path, invalid
     staging = locator.source_directory(
         source.provider, source.collection_key, source.key
     ) / "staging-fast.sqlite"
-    with sqlite3.connect(staging) as db:
+    with closing(sqlite3.connect(staging)) as db, db:
         if invalid == "version":
             schema.write_meta(db, {schema.SCHEMA_VERSION: str(schema.CURRENT_SCHEMA_VERSION - 1)})
         elif invalid == "missing-version":

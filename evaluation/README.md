@@ -1,13 +1,13 @@
-# Evaluation: how good is search?
+# Search evaluation
 
-This folder contains a fixed search-quality evaluation. It measures where the
-expected article appears in the first 20 results. It supports Zimantic and
-Kiwix search for configured ZIM files.
+This folder contains a fixed search-quality evaluation. It measures the rank
+of the target article in the first 20 results for Zimantic and Kiwix search
+on configured ZIM files.
 
 Unit tests (`tests/`) check code behavior. This evaluation measures ranking
 quality. A ranking rule can pass its tests and still reduce search quality,
-especially in languages that have few test queries. Use the evaluation for
-ranking and indexing work.
+especially for languages with few queries. Use this evaluation for ranking
+and indexing work.
 
 **All queries are synthetic.** They were written or generated for testing,
 with AI assistance. They do not come from real users. The non-English queries
@@ -18,16 +18,17 @@ language and query type. It does not measure user satisfaction. See
 
 ## What it measures
 
-For every query: the position of the right article in the first 20 results. From that, per run:
+For each query, the harness records the target article's position in the first
+20 results and calculates these metrics for each run:
 
-| Metric | Meaning |
+| Metric | Description |
 |---|---|
-| **#1** | share of queries where the right article is the first result |
-| **Top 5** | right article within the first 5 results |
-| **Top 20** | right article anywhere in the first 20 results (if not here, no reranking can fix it) |
-| **MRR** | mean reciprocal rank: 1 for #1, ½ for #2, ⅓ for #3 … 0 when missing; rewards "almost right" |
+| **#1** | Share of queries where the target article is the first result |
+| **Top 5** | Share of queries where the target article is in the first 5 results |
+| **Top 20** | Share of queries where the target article is in the first 20 results; reranking cannot find an article outside this set |
+| **MRR** | Mean reciprocal rank: 1 for #1, ½ for #2, ⅓ for #3, and 0 when missing |
 | **± (95%)** | margin of error on #1 for that many queries |
-| **Fixed / broken** | queries a run gets right at #1 that the baseline didn't, and the reverse. An average can hide a change that fixes 40 searches and breaks 69 |
+| **Fixed / broken** | Queries that reach #1 in one run but not the baseline, and vice versa |
 | **Median / p95 ms** | search time over HTTP |
 
 Every number can be broken down by **language**, **query type** (`set`), **ZIM** and **suite**, or any
@@ -58,10 +59,10 @@ Included (6,132 queries, 5 ZIMs, up to 20 languages):
 Languages: en, es, fr, pt, de, it, zh, ja, ru, ar, hi, sw, ha, am, so, af, yo, ig, zu, rw, plus `mul`
 (30 mixed-language queries).
 
-How many queries each language has decides how much you can read from it. The last column is how far
-a language's #1 score (on its test queries) could move by chance alone, in percentage points. With 8
-queries, each one is worth 12.5 points, so one lucky or unlucky query swings the score a lot. A
-difference between two versions smaller than this number can't be told apart from luck.
+The query count limits the conclusions for each language. The last column
+shows the chance variation in the #1 test score, in percentage points. With
+8 queries, each result is worth 12.5 points. A difference smaller than the
+listed margin is inconclusive.
 
 | Languages | Queries (dev / test) | Where they come from | #1 score could vary by chance (±) |
 |---|---|---|---|
@@ -92,7 +93,7 @@ keeps a setting from being fitted to the very queries used to judge it.
 Start the engines you want to measure, then:
 
 ```bash
-# a current Zimantic server; select one query-file ZIM and its key from /sources
+# Start a Zimantic server; select one query-file ZIM and its key from /sources
 python evaluation/run.py --engine zimantic --url http://localhost:8090 \
   --label my-branch --commit abc1234 --zims archive_name --source-key '<canonical key>'
 
@@ -103,7 +104,7 @@ python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwi
 python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
 ```
 
-`run.py` supports only the current Zimantic API. It reads `/sources?provider=zim`
+`run.py` uses the Zimantic API. It reads `/sources?provider=zim`
 and `/config`, and requires the selected source to be **searchable**.
 Every result must carry a canonical source key; hits from another source are
 ignored and reported in a warning. Historical endpoints and source-name aliases
@@ -158,8 +159,8 @@ Caches are disabled; all variants use the same model, thread budget and
 query set. This intentionally overrides the multi-ZIM/multilingual release
 scope below: it is a quick qualitative smoke comparison, not a release gate.
 
-HEAD here is the historical positional control; the production default is now
-compact Unicode61 with `remove_diacritics 2`.
+HEAD is the positional control. Production indexes use compact Unicode61 with
+`remove_diacritics 2`.
 
 For storage/BM25 selection, then tokenizers on the preferred layout:
 
@@ -175,7 +176,7 @@ uv run python scripts/bench_body_quality.py \
   --variants compact compact-unicode61 compact-porter compact-ascii trigram
 ```
 
-The first selected variant is the baseline. `stored` preserves the current
+The first selected variant is the baseline. `stored` preserves the
 Unicode61 diacritic setting while changing storage; `stored-default` uses
 literal `fts5(text)`. BM25 controls retain positions and stored token counts.
 Trigram retains full detail because its compact form rejects our long query
@@ -204,7 +205,7 @@ uv run python scripts/bench_body_tradeoffs.py \
   --build-repeats 3 --full-repeats 0 --query-repeats 3
 ```
 
-Use `--queries` to reuse a previous provider-probe JSON file. These timings
+Use `--queries` to reuse a provider-probe JSON file. These timings
 exclude query embeddings, previews, and HTTP; relevance comes from the quality
 harness, not the probe-overlap counts. See the
 [measured storage/ranking/tokenizer comparison](../docs/build-performance.md#default-stored-content-versus-contentless-including-bm25).
@@ -222,7 +223,7 @@ harness, not the probe-overlap counts. See the
   Keep them in the git-ignored `evaluation.zims/` folder rather than the normal `zims/`, and run a
   separate server for measurements (`zim_dir = "./evaluation.zims"`, `index_dir = "./evaluation.indexes"`)
   so the scored source set is only the reference ZIMs. The astronomy `2025-11` and wikibooks `2026-01`
-  files are no longer published on Kiwix's server; the nearest releases on it are
+  files are not available from Kiwix's server; the nearest releases are
   `wikipedia_en_astronomy_maxi_2026-08` and `wikibooks_en_all_nopic_2026-04`, whose article paths do
   not all match the queries. Ask the query-set author for the exact files, or regenerate queries for
   other releases (see
@@ -240,7 +241,7 @@ harness, not the probe-overlap counts. See the
 - **Indexes** built from those ZIMs with that model by the version being tested, with default build
   settings. An index built by one model and searched with another gives meaningless results without an
   error, so rebuild after changing the model.
-- **Config:** defaults, except paths and port. Record any other setting you changed.
+- **Config:** use defaults except for paths and port. Record other settings.
 
 Write the commit, ZIM names, model hashes and non-default settings in the PR along with the
 `compare.py` output. Search times depend on the machine and its load: compare timings only between runs
@@ -262,8 +263,9 @@ search settings:
 - Keep existing query files, `DEV_SHARE`, and the split fixed. Put additional
   queries in separate files with unique ids.
 
-`run.py` turns `localhost` into `127.0.0.1`: on Windows, `localhost` first tries IPv6, and against a
-server listening on IPv4 only every request then waits ~2 seconds, which would distort the timings.
+`run.py` uses `127.0.0.1` for `localhost` URLs because Windows tries IPv6
+first. Each request to an IPv4-only server otherwise waits about 2 seconds
+and distorts the timings.
 
 ## Building a ZIM query set
 
@@ -294,17 +296,18 @@ and run `check` on the hand-written sets. Keep answers that exist in the file.
 python evaluation/make_queries.py translate --zim wikipedia_en_medicine_maxi_2026-04 --suite readme --to pt
 ```
 
-This writes `queries/<zim>/readme.pt.jsonl` with each English query in `source_query` and an empty
-`query` to fill in. Empty lines are skipped (and counted) until they are translated, so the file can be
-filled in gradually. Translations keep the English query's id with `@pt` appended, so results can be
-compared query by query across languages. Language codes are free-form; reports group by whatever
-codes appear.
+This writes `queries/<zim>/readme.pt.jsonl`. Each English query appears in
+`source_query`, and `query` is empty for translation. The runner skips and
+counts empty queries, so the file supports partial translation. Each
+translation keeps the English query ID with `@pt` appended. This lets reports
+compare the same query across languages. Language codes are free-form; reports
+group by the codes in the files.
 
 ## Reading the results
 
 - **Small groups are noisy.** #1 is accurate to roughly ±100/√n points: ±20 for
   25 queries, ±10 for 100, and ±5 for 400. A 5-point score difference in a
-  25-query set is not meaningful.
+  25-query set is inconclusive.
 - **Look at fixed / broken**, not only averages.
 - **Look at every language**, not only English. Zimantic's biggest advantage over Kiwix is outside English.
 - **Top 20 is the ceiling** for any reranking: a reranker can only reorder what the first stage found.
@@ -316,15 +319,15 @@ codes appear.
 - **Synthetic queries.** The queries were written for testing, with AI
   assistance. The non-English queries are translations, not searches by native
   speakers. They do not represent real user queries.
-- **Generated queries come from the articles.** They are sentences taken from the articles themselves,
-  with the title words removed. They test some things well (matching remembered text) and others not at
-  all (questions), and they favour word matching.
-- **One right answer per query.** A different article that also answers the query counts as a miss, so
+- **Generated queries come from the articles.** They are sentences taken from the articles, with title
+  words removed. They test matching article text, but do not test natural-language questions well.
+  They also favor word matching.
+- **One target article per query.** Another article that also answers the query counts as a miss, so
   scores slightly undercount quality.
 - **Mostly English content.** Four of the five ZIMs are English. "Multilingual" here means a query in
   another language finding an English article; searching non-English ZIMs is not tested.
 - **Small language sets.** See the table under [The queries](#the-queries): many languages have 8–19
-  test queries, enough to notice that a language stopped working, not to measure small changes.
+  test queries, enough to detect when search returns no results, but not small score differences.
 - **Query-set bias.** The query sets reflect Zimantic's design and may favor
   similar approaches. Consider this when evaluating a different design.
 - **Search quality also depends on the index:** a ZIM indexed with a different reader, build settings or

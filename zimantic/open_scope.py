@@ -189,8 +189,8 @@ def _unlock(fd: int) -> None:
 
 @contextmanager
 def _existing_shared_lease(lease_path: Path) -> Iterator[None]:
-    """Hold an existing catalog lease through a read-only descriptor."""
-    fd = os.open(lease_path, os.O_RDONLY)
+    """Hold an existing catalog lease through a lockable descriptor."""
+    fd = os.open(lease_path, os.O_RDWR)
     try:
         _lock_shared(fd)
         yield

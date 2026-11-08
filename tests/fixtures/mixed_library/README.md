@@ -1,7 +1,7 @@
 # Mixed-library fixture
 
-This directory contains the reproducibility inputs for the mixed-library
-benchmark. The fixture does not download content or contact the network.
+This directory contains the fixtures for the mixed-library benchmark.
+Generation does not download content or contact the network.
 
 ## Generate
 
@@ -11,7 +11,7 @@ From the repository root:
 python tests/fixtures/mixed_library/generate.py --root /tmp/zimantic-mixed --force
 ```
 
-The generator writes one fixture for each provider:
+The generator creates one fixture for each provider:
 
 | Provider | Fixture |
 |---|---|
@@ -21,7 +21,7 @@ The generator writes one fixture for each provider:
 | Kiwix | `kiwix_server.py`, a local deterministic catalog/search endpoint with three books |
 
 `INPUTS.json` records the Kolibri release and fixture sizes.
-`queries.txt` contains the fixed 100-query benchmark set.
+`queries.txt` contains the fixed set of 100 benchmark queries.
 
 ## Run the benchmark
 
@@ -33,14 +33,13 @@ python tests/benchmarks/run_mixed.py --root /tmp/zimantic-mixed \
     --fixture-revision phase09-v1
 ```
 
-The harness starts the server with the fixture. It records startup time until
-`/health` is ready, one warm-up request, p50/p95 over the fixed query set,
-`/library` payload size and render time, and peak process RSS. Use
-`--build fast` or `--build full` to include a cold build measurement.
+The harness starts the server with the fixture. It records the time until
+`/health` is ready, one warm-up request, p50/p95 search time over the fixed
+query set, `/library` payload size and render time, and peak process RSS. Use
+`--build fast` or `--build full` to measure a cold build.
 
-The Kiwix endpoint is optional for startup and discovery measurements. If it
-is not running, its collection reports an operation-scoped discovery error.
-Start it with:
+The Kiwix endpoint is optional for startup and discovery measurements. When
+it is unavailable, its collection reports a discovery error. Start it with:
 
 ```bash
 python tests/fixtures/mixed_library/kiwix_server.py --port 8085

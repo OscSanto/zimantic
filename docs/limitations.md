@@ -1,27 +1,26 @@
-# Current limitations
+# Limitations
 
 ## Kolibri schema
 
 Zimantic supports the installed Kolibri SQLite schema from v0.19.5. It
 identifies the schema from its tables, columns, and content migration history.
-Other releases and export databases are reported as unsupported. Zimantic
-never migrates, repairs, or writes the installation. Private snapshots include
-committed WAL data. A concurrent write during the bounded copy makes the copy
-fail closed.
+Other releases and export databases are unsupported. Zimantic does not migrate,
+repair, or write to the installation. Private snapshots include committed WAL
+data. A concurrent write during the bounded copy makes the copy fail closed.
 
 ## Derived text is optional and local-only
 
 `captions`, `ocr`, and `asr` are independent build-time options. They are off
 by default. A provider with no enabled operation does not read caption, image,
 or media bytes. Engines run only during a build, not in `serve`. Transcription
-runs locally. The only network use is the one-time checkpoint download. A
-missing local engine makes only its operation unavailable.
+runs locally. Network access is required only to download a missing checkpoint.
+A missing local engine makes only its operation unavailable.
 
 - Embedded caption tracks require a local `ffmpeg`/`ffprobe` pair.
 - OCR requires a local engine and model; pages, pixels, and output are bounded.
 - ASR requires a local engine (`whisper-cli` or `whisper-ctranslate2`); a
-  missing checkpoint is downloaded and verified on first use, so
-  the first build needs network access unless the model is already cached.
+  missing checkpoint is downloaded and verified on first use. The first build
+  needs network access unless the model is already cached.
   Media duration and bytes are bounded.
 - A partial enrichment publishes available channels, reports a partial state,
   and exits the build with a non-zero status.
@@ -54,6 +53,6 @@ indexed build, search, and reader-lease tests remain in the release matrix.
 ## Filtering and UI scale
 
 Collections group sources. Items remain within their source. The library loads
-sources in bounded pages. If a collection exceeds its source cap, it collapses
-to one source with a different key. Rebuild the index and update any exact
-`sources` override that uses the other state's key.
+sources in bounded pages. If a collection exceeds its source cap, Zimantic
+represents it as one source with a different key. Rebuild the index and update
+any exact `sources` override that uses the other key.

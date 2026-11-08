@@ -1,8 +1,7 @@
-# Build performance and quality
+# Build performance and search quality
 
-This ports the ideas from [OscSanto/zimantic#3](https://github.com/OscSanto/zimantic/pull/3),
-credited to OscSanto, into the current provider-neutral index pipeline rather
-than cherry-picking the older ZIM-only builder.
+This document records index-size, retrieval-quality, build-time, memory, and
+query-latency measurements for the current index pipeline.
 
 ## Advisory index size goal
 
@@ -22,14 +21,13 @@ None meets the goal; removing body FTS alone is insufficient on this fixture.
 
 ## Body FTS alternatives and search quality
 
-The benchmark variants change the body channel only. Title FTS and semantic
-vectors remain unchanged. New production indexes now use compact Unicode61
+The benchmark variants differ only in the body-search channel. Title FTS and
+semantic vectors are the same in every variant. Production indexes use compact Unicode61
 with `remove_diacritics 2`. Production only reads and resumes the current index
 schema and canonical metadata; `build` can reuse compatible vectors from v0
 root-level pairs while rebuilding the current schema. In this comparison, HEAD
-denotes the historical positional control, which the harness
-continues to reproduce explicitly rather than using the moving production
-default.
+denotes the positional control. The harness reproduces it explicitly; it is not
+the production default.
 
 | Variant | Conventional description | SQLite options |
 |---|---|---|
@@ -45,12 +43,12 @@ token counts unused by that query; it must use table-level MATCH, and cannot
 support SQLite phrase/NEAR queries, column filters, or normal length-aware BM25
 with this contentless configuration.
 
-The earlier 48-query provider-only probe changed 32 top-10 lists under
-native-only: 10 were reorderings of the same members, 22 changed membership,
-and only 7 changed the first result. This is not a count of relevance failures,
-and those probes did not include semantic retrieval or final HTTP ranking.
+In a 48-query provider-only probe, native-only retrieval differed in 32 top-10
+lists: 10 reordered the same results, 22 had different members, and 7 had a
+different first result. These are not relevance-failure counts. The probe did not
+include semantic retrieval or final HTTP ranking.
 
-The follow-up uses the [existing evaluation method](../evaluation/README.md#small-zim-body-index-comparison)
+The HTTP comparison uses the [evaluation method](../evaluation/README.md#small-zim-body-index-comparison)
 on the same small archive, real HTTP search and a fixed synthetic query set.
 There are 120 English queries, 41 dev and 79 test; no settings were tuned.
 All variants have identical embedding vectors. Reported results are test-only:
@@ -84,7 +82,7 @@ handling. That follow-up was not tuned on these test queries.
 Treat the rates as a small-ZIM smoke comparison: labels are synthetic and
 incomplete, generated sentences can be awkward or include profiles, and
 aggregate differences are smaller than this sample's reported uncertainty.
-Concrete regressions still identify behavior to preserve.
+These results identify cases to consider when evaluating retrieval behavior.
 
 ### Default stored content versus contentless, including BM25
 
@@ -93,8 +91,7 @@ Ordinary `fts5(text)` stores a second copy of the indexed text in its content
 shadow table. This supports raw text reads, snippets/highlights, and normal
 updates/deletes. Classic contentless tables return NULL for text, cannot supply
 snippets, and have update/delete restrictions. Our published indexes are rebuilt,
-and previews still read the archive: this experiment does **not** implement
-preview reuse from stored FTS text.
+and previews read the archive, not the stored FTS text.
 
 Raw content, positions, and document lengths are separate choices:
 
@@ -104,7 +101,7 @@ Raw content, positions, and document lengths are separate choices:
 | Compact contentless | No | No | No | No; the probe returns tied `-0.0` scores |
 | Default stored content | Yes | Yes | Yes | Yes |
 
-HEAD already has the information needed for
+HEAD has the information needed for
 [`bm25(body)`](https://www.sqlite.org/fts5.html#the_bm25_function), but its current
 body query does not use it. The BM25 experiment changes only candidate ordering:
 `ORDER BY bm25(body), rowid` (SQLite's better scores are more negative), followed
@@ -117,9 +114,9 @@ constant to isolate storage, plus their positional BM25 controls. Separately,
 Both stored variants match **all 120 compact top-20 lists in both modes**.
 Stored content itself adds no quality here.
 
-Compact remained preferred on the 41 dev queries: all storage/ranking variants
-tied at 85.4% hybrid #1, but BM25 reduced lexical #1 from 68.3% to 63.4%
-(0 fixed, 2 broken). With choices frozen, the 79 held-out test queries give:
+All storage/ranking variants tie at 85.4% hybrid #1 on the 41 dev queries.
+BM25 lowers lexical #1 from 68.3% to 63.4% (0 fixed, 2 broken). On the
+79 held-out test queries:
 
 | Mode / body variant | #1 | Top 5 | Top 20 | MRR | Fixed / broken #1 vs compact |
 |---|---:|---:|---:|---:|---:|
@@ -154,7 +151,7 @@ The second stage compares the dev-preferred compact layout across
 contentless with **full detail**, `columnsize=0`: SQLite rejects query tokens
 longer than three characters with trigram `detail=none`. It is substring
 retrieval, not the same word-token compact layout, and cannot match terms shorter
-than three characters. Query normalization was not changed to accommodate it.
+than three characters. Query normalization remains unchanged in this comparison.
 
 Unicode61 `remove_diacritics 2` was retained before inspecting test results.
 Bare Unicode61 and ASCII tied on English dev; Porter and trigram worsened #1.
@@ -201,64 +198,54 @@ similar total provider medians.
 
 Default storage costs about **6.1 times compact's SQLite space** for identical
 results; small build/runtime differences are not compelling. Porter saves
-about 8% of SQLite bytes but loses labelled #1 results. Keep compact Unicode61
-mode 2 as the measured candidate, not ASCII or trigram; none reaches the
-advisory 10% total-index goal. Compact is now the default for new indexes;
+about 8% of SQLite bytes but loses labelled #1 results. Compact Unicode61 mode 2 is the selected tokenizer, not ASCII or trigram; none
+reaches the advisory 10% total-index goal. Compact is the default for indexes;
 candidate matching and ranking remain unchanged.
 
-## Review and libzim API verification
+## ZIM iteration and resource bounds
 
-- The storage-order API claim is true for **python-libzim 4.0.0**, but false for
-  **4.1.0**, released November 5, 2026. Its
-  [tagged reader interface](https://github.com/openzim/python-libzim/blob/v4.1.0/libzim/reader.pyi#L67-L72)
-  exposes `iter_efficient()` and `__iter__()` (its alias). The
-  [binding implementation](https://github.com/openzim/python-libzim/blob/v4.1.0/libzim/libzim.pyx#L1362-L1386)
-  delegates to libzim's `iterEfficient()`: internally its efficient iterator
-  maps positions through `getIndexByClusterOrder`. `iter_by_path()` and
-  `iter_by_title()` are not storage-order iterators; `find_by_*()` selects
-  prefix ranges. The efficient ordering is intentionally unspecified publicly.
-- Use that native iterator, not the PR's raw entry-table parser. Canonical row
-  ids and the original entry cap stay unchanged. Record the chosen order and
-  its digest; reject a changed native ordering or an incomplete resume manifest
-  rather than applying a saved storage ordinal to a different order. Existing
-  completed indexes are not invalidated just for this change.
-- The PR's 512-*article* windows could retain arbitrarily many redirects or
-  title-only rows. Retain bounded *row* windows and the existing shared body
-  budget instead. Flush/drain before waiting for budget held by the same build.
-- The PR's hardware fallback could turn exhausted available RAM into half of
-  total RAM, and its root-only cgroup checks missed parent limits. Clamp
-  exhaustion to zero, inspect leaf/ancestor limits, and respect CPU affinity.
-  Use physical cores where detected (logical-core fallback elsewhere), a
-  conservative available-memory allowance, and a bounded shared model pool.
-  This is not an OOM guarantee for arbitrary models or a substitute for Pi
-  measurements. Existing low-memory arena/reclamation behavior is retained.
+ZIM builds use `iter_efficient()` from python-libzim 4.1.0 or later. This
+iterator follows storage order; its exact order is not part of the public
+contract. `iter_by_path()` and `iter_by_title()` do not follow storage order.
+The build records the selected order and its digest. Resume rejects a different
+order or an incomplete manifest instead of applying saved row positions to a
+different sequence. Completed indexes remain valid.
+
+Builds use bounded row windows, not article-count windows. This also bounds
+redirect and title-only rows. A shared body-text budget limits retained text.
+The build flushes queued work before it waits for budget that the same build
+holds.
+
+Automatic worker selection respects CPU affinity, physical cores when
+available, parent and leaf cgroup memory limits, and available RAM. A bounded
+shared model pool limits concurrent embedding work. Low-memory arena
+reclamation remains enabled. These limits do not guarantee that an arbitrary
+model fits in memory and do not replace measurements on Raspberry Pi hardware.
 
 ## Token batches and progress
 
-Read/commit windows still use `batch_size`. Inside each window, preserve the
-existing word-boundary truncation, encode final inputs once, sort by actual capped token
-length, and schedule model calls with at most **1,000 padded input tokens** by
-default (`embedding_batch_tokens`). Useful-token sums alone would underestimate
-the workspace needed by padding. A single input exceeding the batch budget is
-admitted alone, still capped by the model's per-input limit.
+Read/commit windows use `batch_size`. Inside each window, inputs are truncated
+at word boundaries, encoded once, sorted by capped token length, and grouped
+into model calls with at most **1,000 padded input tokens** by default
+(`embedding_batch_tokens`). Useful-token sums underestimate the workspace
+needed for padding. One input that exceeds the batch budget runs alone and
+remains capped by the model's per-input limit.
 
-Workers share one model and can embed one source concurrently while its reader
-continues. The default pending-window limit scales to workers + 1 (at least
-two), so even one-call short-text windows can feed the whole pool. Ordered
-commits still wait for earlier batches; read-ahead and the shared body budget
-remain bounded. A deterministic regression holds one worker's first call,
-requires all other workers to start, and verifies that a later batch finishes
-before the straggler is released without committing out of order.
+Workers share one model. Embedding runs concurrently with source reading. The
+default pending-window limit scales to workers + 1, with a minimum of two, so
+short-text windows can keep the worker pool busy. Commits preserve batch order;
+read-ahead and the shared body budget remain bounded. A concurrency test
+verifies that later work finishes while an earlier batch is blocked, without
+committing out of order.
 Equal token budgets make workspace sizes and scheduling more even,
 not identical-cost: attention depends on sequence length and call overhead
 still matters. Increase the token budget for GPU throughput.
 
-Readable non-redirect entries retain native efficient order and form the
-article phase. The cheap entries follow. Advance article progress only after
-rows **and vectors** commit, including resumed work. Report redirects/assets
-separately without an ETA; they no longer inflate the early article estimate.
-The metadata-only order preparation and final FAISS publication are outside
-that article ETA.
+Readable non-redirect entries form the article phase in native storage order.
+Redirects and assets follow as a separate phase. Article progress advances only
+after rows **and vectors** commit, including resumed work. The redirect and
+asset phase has no ETA. Metadata-only order preparation and final FAISS
+publication are outside the article ETA.
 
 ## Measurements: November 7, 2026
 
@@ -278,7 +265,7 @@ python-libzim **4.1.0 was held constant** for the comparison; a preliminary
 embedding, SQLite/body postings, FAISS writing, and generation publication;
 model loading/warm-up and quality evaluation are excluded.
 
-| Metric | Before | Port |
+| Metric | Baseline | Current pipeline |
 |---|---:|---:|
 | Median build time, two runs | 43.77 s | 23.93 s |
 | Articles/s | 34.4 | 62.8 |
@@ -289,21 +276,21 @@ model loading/warm-up and quality evaluation are excluded.
 | Recall@10 | 70% | 75% |
 | MRR@10 | 0.4933 | 0.5113 |
 
-**1.83× faster, 47% lower peak RSS.** Before times: 43.661/43.875 s;
-after: 23.792/24.071 s. An additional final-code run took 23.914 s and
-confirmed the same quality metrics using the actual published FAISS index.
+The current pipeline is **1.83× faster and uses 47% less peak RSS** in this
+measurement. Baseline runs took 43.661/43.875 s; current runs took
+23.792/24.071 s. A separate run took 23.914 s and confirmed the same quality
+metrics using the published FAISS index.
 
-The figures above describe revision `e0670ea`, with its original two-window
-read-ahead limit. After scaling read-ahead with worker count, a sanity run took
-23.559 s with 475.9 MB peak RSS; vectors, postings and query rankings were
-identical to that revision. This single run is not a new median or evidence of
-a general speedup; the straggler regression demonstrates the scheduling fix.
+Revision `e0670ea` uses a two-window read-ahead limit. A run with read-ahead
+scaled to worker count took 23.559 s with 475.9 MB peak RSS; vectors, postings,
+and query rankings matched that revision. This single run is not a median and
+does not establish a general speedup.
 
 With the same native order, row window, sorting and 3×1 workers, fixed
 **eight-text** calls took 26.716/26.396 s (median 26.56 s), with 647.4 MB
 peak RSS. Token budgeting is **1.11× faster** and uses **27% less peak RSS**
 than that ablation here. This separates its benefit from concurrent calls,
-but is not a reproduction of every detail of the older PR.
+but does not reproduce every condition in the comparison.
 
 SQLite title/path/redirect rows and **all lexical body postings are identical**.
 Vector ids are identical; mean corresponding-vector cosine is **0.99730**
@@ -318,10 +305,8 @@ single-query serving.
 
 ## Separate build and query thread budgets
 
-Do not set one thread globally. `build_embed_threads` now controls build calls
-and automatic embedding-worker sizing; `embed_threads` controls query serving.
-Existing `embed_threads` overrides no longer affect builds. Both remain
-independently configurable.
+`build_embed_threads` controls build calls and automatic embedding-worker
+sizing. `embed_threads` controls query serving. These settings are independent.
 
 The following tuning used the same 6.33 MB archive and model. Desktop affinity
 was CPUs 0–7: **four physical/eight logical cores**. The Pi was a **Pi 500,
@@ -405,10 +390,10 @@ cores, leaving one available** (minimum one thread), favoring typical short
 searches; this yields **three on a four-core Pi**. Override to eight for a
 near-limit-query workload. A blanket one-thread serving default is not supported.
 
-The mobile and supercomputer profiles retain their previous per-call budgets
-of two and eight, now separately named for builds and serving. Pi Zero 2 W and
-large-core servers were **not** benchmarked here; these are not newly claimed
-optima. A RAM-limited single model worker can still benefit from intra-call
+The mobile profile uses two threads per call; the supercomputer profile uses
+eight. Build and serving thread settings are separate. Pi Zero 2 W and
+large-core servers were **not** benchmarked here; the results do not set
+optima for those devices. A RAM-limited single model worker can still benefit from intra-call
 parallelism, as the Pi 1×1 versus 1×2 sweep illustrates.
 
 ## Reproduce
@@ -458,13 +443,12 @@ still used on any platform; `pip install 'zimantic[lexbor]'` explicitly opts
 into installing/building it outside the automatic platform list. Platform
 markers cannot distinguish every libc/OS-version/ABI wheel constraint.
 
-The fallback is the previous streaming extractor measured below. It retains
-the same visibility/language rules and capped text, and checks deadlines
-between input chunks. It is slower and lacks Lexbor's HTML5 malformed-markup
-recovery; the recorded legacy-page differences remain its known tradeoffs.
+The fallback uses stdlib `HTMLParser`. It applies the same visibility and
+language rules and text caps, and checks deadlines between input chunks. It is
+slower than Lexbor and does not recover malformed HTML5 markup.
 
 The [recorded results](../tests/benchmarks/results/html-parsers-2026-11-07.json)
-compare the previous stdlib parser with native backends using the same
+compare stdlib parsing with native backends using the same
 extraction rules: **242 real pages from 18 ZIMs and six module directories**
 (10.60 MiB HTML), plus eight stress cases. Up to 12 pages per input mix random
 pages with large pages from a sampled pool, not archive-wide maxima. There
@@ -480,7 +464,7 @@ writing; they are not complete-build or HTTP speedups.
 
 | Backend | Body speedup | Preview speedup | Additional peak RSS | Preferred/tied quality cases |
 |---|---:|---:|---:|---:|
-| Previous stdlib HTMLParser | 1.00x | 1.00x | 8.0 MiB | 10/14 |
+| Stdlib HTMLParser | 1.00x | 1.00x | 8.0 MiB | 10/14 |
 | lxml streaming target | 1.50x | 1.49x | 17.2 MiB | 13/14 |
 | lxml DOM | 1.40x | 1.82x | 21.1 MiB | 12/14 |
 | **Lexbor** | **1.44x** | **2.06x** | **24.8 MiB** | **14/14** |
@@ -493,10 +477,10 @@ before measuring additional post-exec `VmHWM`. It includes native allocations,
 but is not whole-application RSS or a concurrency/OOM guarantee.
 
 All native alternatives exactly matched **240/242 real body and preview
-outputs**, and none lost a previously nonempty real page. The two differences
-were improvements: useful opening paragraphs were recovered from an old
-resource-directory page, and repeated copyright/webmaster footer text was
-removed from another legacy document.
+outputs**, and none returned empty text for a page where stdlib parsing found
+text. The two differences were improvements: Lexbor recovered useful opening
+paragraphs from a resource-directory page and removed repeated
+copyright/webmaster footer text from another legacy document.
 The production Lexbor extractor was checked against the measured prototype:
 body and preview hashes match on all 250 real/stress pages, as do the preserved
 stdlib baseline's hashes against the original baseline.

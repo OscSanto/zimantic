@@ -91,9 +91,10 @@ class ModelFingerprintTests(unittest.TestCase):
             with (
                 patch.object(embed.ort, "InferenceSession", return_value=MagicMock()),
                 patch.object(embed.sentencepiece, "SentencePieceProcessor"),
-                self.assertRaisesRegex(FileNotFoundError, str(precision)),
+                self.assertRaises(FileNotFoundError) as error,
             ):
                 embed.Embedder(precision, device="cpu")
+            self.assertIn(str(precision), str(error.exception))
 
     def test_verify_and_fingerprint_hash_unchanged_files_once(self):
         with tempfile.TemporaryDirectory() as tmp:

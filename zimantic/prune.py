@@ -79,7 +79,7 @@ class PruneInventory:
 
 def _lock_is_free(lease_path: Path) -> bool:
     try:
-        fd = os.open(lease_path, os.O_RDONLY)
+        fd = os.open(lease_path, os.O_RDWR)
     except OSError:
         return True
     try:

@@ -19,12 +19,13 @@ from zimantic.__main__ import (
 )
 from zimantic.config_writer import ConfigWriteError, append_collection
 from zimantic.indexing.locator import IndexLocator
-from zimantic.prune import collect_inventory, delete_candidates
+from zimantic.paths import default_config_path
 from zimantic.providers.config import (
     ConfigIssue,
     ConfigValidationError,
     parse_collections,
 )
+from zimantic.prune import collect_inventory, delete_candidates
 from zimantic.settings import load_config
 
 
@@ -349,7 +350,8 @@ class TestConfigWriter:
         text = config.read_text(encoding="utf-8")
         assert text.startswith("port = 8123\n")
         assert '[[collections]]' in text
-        assert stat.S_IMODE(config.stat().st_mode) == 0o600
+        if os.name != "nt":
+            assert stat.S_IMODE(config.stat().st_mode) == 0o600
         assert appended.path == str(tmp_path / "zims" / "book.zim")
 
     def test_append_escapes_toml_and_validates_the_result(self, tmp_path):
@@ -513,16 +515,16 @@ class TestSourcesAndPrune:
     def test_build_list_does_not_take_the_build_lock(self, tmp_path, monkeypatch, capsys):
         (tmp_path / "modules").mkdir()
         (tmp_path / "modules" / "a.html").write_text("hello", encoding="utf-8")
-        config_dir = tmp_path / "zimantic"
-        config_dir.mkdir()
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        config_path = default_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         _write(
-            config_dir / "config.toml",
+            config_path,
             f"index_dir = {json.dumps(str(tmp_path / 'indexes'))}\n"
             '[[collections]]\ntype = "files"\nname = "modules"\n'
             'path = "../modules"\n',
         )
-        monkeypatch.chdir(tmp_path)
         main(["build", "--list"])
         assert not (tmp_path / ".build.lock").exists()
         assert not (tmp_path / "indexes").exists()
