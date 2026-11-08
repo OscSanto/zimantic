@@ -59,8 +59,10 @@ uv sync
   configuration, commands, and published measurements. Use measurements from
   the documented version.
 - **Compatibility:** Document supported configuration, index, and command
-  formats. For an unsupported format, provide a clear diagnostic and migration
-  path.
+  formats. Only current formats are supported; backward compatibility and
+  migrations are not guaranteed at this stage. Reject unsupported formats with
+  a clear diagnostic directing users to update configuration or regenerate
+  caches/indexes. Cross-model embedding-probe reuse remains supported.
 
 ## Code style
 
