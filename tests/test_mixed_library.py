@@ -59,6 +59,9 @@ def test_mixed_library_serves_all_providers(tmp_path):
         )
         env = dict(os.environ)
         env["PYTHONPATH"] = str(REPO_ROOT)
+        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        env["XDG_DATA_HOME"] = str(tmp_path / "data")
+        env["XDG_RUNTIME_DIR"] = str(tmp_path)
         build = subprocess.run(
             [sys.executable, "-m", "zimantic", "build", "--fast"],
             cwd=root,

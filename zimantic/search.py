@@ -433,9 +433,8 @@ class Search:
                     "zimantic: semantic search disabled: embedding model "
                     "unavailable (%s); falling back to title and full-text "
                     "(lexical) search",
-                    self.public_error(error),
+                    error,
                 )
-                logger.debug("embedding model load error: %s", error)
             else:
                 with self._state_lock:
                     self.embedder = embedder

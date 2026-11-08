@@ -1815,6 +1815,24 @@ class GracefulDegradationTests(unittest.TestCase):
             "candidate_count": 16,
         }
 
+    def test_embedding_model_warning_includes_model_file_path(self):
+        with _temp_dir(self) as tmp:
+            model_path = Path(tmp) / "model" / "model.onnx"
+            search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
+            search._embedder_ready = threading.Event()
+
+            def fail_to_load():
+                raise RuntimeError(
+                    f"Load model from {model_path} failed: File doesn't exist"
+                )
+
+            with self.assertLogs("zimantic.search", level="WARNING") as logs:
+                search.start_embedder(fail_to_load)
+                self.assertTrue(search._embedder_ready.wait(timeout=2))
+
+            self.assertTrue(any(str(model_path) in line for line in logs.output))
+
     def test_index_without_vectors_still_serves_title_results(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)

@@ -3,12 +3,13 @@
 Absolute provider roots, index directories, and private snapshot/database
 locators are implementation details.  They may be used internally (and by
 ``catalog.sqlite``), but they must not leak into API payloads, redirects,
-ETags, or normal logs.  This module owns the one redaction policy so every
-surface applies the same rules.
+ETags, or normal logs. Embedding model load warnings are an exception: their
+raw errors are logged to expose the model file path for troubleshooting. This
+module owns the redaction policy for the other public-facing surfaces.
 
 Raw exception details may still be useful when debugging.  Callers should log
 the redacted public cause at warning/error level and the untouched exception at
-debug level.
+debug level, except for embedding model load warnings.
 """
 
 from __future__ import annotations
