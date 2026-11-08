@@ -314,7 +314,8 @@ class BuildPipelineTests(unittest.TestCase):
         self.assertTrue(producer.closed)
 
     def test_resume_requires_order_fingerprint_and_rejects_changed_order(self):
-        rows = [EntryRecord(i, f"T{i}", "", f"p{i}") for i in range(4)]
+        batch_size = build_module.FAST_BUILD_BATCH_SIZE
+        rows = [EntryRecord(i, f"T{i}", "", f"p{i}") for i in range(batch_size + 2)]
 
         class OrderedProducer(Producer):
             order_fingerprint = "order-a"
@@ -325,19 +326,21 @@ class BuildPipelineTests(unittest.TestCase):
 
         for missing_manifest in (False, True):
             with tempfile.TemporaryDirectory() as tmp:
-                first = OrderedProducer(rows, interrupt_at=2)
+                first = OrderedProducer(rows, interrupt_at=batch_size + 1)
                 with self.assertRaises(KeyboardInterrupt):
                     _build(first, tmp, fast=True)
                 directory = IndexLocator(tmp).source_directory(
                     "files", "files:test", "files:test:manual-0123"
                 )
-                if missing_manifest:
-                    db = sqlite3.connect(directory / "staging-fast.sqlite")
-                    try:
+                db = sqlite3.connect(directory / "staging-fast.sqlite")
+                try:
+                    meta = dict(db.execute("SELECT key, value FROM meta"))
+                    self.assertEqual(meta[NEXT], str(batch_size))
+                    if missing_manifest:
                         db.execute("DELETE FROM meta WHERE key IN ('entry_order', 'entry_order_fingerprint')")
                         db.commit()
-                    finally:
-                        db.close()
+                finally:
+                    db.close()
                 resumed = OrderedProducer(rows)
                 if missing_manifest:
                     with self.assertRaisesRegex(
