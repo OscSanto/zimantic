@@ -550,16 +550,6 @@ def _slug_collection_name(path: Path) -> str:
     return text[:64]
 
 
-def _append_collection_entry(config_path: Path, name: str, path: Path) -> None:
-    """Compatibility wrapper for the phase-00 locked config append."""
-    from .config_writer import append_collection
-
-    append_collection(
-        config_path,
-        lambda _data: {"type": "zim", "name": name, "path": str(path)},
-    )
-
-
 def _build_producer_for_zim(zim: Path, cfg: dict, *, fast: bool):
     """Build the ZIM producer through the configured collection entry."""
     from types import SimpleNamespace
@@ -613,7 +603,7 @@ def _build_files_collections(
     failures: list[tuple[Path, BaseException]],
 ) -> None:
     """Build every configured files collection through the generic pipeline."""
-    from .build import build_index
+    from .indexing.pipeline import build_index
     from .diagnostics import public_cause
     from .indexing.locator import IndexLocator
     from .providers.base import ProviderContext
@@ -705,7 +695,7 @@ def _build_kolibri_collections(
     failures: list[tuple[Path, BaseException]],
 ) -> None:
     """Build every configured Kolibri channel through the generic pipeline."""
-    from .build import build_index
+    from .indexing.pipeline import build_index
     from .diagnostics import public_cause
     from .indexing.locator import IndexLocator
     from .providers.base import ProviderContext
@@ -1091,7 +1081,7 @@ def _build_tasks(
     parser: argparse.ArgumentParser,
 ) -> None:
     """Build one or more already-discovered sources through the generic pipeline."""
-    from .build import EmbeddingPipeline, build_index
+    from .indexing.pipeline import EmbeddingPipeline, build_index
     from .indexing.locator import IndexLocator
 
     workers = args.workers
@@ -1285,7 +1275,7 @@ def _run_positional_zim_build(
     args,
     parser: argparse.ArgumentParser,
 ) -> None:
-    from .build import build_index
+    from .indexing.pipeline import build_index
     from .indexing.locator import IndexLocator
 
     zims = _collect_zims([Path(path) for path in args.paths], ".")
@@ -1333,7 +1323,7 @@ def _run_positional_zim_build(
     embedder = None
     embedding_pipeline = None
     if not args.fast:
-        from .build import EmbeddingPipeline
+        from .indexing.pipeline import EmbeddingPipeline
         from .embed import Embedder
 
         def _make_embedder():

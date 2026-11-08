@@ -184,7 +184,7 @@ class BuildWorkerTests(unittest.TestCase):
         import zimantic.__main__ as main_module
         from zimantic import settings
 
-        build_module = importlib.import_module("zimantic.build")
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             source = directory / "manual.zim"
@@ -226,7 +226,7 @@ class BuildWorkerTests(unittest.TestCase):
         import zimantic.__main__ as main_module
         from zimantic import settings
 
-        build_module = importlib.import_module("zimantic.build")
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
         barrier = threading.Barrier(2)
         built = []
 
@@ -295,7 +295,7 @@ class BuildWorkerTests(unittest.TestCase):
     def test_one_source_uses_all_configured_embedding_workers(self):
         import zimantic.__main__ as main_module
 
-        build_module = importlib.import_module("zimantic.build")
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
         runtime = types.SimpleNamespace(entry_producer=lambda *_args, **_kwargs: object())
         config = {
             "index_dir": "/unused/indexes",

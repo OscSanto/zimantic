@@ -507,33 +507,6 @@ def fetch_catalog(
     return CatalogFetch(tuple(entries))
 
 
-def catalog_entries(
-    server: str,
-    *,
-    catalog_path: str | None = None,
-    catalog_limit: int = DEFAULT_KIWIX_CATALOG_LIMIT,
-    max_entries: int = DEFAULT_KIWIX_CATALOG_ENTRIES,
-    max_response_bytes: int = DEFAULT_MAX_KIWIX_RESPONSE_BYTES,
-    timeout: float = 12.0,
-    total_timeout: float | None = None,
-    urlopen_fn: Callable[..., Any] | None = None,
-    sleep_fn: Callable[[float], Any] | None = None,
-) -> list[dict[str, str]] | None:
-    """Compatibility wrapper returning only the entries (or ``None``)."""
-    result = fetch_catalog(
-        server,
-        catalog_path=catalog_path,
-        catalog_limit=catalog_limit,
-        max_entries=max_entries,
-        max_response_bytes=max_response_bytes,
-        timeout=timeout,
-        total_timeout=total_timeout,
-        urlopen_fn=urlopen_fn,
-        sleep_fn=sleep_fn,
-    )
-    return None if result.entries is None else list(result.entries)
-
-
 __all__ = [
     "CatalogFetch",
     "DEFAULT_KIWIX_CATALOG_ATTEMPTS",
@@ -557,6 +530,5 @@ __all__ = [
     "_read_limited_response",
     "_safe_result_url",
     "_validated_origin",
-    "catalog_entries",
     "fetch_catalog",
 ]

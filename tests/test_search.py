@@ -34,7 +34,7 @@ from zimantic.providers.zim.metadata import (
 from zimantic.providers.zim.search import (
     phrase_in_word_stream as _phrase_in_word_stream,
 )
-from zimantic.searching.index import _LocalIndex, _nprobe
+from zimantic.searching.index import IndexHandle, _nprobe
 from zimantic.searching.config import _file_signature
 from zimantic.searching.sources import _html_attribute
 
@@ -252,7 +252,7 @@ class FulltextFailureTests(unittest.TestCase):
             close=lambda: None,
         )
         archive = types.SimpleNamespace(has_fulltext_index=True)
-        index = _LocalIndex(
+        index = IndexHandle(
             None,
             None,
             archive,
@@ -285,7 +285,7 @@ class FulltextFailureTests(unittest.TestCase):
             ],
             close=lambda: None,
         )
-        index = _LocalIndex(
+        index = IndexHandle(
             None,
             None,
             None,
@@ -386,7 +386,7 @@ def _title_search(rows, query, limit=1):
     search = _bare_search({"candidate_count": 2})
     search.semantic = False
     search.sources = {"manual": source}
-    search.indexes = {"manual": _LocalIndex(db, None, None, None, threading.Lock())}
+    search.indexes = {"manual": IndexHandle(db, None, None, None, threading.Lock())}
     try:
         events = list(search.stream_search(query, limit=limit))
     finally:
@@ -409,7 +409,7 @@ def _title_suggest(rows, query, limit=2):
     search = _bare_search({"candidate_count": 2})
     search.semantic = False
     search.sources = {"manual": source}
-    search.indexes = {"manual": _LocalIndex(db, None, None, None, threading.Lock())}
+    search.indexes = {"manual": IndexHandle(db, None, None, None, threading.Lock())}
     try:
         return search.suggest(query, ["manual"], limit)
     finally:
@@ -518,7 +518,7 @@ class SearchContractTests(unittest.TestCase):
         search.preview_chars = 1000
         search.sources = {"manual": source}
         search.indexes = {
-            "manual": _LocalIndex(None, None, archive, None, threading.Lock())
+            "manual": IndexHandle(None, None, archive, None, threading.Lock())
         }
         search.runtimes = {"": _TestZimRuntime(search)}
         search._state_lock = threading.RLock()
@@ -1276,7 +1276,7 @@ class SearchContractTests(unittest.TestCase):
         search.semantic = True
         search.sources = {"manual": source}
         search.indexes = {
-            "manual": _LocalIndex(db, FakeFaiss(), None, None, threading.Lock())
+            "manual": IndexHandle(db, FakeFaiss(), None, None, threading.Lock())
         }
         search.runtimes = {"": _TestZimRuntime(search)}
         search._state_lock = threading.RLock()
@@ -1391,7 +1391,7 @@ class SearchContractTests(unittest.TestCase):
             _fulltext_query("above"),
             np.array([[1.0]]),
             1,
-            _LocalIndex(db, FakeFaiss(), None, None, threading.Lock()),
+            IndexHandle(db, FakeFaiss(), None, None, threading.Lock()),
         )
 
         db.close()
@@ -1433,7 +1433,7 @@ class SearchContractTests(unittest.TestCase):
             _fulltext_query("unrelated"),
             np.array([[1.0]]),
             1,
-            _LocalIndex(db, FakeFaiss(), None, None, threading.Lock()),
+            IndexHandle(db, FakeFaiss(), None, None, threading.Lock()),
         )
 
         db.close()
@@ -1465,7 +1465,7 @@ class SearchContractTests(unittest.TestCase):
         search.preview_limit = 10
         search.sources = {"manual": source}
         search.indexes = {
-            "manual": _LocalIndex(
+            "manual": IndexHandle(
                 None,
                 None,
                 _Archive(),
@@ -1519,7 +1519,7 @@ class SearchContractTests(unittest.TestCase):
         search.preview_limit = 1
         search.sources = {"manual": source}
         search.indexes = {
-            "manual": _LocalIndex(None, None, _Archive(), None, threading.Lock())
+            "manual": IndexHandle(None, None, _Archive(), None, threading.Lock())
         }
         search.runtimes = {"": _TestZimRuntime(search)}
         search._state_lock = threading.RLock()
@@ -1652,8 +1652,8 @@ class SearchContractTests(unittest.TestCase):
             "other": _zim_source("other", "Other"),
         }
         search.indexes = {
-            "manual": _LocalIndex(manual_db, None, None, None, threading.Lock()),
-            "other": _LocalIndex(other_db, None, None, None, threading.Lock()),
+            "manual": IndexHandle(manual_db, None, None, None, threading.Lock()),
+            "other": IndexHandle(other_db, None, None, None, threading.Lock()),
         }
         try:
             scoped = search.suggest("tire", ["manual"], limit=8)
@@ -2056,7 +2056,7 @@ class GracefulDegradationTests(unittest.TestCase):
 
     def test_failed_archive_open_is_not_retried(self):
         with _temp_dir(self) as tmp:
-            index = _LocalIndex(
+            index = IndexHandle(
                 None,
                 None,
                 None,
@@ -3437,7 +3437,7 @@ class ProductionHardeningTests(unittest.TestCase):
             search = _bare_search({})
             search._defer_faiss = True
             search.indexes = {
-                "manual": _LocalIndex(
+                "manual": IndexHandle(
                     None,
                     None,
                     None,
@@ -3452,7 +3452,7 @@ class ProductionHardeningTests(unittest.TestCase):
             try:
                 with (
                     patch.object(
-                        _LocalIndex, "ensure_open", return_value=fake_archive
+                        IndexHandle, "ensure_open", return_value=fake_archive
                     ),
                     patch.object(
                         Search,
@@ -3474,7 +3474,7 @@ class ProductionHardeningTests(unittest.TestCase):
 
     def test_unavailable_native_index_reports_an_error_not_an_empty_ok(self):
         source = _zim_source("manual", "Manual")
-        index = _LocalIndex(
+        index = IndexHandle(
             None,
             None,
             None,
@@ -3704,7 +3704,7 @@ def _test_open_index(self, db_path: Path):
                     faiss_index = None
     finally:
         db.close()
-    return _LocalIndex(
+    return IndexHandle(
         None,
         faiss_index,
         None,
@@ -3829,7 +3829,7 @@ def _test_open_zim_index(self, zim_path):
     except Exception:
         if not Path(zim_path).exists():
             return None
-    return _LocalIndex(
+    return IndexHandle(
         None,
         None,
         archive,

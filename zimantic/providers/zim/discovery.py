@@ -27,7 +27,7 @@ from ...model_meta import (
     MODEL_PROBE_VECTORS_KEY,
 )
 from ...searching.config import _file_signature
-from ...searching.index import _LocalIndex, _nprobe
+from ...searching.index import IndexHandle, _nprobe
 from .metadata import metadata_from_archive, perma_ref, source_info_from_record
 
 logger = logging.getLogger(__name__)
@@ -537,7 +537,7 @@ def open_generation_index(
     options: ZimIndexOptions,
     expected_source_size: int | None,
     expected_source_mtime: int | None = None,
-) -> _LocalIndex | None:
+) -> IndexHandle | None:
     """Open the current validated generation for one ZIM source."""
     try:
         lease = IndexLocator(index_dir).paths(
@@ -687,7 +687,7 @@ def open_generation_index(
                     logger.debug("%s: vector open error: %s", source.key, error)
                     faiss_index = None
         db.close()
-        return _LocalIndex(
+        return IndexHandle(
             None,
             faiss_index,
             None,
@@ -721,7 +721,7 @@ def open_native_index(
     source: Any,
     *,
     archive_factory: Any | None = None,
-) -> _LocalIndex | None:
+) -> IndexHandle | None:
     """Open an unindexed ZIM using only its native full-text index."""
     from libzim.reader import Archive
 
@@ -747,7 +747,7 @@ def open_native_index(
             return None
     elif record.native_fulltext_available is not True:
         return None
-    return _LocalIndex(
+    return IndexHandle(
         None,
         None,
         archive,
@@ -805,7 +805,7 @@ def discover_source_indexes(
     archive_factory: Any | None = None,
     unreadable: dict[str, str] | None = None,
     order: dict[str, int] | None = None,
-) -> tuple[list[Any], list[Any], dict[str, _LocalIndex]]:
+) -> tuple[list[Any], list[Any], dict[str, IndexHandle]]:
     """Build searchable/library sources and open their indexes.
 
     Returns ``(sources, library_sources, indexes)``.  A source is searchable
@@ -815,7 +815,7 @@ def discover_source_indexes(
     unreadable = unreadable or {}
     sources = []
     library_sources = []
-    indexes: dict[str, _LocalIndex] = {}
+    indexes: dict[str, IndexHandle] = {}
     for record in records:
         path_str = record.path or ""
         readable = path_str not in unreadable

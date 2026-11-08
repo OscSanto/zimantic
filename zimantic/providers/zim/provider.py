@@ -34,7 +34,7 @@ from ...model_meta import (
 )
 from ...open_scope import OPEN_COLLECTION_KEY, OPEN_COLLECTION_LABEL, ZimOpenScope
 from ...searching.config import _file_signature
-from ...searching.index import _LocalIndex
+from ...searching.index import IndexHandle
 from ..base import (
     CollectionInfo,
     CollectionRuntime,
@@ -103,7 +103,7 @@ class ZimRuntime(CollectionRuntime):
         self._library_sources: tuple[SourceInfo, ...] = ()
         self._records: dict[str, SourceRecord] = {}
         self._unreadable: dict[str, str] = {}
-        self.indexes: dict[str, _LocalIndex] = {}
+        self.indexes: dict[str, IndexHandle] = {}
         self._lock = threading.RLock()
         self._refresh_lock = threading.Lock()
         self._version = 1
@@ -563,8 +563,8 @@ class ZimRuntime(CollectionRuntime):
         )
         with self._lock:
             by_key = {source.key: source for source in library_sources}
-            installed: dict[str, _LocalIndex] = {}
-            discarded: list[_LocalIndex] = []
+            installed: dict[str, IndexHandle] = {}
+            discarded: list[IndexHandle] = []
             for key, fresh in discovered.items():
                 source = by_key.get(key)
                 record = self._record_by_key(scan, key)
@@ -647,7 +647,7 @@ class ZimRuntime(CollectionRuntime):
         return None
 
     def _can_reuse_index(
-        self, index: _LocalIndex, record: SourceRecord | None, source: SourceInfo
+        self, index: IndexHandle, record: SourceRecord | None, source: SourceInfo
     ) -> bool:
         if record is None or record.path is None:
             return False

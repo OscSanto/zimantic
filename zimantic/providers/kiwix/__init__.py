@@ -8,7 +8,6 @@ carry absolute external links; this provider never exposes a local
 
 from .catalog import (
     CatalogFetch,
-    catalog_entries,
     fetch_catalog,
 )
 from .provider import (
@@ -25,7 +24,6 @@ __all__ = [
     "KiwixDiscoveryBatch",
     "KiwixProvider",
     "KiwixRuntime",
-    "catalog_entries",
     "fetch_catalog",
     "kiwix_collection_key",
     "kiwix_source_key",

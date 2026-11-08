@@ -253,15 +253,9 @@ def _nprobe(faiss_index: Any, cfg: dict) -> int:
     return min(probes, nlist) if nlist else probes
 
 
-# Phase-01 code and provider discovery used the private name.  New code should
-# import ``IndexHandle``; the alias keeps the mechanical migration small while
-# there is exactly one implementation.
-_LocalIndex = IndexHandle
-
 __all__ = [
     "DEFAULT_NPROBE_FRACTION",
     "IndexHandle",
     "IndexLocks",
-    "_LocalIndex",
     "_nprobe",
 ]
