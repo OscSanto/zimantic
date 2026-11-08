@@ -2,23 +2,24 @@ import gc
 import itertools
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
-import re
 import unittest
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import quote
 from unittest.mock import patch
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.locator import IndexLocator
+from zimantic.libzim_compat import get_entry_by_id
 from zimantic.providers.config import RuntimeConfig, ZimConfig
 from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
 from zimantic.providers.zim.entries import ArchiveEntryProducer
@@ -504,7 +505,7 @@ class LocalIntegrationTests(unittest.TestCase):
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
-                entry = archive.get_entry_by_id(i)
+                entry = get_entry_by_id(archive, i)
                 if entry.path == "Alpha":
                     article_id = i
                 elif not entry.is_redirect:
@@ -551,7 +552,7 @@ class LocalIntegrationTests(unittest.TestCase):
             article_id = None
             asset_ids: list[int] = []
             for i in range(archive.entry_count):
-                entry = archive.get_entry_by_id(i)
+                entry = get_entry_by_id(archive, i)
                 if entry.path == "Alpha":
                     article_id = i
                 elif not entry.is_redirect:

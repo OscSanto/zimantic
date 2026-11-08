@@ -102,9 +102,20 @@ jobs:
                 python3-faiss \
                 python3-libzim \
                 python3-onnxruntime \
-                python3-sentencepiece
+                python3-sentencepiece \
+                python3-httpx \
+                python3-pytest \
+                python3-tqdm \
+                python3-venv \
+                python3-setuptools \
+                python3-wheel
+              /usr/bin/python3 -m venv --system-site-packages /tmp/zimantic-venv
+              /tmp/zimantic-venv/bin/pip install --no-deps --no-build-isolation .
               PYTHONPATH=/app /usr/bin/python3 -c "import faiss, onnxruntime, sentencepiece; from libzim.reader import Archive; from libzim.search import Searcher; from zimantic.embed import Embedder; from zimantic.search import Search; print(onnxruntime.__version__)"
               PYTHONPATH=/app /usr/bin/python3 -c "from zimantic.content.reader import LexborHTMLParser, extract_excerpt; assert LexborHTMLParser is None; text = b\"A readable article paragraph with enough useful text for the fallback extractor.\"; assert extract_excerpt(b\"<p>\" + text + b\"</p>\") == text.decode(); print(\"stdlib HTML fallback OK\")"
+              (cd /tmp && /tmp/zimantic-venv/bin/python -c "from importlib.metadata import requires, version; from packaging.requirements import Requirement; reqs = [Requirement(dep) for dep in requires(\"zimantic\")]; assert any(req.name == \"libzim\" for req in reqs); assert all(version(\"libzim\") in req.specifier for req in reqs if req.name == \"libzim\" and (req.marker is None or req.marker.evaluate())); print(\"libzim\", version(\"libzim\"))")
+              (cd /tmp && /tmp/zimantic-venv/bin/zimantic --help > /dev/null)
+              PYTHONPATH=/app /usr/bin/python3 -m pytest -q tests/test_runtime_api.py tests/test_libzim_compat.py tests/providers/zim/test_provider.py::test_legacy_id_order_resumes_after_upgrade
             '
 
   publish:

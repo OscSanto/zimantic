@@ -35,7 +35,7 @@ Zimantic searches local ZIM archives directly; it does not need a separate Kiwix
 ## Requirements
 
 - Python 3.11–3.14 with native dependency wheels available for the interpreter. `libzim` publishes wheels for specific Python ABIs and platforms, so choose an interpreter with a compatible wheel. Update this range when the native dependencies add support for a newer Python version.
-- 32-bit Linux platforms (armhf/armv7) have no prebuilt wheels for the native dependencies. They work when the dependencies are installed as distribution packages. Debian 13 (trixie) or newer provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic can use them.
+- 32-bit Linux platforms (armhf/armv7) have no prebuilt wheels for the native dependencies. They work when the dependencies are installed as distribution packages. Debian 13 (trixie) or newer provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic can use them. Known 32-bit machine names accept python-libzim 3 or newer; other machines require 4.1 or newer. Python package markers report the machine name, not interpreter bitness, so a 32-bit interpreter reporting a 64-bit machine name still requires 4.1.
 - About 120 MB for the default embedding model, plus the ZIM files. The English-only `e5-small-v2` model is about 35 MB on disk.
 - Wikipedia-style ZIM files. Zimantic relies on their predictable HTML structure to locate useful content blocks.
 - **One provider seam.** ZIM, remote Kiwix, files, and Kolibri are in-tree providers. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
@@ -73,6 +73,7 @@ Zimantic searches local ZIM archives directly; it does not need a separate Kiwix
        python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
        python3-fastapi python3-uvicorn
    python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install 'puremagic>=1.30'
    .venv/bin/pip install --no-deps .
    ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
    ```
@@ -781,7 +782,7 @@ When more than one ZIM is selected, the article toolbar shows separate previous/
 
 **Query threads.** The desktop default uses at most four usable physical cores, leaving one for other work (minimum one thread); this gives three on a four-core Pi 5/500. Mobile and supercomputer profiles retain two and eight. One thread is not a good serving default: longer queries benefited substantially from parallelism. More than four can help near-limit queries but hurt typical short searches; override `embed_threads` for that workload. These are balanced defaults, not a universal optimum for every model or device.
 
-With **python-libzim 4.1+**, ZIM builds use its native `iter_efficient()` (cluster-order) iterator. Article work is followed by a cheap redirects/assets phase without an ETA; article progress counts committed work rather than read-ahead entries. The order and its fingerprint are recorded for safe resume; interrupted builds without that manifest must be rebuilt. No raw ZIM-table parsing is needed. See [build performance and quality measurements](docs/build-performance.md).
+With **python-libzim 4.1+**, ZIM builds use its native `iter_efficient()` (cluster-order) iterator. Article work is followed by a cheap redirects/assets phase without an ETA; article progress counts committed work rather than read-ahead entries. Older bindings use entry-ID order, which can be slower. The order and its fingerprint are recorded for safe resume; interrupted builds without that manifest must be rebuilt. No raw ZIM-table parsing is needed. See [build performance and quality measurements](docs/build-performance.md).
 
 **Disk space.** Keep about **20% of total ZIM file size** free when building indexes.
 

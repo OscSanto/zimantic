@@ -12,6 +12,7 @@ import sqlite3
 from typing import Any
 from urllib.parse import quote
 
+from ..libzim_compat import get_entry_by_id
 from .reader import _READABLE_MIMETYPES
 
 RANDOM_ARTICLE_ATTEMPTS = 128
@@ -117,7 +118,7 @@ def random_fallback_article(
     for _ in range(attempts):
         point = secrets.randbelow(upper)
         try:
-            entry = archive.get_entry_by_id(point)
+            entry = get_entry_by_id(archive, point)
         except (KeyError, RuntimeError, ValueError, IndexError):
             continue
         if is_random_article_entry(entry):
@@ -127,7 +128,7 @@ def random_fallback_article(
         ids = []
         for point in range(upper):
             try:
-                entry = archive.get_entry_by_id(point)
+                entry = get_entry_by_id(archive, point)
             except (KeyError, RuntimeError, ValueError, IndexError):
                 continue
             if is_random_article_entry(entry):
@@ -136,7 +137,7 @@ def random_fallback_article(
     if not ids:
         return None
     try:
-        entry = archive.get_entry_by_id(ids[secrets.randbelow(len(ids))])
+        entry = get_entry_by_id(archive, ids[secrets.randbelow(len(ids))])
     except (KeyError, RuntimeError, ValueError, IndexError):
         return None
     return entry.path

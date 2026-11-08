@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from libzim.reader import Archive
 
 from ..indexing.types import EntryRecord
+from ..libzim_compat import get_entry_by_id
 from ..redirects import RedirectError, resolve_redirect_entry
 from .path import normalize_archive_path
 
@@ -1620,7 +1621,7 @@ def read_entry(
     ``max_body_text_bytes`` bounds the separately indexed lexical body; the
     embedding excerpt keeps its existing short ``max_preview_chars`` limit.
     """
-    entry = zim.get_entry_by_id(i)
+    entry = get_entry_by_id(zim, i)
     if entry.is_redirect:
         target = _redirect_target(entry)
         if target is None:

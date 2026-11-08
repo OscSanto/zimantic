@@ -58,6 +58,7 @@ def _create_zim(path: Path, *, main_path: str = "Alpha") -> None:
         creator.add_item(_Page("Beta", "Beta", ALPHA_HTML))
 
 
+@pytest.mark.skipif(not hasattr(Archive, "iter_efficient"), reason="requires libzim 4.1")
 def test_native_order_preserves_ids_redirects_and_original_entry_cap(tmp_path):
     from types import SimpleNamespace
 
@@ -92,6 +93,70 @@ def test_native_order_preserves_ids_redirects_and_original_entry_cap(tmp_path):
         ) == capped_expected
     finally:
         capped.close()
+
+
+def test_legacy_id_order_resumes_after_upgrade(tmp_path):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from zimantic.indexing.locator import IndexLocator
+    from zimantic.indexing.pipeline import build_index
+    from zimantic.libzim_compat import get_entry_by_id
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
+
+    class LegacyArchive:
+        def __init__(self, path):
+            self.archive = Archive(path)
+            self.entry_count = self.archive.entry_count
+
+        def _get_entry_by_id(self, entry_id):
+            return get_entry_by_id(self.archive, entry_id)
+
+    path = tmp_path / "legacy.zim"
+    _create_zim(path)
+    source = SimpleNamespace(key="legacy", provider="zim", collection_key="zim:test")
+    locator = IndexLocator(tmp_path / "indexes")
+    legacy = ArchiveEntryProducer(source, path, archive=LegacyArchive(path), fast=True)
+    assert legacy.prepare_iteration() == "id-v1"
+    fingerprint = legacy.order_fingerprint
+    assert fingerprint
+    capped = ArchiveEntryProducer(
+        source, path, archive=LegacyArchive(path), max_entries=1, fast=True
+    )
+    try:
+        assert capped.prepare_iteration() == "id-v1"
+        assert capped.order_fingerprint != fingerprint
+        assert capped.entry_at(0).id == 0
+    finally:
+        capped.close()
+    with pytest.raises(RuntimeError, match="requires libzim 4.1"):
+        legacy.prepare_iteration("efficient-v1")
+    original_entry_at = legacy.entry_at
+
+    def interrupted(index):
+        if index == 1:
+            raise KeyboardInterrupt
+        return original_entry_at(index)
+
+    legacy.entry_at = interrupted
+    with pytest.raises(KeyboardInterrupt):
+        build_index(legacy, locator, None, {"batch_size": 1}, fast=True)
+
+    upgraded = ArchiveEntryProducer(source, path, fast=True)
+    assert upgraded.prepare_iteration("id-v1") == "id-v1"
+    assert upgraded.order_fingerprint == fingerprint
+    report = build_index(upgraded, locator, None, {"batch_size": 1}, fast=True)
+    assert report.status == "published"
+    lease = locator.paths(source)
+    assert lease is not None
+    try:
+        with sqlite3.connect(lease.sqlite_path) as db:
+            meta = dict(db.execute("SELECT key, value FROM meta"))
+            assert meta["entry_order"] == "id-v1"
+            assert meta["entry_order_fingerprint"] == fingerprint
+            assert {row[0] for row in db.execute("SELECT title FROM docs")} == {"Alpha", "Beta"}
+    finally:
+        lease.close()
 
 
 def _context(index_dir: Path, *, archive_factory=Archive) -> ProviderContext:

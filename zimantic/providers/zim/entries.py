@@ -174,17 +174,25 @@ class ArchiveEntryProducer:
         return row
 
     def prepare_iteration(self, order: str | None = None) -> str:
-        """Keep canonical ids and caps while reading content in native order.
+        """Keep canonical ids and caps while choosing a resumable reading order.
 
-        Only metadata is read here, never compressed article bodies. The cheap
-        entries follow the article phase, whose progress has an ETA.
+        Native order groups article work first; older bindings use ID order.
+        Only metadata is read here, never compressed article bodies.
         """
-        if order not in (None, "efficient-v1"):
+        if order not in (None, "efficient-v1", "id-v1"):
             raise ValueError(f"unsupported ZIM entry order {order!r}")
         self._order = None
         self.article_work_count = None
         self.order_fingerprint = ""
-        iterator = self._open().iter_efficient
+        iterator = getattr(self._open(), "iter_efficient", None)
+        has_efficient_order = callable(iterator)
+        if order == "id-v1" or (order is None and not has_efficient_order):
+            self.order_fingerprint = hashlib.sha256(
+                f"zim:id-v1:{self.count}".encode("ascii")
+            ).hexdigest()
+            return "id-v1"
+        if not has_efficient_order:
+            raise RuntimeError("resuming efficient ZIM order requires libzim 4.1")
         import numpy as np
 
         def entries():

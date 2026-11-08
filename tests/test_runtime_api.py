@@ -1,10 +1,7 @@
 """Pre/post-install check of the third-party APIs zimantic depends on.
 
-``zimantic`` reaches into libzim through a few private and semi-private calls
-(``Entry._index``, ``Entry.get_item``, the ``Searcher``/``Query`` pair, and
-search result access). A libzim upgrade can change them silently, so this
-module builds a tiny real ZIM and asserts the APIs the indexer and searcher
-use directly.
+``zimantic`` uses private and version-dependent libzim calls for entry lookup
+and searching. This module builds a tiny real ZIM and checks those adapters.
 
 Run it after installing dependencies:
 
@@ -19,6 +16,7 @@ from libzim.search import Query, Searcher
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.content.reader import read_entry
+from zimantic.libzim_compat import get_entry_by_id, search_results
 
 BODY_ALPHA = (
     "<html><body><p>Alpha is a sufficiently long article about tires and "
@@ -80,13 +78,13 @@ class LibzimRuntimeApiTests(unittest.TestCase):
         cls._tmp.cleanup()
 
     def test_archive_exposes_the_entry_lookup(self):
-        entry = self.archive.get_entry_by_id(0)
+        entry = get_entry_by_id(self.archive, 0)
         self.assertIsInstance(entry._index, int)
         self.assertTrue(entry.path)
         self.assertTrue(entry.title)
 
     def test_private_entry_index_matches_path_lookup(self):
-        entry = self.archive.get_entry_by_id(0)
+        entry = get_entry_by_id(self.archive, 0)
         by_path = self.archive.get_entry_by_path(entry.path)
         self.assertEqual(by_path._index, entry._index)
 
@@ -97,6 +95,16 @@ class LibzimRuntimeApiTests(unittest.TestCase):
         target = redirect.get_redirect_entry()
         self.assertEqual(target.path, "Alpha")
         self.assertIsInstance(target._index, int)
+        row = read_entry(self.archive, redirect._index)
+        self.assertEqual((row.path, row.target_id), ("Alpha", target._index))
+
+    def test_random_article_fallback_reads_entries_by_id(self):
+        from types import SimpleNamespace
+
+        from zimantic.content.serving import random_fallback_article
+
+        index = SimpleNamespace(ensure_open=lambda: self.archive, random_article_ids=None)
+        self.assertIn(random_fallback_article(index, attempts=0), ("Alpha", "Beta"))
 
     def test_entry_content_and_mimetype_are_readable(self):
         entry = self.archive.get_entry_by_path("Alpha")
@@ -108,7 +116,16 @@ class LibzimRuntimeApiTests(unittest.TestCase):
         if not self.archive.has_fulltext_index:
             self.skipTest("libzim was built without a full-text index")
         search = Searcher(self.archive).search(Query().set_query("brakes"))
-        self.assertIn("Beta", [result.path for result in search.get_results(0, 10)])
+        self.assertIn("Beta", [result["path"] for result in search_results(search, 0, 10)])
+
+    def test_native_searcher_returns_titles(self):
+        if not self.archive.has_fulltext_index:
+            self.skipTest("libzim was built without a full-text index")
+        from zimantic.providers.zim.native import ZimNativeSearcher
+
+        searcher = ZimNativeSearcher.open(self.archive)
+        assert searcher is not None
+        self.assertIn(("Beta", "Beta"), [(hit.path, hit.title) for hit in searcher.search("brakes", 10)])
 
     def test_fulltext_helper_returns_paths(self):
         if not self.archive.has_fulltext_index:
@@ -117,17 +134,17 @@ class LibzimRuntimeApiTests(unittest.TestCase):
 
         pool = FulltextPool(1)
         try:
-            paths = pool.search(str(self.zim_path), "brakes", 10)
+            results = pool.search_results(str(self.zim_path), "brakes", 10)
         finally:
             pool.close()
-        self.assertIn("Beta", paths)
+        self.assertIn({"path": "Beta", "title": "Beta"}, results)
 
     def test_read_entry_produces_an_excerpt(self):
         # End-to-end: the real Archive -> private lookup -> text extraction.
         row = next(
             read_entry(self.archive, index)
             for index in range(self.archive.entry_count)
-            if not self.archive.get_entry_by_id(index).is_redirect
+            if not get_entry_by_id(self.archive, index).is_redirect
         )
         assert row is not None
         self.assertEqual(len(row), 7)

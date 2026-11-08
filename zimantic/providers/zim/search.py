@@ -17,9 +17,10 @@ from ...content.reader import (
     truncate_at_word_boundary,
 )
 from ...content.zim_paths import ZimPathError, resolve_zim_path
-from ...diagnostics import public_cause
 from ...contracts import SourceInfo, SourceResult, encode_document_id
+from ...diagnostics import public_cause
 from ...indexing.search import body_search, fuse_fulltext, vector_search
+from ...libzim_compat import search_results
 from ...searching.query import _title_prefix_query, _title_query
 from ...searching.ranking import source_items
 
@@ -307,8 +308,7 @@ def _search_locked(
                         _query_object(request.fulltext_query or request.query)
                     )
                     paths = [
-                        str(result.path)
-                        for result in search.get_results(0, count)
+                        result["path"] for result in search_results(search, 0, count)
                     ]
                 except (RuntimeError, ValueError) as error:
                     errors.append(f"full-text search unavailable: {error}")

@@ -206,10 +206,12 @@ candidate matching and ranking remain unchanged.
 
 ZIM builds use `iter_efficient()` from python-libzim 4.1.0 or later. This
 iterator follows storage order; its exact order is not part of the public
-contract. `iter_by_path()` and `iter_by_title()` do not follow storage order.
-The build records the selected order and its digest. Resume rejects a different
-order or an incomplete manifest instead of applying saved row positions to a
-different sequence. Completed indexes remain valid.
+contract. Older bindings use entry-ID order, which may be slower.
+`iter_by_path()` and `iter_by_title()` do not follow storage order. The build
+records the selected order and its digest. Resume preserves ID order after an
+upgrade and rejects a different order or an incomplete manifest instead of
+applying saved row positions to a different sequence. Completed indexes remain
+valid.
 
 Builds use bounded row windows, not article-count windows. This also bounds
 redirect and title-only rows. A shared body-text budget limits retained text.
@@ -435,13 +437,13 @@ boilerplate removal, primary-language selection and text caps remain unchanged.
 The small, marker-gated meta-refresh scan still uses stdlib `HTMLParser`.
 Existing indexes are not automatically rewritten.
 
-Automatic selectolax installation is restricted to the published CPython
-wheel OS/architecture families: Linux x86-64/AArch64, macOS x86-64/ARM64, and
-Windows x86/x64/ARM64. ARM32 and other unlisted targets do not require
-selectolax or a native source build. A separately installed selectolax is
-still used on any platform; `pip install 'zimantic[lexbor]'` explicitly opts
-into installing/building it outside the automatic platform list. Platform
-markers cannot distinguish every libc/OS-version/ABI wheel constraint.
+Automatic selectolax installation excludes known 32-bit machine names, using
+the same platform marker as libzim. Other machines require selectolax even
+when no compatible wheel is published, which may require a source build.
+A separately installed selectolax is still used on any platform;
+`pip install 'zimantic[lexbor]'` explicitly opts in on excluded machines.
+Platform markers cannot distinguish every interpreter bitness or
+libc/OS-version/ABI wheel constraint.
 
 The fallback uses stdlib `HTMLParser`. It applies the same visibility and
 language rules and text caps, and checks deadlines between input chunks. It is

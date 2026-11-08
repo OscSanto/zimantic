@@ -316,18 +316,23 @@ class TextExtractionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_selectolax_dependency_skips_platforms_without_wheels(self):
+    def test_selectolax_dependency_skips_known_32bit_machines(self):
         config = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
         requirements = [
             Requirement(value) for value in config["project"]["dependencies"]
             if Requirement(value).name == "selectolax"
         ]
         for platform, machine, implementation, expected in (
+            ("linux", "armv6l", "cpython", False),
+            ("linux", "armv7b", "cpython", False),
             ("linux", "armv7l", "cpython", False),
+            ("linux", "armv8l", "cpython", False),
             ("linux", "i686", "cpython", False),
-            ("linux", "ppc64le", "cpython", False),
-            ("freebsd", "x86_64", "cpython", False),
-            ("linux", "x86_64", "pypy", False),
+            ("linux", "mipsel", "cpython", False),
+            ("win32", "x86", "cpython", False),
+            ("linux", "ppc64le", "cpython", True),
+            ("freebsd", "x86_64", "cpython", True),
+            ("linux", "x86_64", "pypy", True),
             ("linux", "aarch64", "cpython", True),
             ("linux", "x86_64", "cpython", True),
             ("darwin", "arm64", "cpython", True),
