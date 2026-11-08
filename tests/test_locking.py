@@ -83,6 +83,26 @@ class BuildLockTests(unittest.TestCase):
             lock.release()
 
 
+class FileLeaseTests(unittest.TestCase):
+    def test_shared_leases_coexist_and_block_exclusive_lease(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".catalog.lock"
+            first = locking.FileLease(path)
+            second = locking.FileLease(path)
+            exclusive = locking.FileLease(path)
+            try:
+                self.assertTrue(first.acquire(shared=True))
+                self.assertTrue(second.acquire(shared=True, blocking=False))
+                self.assertFalse(exclusive.acquire(blocking=False))
+                second.release()
+                first.release()
+                self.assertTrue(exclusive.acquire(blocking=False))
+            finally:
+                first.release()
+                second.release()
+                exclusive.release()
+
+
 class BuildLockCliTests(unittest.TestCase):
     def test_build_accepts_no_wait_lock_and_lock_timeout(self):
         parser = main_module._make_parser()

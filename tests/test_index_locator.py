@@ -49,6 +49,23 @@ def test_publish_and_pin_an_immutable_generation(tmp_path):
         pinned.close()
 
 
+def test_multiple_shared_generation_leases_can_coexist(tmp_path):
+    source = _Source()
+    locator = IndexLocator(tmp_path)
+    published = locator.publish(source, _database(tmp_path / "source.sqlite", 1))
+    published.close()
+
+    first = locator.paths(source)
+    second = locator.paths(source)
+    assert first is not None
+    assert second is not None
+    try:
+        assert first.generation == second.generation
+    finally:
+        first.close()
+        second.close()
+
+
 def test_cleanup_keeps_the_current_generation(tmp_path):
     source = _Source()
     locator = IndexLocator(tmp_path)

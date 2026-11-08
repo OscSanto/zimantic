@@ -524,7 +524,10 @@ def test_partial_enrichment_publishes_then_retries_on_next_build():
                     "derived_source_operations": {source_key: operations},
                 },
             )
-        generation = locator.paths(_source()).generation
+        initial = locator.paths(_source())
+        assert initial is not None
+        generation = initial.generation
+        initial.close()
         lease = locator.paths(_source())
         assert lease is not None
         db = sqlite3.connect(lease.sqlite_path)

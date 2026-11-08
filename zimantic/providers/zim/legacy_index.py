@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import os
 import shutil
 import sqlite3
 from contextlib import closing
@@ -266,9 +267,10 @@ def open_legacy_vectors(producer, index_dir, db, cfg, embedder):
             faiss_digest = _file_digest(faiss_path)
             import faiss
 
-            index = faiss.read_index(
-                str(faiss_path), faiss.IO_FLAG_MMAP | faiss.IO_FLAG_READ_ONLY
-            )
+            flags = faiss.IO_FLAG_READ_ONLY
+            if os.name != "nt":
+                flags |= faiss.IO_FLAG_MMAP
+            index = faiss.read_index(str(faiss_path), flags)
             if index.metric_type != faiss.METRIC_INNER_PRODUCT or not index.is_trained:
                 raise LegacyIndexError("unsupported v0 FAISS metric or training state")
             if not index.ntotal or not index.d:

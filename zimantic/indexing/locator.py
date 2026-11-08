@@ -12,11 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
-try:  # POSIX
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
-    import msvcrt
+from .._filelock import lock_file, unlock_file
 
 MANIFEST_VERSION = 1
 _SAFE = re.compile(r"[^a-z0-9._-]+")
@@ -58,35 +54,21 @@ def _fsync_path(path: Path) -> None:
 
 def _lock_shared(fd: int) -> bool:
     try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        else:  # pragma: no cover - Windows
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        return True
+        return lock_file(fd, shared=True)
     except OSError:
         return False
 
 
 def _lock_exclusive(fd: int) -> bool:
     try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        else:  # pragma: no cover - Windows
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        return True
+        return lock_file(fd)
     except OSError:
         return False
 
 
 def _unlock(fd: int) -> None:
     try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        else:  # pragma: no cover - Windows
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        unlock_file(fd)
     except OSError:
         pass
 

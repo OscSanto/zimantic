@@ -33,6 +33,7 @@ from .catalog import (
 )
 from .diagnostics import public_cause
 from .locking import catalog_lease_path
+from ._filelock import lock_file, unlock_file
 
 logger = logging.getLogger(__name__)
 
@@ -158,31 +159,12 @@ def _recovery_marker(catalog: Path) -> Path | None:
 
 
 def _lock_shared(fd: int) -> None:
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - Windows
-        import msvcrt
-
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-        return
-    fcntl.flock(fd, fcntl.LOCK_SH)
+    lock_file(fd, shared=True, blocking=True)
 
 
 def _unlock(fd: int) -> None:
     try:
-        import fcntl
-    except ImportError:  # pragma: no cover - Windows
-        import msvcrt
-
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock_file(fd)
     except OSError:
         pass
 

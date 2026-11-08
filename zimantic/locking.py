@@ -12,16 +12,11 @@ killed build leaves no stale lock behind.
 
 from __future__ import annotations
 
-import errno
 import os
 import time
 from pathlib import Path
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
-    import msvcrt
+from ._filelock import lock_file, unlock_file
 
 # sysexits.h EX_TEMPFAIL: the operation could not run now, but retrying later
 # may succeed. Callers such as a systemd.path trigger treat this as "skip".
@@ -88,27 +83,12 @@ class FileLease:
 
     @staticmethod
     def _lock(fd: int, *, shared: bool) -> bool:
-        try:
-            if fcntl is not None:
-                mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
-                fcntl.flock(fd, mode | fcntl.LOCK_NB)
-            else:  # pragma: no cover - Windows
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            return True
-        except OSError as error:
-            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                return False
-            raise
+        return lock_file(fd, shared=shared)
 
     @staticmethod
     def _unlock(fd: int) -> None:
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            else:  # pragma: no cover - Windows
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            unlock_file(fd)
         except OSError:
             pass
 
@@ -180,26 +160,12 @@ class BuildLock:
 
     @staticmethod
     def _lock(fd: int) -> bool:
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            else:  # pragma: no cover - Windows
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            return True
-        except OSError as error:
-            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                return False
-            raise
+        return lock_file(fd)
 
     @staticmethod
     def _unlock(fd: int) -> None:
         try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            else:  # pragma: no cover - Windows
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            unlock_file(fd)
         except OSError:
             # Closing the descriptor releases the lock on both platforms; a
             # failed explicit unlock must not hide the build's real result.

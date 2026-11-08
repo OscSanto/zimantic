@@ -18,12 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-try:  # POSIX
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
-    import msvcrt
-
+from ._filelock import lock_file, unlock_file
 from .discovery import DiscoveryResult
 from .indexing.locator import MANIFEST_VERSION, IndexLocator
 from .providers.config import BUILTIN_PROVIDERS, ConfigIssue
@@ -82,25 +77,16 @@ def _lock_is_free(lease_path: Path) -> bool:
         fd = os.open(lease_path, os.O_RDWR)
     except OSError:
         return True
+    locked = False
     try:
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            else:  # pragma: no cover - Windows
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
-        return True
+        locked = lock_file(fd)
+        return locked
     finally:
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            else:  # pragma: no cover - Windows
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
+        if locked:
+            try:
+                unlock_file(fd)
+            except OSError:
+                pass
         os.close(fd)
 
 
