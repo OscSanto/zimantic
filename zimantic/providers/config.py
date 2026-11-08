@@ -948,12 +948,6 @@ def parse_collections(
     )
 
 
-# Convenience aliases for callers that speak in terms of the normalized entry
-# set rather than the TOML table name.
-parse_provider_config = parse_collections
-normalize_collections = parse_collections
-
-
 __all__ = [
     "BUILTIN_PROVIDERS",
     "PROVIDER_CONFIG_SPECS",
@@ -977,9 +971,7 @@ __all__ = [
     "WorkerCount",
     "ZimConfig",
     "get_provider_config_spec",
-    "normalize_collections",
     "parse_collections",
-    "parse_provider_config",
     "provider_config_defaults",
     "provider_config_specs",
     "validate_name",
