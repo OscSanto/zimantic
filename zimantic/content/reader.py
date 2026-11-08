@@ -541,12 +541,12 @@ def iter_text_blocks(
         if not closing:
             if tag == "-text":
                 parser.handle_data(node.text(deep=False))
-            elif not tag.startswith("-"):
+            elif tag and not tag.startswith("-"):
                 parser.handle_starttag(tag, node.attributes.items())
             if node.child is not None:
                 node = node.child
                 continue
-        if not tag.startswith("-"):
+        if tag and not tag.startswith("-"):
             parser.handle_endtag(tag)
         if max_chars is not None and parser._can_stop(max_chars):
             break

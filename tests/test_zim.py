@@ -219,6 +219,29 @@ def _phet_archive(html: bytes, script: bytes, *, path: str, title: str):
 
 
 class TextExtractionTests(unittest.TestCase):
+    def test_untagged_dom_nodes_preserve_article_text(self):
+        text = "Useful article prose inside an untagged DOM node must remain searchable."
+        root = types.SimpleNamespace(tag=None, parent=None, next=None)
+        paragraph = types.SimpleNamespace(tag="p", parent=root, attributes={})
+        text_node = types.SimpleNamespace(
+            tag="-text",
+            parent=paragraph,
+            child=None,
+            next=None,
+            text=lambda deep: text,
+        )
+        untagged = types.SimpleNamespace(
+            tag=None, parent=root, child=None, next=None
+        )
+        root.child = paragraph
+        paragraph.child = text_node
+        paragraph.next = untagged
+        with patch(
+            "zimantic.content.reader.LexborHTMLParser",
+            return_value=types.SimpleNamespace(root=root),
+        ):
+            self.assertEqual(list(iter_text_blocks(b"<p>article</p>")), [text])
+
     @unittest.skipUnless(content_reader.LexborHTMLParser, "requires Lexbor HTML5 recovery")
     def test_omitted_paragraph_end_tags_do_not_duplicate_prose(self):
         first = "The first paragraph contains useful readable prose that should appear only once."
