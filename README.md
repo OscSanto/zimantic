@@ -1073,7 +1073,11 @@ Each article's **excerpt** is extracted transiently for the embedding and discar
 
 The logical source key uses the provider, collection, and root-relative archive path, never an absolute filesystem path. Relocating a collection root without changing its relative layout preserves keys. Two archives can share a stem and size and still be distinct sources; each build writes an immutable generation and atomically replaces the `current` manifest. Build fingerprints use the archive UUID, size, and whole-second mtime as practical change detectors, not proof of identical bytes. A same-size write that restores the mtime can evade detection. Keep source content immutable or use an external snapshot when strong consistency matters. Indexes with stem-based paths are not served; build them with the current locator to restore indexed search. To copy a subset of finished indexes to another machine, see [Copying finished indexes to another machine](#copying-finished-indexes-to-another-machine).
 
-Existing positional body indexes remain usable and resume-compatible. Use `build --force` to rebuild selected indexes with the smaller compact layout.
+Only the current index schema and canonical metadata are supported. Older
+indexes, including positional body indexes, are not served or resumed; `build`
+rebuilds them without migration. Interrupted builds resume only within the current
+schema. Cross-model embedding probes still allow vector reuse between compatible
+model exports.
 
 | ZIM size | Vector index | Why |
 |---|---|---|

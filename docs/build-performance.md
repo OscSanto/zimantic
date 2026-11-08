@@ -24,8 +24,8 @@ None meets the goal; removing body FTS alone is insufficient on this fixture.
 
 The benchmark variants change the body channel only. Title FTS and semantic
 vectors remain unchanged. New production indexes now use compact Unicode61
-with `remove_diacritics 2`. Existing positional indexes remain readable and
-resume-compatible; rebuilding is needed to obtain the smaller layout. In this
+with `remove_diacritics 2`. Production only reads and resumes the current index
+schema and canonical metadata; older indexes are rebuilt without migration. In this
 comparison, HEAD denotes the historical positional control, which the harness
 continues to reproduce explicitly rather than using the moving production
 default.
