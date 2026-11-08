@@ -46,6 +46,8 @@ from ..base import (
     CollectionSnapshot,
     ContentStore,
     DiscoveryBatch,
+    EnrichingRuntime,
+    IndexedRuntime,
     ProviderContext,
     SourceQuery,
 )
@@ -89,7 +91,7 @@ def _float_setting(settings: dict[str, Any], key: str, default: float) -> float:
     return float(value)
 
 
-class FilesRuntime(CollectionRuntime):
+class FilesRuntime(IndexedRuntime, EnrichingRuntime):
     """One configured files directory: sources, indexes, and serving."""
 
     def __init__(

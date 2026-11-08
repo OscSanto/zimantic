@@ -8,10 +8,20 @@ second copy.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 from ..content.store import ArticleData, ContentEntry, ContentRange, ContentStore
 from ..indexing.types import EntryProducer
@@ -26,6 +36,9 @@ from ..contracts import (
 )
 from .config import ProviderConfig, ProviderKind, RuntimeConfig
 
+if TYPE_CHECKING:
+    from ..searching.index import IndexHandle
+
 DiscoveryState = Literal["loading", "ready", "error", "closed"]
 
 __all__ = [
@@ -39,6 +52,9 @@ __all__ = [
     "ContentStore",
     "DiscoveryBatch",
     "DiscoveryState",
+    "EnrichingRuntime",
+    "IndexedRuntime",
+    "IsolatedFulltextRuntime",
     "MEDIA_TYPE_ORDER",
     "ProviderContext",
     "ProviderKind",
@@ -163,6 +179,7 @@ class SourceQuery:
 
 class CollectionRuntime(Protocol):
     collection: CollectionInfo
+    config: ProviderConfig
 
     @property
     def snapshot(self) -> CollectionSnapshot: ...
@@ -203,6 +220,67 @@ class CollectionRuntime(Protocol):
     def snapshot_version(self) -> int: ...
 
     def close(self) -> None: ...
+
+
+class IndexedRuntime(CollectionRuntime, ABC):
+    """Declared capability for locally indexed search and source maintenance."""
+
+    indexes: Mapping[str, IndexHandle]
+
+    @abstractmethod
+    def bind_search(
+        self,
+        *,
+        semantic: bool,
+        defer_faiss: bool,
+        embedder_getter: Callable[[], Any] | None = None,
+        embedder_ready_getter: Callable[[], Any] | None = None,
+        model_fingerprint_getter: Callable[[], str] | None = None,
+        preview_cache: Any | None = None,
+        fulltext_pool: Any | None = None,
+        candidate_count: int | None = None,
+        preview_chars: int | None = None,
+        max_html_bytes: int | None = None,
+        max_article_bytes: int | None = None,
+        min_cosine_similarity: float | None = None,
+        cfg: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def start_faiss(self) -> None: ...
+
+    @abstractmethod
+    def refresh_if_stale(self) -> bool: ...
+
+    @abstractmethod
+    def random_source(self) -> SourceInfo: ...
+
+    @abstractmethod
+    def health(self) -> list[dict[str, Any]]: ...
+
+
+class EnrichingRuntime(ABC):
+    """Declared capability for content-based result enrichment."""
+
+    @abstractmethod
+    def enrich(
+        self,
+        source: SourceInfo,
+        result_docs: list[dict[str, Any]],
+        source_docs: dict[str, dict[str, Any]],
+        *,
+        phrase_ids: set[str],
+        phrase_words: list[str],
+        max_html_bytes: int,
+        max_article_bytes: int,
+    ) -> bool: ...
+
+
+class IsolatedFulltextRuntime(ABC):
+    """Declared capability for helper-process native full-text search."""
+
+    @abstractmethod
+    def start_fulltext_isolation(self, workers: int | None = None) -> None: ...
 
 
 @runtime_checkable

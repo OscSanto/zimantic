@@ -30,7 +30,16 @@ from .content.store import (
 )
 from .contracts import SourceInfo, SourceResult
 from .diagnostics import private_locators, public_cause, sanitize_public_text
-from .providers.base import CollectionInfo, CollectionSnapshot, ProviderContext, SourceQuery
+from .providers.base import (
+    CollectionInfo,
+    CollectionRuntime,
+    CollectionSnapshot,
+    EnrichingRuntime,
+    IndexedRuntime,
+    IsolatedFulltextRuntime,
+    ProviderContext,
+    SourceQuery,
+)
 from .providers.config import ProviderConfig, RuntimeConfig
 from .scoped_settings import resolve_settings, settings_key
 from .searching.config import (
@@ -142,7 +151,7 @@ class Search:
     open_scope: Any | None = None
     embedder: Any = None
     _defer_faiss: bool = False
-    runtimes: dict[str, Any] = {}
+    runtimes: dict[str, CollectionRuntime] = {}
     collections: dict[str, CollectionInfo] = {}
     _library_source_index: dict[str, SourceInfo] = {}
     _discovery_batches: tuple[Any, ...] = ()
@@ -336,7 +345,7 @@ class Search:
         self.providers = {
             provider.kind: provider for provider in builtin_providers()
         }
-        self.runtimes: dict[str, Any] = {}
+        self.runtimes: dict[str, CollectionRuntime] = {}
         self.collections: dict[str, CollectionInfo] = {}
         self._discovery_batches: list[Any] = []
         self._collection_snapshots: dict[str, CollectionSnapshot] = {}
@@ -397,18 +406,17 @@ class Search:
 
         threading.Thread(target=_load, name="zimantic-embedder", daemon=True).start()
 
-    def _bind_runtime(self, runtime: Any) -> None:
+    def _bind_runtime(self, runtime: CollectionRuntime) -> None:
         """Give a provider runtime the core-owned search services it needs."""
-        bind = getattr(runtime, "bind_search", None)
-        if not callable(bind):
+        if not isinstance(runtime, IndexedRuntime):
             return
-        bind(
+        runtime.bind_search(
             semantic=self.semantic,
             defer_faiss=self._defer_faiss,
             embedder_getter=lambda: self.embedder,
             embedder_ready_getter=lambda: (
-                getattr(self, "_embedder_ready", None),
-                getattr(self, "_embedder_started", False),
+                self._embedder_ready,
+                self._embedder_started,
             ),
             model_fingerprint_getter=lambda: self._model_fingerprint,
             preview_cache=self.preview_cache,
@@ -464,26 +472,24 @@ class Search:
                 for runtime in runtimes:
                     self._bind_runtime(runtime)
             for runtime in runtimes:
-                starter = getattr(runtime, "start_faiss", None)
-                if callable(starter):
+                if isinstance(runtime, IndexedRuntime):
                     try:
-                        starter()
+                        runtime.start_faiss()
                     except Exception as error:
                         logger.warning(
                             "zimantic: semantic search disabled for %s (%s); "
                             "falling back to title and full-text",
-                            getattr(runtime.collection, "label", "collection"),
+                            runtime.collection.label,
                             self.public_error(error),
                         )
                         logger.debug("FAISS reopen error: %s", error)
             with self._state_lock:
                 semantic_indexes = sum(
-                    sum(
-                        1
-                        for index in getattr(runtime, "indexes", {}).values()
-                        if index.semantic
-                    )
+                    1
                     for runtime in runtimes
+                    if isinstance(runtime, IndexedRuntime)
+                    for index in runtime.indexes.values()
+                    if index.semantic
                 )
             logger.info(
                 "zimantic: FAISS ready; semantic search enabled for %d index(es)",
@@ -500,9 +506,8 @@ class Search:
         with self._state_lock:
             runtimes = list(self.runtimes.values())
         for runtime in runtimes:
-            starter = getattr(runtime, "start_fulltext_isolation", None)
-            if callable(starter):
-                starter(workers)
+            if isinstance(runtime, IsolatedFulltextRuntime):
+                runtime.start_fulltext_isolation(workers)
 
     def reload(
         self, *, scan_catalog: bool = True, refresh: bool = True
@@ -517,13 +522,14 @@ class Search:
             with self._state_lock:
                 return {
                     key: (
-                        getattr(index, "generation", None),
+                        index.generation,
                         index.db_signature,
                         index.zim_signature,
                         index.done,
                     )
                     for runtime in self.runtimes.values()
-                    for key, index in getattr(runtime, "indexes", {}).items()
+                    if isinstance(runtime, IndexedRuntime)
+                    for key, index in runtime.indexes.items()
                 }
 
         with self._reload_lock:
@@ -577,7 +583,7 @@ class Search:
             except Exception as error:
                 logger.warning(
                     "zimantic: source refresh failed for %s (%s)",
-                    getattr(runtime.collection, "label", "collection"),
+                    runtime.collection.label,
                     self.public_error(error),
                 )
                 logger.debug("source refresh error: %s", error)
@@ -610,17 +616,17 @@ class Search:
         with self._state_lock:
             previous_runtimes = dict(self.runtimes)
             previous_batches = list(getattr(self, "_discovery_batches", []))
-        new_runtimes: dict[str, Any] = {}
+        new_runtimes: dict[str, CollectionRuntime] = {}
         new_collections: dict[str, CollectionInfo] = {}
         new_batches: list[Any] = []
         diagnostics: list[str] = []
         failed_entries: set[str] = set()
 
-        def matches_entry(runtime: Any, entry: ProviderConfig) -> bool:
-            runtime_config = getattr(runtime, "config", None)
+        def matches_entry(runtime: CollectionRuntime, entry: ProviderConfig) -> bool:
+            runtime_config = runtime.config
             return (
-                getattr(runtime_config, "kind", None) == entry.kind
-                and getattr(runtime_config, "name", None) == entry.name
+                runtime_config.kind == entry.kind
+                and runtime_config.name == entry.name
             )
 
         entries = self._configured_provider_entries()
@@ -743,7 +749,7 @@ class Search:
             open_scope=self.open_scope,
         )
         batch = None
-        new_runtimes: dict[str, Any] = {}
+        new_runtimes: dict[str, CollectionRuntime] = {}
         new_collections: dict[str, CollectionInfo] = {}
         try:
             batch = open_zim_scope_batch(self.open_scope, ctx, self.cfg)
@@ -1010,10 +1016,9 @@ class Search:
         with self._state_lock:
             runtimes = list(self.runtimes.values())
         for runtime in runtimes:
-            stale = getattr(runtime, "refresh_if_stale", None)
-            if callable(stale):
+            if isinstance(runtime, IndexedRuntime):
                 try:
-                    stale()
+                    runtime.refresh_if_stale()
                 except Exception:
                     pass
         with self._state_lock:
@@ -1295,7 +1300,7 @@ class Search:
             runtimes = [
                 runtime
                 for runtime in self.runtimes.values()
-                if getattr(runtime.collection, "provider", None) in local_providers
+                if isinstance(runtime, IndexedRuntime)
             ]
             fallback_by_key = {
                 source.key: source
@@ -1308,11 +1313,8 @@ class Search:
             fallback_sources = list(fallback_by_key.values())
         candidates: list[SourceInfo] = []
         for runtime in runtimes:
-            chooser = getattr(runtime, "random_source", None)
-            if not callable(chooser):
-                continue
             try:
-                candidates.append(chooser())
+                candidates.append(runtime.random_source())
             except ArticleNotFoundError:
                 continue
         if not candidates:
@@ -1369,15 +1371,14 @@ class Search:
 
         reports: list[dict[str, Any]] = []
         for runtime in runtimes:
-            reporter = getattr(runtime, "health", None)
-            if not callable(reporter):
+            if not isinstance(runtime, IndexedRuntime):
                 continue
             try:
-                reports.extend(reporter())
+                reports.extend(runtime.health())
             except Exception as error:
                 logger.warning(
                     "zimantic: health report failed for %s (%s)",
-                    getattr(runtime.collection, "label", "collection"),
+                    runtime.collection.label,
                     self.public_error(error),
                 )
                 logger.debug("health report error: %s", error)
@@ -1468,18 +1469,13 @@ class Search:
         for source in available:
             by_collection.setdefault(source.collection_key, []).append(source)
         with self._state_lock:
-            runtimes = dict(getattr(self, "runtimes", {}))
+            runtimes = dict(self.runtimes)
         keep: set[str] = set()
         for collection_key, collection_sources in by_collection.items():
             runtime = runtimes.get(collection_key)
             limit = None
             if runtime is not None:
-                policy = getattr(runtime, "max_sources_per_search", None)
-                if callable(policy):
-                    try:
-                        limit = policy()
-                    except Exception:
-                        limit = None
+                limit = runtime.max_sources_per_search()
             if limit is None or len(collection_sources) <= limit:
                 keep.update(source.key for source in collection_sources)
                 continue
@@ -1832,9 +1828,9 @@ class Search:
         wants_semantic = False
         for source in sources:
             runtime = runtimes.get(source.collection_key)
-            if runtime is None:
+            if not isinstance(runtime, IndexedRuntime):
                 continue
-            index = getattr(runtime, "indexes", {}).get(source.key)
+            index = runtime.indexes.get(source.key)
             if index is not None and index.semantic:
                 wants_semantic = True
                 break
@@ -2681,8 +2677,11 @@ class Search:
 
         def cache_key(source: Any, doc: dict[str, Any]):
             runtime = runtimes.get(source.collection_key)
-            index = getattr(runtime, "indexes", {}).get(source.key) if runtime else None
-            generation = getattr(index, "generation", None) or ""
+            index = (
+                runtime.indexes.get(source.key)
+                if isinstance(runtime, IndexedRuntime) else None
+            )
+            generation = (index.generation or "") if index is not None else ""
             return (source.key, generation, doc["path"], settings_key(self.cfg, source))
 
         for doc in docs:
@@ -2768,9 +2767,9 @@ class Search:
                 if source is None:
                     continue
                 runtime = runtimes.get(source.collection_key)
-                if runtime is None:
+                if not isinstance(runtime, IndexedRuntime):
                     continue
-                index = getattr(runtime, "indexes", {}).get(source.key)
+                index = runtime.indexes.get(source.key)
                 if index is None or index.ensure_open() is None:
                     continue
                 if _phrase(query_terms, _content_terms(result["title"])):
@@ -2789,14 +2788,11 @@ class Search:
             if source is None:
                 return False
             runtime = runtimes.get(source.collection_key)
-            if runtime is None:
-                return False
-            enricher = getattr(runtime, "enrich", None)
-            if not callable(enricher):
+            if not isinstance(runtime, EnrichingRuntime):
                 return False
             settings = resolve_settings(self.cfg, source)
             return bool(
-                enricher(
+                runtime.enrich(
                     source,
                     result_docs,
                     docs,

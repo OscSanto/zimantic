@@ -14,6 +14,7 @@ import numpy as np
 
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult, encode_document_id
+from zimantic.providers.base import EnrichingRuntime, IndexedRuntime, IsolatedFulltextRuntime
 from zimantic.search import (
     PREVIEW_HTML_BYTES,
     Search as _SearchBase,
@@ -113,6 +114,8 @@ def _bare_search(cfg):
     search.refresh_collections = lambda **_kwargs: search.source_dicts()
     search.providers = {}
     search._defer_faiss = False
+    search._embedder_ready = threading.Event()
+    search._embedder_started = False
     search.fulltext_pool = None
     search._probe_cache = {}
     search._probe_cache_lock = threading.Lock()
@@ -137,12 +140,30 @@ class _TestCollection:
     label = "Library"
 
 
-class _TestZimRuntime:
+class _TestZimRuntime(IndexedRuntime, EnrichingRuntime):
     """Minimal runtime that exercises the real ZIM search module in tests."""
 
     def __init__(self, search):
         self.core = search
         self.collection = _TestCollection()
+        self.config = ZimConfig(name="library", path=".")
+
+    def bind_search(self, **bindings):
+        self.bindings = bindings
+
+    def start_faiss(self):
+        pass
+
+    def refresh_if_stale(self):
+        return self.refresh()
+
+    def random_source(self):
+        from zimantic.content.store import ArticleNotFoundError
+
+        for source in self.sources:
+            if source.homepage:
+                return source
+        raise ArticleNotFoundError("no local source has a homepage")
 
     @property
     def indexes(self):
@@ -281,6 +302,65 @@ class _TestZimRuntime:
 
     def close(self):
         pass
+
+
+class RuntimeCapabilityTests(unittest.TestCase):
+    def test_binding_requires_a_declared_indexed_runtime(self):
+        search = _bare_search({})
+        try:
+            runtime = search.runtimes[""]
+            search._bind_runtime(runtime)
+            search.embedder = object()
+            search._model_fingerprint = "model-fingerprint"
+            self.assertIs(runtime.bindings["embedder_getter"](), search.embedder)
+            self.assertEqual(runtime.bindings["model_fingerprint_getter"](), "model-fingerprint")
+            self.assertEqual(
+                runtime.bindings["embedder_ready_getter"](),
+                (search._embedder_ready, False),
+            )
+            with patch.object(runtime, "bind_search") as bind:
+                search._bind_runtime(types.SimpleNamespace(bind_search=bind))
+                bind.assert_not_called()
+        finally:
+            search._executor.shutdown(wait=True)
+
+    def test_deferred_faiss_startup_only_reopens_declared_indexed_runtimes(self):
+        search = _bare_search({})
+        runtime = search.runtimes[""]
+        search._defer_faiss = True
+        try:
+            with patch.object(runtime, "start_faiss") as start:
+                search.runtimes["other"] = types.SimpleNamespace(
+                    bind_search=runtime.bind_search, start_faiss=start
+                )
+                with patch("zimantic.search.threading.Thread") as thread:
+                    search.start_faiss()
+                    thread.call_args.kwargs["target"]()
+                start.assert_called_once_with()
+                self.assertFalse(runtime.bindings["defer_faiss"])
+        finally:
+            search._executor.shutdown(wait=True)
+
+    def test_fulltext_startup_only_calls_declared_isolation_runtimes(self):
+        class _IsolatedRuntime(IsolatedFulltextRuntime):
+            def start_fulltext_isolation(self, workers=None):
+                self.workers = workers
+
+        search = _bare_search({})
+        isolated = _IsolatedRuntime()
+        with patch.object(
+            isolated, "start_fulltext_isolation", wraps=isolated.start_fulltext_isolation
+        ) as start:
+            search.runtimes = {
+                "isolated": isolated,
+                "other": types.SimpleNamespace(start_fulltext_isolation=start),
+            }
+            try:
+                search.start_fulltext_isolation()
+                self.assertEqual(isolated.workers, 2)
+                start.assert_called_once_with(2)
+            finally:
+                search._executor.shutdown(wait=True)
 
 
 class FulltextFailureTests(unittest.TestCase):
@@ -783,8 +863,6 @@ class SearchContractTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_scoped_preview_limits_and_disabled_quota_apply_to_hydration(self):
-        from types import SimpleNamespace
-
         from zimantic.contracts import (
             SourceInfo as CanonicalSourceInfo,
         )
@@ -816,9 +894,16 @@ class SearchContractTests(unittest.TestCase):
             self.assertEqual(kwargs["max_html_bytes"], 4)
             return False
 
+        class _PreviewRuntime(EnrichingRuntime):
+            def preview(self, *args, **kwargs):
+                return preview(*args, **kwargs)
+
+            def enrich(self, *args, **kwargs):
+                return enrich(*args, **kwargs)
+
         search.sources = {source.key: source}
         search.runtimes = {
-            source.collection_key: SimpleNamespace(preview=preview, enrich=enrich)
+            source.collection_key: _PreviewRuntime()
         }
         search.preview_cache = QueryCache(16)
         doc = {

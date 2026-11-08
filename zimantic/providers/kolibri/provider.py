@@ -40,6 +40,7 @@ from ..base import (
     CollectionSnapshot,
     ContentStore,
     DiscoveryBatch,
+    IndexedRuntime,
     ProviderContext,
     SourceQuery,
 )
@@ -104,7 +105,7 @@ def _paths(config: KolibriConfig) -> tuple[Path, Path, Path]:
     return home, database, storage
 
 
-class KolibriRuntime(CollectionRuntime):
+class KolibriRuntime(IndexedRuntime):
     """One installed channel: sources, indexes, and content serving."""
 
     def __init__(

@@ -41,6 +41,9 @@ from ..base import (
     CollectionSnapshot,
     ContentStore,
     DiscoveryBatch,
+    EnrichingRuntime,
+    IndexedRuntime,
+    IsolatedFulltextRuntime,
     ProviderContext,
     SourceQuery,
 )
@@ -62,7 +65,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LIBRARY_SCAN_TTL = 120.0
 
 
-class ZimRuntime(CollectionRuntime):
+class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
     """One configured ZIM root: catalog, archives, indexes, and serving."""
 
     def __init__(
