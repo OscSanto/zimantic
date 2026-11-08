@@ -7,8 +7,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from zimantic.indexing.pipeline import BuildReport
+
+
+def _build_report():
+    return BuildReport("zim", "zim:library", "manual", "built", 1, 0, False, 0, 0.0)
+
 
 class LoggingTests(unittest.TestCase):
+    def test_build_report_requires_the_report_contract(self):
+        from zimantic.__main__ import _log_build_report
+
+        with self.assertRaises(AttributeError):
+            _log_build_report(None)
+
     def test_configures_faiss_to_log_only_warnings_and_errors(self):
         import zimantic.__main__ as main_module
 
@@ -211,7 +223,7 @@ class BuildWorkerTests(unittest.TestCase):
                             return_value=set(),
                         ) as find_sizes,
                         patch.object(
-                            build_module, "build_index"
+                            build_module, "build_index", return_value=_build_report()
                         ),
                         patch.object(
                             main_module,
@@ -233,6 +245,7 @@ class BuildWorkerTests(unittest.TestCase):
         def fake_build(producer, *_args, **_kwargs):
             barrier.wait(timeout=2)
             built.append(Path(producer.path).name)
+            return _build_report()
 
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
@@ -308,7 +321,7 @@ class BuildWorkerTests(unittest.TestCase):
         args = types.SimpleNamespace(workers=1, fast=False, force=False)
         with (
             patch.object(main_module, "_build_config", return_value=config.copy()),
-            patch.object(build_module, "build_index") as build,
+            patch.object(build_module, "build_index", return_value=_build_report()) as build,
             patch.object(build_module, "EmbeddingPipeline") as pipeline,
             patch("zimantic.embed.Embedder") as embedder,
         ):

@@ -1026,12 +1026,6 @@ def _warn_about_appended_collections(appended: list, cfg: dict) -> None:
 
 def _log_build_report(report) -> None:
     """Log one provider-neutral, path-free build report."""
-    if report is None or not isinstance(
-        getattr(report, "indexed_count", None), int
-    ):
-        # A test double or a legacy caller may patch out the pipeline and not
-        # return a report; that must not turn a successful build into an error.
-        return
     logger.info(
         "zimantic: build report: provider=%s collection=%s source=%s "
         "status=%s indexed=%d skipped=%d truncated=%s "
