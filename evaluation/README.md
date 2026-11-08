@@ -9,7 +9,7 @@ quality. A ranking rule can pass its tests and still reduce search quality,
 especially for languages with few queries. Use this evaluation for ranking
 and indexing work.
 
-**All queries are synthetic.** They were written or generated for testing,
+All queries are synthetic. They were written or generated for testing,
 with AI assistance. They do not come from real users. The non-English queries
 are translations of English queries. Use the set to **compare two runs with
 the same ZIM files and model**. The report shows ranking differences by
@@ -228,7 +228,7 @@ harness, not the probe-overlap counts. See the
   not all match the queries. Ask the query-set author for the exact files, or regenerate queries for
   other releases (see
   [Building a ZIM query set](#building-a-zim-query-set)).
-- **Model:** multilingual-e5-small, int8 ONNX from
+- Model: multilingual-e5-small, int8 ONNX from
   [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small)
   (`onnx/model_quantized.onnx` saved as `model.onnx`), 384 dimensions, with the tokenizer from
   [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small):
@@ -241,7 +241,7 @@ harness, not the probe-overlap counts. See the
 - **Indexes** built from those ZIMs with that model by the version being tested, with default build
   settings. An index built by one model and searched with another gives meaningless results without an
   error, so rebuild after changing the model.
-- **Config:** use defaults except for paths and port. Record other settings.
+- Config: use defaults except for paths and port. Record other settings.
 
 Write the commit, ZIM names, model hashes and non-default settings in the PR along with the
 `compare.py` output. Search times depend on the machine and its load: compare timings only between runs
@@ -252,9 +252,9 @@ made on the same machine, close together.
 Use these rules to evaluate ranking, indexing, query handling, models, and
 search settings:
 
-- **Tune on dev, report on test.** Look only at `--split dev` while trying settings, then report
+- Tune on dev, report on test. Look only at `--split dev` while trying settings, then report
   `--split test` once. If you tune again after seeing test results, say so.
-- **Run everything:** every ZIM and every language, with `--by zim lang set`, not only English.
+- Run everything: every ZIM and every language, with `--by zim lang set`, not only English.
 - **Report fixed / broken counts** and results by language and ZIM, not only averages. Call out anything
   that got worse.
 - If a run filters results (for example, with a score cutoff), report how often
@@ -283,10 +283,10 @@ and distorts the timings.
    python evaluation/make_queries.py check --zim-dir zims
    ```
 
-**Very large ZIMs:** the evaluation itself is light (it only sends queries over HTTP). The slow part is
+Very large ZIMs: the evaluation itself is light (it only sends queries over HTTP). The slow part is
 building the Zimantic index for the ZIM. Use `--zims`, `--sets` or `--split dev` for quick checks.
 
-**ZIM releases:** Queries use an exact ZIM file name because article paths can
+ZIM releases: Queries use an exact ZIM file name because article paths can
 differ between releases. For another release, regenerate the generated sets
 and run `check` on the hand-written sets. Keep answers that exist in the file.
 
@@ -305,32 +305,32 @@ group by the codes in the files.
 
 ## Reading the results
 
-- **Small groups are noisy.** #1 is accurate to roughly ±100/√n points: ±20 for
+- Small groups are noisy. #1 is accurate to roughly ±100/√n points: ±20 for
   25 queries, ±10 for 100, and ±5 for 400. A 5-point score difference in a
   25-query set is inconclusive.
 - **Look at fixed / broken**, not only averages.
 - **Look at every language**, not only English. Zimantic's biggest advantage over Kiwix is outside English.
 - **Top 20 is the ceiling** for any reranking: a reranker can only reorder what the first stage found.
-- **Kiwix can't search some ZIMs.** kiwix-serve refuses multi-language ("mul") ZIMs such as TED; the
+- Kiwix can't search some ZIMs. kiwix-serve refuses multi-language ("mul") ZIMs such as TED; the
   report lists them as unsupported instead of scoring them 0%.
 
 ## Limitations
 
-- **Synthetic queries.** The queries were written for testing, with AI
+- Synthetic queries. The queries were written for testing, with AI
   assistance. The non-English queries are translations, not searches by native
   speakers. They do not represent real user queries.
-- **Generated queries come from the articles.** They are sentences taken from the articles, with title
+- Generated queries come from the articles. They are sentences taken from the articles, with title
   words removed. They test matching article text, but do not test natural-language questions well.
   They also favor word matching.
-- **One target article per query.** Another article that also answers the query counts as a miss, so
+- One target article per query. Another article that also answers the query counts as a miss, so
   scores slightly undercount quality.
-- **Mostly English content.** Four of the five ZIMs are English. "Multilingual" here means a query in
+- Mostly English content. Four of the five ZIMs are English. "Multilingual" here means a query in
   another language finding an English article; searching non-English ZIMs is not tested.
-- **Small language sets.** See the table under [The queries](#the-queries): many languages have 8–19
+- Small language sets. See the table under [The queries](#the-queries): many languages have 8–19
   test queries, enough to detect when search returns no results, but not small score differences.
-- **Query-set bias.** The query sets reflect Zimantic's design and may favor
+- Query-set bias. The query sets reflect Zimantic's design and may favor
   similar approaches. Consider this when evaluating a different design.
-- **Search quality also depends on the index:** a ZIM indexed with a different reader, build settings or
+- Search quality also depends on the index: a ZIM indexed with a different reader, build settings or
   model gives different results with the same code.
 
 ## Licenses

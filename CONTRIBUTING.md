@@ -6,11 +6,11 @@ reports, code, documentation, evaluation queries, and features.
 
 ## Project goals
 
-1. **Offline operation.** The application runs without network access after
+1. Offline operation. The application runs without network access after
    setup.
-2. **Multilingual search.** Search supports languages beyond English.
+2. Multilingual search. Search supports languages beyond English.
    Language-specific rules do not reduce search quality in other languages.
-3. **Measured ranking and indexing.** Evaluation results guide ranking and
+3. Measured ranking and indexing. Evaluation results guide ranking and
    indexing work.
 
 ## How to contribute
@@ -37,9 +37,9 @@ uv sync
 
 ## Pull request requirements
 
-- **Tests:** Add tests in `tests/` for testable behavior. Run
+- Tests: Add tests in `tests/` for testable behavior. Run
   `python -m pytest`.
-- **Evaluation:** Ranking and indexing use the evaluation harness. Measure
+- Evaluation: Ranking and indexing use the evaluation harness. Measure
   `main` and the pull request branch on the same machine and with the same ZIM
   files. Include the comparison in the pull request (see
   [evaluation/README.md](evaluation/README.md)):
@@ -55,10 +55,10 @@ uv sync
   them. Report results **by language and query type**, plus **fixed / broken**
   counts. For indexing work, build separate indexes on each branch. Tune with
   `--split dev` and report with `--split test`.
-- **Documentation:** Keep the README accurate for current behavior,
+- Documentation: Keep the README accurate for current behavior,
   configuration, commands, and published measurements. Use measurements from
   the documented version.
-- **Compatibility:** Document supported configuration, index, and command
+- Compatibility: Document supported configuration, index, and command
   formats. Zimantic supports documented formats only; it does not guarantee
   backward compatibility or migrations. Reject unsupported formats with a
   clear diagnostic that tells users to update configuration or rebuild caches

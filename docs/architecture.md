@@ -59,7 +59,7 @@ embedding model or FAISS indexes.
 
 There are two reasons to retain the process boundary:
 
-- **Crash containment.** Some python-libzim C++ declarations lack `except +`,
+- Crash containment. Some python-libzim C++ declarations lack `except +`,
   so an exception during result iteration can abort the interpreter instead
   of becoming a catchable Python exception. See
   [openzim/python-libzim#266](https://github.com/openzim/python-libzim/issues/266).
@@ -69,7 +69,7 @@ There are two reasons to retain the process boundary:
   the archive. The parent knows which ZIM the helper was searching, logs its
   basename, and disables native search for that archive until reload.
   Other available search channels and the server remain usable.
-- **Actual parallelism.** The tested python-libzim reader bindings hold the
+- Actual parallelism. The tested python-libzim reader bindings hold the
   GIL across native work. Threads therefore do not provide parallel native
   search, even across different archives. Processes do. Threads also cannot
   forcibly stop a stuck native call; a helper can be terminated when its
