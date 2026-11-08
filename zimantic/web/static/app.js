@@ -4062,13 +4062,8 @@
                 const sourceValues = [
                     ...new Set(params.getAll("source").filter(Boolean)),
                 ];
-                const displaySources = [
-                    ...new Set(params.getAll("display_source").filter(Boolean)),
-                ];
                 const collection = params.get("collection") || null;
-                // Older UI links used display_source for shallow filtering.
-                // Restore their selection as a real, deeply searched scope.
-                const scopeSources = displaySources.length ? displaySources : sourceValues;
+                const scopeSources = sourceValues;
                 return {
                     question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
                     selectedSources: scopeSources,

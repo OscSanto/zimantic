@@ -37,7 +37,7 @@ location.href = "http://example.test/?q=q&source=a";
 location.search = "?q=q&source=a";
 const explicit = readLocationState();
 location.href = "http://example.test/?q=q&display_source=a&display_source=b";
-const legacy = readLocationState();
+const oldDisplayFilter = readLocationState();
 current = {{question: "q", searchAll: false, searchKeys: ["a", "b"], searchCollection: "zim:library"}};
 const expandedCollection = makeStateUrl("q", [], 0);
 console.log(JSON.stringify({{
@@ -51,8 +51,8 @@ console.log(JSON.stringify({{
   explicitSources: explicit.selectedSources,
   explicitCollection: explicit.collection,
   explicitHasScope: explicit.hasScope,
-  legacySources: legacy.scopeSources,
-  legacyHasScope: legacy.hasScope,
+  oldDisplayFilterSources: oldDisplayFilter.scopeSources,
+  oldDisplayFilterHasScope: oldDisplayFilter.hasScope,
   expandedCollection,
 }}));
 """
@@ -73,8 +73,8 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["explicitSources"], ["a"])
         self.assertIsNone(payload["explicitCollection"])
         self.assertTrue(payload["explicitHasScope"])
-        self.assertEqual(payload["legacySources"], ["a", "b"])
-        self.assertTrue(payload["legacyHasScope"])
+        self.assertEqual(payload["oldDisplayFilterSources"], [])
+        self.assertFalse(payload["oldDisplayFilterHasScope"])
         self.assertEqual(payload["expandedCollection"], "/?q=q&collection=zim%3Alibrary")
 
     def test_deep_search_retains_discovery_only_for_the_same_broadly_searched_query(self):
