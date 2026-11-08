@@ -85,6 +85,11 @@ def _bare_search(cfg):
     return search
 
 
+def _zim_source(key, title, **kwargs):
+    kwargs.setdefault("searchable", True)
+    return SourceInfo(key=key, provider="zim", title=title, **kwargs)
+
+
 class _TestCollection:
     key = ""
     provider = "zim"
@@ -241,9 +246,7 @@ class FulltextFailureTests(unittest.TestCase):
     def test_native_fulltext_failure_is_reported_as_partial(self):
         search = _bare_search({})
         self.addCleanup(search.close)
-        source = SourceInfo(
-            "manual", "Manual", "manual", "local", local_name="manual"
-        )
+        source = _zim_source("manual", "Manual")
         search.fulltext_pool = types.SimpleNamespace(
             search=lambda *_args: None,
             close=lambda: None,
@@ -275,9 +278,7 @@ class FulltextFailureTests(unittest.TestCase):
     def test_isolated_fulltext_results_do_not_open_archive_in_parent(self):
         search = _bare_search({})
         self.addCleanup(search.close)
-        source = SourceInfo(
-            "manual", "Manual", "manual", "local", local_name="manual"
-        )
+        source = _zim_source("manual", "Manual")
         search.fulltext_pool = types.SimpleNamespace(
             search_results=lambda *_args: [
                 {"path": "article", "title": "Article"}
@@ -381,7 +382,7 @@ def _title_search(rows, query, limit=1):
         "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
         rows,
     )
-    source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+    source = _zim_source("manual", "Manual")
     search = _bare_search({"candidate_count": 2})
     search.semantic = False
     search.sources = {"manual": source}
@@ -404,7 +405,7 @@ def _title_suggest(rows, query, limit=2):
         "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
         rows,
     )
-    source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+    source = _zim_source("manual", "Manual")
     search = _bare_search({"candidate_count": 2})
     search.semantic = False
     search.sources = {"manual": source}
@@ -484,13 +485,7 @@ class SearchContractTests(unittest.TestCase):
                 self.calls += 1
                 return _Entry() if path == "Ampiroxicam" else _UnrelatedEntry()
 
-        source = SourceInfo(
-            "manual",
-            "Manual",
-            "manual",
-            "local",
-            local_name="manual",
-        )
+        source = _zim_source("manual", "Manual")
         unrelated = {
             "id": "manual:unrelated",
             "source_key": "manual",
@@ -803,7 +798,7 @@ class SearchContractTests(unittest.TestCase):
             search._executor.shutdown(wait=True)
 
     def test_hybrid_ranking_is_deterministic(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         doc = {
             "id": "manual:z-tire",
             "source_key": "manual",
@@ -846,8 +841,8 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(first[0]["ranking"]["title"]["matches"], 2)
 
     def test_ranking_deduplicates_repeated_hits_and_preserves_source_rank(self):
-        semantic_source = SourceInfo("semantic", "Semantic", "semantic", "local")
-        title_source = SourceInfo("titles", "Titles", "titles", "local")
+        semantic_source = _zim_source("semantic", "Semantic")
+        title_source = _zim_source("titles", "Titles")
         unrelated = {
             "id": "semantic:index",
             "source_key": "semantic",
@@ -888,7 +883,7 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(ranked[1]["score"], 1 / 61)
 
     def test_semantic_hit_wins_an_exact_ranking_tie(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         semantic_doc = {
             "id": "manual:semantic",
             "source_key": "manual",
@@ -929,7 +924,7 @@ class SearchContractTests(unittest.TestCase):
         self.assertFalse(ranked[1]["ranking"]["semantic_hit"])
 
     def test_compact_title_with_all_query_words_beats_longer_title(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         compact = {
             "id": "manual:compact",
             "source_key": "manual",
@@ -963,7 +958,7 @@ class SearchContractTests(unittest.TestCase):
         self.assertIn("density 100%", ranked[0]["explain"])
 
     def test_exact_content_phrase_beats_an_earlier_unrelated_fulltext_hit(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         unrelated = {
             "id": "manual:unrelated",
             "source_key": "manual",
@@ -1001,8 +996,8 @@ class SearchContractTests(unittest.TestCase):
 
     def test_stream_emits_source_snapshots_and_final_results(self):
         sources = [
-            SourceInfo("one", "One", "one", "local"),
-            SourceInfo("two", "Two", "two", "local"),
+            _zim_source("one", "One"),
+            _zim_source("two", "Two"),
         ]
         search = object.__new__(Search)
         search.cfg = {"candidate_count": 16}
@@ -1024,8 +1019,8 @@ class SearchContractTests(unittest.TestCase):
             doc = {
                 "id": f"{source.key}:page",
                 "source_key": source.key,
-                "source": source.name,
-                "title": f"{source.name} page",
+                "source": source.title,
+                "title": f"{source.title} page",
                 "lead": "A useful page.",
                 "path": "page",
                 "url": f"http://example/{source.key}",
@@ -1049,7 +1044,7 @@ class SearchContractTests(unittest.TestCase):
 
     def test_stream_bounds_intermediate_ranking_passes_for_many_sources(self):
         sources = [
-            SourceInfo(f"source-{index}", f"Source {index}", f"source-{index}", "local")
+            _zim_source(f"source-{index}", f"Source {index}")
             for index in range(20)
         ]
         search = _bare_search(
@@ -1071,8 +1066,8 @@ class SearchContractTests(unittest.TestCase):
             doc = {
                 "id": f"{source.key}:page",
                 "source_key": source.key,
-                "source": source.name,
-                "title": source.name,
+                "source": source.title,
+                "title": source.title,
                 "lead": "",
                 "path": "page",
                 "url": None,
@@ -1109,7 +1104,7 @@ class SearchContractTests(unittest.TestCase):
         import zimantic.search as search_module
 
         sources = [
-            SourceInfo(f"source-{index}", f"Source {index}", f"source-{index}", "local")
+            _zim_source(f"source-{index}", f"Source {index}")
             for index in range(3)
         ]
         search = _bare_search({"candidate_count": 2, "max_stream_ranks": 1})
@@ -1126,8 +1121,8 @@ class SearchContractTests(unittest.TestCase):
             doc = {
                 "id": f"{source.key}:page",
                 "source_key": source.key,
-                "source": source.name,
-                "title": source.name,
+                "source": source.title,
+                "title": source.title,
                 "lead": "",
                 "path": "page",
                 "url": None,
@@ -1197,7 +1192,7 @@ class SearchContractTests(unittest.TestCase):
         import zimantic.search as search_module
 
         sources = [
-            SourceInfo(f"source-{index}", f"Source {index}", f"source-{index}", "local")
+            _zim_source(f"source-{index}", f"Source {index}")
             for index in range(2)
         ]
         search = _bare_search({"candidate_count": 2})
@@ -1274,7 +1269,7 @@ class SearchContractTests(unittest.TestCase):
             def search(self, query_vector, count):
                 return np.array([[0.9]]), np.array([[1]])
 
-        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {"candidate_count": 2}
         search.candidate_count = 2
@@ -1315,7 +1310,7 @@ class SearchContractTests(unittest.TestCase):
                 (2, "Final title", "C", None),
             ],
         )
-        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {}
         try:
@@ -1343,7 +1338,7 @@ class SearchContractTests(unittest.TestCase):
         statements = []
         db.set_trace_callback(statements.append)
 
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {}
         search.preview_chars = 100
@@ -1382,7 +1377,7 @@ class SearchContractTests(unittest.TestCase):
                     np.array([[2, 1]]),
                 )
 
-        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {
             "candidate_count": 2,
@@ -1424,7 +1419,7 @@ class SearchContractTests(unittest.TestCase):
                     np.array([[2, 1]]),
                 )
 
-        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {
             "candidate_count": 2,
@@ -1459,13 +1454,7 @@ class SearchContractTests(unittest.TestCase):
                 self.path = path
                 return _Entry()
 
-        source = SourceInfo(
-            "manual",
-            "Manual",
-            "manual",
-            "local",
-            local_name="manual",
-        )
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {
             "max_html_bytes": 4_194_304,
@@ -1519,7 +1508,7 @@ class SearchContractTests(unittest.TestCase):
             def get_entry_by_path(self, path):
                 return _Entry()
 
-        source = SourceInfo("manual", "Manual", "manual", "local", local_name="manual")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {
             "max_html_bytes": 4_194_304,
@@ -1659,12 +1648,8 @@ class SearchContractTests(unittest.TestCase):
         search = _bare_search({"candidate_count": 2})
         search.semantic = False
         search.sources = {
-            "manual": SourceInfo(
-                "manual", "Manual", "manual", "local", local_name="manual"
-            ),
-            "other": SourceInfo(
-                "other", "Other", "other", "local", local_name="other"
-            ),
+            "manual": _zim_source("manual", "Manual"),
+            "other": _zim_source("other", "Other"),
         }
         search.indexes = {
             "manual": _LocalIndex(manual_db, None, None, None, threading.Lock()),
@@ -1687,7 +1672,7 @@ class DisambiguationRankingTests(unittest.TestCase):
         return search
 
     def _result(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         hub = {
             "id": "manual:hub",
             "source_key": "manual",
@@ -1741,7 +1726,7 @@ class UserPageRankingTests(unittest.TestCase):
         return search
 
     def _result(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         user = {
             "id": "manual:user",
             "source_key": "manual",
@@ -2024,21 +2009,11 @@ class GracefulDegradationTests(unittest.TestCase):
         search = _bare_search({})
         self.addCleanup(search.close)
         search.sources = {
-            "readable": SourceInfo(
-                "readable",
-                "Readable",
-                "readable",
-                "local",
-                local_name="readable",
-                homepage="Main_Page",
+            "readable": _zim_source(
+                "readable", "Readable", homepage="Main_Page"
             ),
-            "unreadable": SourceInfo(
-                "unreadable",
-                "Unreadable",
-                "unreadable",
-                "local",
-                local_name="unreadable",
-                searchable=False,
+            "unreadable": _zim_source(
+                "unreadable", "Unreadable", searchable=False
             ),
         }
         with patch.object(
@@ -2052,25 +2027,18 @@ class GracefulDegradationTests(unittest.TestCase):
             library = search.library_dicts()
 
         self.assertEqual(
-            [source["name"] for source in library], ["Readable", "Unreadable"]
+            [source["title"] for source in library], ["Readable", "Unreadable"]
         )
         self.assertTrue(library[0]["searchable"])
         self.assertFalse(library[1]["searchable"])
         search._executor.shutdown(wait=True)
 
-    def test_library_lists_an_unreadable_source(self):
+    def test_library_lists_an_unsearchable_source(self):
         search = _bare_search({})
         self.addCleanup(search.close)
         search.sources = {
-            "broken": SourceInfo(
-                "broken",
-                "Broken",
-                "broken",
-                "local",
-                local_name="broken",
-                available=False,
-                error="Invalid magic number",
-                title="A broken book",
+            "broken": _zim_source(
+                "broken", "A broken book", searchable=False
             ),
         }
         with patch.object(
@@ -2080,9 +2048,8 @@ class GracefulDegradationTests(unittest.TestCase):
         ):
             library = search.library_dicts()
 
-        self.assertEqual([source["name"] for source in library], ["Broken"])
-        self.assertFalse(library[0]["available"])
-        self.assertEqual(library[0]["error"], "Invalid magic number")
+        self.assertEqual([source["key"] for source in library], ["broken"])
+        self.assertFalse(library[0]["searchable"])
         self.assertEqual(library[0]["title"], "A broken book")
         search._executor.shutdown(wait=True)
 
@@ -2215,7 +2182,7 @@ class GracefulDegradationTests(unittest.TestCase):
         import zimantic.search as search_module
 
         sources = [
-            SourceInfo(key=key, name=key.upper(), book=key, mode="local", local_name=key)
+            _zim_source(key, key.upper())
             for key in ("a", "b", "c")
         ]
         cfg = self._cfg(Path("/tmp/does-not-exist"))
@@ -2231,9 +2198,9 @@ class GracefulDegradationTests(unittest.TestCase):
             doc = {
                 "id": f"{source.key}:{source.key}-path",
                 "source_key": source.key,
-                "source": source.name,
+                "source": source.title,
                 "source_icon": None,
-                "title": source.name,
+                "title": source.title,
                 "lead": "",
                 "path": f"{source.key}-path",
                 "mimetype": None,
@@ -2607,8 +2574,8 @@ class PaginationTests(unittest.TestCase):
         Consumes `started` and the first `source` event, leaving the stream
         suspended while `slow` is still running.
         """
-        quick = SourceInfo("quick", "Quick", "quick", "local", local_name="quick")
-        slow = SourceInfo("slow", "Slow", "slow", "local", local_name="slow")
+        quick = _zim_source("quick", "Quick")
+        slow = _zim_source("slow", "Slow")
         search.sources = {source.key: source for source in (quick, slow)}
         release = threading.Event()
         slow_started = threading.Event()
@@ -2657,9 +2624,9 @@ class PaginationTests(unittest.TestCase):
         search = _bare_search({})
         self.addCleanup(search.close)
         sources = [
-            SourceInfo("slow1", "Slow 1", "slow1", "local", local_name="slow1"),
-            SourceInfo("slow2", "Slow 2", "slow2", "local", local_name="slow2"),
-            SourceInfo("queued", "Queued", "queued", "local", local_name="queued"),
+            _zim_source("slow1", "Slow 1"),
+            _zim_source("slow2", "Slow 2"),
+            _zim_source("queued", "Queued"),
         ]
         search.sources = {source.key: source for source in sources}
         release = threading.Event()
@@ -2699,9 +2666,9 @@ class PaginationTests(unittest.TestCase):
         search = _bare_search({})
         self.addCleanup(search.close)
         sources = [
-            SourceInfo("slow1", "Slow 1", "slow1", "local", local_name="slow1"),
-            SourceInfo("slow2", "Slow 2", "slow2", "local", local_name="slow2"),
-            SourceInfo("queued", "Queued", "queued", "local", local_name="queued"),
+            _zim_source("slow1", "Slow 1"),
+            _zim_source("slow2", "Slow 2"),
+            _zim_source("queued", "Queued"),
         ]
         search.sources = {source.key: source for source in sources}
         release = threading.Event()
@@ -2769,7 +2736,7 @@ class PaginationTests(unittest.TestCase):
         self.addCleanup(search.close)
         search._search_slots = _CountingSemaphore(1)
         search.stream_update_interval = 0.001
-        source = SourceInfo("queued", "Queued", "queued", "local", local_name="queued")
+        source = _zim_source("queued", "Queued")
         search.sources = {source.key: source}
         release = threading.Event()
         started = [threading.Event(), threading.Event()]
@@ -3149,9 +3116,7 @@ class SourceScopeTests(unittest.TestCase):
     def test_remote_dated_book_slug_selects_the_local_base_source(self):
         search = _bare_search({})
         search.sources = {
-            "foo": SourceInfo(
-                "foo", "foo", "foo", "local", local_name="foo"
-            )
+            "foo": _zim_source("foo", "foo")
         }
         try:
             scope = search._search_scope(["foo"])
@@ -3162,19 +3127,11 @@ class SourceScopeTests(unittest.TestCase):
     def test_hidden_flavour_variant_selects_the_chosen_book(self):
         search = _bare_search({})
         search.sources = {
-            "medicine": SourceInfo(
-                "medicine",
-                "medicine_nopic_2025-10",
-                "medicine_nopic_2025-10",
-                "local",
-                local_name="medicine_nopic_2025-10",
-            )
+            "medicine": _zim_source("medicine", "medicine_nopic_2025-10")
         }
         for index in range(3):
             key = f"other-{index}"
-            search.sources[key] = SourceInfo(
-                key, key, key, "local", local_name=key
-            )
+            search.sources[key] = _zim_source(key, key)
         try:
             scope = search._search_scope(["medicine"])
         finally:
@@ -3342,7 +3299,7 @@ class ProductionHardeningTests(unittest.TestCase):
         return db
 
     def test_local_results_use_content_route(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {}
         search.preview_chars = 100
@@ -3355,7 +3312,7 @@ class ProductionHardeningTests(unittest.TestCase):
         self.assertEqual(doc["path"], "tire-change")
 
     def test_local_results_use_web_base_path(self):
-        source = SourceInfo("manual", "Manual", "manual", "local")
+        source = _zim_source("manual", "Manual")
         search = object.__new__(Search)
         search.cfg = {"web_base_path": "zimantic"}
         search.preview_chars = 100
@@ -3515,9 +3472,7 @@ class ProductionHardeningTests(unittest.TestCase):
                 search._executor.shutdown(wait=True)
 
     def test_unavailable_native_index_reports_an_error_not_an_empty_ok(self):
-        source = SourceInfo(
-            "manual", "Manual", "manual", "local", local_name="manual"
-        )
+        source = _zim_source("manual", "Manual")
         index = _LocalIndex(
             None,
             None,

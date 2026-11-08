@@ -87,11 +87,10 @@ class FakeSearch:
         from zimantic.contracts import SourceInfo
 
         return SourceInfo(
-            "manual",
-            "Manual",
-            "manual",
-            "local",
-            local_name="manual",
+            key="manual",
+            provider="zim",
+            title="Manual",
+            searchable=True,
             homepage="Main_Page",
         )
 
