@@ -59,7 +59,21 @@ def test_mixed_library_serves_all_providers(tmp_path):
         )
         env = dict(os.environ)
         env["PYTHONPATH"] = str(REPO_ROOT)
-        env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+        xdg_config = tmp_path / "config"
+        app_config_dir = xdg_config / "zimantic"
+        app_config_dir.mkdir(parents=True)
+        config_text = config_path.read_text(encoding="utf-8")
+        for relative, absolute in (
+            ('index_dir = "./indexes"', f'index_dir = "{root / "indexes"}"'),
+            ('path = "./zims"', f'path = "{root / "zims"}"'),
+            ('path = "./files"', f'path = "{root / "files"}"'),
+            ('path = "./kolibri"', f'path = "{root / "kolibri"}"'),
+        ):
+            config_text = config_text.replace(relative, absolute)
+        (app_config_dir / "config.toml").write_text(
+            config_text, encoding="utf-8"
+        )
+        env["XDG_CONFIG_HOME"] = str(xdg_config)
         env["XDG_DATA_HOME"] = str(tmp_path / "data")
         env["XDG_RUNTIME_DIR"] = str(tmp_path)
         build = subprocess.run(

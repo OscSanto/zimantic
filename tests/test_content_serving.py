@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.content.store import ArticleNotFoundError
+from zimantic.providers.config import ZimConfig
 from zimantic.providers.zim.discovery import zim_source_key
 from zimantic.search import Search
 from zimantic.web.app import create_app
@@ -66,7 +67,7 @@ def _create_zim(
 def _config(root: Path, *, max_article_bytes: int | None = None) -> dict:
     cfg = {
         "index_dir": str(root / "indexes"),
-        "zim_dir": str(root / "zims"),
+        "collections": (ZimConfig(name="library", path=str(root / "zims")),),
         "candidate_count": 16,
         "page_size": 10,
         "max_results": 100,

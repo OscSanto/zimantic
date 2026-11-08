@@ -17,8 +17,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
-from zimantic import build as build_module
+from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.locator import IndexLocator
+from zimantic.providers.config import ZimConfig
 from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
 from zimantic.providers.zim.entries import ArchiveEntryProducer
 from zimantic.search import Search
@@ -215,7 +216,7 @@ ZIM_URL = quote(ZIM_KEY, safe="")
 def _config(root: Path, *, max_results: int = 100) -> dict:
     return {
         "index_dir": str(root / "indexes"),
-        "zim_dir": str(root / "zims"),
+        "collections": (ZimConfig(name="library", path=str(root / "zims")),),
         "candidate_count": 16,
         "page_size": 10,
         "max_results": max_results,
