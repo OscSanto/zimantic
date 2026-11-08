@@ -98,8 +98,9 @@ the seam in `zimantic/providers/`:
   starve or crash other providers. No provider may turn a failed operation into
   an empty successful result.
 
-The contract tests in `tests/providers/`, collection/source serializers, and
-the migration notes in `plans/` define these contracts.
+The contract tests in `tests/providers/` and collection/source serializers
+define these contracts. Current compatibility limits are documented in
+[`docs/known-issues.md`](docs/known-issues.md).
 
 ### Adding an in-tree provider
 

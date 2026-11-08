@@ -960,7 +960,7 @@ dev = [
 requires-dist = [
     { name = "faiss-cpu" },
     { name = "fastapi" },
-    { name = "libzim" },
+    { name = "libzim", specifier = ">=4.1.0" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "puremagic", specifier = ">=1.30" },

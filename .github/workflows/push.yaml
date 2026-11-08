@@ -76,7 +76,8 @@ jobs:
       - name: Catalog, generation lease, and FAISS publication safety
         run: >
           uv run pytest -q
-          tests/test_catalog.py
+          tests/providers/zim/test_catalog.py
+          tests/providers/kiwix/test_catalog.py
           tests/test_index_locator.py
           tests/test_locking.py
           tests/test_build.py
