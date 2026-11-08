@@ -29,6 +29,13 @@ from zimantic.prune import collect_inventory, delete_candidates
 from zimantic.settings import load_config
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cli_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.chdir(tmp_path)
+
+
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
@@ -492,20 +499,27 @@ class TestCliSelectors:
 
 class TestSourcesAndPrune:
     def test_sources_json_is_read_only_and_has_no_absolute_paths(
-        self, tmp_path, capsys, monkeypatch
+        self, tmp_path, capsys
     ):
         (tmp_path / "modules").mkdir()
         (tmp_path / "modules" / "a.html").write_text("hello", encoding="utf-8")
+        config_path = default_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         config = _write(
-            tmp_path / "config.toml",
-            'index_dir = "indexes"\n'
+            config_path,
+            f"index_dir = {json.dumps(str(tmp_path / 'indexes'))}\n"
             '[[collections]]\ntype = "files"\nname = "modules"\n'
-            'path = "modules"\n',
+            f"path = {json.dumps(str(tmp_path / 'modules'))}\n",
         )
-        monkeypatch.chdir(tmp_path)
         main(["sources", "--json"])
         payload = json.loads(capsys.readouterr().out)
         assert set(payload) == {"collections", "sources"}
+        assert [collection["key"] for collection in payload["collections"]] == [
+            "files:modules"
+        ]
+        assert [source["key"] for source in payload["sources"]] == [
+            "files:modules:root"
+        ]
         serialized = json.dumps(payload)
         assert str(tmp_path) not in serialized
         assert not (tmp_path / "indexes").exists()

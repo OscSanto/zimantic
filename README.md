@@ -937,6 +937,8 @@ Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` 
 
 For large libraries, `search_workers` controls how many ZIM indexes are searched in parallel. `max_stream_ranks` limits completion-spaced intermediate ranking passes. Timed snapshots are additionally emitted about every 700 ms so a slow query keeps updating, and the final result still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. The automatic profiles use 8 workers and 16 completion-spaced passes on desktops, and 2 workers and 8 passes on low-memory devices.
 
+Native ZIM full-text search uses reusable helper processes, capped at `min(4, search_workers)` per ZIM collection, rather than running libzim in the server's source threads. With libzim 4.1.0, malformed full-text results can abort the interpreter, and reader calls hold the GIL. Helpers both contain those crashes and provide real native-search parallelism: a four-worker benchmark was 3.4–4 times faster than threads, at a higher memory cost. A native crash logs the archive basename and disables that archive's native search until reload; other available channels remain usable. Budget memory for the server and its helpers. See [the architecture rationale and benchmark](docs/architecture.md#native-zim-full-text-search-uses-helper-processes).
+
 ## Hardening and release gates
 
 Zimantic treats configured file trees and Kolibri installations as untrusted

@@ -23,6 +23,11 @@ def _inline_script(source: str) -> str:
 
 
 def _run_node(script: str) -> dict:
+    # Background article timers must not keep synchronous navigation checks alive.
+    script = """
+const originalSetTimeout = setTimeout;
+globalThis.setTimeout = (...args) => originalSetTimeout(...args).unref();
+""" + script
     result = subprocess.run(
         [NODE, "-e", script],
         check=True,
