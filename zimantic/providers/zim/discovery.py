@@ -14,19 +14,15 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 from ...catalog import SourceCatalog, SourceRecord, absolute_path
 from ...diagnostics import public_cause
 from ...indexing import schema
 from ...indexing.locator import IndexLocator, IndexLocatorError
-from ...model_meta import (
-    MODEL_PROBE_SHAPE_KEY,
-    MODEL_PROBE_TEXTS_KEY,
-    MODEL_PROBE_VECTORS_KEY,
-)
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
 from .metadata import metadata_from_archive, perma_ref, source_info_from_record

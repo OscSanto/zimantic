@@ -11,13 +11,13 @@ from .base import (
     SourceQuery,
 )
 from .config import (
+    PROVIDER_CONFIG_SPECS,
+    PROVIDER_DEFAULTS,
     ConfigIssue,
     ConfigValidationError,
     FilesConfig,
     KiwixConfig,
     KolibriConfig,
-    PROVIDER_CONFIG_SPECS,
-    PROVIDER_DEFAULTS,
     ProviderConfig,
     ProviderConfigSpec,
     ProviderKind,
@@ -31,6 +31,8 @@ from .config import (
 )
 
 __all__ = [
+    "PROVIDER_CONFIG_SPECS",
+    "PROVIDER_DEFAULTS",
     "CollectionInfo",
     "CollectionRuntime",
     "CollectionSnapshot",
@@ -40,8 +42,6 @@ __all__ = [
     "FilesConfig",
     "KiwixConfig",
     "KolibriConfig",
-    "PROVIDER_CONFIG_SPECS",
-    "PROVIDER_DEFAULTS",
     "ProviderConfig",
     "ProviderConfigSpec",
     "ProviderContext",

@@ -14,10 +14,10 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
-from ...contracts import SourceInfo, SourceResult
 from ...content.reader import (
     extract_excerpt,
     extract_markdown_document,
@@ -30,10 +30,11 @@ from ...content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
+from ...contracts import SourceInfo, SourceResult
 from ...diagnostics import public_cause
-from ...indexing.locator import IndexLocator
 from ...indexing import search as generic_search
 from ...indexing.derived import derived_text_preview
+from ...indexing.locator import IndexLocator
 from ..base import (
     CollectionInfo,
     CollectionRuntime,
@@ -53,7 +54,6 @@ from ..files.discovery import (
 from .discovery import (
     ChannelRow,
     KolibriSource,
-    SourceScope,
     discover_channel_sources,
     kolibri_collection_key,
     load_channel,

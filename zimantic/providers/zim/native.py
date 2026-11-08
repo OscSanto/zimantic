@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from ...indexing.types import NativeHit
 from ...libzim_compat import search_results
@@ -23,7 +24,7 @@ class ZimNativeSearcher:
         self._lock = threading.Lock()
 
     @classmethod
-    def open(cls, archive: Any) -> "ZimNativeSearcher | None":
+    def open(cls, archive: Any) -> ZimNativeSearcher | None:
         if not getattr(archive, "has_fulltext_index", False):
             return None
         try:

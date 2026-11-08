@@ -14,9 +14,10 @@ import html as html_module
 import json
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ...content.reader import (
     DEFAULT_MAX_BODY_TEXT_BYTES,

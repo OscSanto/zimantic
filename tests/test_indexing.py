@@ -411,7 +411,7 @@ def test_generic_search_fuses_native_and_body_hits_with_integer_ranks():
 
 
 def test_ambiguous_native_path_is_omitted_and_source_is_partial():
-    rows = [EntryRecord(1, "Alpha", "e", "alpha", None, "body")]
+    [EntryRecord(1, "Alpha", "e", "alpha", None, "body")]
     handle = IndexHandle(None, None, db_path=None)
     try:
         result = search(
@@ -825,7 +825,7 @@ def test_spooled_input_is_private_and_bounded():
 
     candidate = _Input("captions", "data")
     with tempfile.TemporaryDirectory() as tmp:
-        path, digest, size = derived_module.spool_input(
+        path, _digest, size = derived_module.spool_input(
             candidate, max_bytes=100, directory=tmp
         )
         try:

@@ -67,9 +67,8 @@ class BuildLockTests(unittest.TestCase):
                 locking.os,
                 "open",
                 side_effect=PermissionError(13, "Permission denied"),
-            ):
-                with self.assertRaises(locking.BuildLockError) as caught:
-                    lock.try_acquire()
+            ), self.assertRaises(locking.BuildLockError) as caught:
+                lock.try_acquire()
         message = str(caught.exception)
         self.assertIn("cannot open the build lock", message)
         self.assertIn("sudo", message)

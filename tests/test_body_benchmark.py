@@ -6,7 +6,12 @@ import pytest
 
 from scripts import bench_body_tradeoffs as benchmark
 from scripts.bench_body_tradeoffs import (
-    bm25_search, body_query, compact_search, compare, summary, variant_patches,
+    bm25_search,
+    body_query,
+    compact_search,
+    compare,
+    summary,
+    variant_patches,
 )
 from zimantic.content import reader
 from zimantic.indexing import pipeline, schema

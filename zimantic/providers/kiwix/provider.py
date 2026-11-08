@@ -10,8 +10,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ...diagnostics import public_cause
 from ...contracts import SourceInfo, SourceResult
+from ...diagnostics import public_cause
 from ...media_types import ordered_media_types
 from ..base import (
     CollectionInfo,

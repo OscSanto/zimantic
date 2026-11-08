@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from pathlib import Path
-
-import pytest
 
 from zimantic.catalog import SourceCatalog
 from zimantic.contracts import SourceInfo
@@ -101,7 +98,8 @@ def test_appended_collection_remains_redacted(tmp_path):
 def test_public_cause_never_echoes_an_os_filename(tmp_path):
     secret = tmp_path / "private-root" / "article.html"
     try:
-        open(secret, "rb")
+        with open(secret, "rb"):
+            pass
     except OSError as error:
         caused = public_cause(error)
     else:  # pragma: no cover - the path must not exist
@@ -147,7 +145,7 @@ def test_build_report_carries_counts_truncation_and_duration():
 
 
 def test_collection_snapshot_reports_health_fields(tmp_path):
-    from providers.files.helpers import files_config, open_runtime, build_tree
+    from providers.files.helpers import build_tree, files_config, open_runtime
 
     root = tmp_path / "modules"
     build_tree(root)

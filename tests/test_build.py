@@ -10,10 +10,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from index_helpers import body_hits as _body_hits
+from index_helpers import docs as _docs
+from index_helpers import meta as _meta
 
 from zimantic.contracts import SourceInfo
-from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing import pipeline as build_module
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.schema import (
     BODY_TRUNCATED_COUNT,
     DONE,
@@ -21,8 +24,6 @@ from zimantic.indexing.schema import (
     SCHEMA,
 )
 from zimantic.indexing.types import EntryRecord
-
-from index_helpers import body_hits as _body_hits, docs as _docs, meta as _meta
 
 
 def _source(key="files:test:manual-0123", provider="files", collection_key="files:test"):

@@ -653,7 +653,8 @@ class TestSourcesAndPrune:
         self, tmp_path, monkeypatch, capsys
     ):
         from providers.kiwix.test_runtime import _FakeKiwix, _feed
-        import zimantic.providers.kiwix.catalog as catalog
+
+        from zimantic.providers.kiwix import catalog
 
         fake = _FakeKiwix(catalog=_feed(["manual"]))
         monkeypatch.setattr(catalog, "urlopen", fake)

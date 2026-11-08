@@ -10,7 +10,7 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from .._filelock import lock_file, unlock_file
 from .._fs import fsync_path
@@ -235,9 +235,9 @@ class IndexLocator:
         generation: str | None = None,
     ) -> GenerationLease:
         """Publish a complete SQLite/optional-FAISS pair as a new generation."""
-        provider = getattr(source, "provider")
+        provider = source.provider
         collection_key = getattr(source, "collection_key", "")
-        source_key = getattr(source, "key")
+        source_key = source.key
         directory = self.source_directory(provider, collection_key, source_key)
         generation = generation or str(uuid.uuid4())
         generation_dir = directory / "generations" / generation
@@ -304,9 +304,9 @@ class IndexLocator:
 
     def cleanup(self, source: Any, *, keep: str | None = None) -> list[Path]:
         """Remove non-current generations that no reader pins."""
-        provider = getattr(source, "provider")
+        provider = source.provider
         collection_key = getattr(source, "collection_key", "")
-        source_key = getattr(source, "key")
+        source_key = source.key
         directory = self.source_directory(provider, collection_key, source_key)
         manifest = self._read_manifest(directory) or {}
         current = keep or manifest.get("generation")
@@ -344,8 +344,8 @@ class IndexLocator:
 
 
 __all__ = [
+    "MANIFEST_VERSION",
     "GenerationLease",
     "IndexLocator",
     "IndexLocatorError",
-    "MANIFEST_VERSION",
 ]

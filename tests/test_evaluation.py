@@ -106,9 +106,8 @@ class SourceDiscoveryTests(unittest.TestCase):
     def test_config_is_required(self):
         with stub({"/config": lambda query: (200, {"max_results": 100, "max_query_length": 4096})}) as server:
             self.assertEqual(run.zimantic_config(server.url, 5)["max_results"], 100)
-        with stub({}) as server:
-            with self.assertRaises(urllib.error.HTTPError):
-                run.zimantic_config(server.url, 5)
+        with stub({}) as server, self.assertRaises(urllib.error.HTTPError):
+            run.zimantic_config(server.url, 5)
 
     def test_canonical_sources_exclude_other_providers_and_unindexed_zims(self):
         self.assertEqual(run.source_names([

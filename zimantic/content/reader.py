@@ -9,7 +9,7 @@ import time
 import unicodedata
 from collections.abc import Iterator
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
 if TYPE_CHECKING:

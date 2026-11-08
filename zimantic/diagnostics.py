@@ -18,8 +18,9 @@ import errno
 import os
 import re
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .providers.config import RuntimeConfig
 

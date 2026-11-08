@@ -9,22 +9,21 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from index_helpers import body_hits as _body_hits
+from index_helpers import meta as _meta
+from media_helpers import MEDIA_ROOT, copy_sample, manifest, sample
+from providers.files.helpers import build_sources, files_config, open_runtime
 
-from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.derived import (
     DerivedTextConfig,
     SourceDerivedOperations,
     parse_caption_bytes,
 )
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.providers.files.common import content_family, extension_mimetype
 from zimantic.providers.files.discovery import discover_sources
 from zimantic.providers.files.entries import FilesEntryProducer
-
-from media_helpers import MEDIA_ROOT, copy_sample, manifest, sample
-from providers.files.helpers import build_sources, files_config, open_runtime
-
-from index_helpers import body_hits as _body_hits, meta as _meta
 
 
 def _source(config, key: str):

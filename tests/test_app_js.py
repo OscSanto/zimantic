@@ -211,7 +211,7 @@ const summarize = () => {{
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
         result = subprocess.run(
-            [NODE, "-e", script], encoding="utf-8", capture_output=True
+            [NODE, "-e", script], encoding="utf-8", capture_output=True, check=False
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)

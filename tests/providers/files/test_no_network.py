@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import socket
 
-from zimantic.indexing.pipeline import build_index
 from zimantic.indexing.locator import IndexLocator
-from zimantic.providers.files.entries import FilesEntryProducer
+from zimantic.indexing.pipeline import build_index
 from zimantic.providers.files.discovery import discover_sources
+from zimantic.providers.files.entries import FilesEntryProducer
 from zimantic.providers.files.store import FilesContentStore
 
 from .helpers import build_tree, files_config

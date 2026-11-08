@@ -15,10 +15,10 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
-from ...contracts import SourceInfo, SourceResult
 from ...content.reader import (
     extract_excerpt,
     extract_markdown_document,
@@ -31,10 +31,11 @@ from ...content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
+from ...contracts import SourceInfo, SourceResult
 from ...diagnostics import public_cause
-from ...indexing.locator import IndexLocator
 from ...indexing import search as generic_search
 from ...indexing.derived import derived_text_preview
+from ...indexing.locator import IndexLocator
 from ...model_meta import (
     MODEL_PROBE_SHAPE_KEY,
     MODEL_PROBE_TEXTS_KEY,

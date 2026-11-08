@@ -82,6 +82,7 @@ def test_mixed_library_serves_all_providers(tmp_path):
             env=env,
             capture_output=True,
             text=True,
+            check=False,
             timeout=120,
         )
         assert build.returncode == 0, build.stderr

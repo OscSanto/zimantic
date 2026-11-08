@@ -1454,9 +1454,8 @@ class JavaScriptShellTests(unittest.TestCase):
         for companion_path, companion_mimetype in cases:
             with self.subTest(companion_path=companion_path, mimetype=companion_mimetype):
                 class _MarkdownItem:
-                    def __init__(self):
-                        self.mimetype = companion_mimetype
-                        self.content = markdown
+                    mimetype = companion_mimetype
+                    content = markdown
 
                 class _MarkdownEntry:
                     def get_item(self):
@@ -1471,14 +1470,16 @@ class JavaScriptShellTests(unittest.TestCase):
                         return _SpaItem(stub)
 
                 class _MarkdownArchive:
+                    _companion_path = companion_path
+
                     def get_entry_by_id(self, _index):
                         return _StubEntry()
 
                     def has_entry_by_path(self, path):
-                        return path in ("index.html", companion_path)
+                        return path in ("index.html", self._companion_path)
 
                     def get_entry_by_path(self, path):
-                        if path == companion_path:
+                        if path == self._companion_path:
                             return _MarkdownEntry()
                         return _HtmlEntry("index.html", "index.html", SHELL_HTML)
 

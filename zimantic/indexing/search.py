@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 from urllib.parse import quote
 
 from ..contracts import SourceInfo, SourceResult, encode_document_id
@@ -518,9 +519,9 @@ def preview(
 
 
 __all__ = [
-    "AmbiguousPathError",
     "DEFAULT_MIN_COSINE_SIMILARITY",
     "RRF_K",
+    "AmbiguousPathError",
     "SearchLimits",
     "body_search",
     "default_url_builder",

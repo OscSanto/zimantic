@@ -34,6 +34,7 @@ def test_build_kolibri_collections_uses_the_generic_pipeline(tmp_path):
     assert failures == []
     locator = IndexLocator(index_dir)
     from zimantic.providers.kolibri import KolibriProvider
+
     from .helpers import context
 
     batch = KolibriProvider().discover(

@@ -7,7 +7,7 @@ caption files explicitly mapped to the selected content node.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from .schema import CAPTION_EXTENSIONS, CAPTION_PRESETS, FileRow, FileSelection
 

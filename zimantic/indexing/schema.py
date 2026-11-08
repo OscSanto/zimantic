@@ -17,7 +17,8 @@ import base64
 import json
 import re
 import sqlite3
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 # -- metadata keys ---------------------------------------------------------
 
@@ -423,7 +424,6 @@ __all__ = [
     "EXPECTED_TABLES",
     "FAISS_DIGEST",
     "FILESIZE",
-    "Fts5UnavailableError",
     "INDEXED_CHANNELS",
     "INDEXED_CHANNELS_ORDER",
     "INDEXED_COUNT",
@@ -440,8 +440,9 @@ __all__ = [
     "SEMANTIC_VECTOR_COUNT",
     "SOURCE_FINGERPRINT",
     "SOURCE_KEY",
-    "SchemaError",
     "TRUNCATED",
+    "Fts5UnavailableError",
+    "SchemaError",
     "decode_bool",
     "decode_bytes",
     "decode_channels",
@@ -457,8 +458,8 @@ __all__ = [
     "encode_json",
     "ensure_fts5",
     "ensure_schema",
-    "read_meta",
     "read_index_meta",
+    "read_meta",
     "schema_version",
     "table_names",
     "validate_schema",

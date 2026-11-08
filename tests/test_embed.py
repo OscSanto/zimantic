@@ -290,7 +290,7 @@ class DeviceSelectionTests(unittest.TestCase):
         ]
         for device in settings.EMBED_DEVICES:
             with self.subTest(device=device):
-                providers, warning = embed.resolve_providers(device, available)
+                _providers, warning = embed.resolve_providers(device, available)
                 self.assertIsNone(warning)
 
     def test_auto_falls_back_to_cpu_quietly(self):

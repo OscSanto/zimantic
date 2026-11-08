@@ -17,9 +17,10 @@ import sqlite3
 import stat as stat_module
 import threading
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 from urllib.parse import quote
 
 from ...contracts import SourceInfo
@@ -28,7 +29,6 @@ from ...indexing import schema
 from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
-
 from .common import (
     FilesConfinedError,
     confined_stat,
@@ -692,12 +692,12 @@ __all__ = [
     "DEFAULT_MAX_ENTRIES",
     "DEFAULT_MAX_FILE_BYTES",
     "DEFAULT_MAX_SOURCES",
+    "LOOSE_IDENTIFIER",
+    "ROOT_IDENTIFIER",
     "FilesDiscovery",
     "FilesIndexOptions",
     "FilesSource",
     "FilesTraversalError",
-    "LOOSE_IDENTIFIER",
-    "ROOT_IDENTIFIER",
     "apply_index_metadata",
     "discover_sources",
     "files_collapsed_key",

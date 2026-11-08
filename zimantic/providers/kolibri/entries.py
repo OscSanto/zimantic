@@ -13,9 +13,10 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from ...content.reader import (
     DEFAULT_MAX_BODY_TEXT_BYTES,

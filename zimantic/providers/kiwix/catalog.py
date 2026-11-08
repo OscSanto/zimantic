@@ -310,9 +310,7 @@ def _parse_entries(root: ET.Element) -> list[dict[str, str]]:
                 or "thumbnail" in rel
                 or "image" in rel
             )
-            if link_type.startswith("text/html"):
-                href = candidate
-            elif not href and not is_image:
+            if link_type.startswith("text/html") or not href and not is_image:
                 href = candidate
             if is_image:
                 icon_href = candidate
@@ -441,9 +439,7 @@ def fetch_catalog(
                 retryable = True
                 if isinstance(error, HTTPError) and (
                     400 <= error.code < 500 and error.code != 429
-                ):
-                    retryable = False
-                elif isinstance(error, ValueError):
+                ) or isinstance(error, ValueError):
                     retryable = False
                 if not retryable:
                     return CatalogFetch(
@@ -508,7 +504,6 @@ def fetch_catalog(
 
 
 __all__ = [
-    "CatalogFetch",
     "DEFAULT_KIWIX_CATALOG_ATTEMPTS",
     "DEFAULT_KIWIX_CATALOG_ENTRIES",
     "DEFAULT_KIWIX_CATALOG_LIMIT",
@@ -520,6 +515,7 @@ __all__ = [
     "DEFAULT_MAX_KIWIX_RESPONSE_BYTES",
     "DEFAULT_MAX_REMOTE_SOURCES",
     "MAX_KIWIX_CATALOG_RETRY_BACKOFF",
+    "CatalogFetch",
     "_bounded_catalog_url",
     "_catalog_book",
     "_child_text",

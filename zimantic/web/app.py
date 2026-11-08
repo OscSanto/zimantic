@@ -22,15 +22,15 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response, StreamingResponse
 
 from ..content.serving import content_disposition, is_inline_mimetype
-from ..diagnostics import public_cause
 from ..content.store import (
     ArticleNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
+from ..diagnostics import public_cause
+from ..paths import server_pid_path
 from ..searching.sources import _html_attribute
 from ..settings import normalize_web_base_path
-from ..paths import server_pid_path
 
 ASSET_DIR = Path(__file__).parent / "static"
 PAGE = ASSET_DIR / "index.html"

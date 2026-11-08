@@ -10,9 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from ...content.reader import (
     _READABLE_MIMETYPES,

@@ -7,7 +7,8 @@ the small adapter helpers used by the generic search path.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from .types import NativeHit, NativeSearcher
 

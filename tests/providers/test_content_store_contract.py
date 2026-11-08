@@ -167,8 +167,8 @@ def test_kiwix_has_no_local_content_store():
 
 
 def test_ambiguous_path_fails_closed(tmp_path, monkeypatch):
-    from zimantic.content.zim_paths import AmbiguousZimPathError
     import zimantic.providers.zim.store as store_module
+    from zimantic.content.zim_paths import AmbiguousZimPathError
 
     store = _store(tmp_path)
     monkeypatch.setattr(

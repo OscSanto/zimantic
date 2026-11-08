@@ -11,16 +11,39 @@ from unittest.mock import patch
 
 import numpy as np
 
-
 from zimantic.cache import QueryCache
 from zimantic.contracts import SourceInfo, SourceResult, encode_document_id
-from zimantic.providers.base import EnrichingRuntime, IndexedRuntime, IsolatedFulltextRuntime
+from zimantic.indexing import schema as index_schema
+from zimantic.providers.base import (
+    EnrichingRuntime,
+    IndexedRuntime,
+    IsolatedFulltextRuntime,
+)
+from zimantic.providers.config import RuntimeConfig, ZimConfig
+from zimantic.providers.zim.metadata import (
+    find_archive_icon_path as _find_archive_icon_path,
+)
+from zimantic.providers.zim.metadata import (
+    source_icon_url as _source_icon_url,
+)
+from zimantic.providers.zim.metadata import (
+    source_info_from_metadata as _source_info_from_metadata,
+)
+from zimantic.providers.zim.search import (
+    fetch_docs as _fetch_zim_docs,
+)
+from zimantic.providers.zim.search import (
+    phrase_in_word_stream as _phrase_in_word_stream,
+)
 from zimantic.search import (
     PREVIEW_HTML_BYTES,
-    Search as _SearchBase,
     SearchBusyError,
     SearchQueryError,
 )
+from zimantic.search import (
+    Search as _SearchBase,
+)
+from zimantic.searching.index import IndexHandle, _nprobe
 from zimantic.searching.query import (
     _fulltext_query,
     _phrase_words,
@@ -28,20 +51,7 @@ from zimantic.searching.query import (
     _title_prefix_query,
     _title_query,
 )
-from zimantic.providers.zim.metadata import (
-    find_archive_icon_path as _find_archive_icon_path,
-    source_icon_url as _source_icon_url,
-    source_info_from_metadata as _source_info_from_metadata,
-)
-from zimantic.providers.zim.search import (
-    fetch_docs as _fetch_zim_docs,
-    phrase_in_word_stream as _phrase_in_word_stream,
-)
-from zimantic.searching.index import IndexHandle, _nprobe
 from zimantic.searching.sources import _html_attribute
-from zimantic.indexing import schema as index_schema
-from zimantic.providers.config import RuntimeConfig, ZimConfig
-
 
 Search = _SearchBase
 
@@ -2522,7 +2532,7 @@ class RandomArticleServingTests(unittest.TestCase):
             def get_item():
                 return types.SimpleNamespace(mimetype="text/html")
 
-        search = _bare_search({})
+        _bare_search({})
         from zimantic.content.serving import random_fallback_article
 
         self.assertEqual(random_fallback_article(_Index()), "Article")

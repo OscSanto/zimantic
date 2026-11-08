@@ -7,7 +7,8 @@ the same canonical path.
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from ..redirects import RedirectError, resolve_redirect_entry
 
@@ -114,8 +115,8 @@ def resolve_zim_path(
 
 
 __all__ = [
-    "AmbiguousZimPathError",
     "MAX_PATH_HOPS",
+    "AmbiguousZimPathError",
     "ZimPathError",
     "ZimPathNotFoundError",
     "resolve_zim_path",

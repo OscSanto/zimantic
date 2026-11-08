@@ -22,8 +22,8 @@ import stat
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from ...diagnostics import public_cause
 from .schema import detect_schema
@@ -157,30 +157,28 @@ def _copy_file(
     total: int,
 ) -> int:
     try:
-        handle = open(source, "rb")
+        with open(source, "rb") as handle:
+            try:
+                with open(destination, "wb") as writer:
+                    while True:
+                        if time.monotonic() >= deadline:
+                            raise SnapshotBudgetError(
+                                "Kolibri snapshot creation timed out"
+                            )
+                        chunk = handle.read(1 << 20)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise SnapshotBudgetError(
+                                f"Kolibri snapshot exceeds the {max_bytes} byte limit"
+                            )
+                        writer.write(chunk)
+                        writer.flush()
+            except OSError as error:
+                raise SnapshotError("could not copy the Kolibri database") from error
     except OSError as error:
         raise SnapshotError("could not read the Kolibri database") from error
-    try:
-        with open(destination, "wb") as writer:
-            while True:
-                if time.monotonic() >= deadline:
-                    raise SnapshotBudgetError(
-                        "Kolibri snapshot creation timed out"
-                    )
-                chunk = handle.read(1 << 20)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise SnapshotBudgetError(
-                        f"Kolibri snapshot exceeds the {max_bytes} byte limit"
-                    )
-                writer.write(chunk)
-                writer.flush()
-    except OSError as error:
-        raise SnapshotError("could not copy the Kolibri database") from error
-    finally:
-        handle.close()
     return total
 
 
@@ -279,7 +277,7 @@ class KolibriSnapshot:
         directory: Path,
         database: Path,
         *,
-        owner: "SnapshotManager",
+        owner: SnapshotManager,
         size: int,
         source_signature: tuple[tuple[int, int, int, int] | None, ...] | None = None,
     ) -> None:
@@ -292,7 +290,7 @@ class KolibriSnapshot:
         self._closed = False
         self._lock = threading.Lock()
 
-    def retain(self) -> "KolibriSnapshot":
+    def retain(self) -> KolibriSnapshot:
         with self._lock:
             if self._closed:
                 raise SnapshotError("Kolibri snapshot is closed")

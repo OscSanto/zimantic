@@ -26,6 +26,7 @@ from .snapshot import KolibriSnapshot, SnapshotError, SnapshotManager
 from .store import KolibriContentStore
 
 __all__ = [
+    "SUPPORTED_KOLIBRI_VERSION",
     "ChannelDiscovery",
     "ChannelRow",
     "FileRow",
@@ -41,7 +42,6 @@ __all__ = [
     "SnapshotError",
     "SnapshotManager",
     "SourceScope",
-    "SUPPORTED_KOLIBRI_VERSION",
     "detect_schema",
     "discover_channel_sources",
     "discover_channels",

@@ -170,9 +170,8 @@ class CatalogTests(unittest.TestCase):
             with mock.patch(
                 "zimantic.catalog.sqlite3.connect",
                 side_effect=sqlite3.OperationalError("database is locked"),
-            ):
-                with self.assertRaises(sqlite3.OperationalError):
-                    SourceCatalog(db_path)
+            ), self.assertRaises(sqlite3.OperationalError):
+                SourceCatalog(db_path)
 
             db = sqlite3.connect(db_path)
             try:

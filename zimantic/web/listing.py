@@ -7,7 +7,8 @@ that the unfiltered listing already publishes participates in a text match.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from ..media_types import MEDIA_TYPE_ORDER
 from ..providers.config import BUILTIN_PROVIDERS

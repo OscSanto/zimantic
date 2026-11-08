@@ -92,16 +92,15 @@ class DownloadFileTests(unittest.TestCase):
                 model_files.urllib.request,
                 "urlopen",
                 return_value=_Response(b"corrupt"),
+            ), self.assertRaisesRegex(
+                model_files.ModelDownloadError, "checksum"
             ):
-                with self.assertRaisesRegex(
-                    model_files.ModelDownloadError, "checksum"
-                ):
-                    model_files._download_file(
-                        model_files.MODEL_SPECS["multilingual-e5-small"],
-                        model_file,
-                        destination,
-                        force=False,
-                    )
+                model_files._download_file(
+                    model_files.MODEL_SPECS["multilingual-e5-small"],
+                    model_file,
+                    destination,
+                    force=False,
+                )
 
             self.assertFalse(destination.exists())
             self.assertFalse(destination.with_name("model.onnx.part").exists())

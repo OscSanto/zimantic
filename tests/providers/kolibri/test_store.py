@@ -17,9 +17,13 @@ from zimantic.providers.kolibri.discovery import (
     kolibri_root_key,
 )
 from zimantic.providers.kolibri.html5 import Html5ZipError
-from zimantic.providers.kolibri.store import KolibriContentStore
 
-from .helpers import KolibriFixture, kolibri_config, make_two_channel_fixture, open_runtime
+from .helpers import (
+    KolibriFixture,
+    kolibri_config,
+    make_two_channel_fixture,
+    open_runtime,
+)
 
 
 def _runtime(tmp_path, fixture):

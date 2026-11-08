@@ -466,7 +466,7 @@ class Embedder:
         # Prevent idle ORT threads from busy-waiting between batches.
         try:
             opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        except Exception:
+        except RuntimeError:
             pass
         self._model_path = str(Path(model_dir) / "model.onnx")
         self._session_options = opts

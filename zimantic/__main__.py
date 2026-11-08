@@ -627,9 +627,9 @@ def _build_files_collections(
     failures: list[tuple[Path, BaseException]],
 ) -> None:
     """Build every configured files collection through the generic pipeline."""
-    from .indexing.pipeline import build_index
     from .diagnostics import public_cause
     from .indexing.locator import IndexLocator
+    from .indexing.pipeline import build_index
     from .providers.base import ProviderContext
     from .providers.files import FilesProvider
     from .settings import normalize_web_base_path
@@ -719,9 +719,9 @@ def _build_kolibri_collections(
     failures: list[tuple[Path, BaseException]],
 ) -> None:
     """Build every configured Kolibri channel through the generic pipeline."""
-    from .indexing.pipeline import build_index
     from .diagnostics import public_cause
     from .indexing.locator import IndexLocator
+    from .indexing.pipeline import build_index
     from .providers.base import ProviderContext
     from .providers.kolibri import KolibriProvider
     from .settings import normalize_web_base_path
@@ -1105,8 +1105,8 @@ def _build_tasks(
     parser: argparse.ArgumentParser,
 ) -> None:
     """Build one or more already-discovered sources through the generic pipeline."""
-    from .indexing.pipeline import EmbeddingPipeline, build_index
     from .indexing.locator import IndexLocator
+    from .indexing.pipeline import EmbeddingPipeline, build_index
 
     workers = args.workers
     if workers is None:
@@ -1308,8 +1308,8 @@ def _run_positional_zim_build(
     args,
     parser: argparse.ArgumentParser,
 ) -> None:
-    from .indexing.pipeline import build_index
     from .indexing.locator import IndexLocator
+    from .indexing.pipeline import build_index
 
     zims = _collect_zims([Path(path) for path in args.paths], ".")
     try:
@@ -1356,8 +1356,8 @@ def _run_positional_zim_build(
     embedder = None
     embedding_pipeline = None
     if not args.fast:
-        from .indexing.pipeline import EmbeddingPipeline
         from .embed import Embedder
+        from .indexing.pipeline import EmbeddingPipeline
 
         def _make_embedder():
             return Embedder(

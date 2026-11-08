@@ -11,8 +11,9 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from ..faster_whisper_models import ensure_faster_whisper_model
 from ..whisper_models import ensure_whisper_cpp_model

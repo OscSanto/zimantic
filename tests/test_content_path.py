@@ -6,8 +6,8 @@ import pytest
 
 from zimantic.content.path import (
     has_encoded_separator,
-    normalize_article_path,
     normalize_archive_path,
+    normalize_article_path,
 )
 from zimantic.content.store import ArticleNotFoundError
 

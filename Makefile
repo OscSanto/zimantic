@@ -5,7 +5,7 @@ DEV ?=
 DEPLOY_HOST ?= 192.168.1.219
 DEPLOY_PATH ?= /opt/iiab/zimantic
 
-.PHONY: build install dev test release release-dry-run deploy release-deploy
+.PHONY: build install dev test lint release release-dry-run deploy release-deploy
 
 build:
 	$(UV) build --clear
@@ -24,6 +24,9 @@ dev:
 
 test:
 	$(UV) run pytest
+
+lint:
+	ruff check . --statistics --fix
 
 release: test
 	UV="$(UV)" $(PYTHON) scripts/release.py $(if $(VERSION),--version $(VERSION),)

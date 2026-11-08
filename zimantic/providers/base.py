@@ -9,23 +9,19 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Literal,
-    Mapping,
     Protocol,
-    Sequence,
     runtime_checkable,
 )
 
 from ..content.store import ArticleData, ContentEntry, ContentRange, ContentStore
-from ..indexing.types import EntryProducer
-from ..media_types import MEDIA_TYPE_ORDER, ordered_media_types
 from ..contracts import (
     RankedResultDocument,
     ResultDocument,
@@ -34,6 +30,8 @@ from ..contracts import (
     SourceResultDocument,
     SourceStatus,
 )
+from ..indexing.types import EntryProducer
+from ..media_types import MEDIA_TYPE_ORDER, ordered_media_types
 from .config import ProviderConfig, ProviderKind, RuntimeConfig
 
 if TYPE_CHECKING:
@@ -42,6 +40,7 @@ if TYPE_CHECKING:
 DiscoveryState = Literal["loading", "ready", "error", "closed"]
 
 __all__ = [
+    "MEDIA_TYPE_ORDER",
     "ArticleData",
     "BuildableRuntime",
     "CollectionInfo",
@@ -55,7 +54,6 @@ __all__ = [
     "EnrichingRuntime",
     "IndexedRuntime",
     "IsolatedFulltextRuntime",
-    "MEDIA_TYPE_ORDER",
     "ProviderContext",
     "ProviderKind",
     "RankedResultDocument",

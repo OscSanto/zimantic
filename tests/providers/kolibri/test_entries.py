@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import pytest
+from index_helpers import body_hits as _body_hits
+from index_helpers import docs as _docs
+from index_helpers import meta as _meta
 
-from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.derived import DerivedTextConfig, SourceDerivedOperations
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.providers.kolibri.discovery import (
     kolibri_node_source_key,
     kolibri_root_key,
 )
 from zimantic.providers.kolibri.entries import row_id_for
-
-from index_helpers import body_hits as _body_hits, docs as _docs, meta as _meta
 
 from .helpers import (
     KolibriFixture,
@@ -83,9 +84,10 @@ def test_exercise_description_is_indexed_and_coach_content_is_not(tmp_path):
     fixture.db.commit()
     index_dir = tmp_path / "indexes"
     config = kolibri_config(fixture)
-    from .helpers import context, runtime_config
     from zimantic.providers.kolibri import KolibriProvider
     from zimantic.providers.kolibri.discovery import kolibri_collection_key
+
+    from .helpers import context, runtime_config
 
     provider_batch = KolibriProvider().discover(
         config, context(index_dir, runtime_config(index_dir, config))
@@ -214,10 +216,10 @@ def test_captions_are_absent_by_default_and_indexed_when_enabled(tmp_path):
     fixture.add_video(
         "video",
         captions=(
-            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n"
-            "caption zebra\n\n00:00:01.000 --> 00:00:02.000\n"
-            "caption zebra\n"
-        ).encode(),
+            b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n"
+            b"caption zebra\n\n00:00:01.000 --> 00:00:02.000\n"
+            b"caption zebra\n"
+        ),
     )
     fixture.close()
     index_dir = tmp_path / "indexes"

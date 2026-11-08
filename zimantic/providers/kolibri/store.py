@@ -39,7 +39,7 @@ from .discovery import (
     load_node,
     parse_node_path,
 )
-from .html5 import Html5Archive, Html5LimitError, Html5ZipError
+from .html5 import Html5Archive
 from .schema import (
     EXERCISE_KIND,
     HTML5_PRESETS,
@@ -295,12 +295,7 @@ class KolibriContentStore:
                 raise ArticleUnavailableError(
                     f"unsupported Kolibri HTML5 preset {primary.preset!r}"
                 )
-            try:
-                archive = self._archive(primary)
-            except (Html5ZipError, Html5LimitError):
-                raise
-            except ArticleUnavailableError:
-                raise
+            archive = self._archive(primary)
             if asset:
                 member = archive.member(asset)
                 final = f"{node_path}/{asset}"
@@ -397,8 +392,7 @@ class KolibriContentStore:
                 raise ArticleNotFoundError("source has no homepage")
             return self._target(main)
         raw = str(path)
-        if raw.endswith("/"):
-            raw = raw[:-1]
+        raw = raw.removesuffix("/")
         requested = self._normalize_path(raw)
         parts = requested.split("/")
         if parts[0] == "channel":

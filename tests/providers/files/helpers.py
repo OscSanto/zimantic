@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from media_helpers import copy_sample
+
 from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.providers.base import ProviderContext
 from zimantic.providers.config import FilesConfig, RuntimeConfig
 from zimantic.providers.files import FilesProvider
-
-from media_helpers import copy_sample
 
 INCLUDE = (
     "**/*.html",

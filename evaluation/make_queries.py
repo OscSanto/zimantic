@@ -24,9 +24,9 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import queries as Q  # noqa: E402
+import queries as Q
 
-PARAGRAPH = re.compile(r"<p[^>]*>(.*?)</p>", re.S)
+PARAGRAPH = re.compile(r"<p[^>]*>(.*?)</p>", re.DOTALL)
 JUNK = re.compile(r"[{}]|mw-parser-output|display\s*:|function\s*\(|https?://")
 SETS = ("alias", "first sentence", "deep in article")
 
@@ -63,6 +63,7 @@ def is_article(entry) -> bool:
 
 def generate(args):
     from libzim.reader import Archive
+
     from zimantic.libzim_compat import get_entry_by_id
     zim_path = Path(args.zim)
     zim, name, rng = Archive(str(zim_path)), zim_path.stem, random.Random(args.seed)
@@ -101,7 +102,7 @@ def generate(args):
     out = Path(args.queries) / name / f"{args.suite}.{args.lang}.jsonl"
     Q.write(out, rows)
     print(f"wrote {out}: " + ", ".join(f"{s} {counts[s]}" for s in wanted)
-          + ("" if all(counts[s] >= args.n for s in wanted) else f"  (budget ran out; raise --attempts)"))
+          + ("" if all(counts[s] >= args.n for s in wanted) else "  (budget ran out; raise --attempts)"))
 
 
 def translate(args):

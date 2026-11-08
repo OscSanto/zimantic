@@ -77,7 +77,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler name
+    def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         query = parse_qs(parsed.query)
         if parsed.path.rstrip("/") == "/kiwix/catalog/v2/entries":
@@ -117,7 +117,7 @@ class KiwixFixture:
         host, port = self.httpd.server_address[:2]
         return f"http://{host}:{port}"
 
-    def start(self) -> "KiwixFixture":
+    def start(self) -> KiwixFixture:
         self.thread.start()
         return self
 
@@ -126,7 +126,7 @@ class KiwixFixture:
         self.httpd.server_close()
         self.thread.join(timeout=5)
 
-    def __enter__(self) -> "KiwixFixture":
+    def __enter__(self) -> KiwixFixture:
         return self.start()
 
     def __exit__(self, *_args) -> None:

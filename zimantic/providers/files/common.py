@@ -15,9 +15,9 @@ import re
 import shutil
 import stat as stat_module
 import subprocess
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from ...media_types import MEDIA_TYPE_ORDER
 
@@ -350,11 +350,11 @@ def _puremagic_mimetype(prefix: bytes) -> str | None:
         return None
     try:
         import puremagic  # type: ignore[import-not-found]
-    except Exception:
+    except ImportError:
         return None
     try:
         value = _normalize_mimetype(puremagic.from_string(prefix, mime=True))
-    except Exception:
+    except puremagic.PureError:
         return None
     # An unknown extension whose bytes look like HTML must remain an
     # attachment, matching the built-in sniffer's safety rule.

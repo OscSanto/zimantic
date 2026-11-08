@@ -6,21 +6,19 @@ import os
 from pathlib import Path
 
 import pytest
+from index_helpers import body_hits as _body_hits
+from index_helpers import docs as _docs
+from index_helpers import meta as _meta
+from media_helpers import copy_sample
 
-from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.derived import DerivedTextConfig, SourceDerivedOperations
+from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.providers.files.discovery import (
     FilesTraversalError,
     discover_sources,
-    files_dir_key,
-    files_loose_key,
 )
 from zimantic.providers.files.entries import FilesEntryProducer
-
-from media_helpers import copy_sample
-
-from index_helpers import body_hits as _body_hits, docs as _docs, meta as _meta
 
 from .helpers import create_pdf, files_config
 
@@ -217,7 +215,7 @@ def test_manifest_cap_is_deterministic_across_enumeration_orders(
     assert first.truncated is True
     assert len(expected) == 3
 
-    import zimantic.providers.files.common as common
+    from zimantic.providers.files import common
 
     real_scandir = common.os.scandir
 

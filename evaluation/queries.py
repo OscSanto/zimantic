@@ -66,6 +66,5 @@ def write(path: Path, rows):
     """Write rows as JSON Lines (UTF-8, one compact object per line, readable non-ASCII)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        for row in rows:
-            f.write(json.dumps({k: row[k] for k in FIELDS if k in row} | {k: v for k, v in row.items() if k not in FIELDS and k != "split"},
-                               ensure_ascii=False) + "\n")
+        f.writelines(json.dumps({k: row[k] for k in FIELDS if k in row} | {k: v for k, v in row.items() if k not in FIELDS and k != "split"},
+                               ensure_ascii=False) + "\n" for row in rows)

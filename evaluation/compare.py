@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import queries as Q  # noqa: E402
+import queries as Q
 
 
 def metrics(ranks):

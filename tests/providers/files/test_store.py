@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -16,7 +15,6 @@ from zimantic.providers.files import common as files_common
 from zimantic.providers.files.discovery import (
     discover_sources,
     files_dir_key,
-    files_loose_key,
 )
 from zimantic.providers.files.store import FilesContentStore
 

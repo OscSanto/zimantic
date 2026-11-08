@@ -11,9 +11,9 @@ from __future__ import annotations
 import mimetypes
 import posixpath
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Iterable, Mapping, Sequence
 
 SUPPORTED_KOLIBRI_VERSION = "0.19.5"
 SUPPORTED_VERSIONS = (SUPPORTED_KOLIBRI_VERSION,)
@@ -559,24 +559,24 @@ __all__ = [
     "DOCUMENT_PRESETS",
     "EXERCISE_KIND",
     "FILE_TABLE",
-    "FileRow",
-    "FileSelection",
     "HTML5_PRESETS",
     "LOCAL_FILE_TABLE",
     "MIGRATIONS_TABLE",
     "NODE_TABLE",
     "PINNED_CONTENT_MIGRATIONS",
+    "PINNED_RELEASE",
     "REQUIRED_COLUMNS",
     "REQUIRED_TABLES",
-    "PINNED_RELEASE",
     "SUPPORTED_HTML5_PRESETS",
     "SUPPORTED_KOLIBRI_VERSION",
     "SUPPORTED_VERSIONS",
-    "SchemaInfo",
     "THUMBNAIL_PRESETS",
     "TOPIC_KIND",
     "VIDEO_PRESETS",
+    "FileRow",
+    "FileSelection",
     "KolibriSchemaError",
+    "SchemaInfo",
     "detect_schema",
     "display_title",
     "extension_mimetype",

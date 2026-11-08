@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import pytest
-
 from zimantic.indexing.derived import SourceDerivedOperations
 from zimantic.providers.files.discovery import (
     discover_sources,

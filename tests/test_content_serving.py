@@ -427,8 +427,8 @@ def test_source_without_a_content_store_returns_404():
 
 def test_ambiguous_store_path_returns_404(site):
     client, _search, key = site
-    from zimantic.content.zim_paths import AmbiguousZimPathError
     import zimantic.providers.zim.store as store_module
+    from zimantic.content.zim_paths import AmbiguousZimPathError
 
     with patch.object(
         store_module,

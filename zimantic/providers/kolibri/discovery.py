@@ -11,8 +11,9 @@ import base64
 import logging
 import re
 import time
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 from urllib.parse import quote
 
 from ...contracts import SourceInfo
@@ -134,7 +135,7 @@ class ChannelRow:
     order: int | None = None
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> "ChannelRow":
+    def from_row(cls, row: Mapping[str, Any]) -> ChannelRow:
         keys = set(row.keys())
         return cls(
             id=str(row["id"]),
@@ -173,7 +174,7 @@ class NodeRow:
     lang_id: str | None = None
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> "NodeRow":
+    def from_row(cls, row: Mapping[str, Any]) -> NodeRow:
         keys = set(row.keys())
         return cls(
             id=str(row["id"]),
@@ -647,7 +648,6 @@ def discover_channel_sources(
     )
 
     scopes: list[SourceScope] = []
-    collapsed = False
     if granularity == "collection":
         scopes = [
             SourceScope("root", node_id=channel.id, title=label)
@@ -666,7 +666,6 @@ def discover_channel_sources(
                 SourceScope("root", node_id=channel.id, title=label)
             ]
         elif candidate_count > max_sources:
-            collapsed = True
             logger.warning(
                 "zimantic: Kolibri channel %s has more than %d sources; "
                 "collapsing it to one channel source (keys change; rebuild required)",
@@ -733,17 +732,17 @@ def discover_channel_sources(
 
 __all__ = [
     "COLLAPSED_IDENTIFIER",
-    "ChannelDiscovery",
-    "ChannelRow",
     "DEFAULT_MAX_ENTRIES",
     "DEFAULT_MAX_SOURCES",
+    "ROOT_IDENTIFIER",
+    "UNGROUPED_IDENTIFIER",
+    "ChannelDiscovery",
+    "ChannelRow",
     "FileRow",
     "KolibriSource",
     "KolibriTraversalError",
     "NodeRow",
-    "ROOT_IDENTIFIER",
     "SourceScope",
-    "UNGROUPED_IDENTIFIER",
     "candidate_nodes",
     "channel_thumbnail",
     "classify_scope",

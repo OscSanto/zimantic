@@ -459,14 +459,13 @@ def test_same_origin_redirect_chains_are_bounded():
             from zimantic.providers.kiwix.catalog import _open_url
 
             request = Request(kiwix.url + "/loop0")
-            with pytest.raises(ValueError, match="too many"):
-                with _open_url(
-                    None,
-                    request,
-                    timeout=2.0,
-                    origin=("http", urlsplit(kiwix.url).netloc),
-                ):
-                    pass
+            with pytest.raises(ValueError, match="too many"), _open_url(
+                None,
+                request,
+                timeout=2.0,
+                origin=("http", urlsplit(kiwix.url).netloc),
+            ):
+                pass
         finally:
             runtime.close()
     finally:
@@ -522,7 +521,7 @@ def test_max_sources_per_search_follows_configuration():
 
 
 def test_search_republishes_background_catalog_sources(monkeypatch, tmp_path):
-    import zimantic.providers.kiwix.catalog as catalog
+    from zimantic.providers.kiwix import catalog
     from zimantic.search import Search
 
     fake = _FakeKiwix(
@@ -553,7 +552,7 @@ def test_search_republishes_background_catalog_sources(monkeypatch, tmp_path):
 def test_no_network_access_without_a_configured_kiwix_collection(
     monkeypatch, tmp_path
 ):
-    import zimantic.providers.kiwix.catalog as catalog
+    from zimantic.providers.kiwix import catalog
     from zimantic.search import Search
 
     def fail(*_args, **_kwargs):

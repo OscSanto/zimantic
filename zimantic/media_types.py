@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 MEDIA_TYPE_ORDER: tuple[str, ...] = ("text", "video", "audio", "image", "other")
 

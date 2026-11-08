@@ -16,10 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-WORDS = (
-    "library article knowledge search index vector lexical body caption "
-    "image audio video archive reader source collection document"
-).split()
+WORDS = ["library", "article", "knowledge", "search", "index", "vector", "lexical", "body", "caption", "image", "audio", "video", "archive", "reader", "source", "collection", "document"]
 
 
 def _rows(count: int, words_per_doc: int) -> list[str]:

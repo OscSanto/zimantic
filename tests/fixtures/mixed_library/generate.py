@@ -37,11 +37,7 @@ DEFAULT_ZIM_ENTRIES = 200
 MEDIA_FIXTURES = Path(__file__).resolve().parents[1] / "media"
 
 _TOPICS = ("Mathematics", "Biology", "Geography")
-_WORDS = (
-    "library article knowledge search index vector lexical body caption "
-    "image audio video archive reader source collection document algebra "
-    "biology geography climate medicine history mathematics physics"
-).split()
+_WORDS = ["library", "article", "knowledge", "search", "index", "vector", "lexical", "body", "caption", "image", "audio", "video", "archive", "reader", "source", "collection", "document", "algebra", "biology", "geography", "climate", "medicine", "history", "mathematics", "physics"]
 
 
 def _digest(value: str) -> str:

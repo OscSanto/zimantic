@@ -511,7 +511,7 @@ def run_worker(args, action, variant, output, extra=()):
         "--query-repeats", str(args.query_repeats), "--limit", str(args.limit),
         *extra,
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode:
         print(result.stderr, file=sys.stderr)
         result.check_returncode()

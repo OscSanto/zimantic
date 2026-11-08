@@ -9,12 +9,12 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
+from media_helpers import sample
+
 from zimantic.providers.base import ProviderContext
 from zimantic.providers.config import KolibriConfig, RuntimeConfig
 from zimantic.providers.kolibri import KolibriProvider
 from zimantic.providers.kolibri.discovery import ChannelRow, SourceScope
-
-from media_helpers import sample
 
 SCHEMA = """
 CREATE TABLE django_migrations (

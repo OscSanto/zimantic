@@ -13,9 +13,10 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from ...catalog import SourceCatalog, SourceRecord, catalog_path
 from ...content.serving import MAX_ICON_BYTES

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from zimantic.providers.kolibri import SnapshotError, SnapshotManager
+from zimantic.providers.kolibri import KolibriProvider, SnapshotError, SnapshotManager
 from zimantic.providers.kolibri.discovery import kolibri_node_source_key
 
 from .helpers import (
@@ -19,7 +19,6 @@ from .helpers import (
     open_runtime,
     runtime_config,
 )
-from zimantic.providers.kolibri import KolibriProvider
 
 
 def _signature(path: Path):

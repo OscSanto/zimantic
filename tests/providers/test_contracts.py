@@ -41,8 +41,8 @@ def test_contract_modules_import_without_runtime_dependencies():
 
 
 def test_content_store_and_provider_exports_are_the_same_types():
-    import zimantic.content.store as store
-    import zimantic.providers.base as base
+    from zimantic.content import store
+    from zimantic.providers import base
 
     assert base.ContentStore is store.ContentStore
     assert base.ContentEntry is store.ContentEntry
@@ -151,7 +151,7 @@ def test_result_document_id_encoding_is_unambiguous():
     # The UTF-8 byte-length prefix makes the pair reconstructible.
     encoded = encode_document_id("é:x", "path")
     length, rest = encoded.split(":", 1)
-    assert int(length) == len("é:x".encode("utf-8"))
+    assert int(length) == len("é:x".encode())
     assert rest == "é:xpath"
 
 

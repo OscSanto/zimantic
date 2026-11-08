@@ -16,18 +16,18 @@ import logging
 import multiprocessing
 import os
 import re
-import shutil
 import sqlite3
 import stat
 import tempfile
 import unicodedata
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 from ..scoped_settings import FILTER_KEYS, SCOPED_KEYS, parse_scoped_settings
-from .types import DerivedTextInput, DerivedTextProducer
+from .types import DerivedTextInput
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +350,7 @@ def parse_source_overrides(
     unknown key is retained here rather than being reported as an error during
     config loading.
     """
-    names = set(collection_names)
+    set(collection_names)
     result: dict[str, SourceDerivedOperations] = {}
     configured_keys: set[str] = set()
     if isinstance(collections, Mapping):
@@ -954,7 +954,7 @@ class DerivedTextStage:
         if engine_function is None:
             return "", f"{operation} engine {engine!r} is unavailable"
         try:
-            spool, digest, size = spool_input(
+            spool, digest, _size = spool_input(
                 input,
                 max_bytes=min(max(1, int(cap)), self.config.max_spool_bytes),
                 directory=self.spool_directory,
@@ -988,18 +988,18 @@ __all__ = [
     "ASR_ENGINES",
     "DERIVED_ORDER",
     "DERIVED_TEXT_KEYS",
-    "DerivedContribution",
-    "DerivedResult",
-    "DerivedTextCache",
-    "DerivedTextConfig",
-    "DerivedTextStage",
-    "DerivedWorkerPool",
     "OPERATION_NOT_CHECKED",
     "OPERATION_OFF",
     "OPERATION_PARTIAL",
     "OPERATION_READY",
     "OPERATION_STATES",
     "OPERATION_UNAVAILABLE",
+    "DerivedContribution",
+    "DerivedResult",
+    "DerivedTextCache",
+    "DerivedTextConfig",
+    "DerivedTextStage",
+    "DerivedWorkerPool",
     "SourceDerivedOperations",
     "compose_body",
     "derived_text_preview",

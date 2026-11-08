@@ -185,7 +185,7 @@ def test_source_key_uses_basename_for_a_single_file_collection(tmp_path):
     zims.mkdir()
     archive = zims / "manual.zim"
     _create_zim(archive)
-    config, batch, runtime = _open(tmp_path, archive)
+    _config, batch, runtime = _open(tmp_path, archive)
     try:
         expected = zim_source_key("library", "manual.zim")
         assert [source.key for source in runtime.library_sources()] == [expected]
@@ -237,13 +237,13 @@ def test_relocating_a_root_preserves_keys(tmp_path):
     second_root.mkdir()
     _create_zim(first_root / "manual.zim")
     _create_zim(second_root / "manual.zim")
-    config, batch, runtime = _open(tmp_path, first_root)
+    _config, batch, runtime = _open(tmp_path, first_root)
     try:
         first_keys = {source.key for source in runtime.library_sources()}
     finally:
         runtime.close()
         batch.close()
-    config, batch, runtime = _open(tmp_path, second_root)
+    _config, batch, runtime = _open(tmp_path, second_root)
     try:
         second_keys = {source.key for source in runtime.library_sources()}
     finally:
@@ -257,7 +257,7 @@ def test_unreadable_archive_is_library_only(tmp_path):
     zims.mkdir()
     _create_zim(zims / "manual.zim")
     (zims / "broken.zim").write_bytes(b"not a zim")
-    config, batch, runtime = _open(tmp_path, zims)
+    _config, batch, runtime = _open(tmp_path, zims)
     try:
         assert len(runtime.sources) == 1
         titles = {source.title for source in runtime.library_sources()}
@@ -272,7 +272,7 @@ def test_store_reads_articles_and_the_homepage(tmp_path):
     zims = tmp_path / "zims"
     zims.mkdir()
     _create_zim(zims / "manual.zim")
-    config, batch, runtime = _open(tmp_path, zims)
+    _config, batch, runtime = _open(tmp_path, zims)
     try:
         source = runtime.sources[0]
         store = runtime.content_store(source)
@@ -325,7 +325,7 @@ def test_built_generation_is_discovered_and_searchable(tmp_path):
         fast=True,
     )
 
-    config, batch, runtime = _open(tmp_path, zims, index_dir=indexes)
+    _config, batch, runtime = _open(tmp_path, zims, index_dir=indexes)
     try:
         source = runtime.sources[0]
         index = runtime.indexes[source.key]
@@ -390,7 +390,7 @@ def test_start_faiss_loads_after_core_binds_defer_false(tmp_path, caplog):
             {"batch_size": 2},
         )
 
-    config, batch, runtime = _open(tmp_path, zims, index_dir=indexes)
+    _config, batch, runtime = _open(tmp_path, zims, index_dir=indexes)
     try:
         runtime.bind_search(semantic=True, defer_faiss=False)
         with (
@@ -538,7 +538,7 @@ def test_source_media_types_come_from_the_mime_counter():
 
 
 def test_key_collision_warns_with_relative_paths_only(tmp_path, monkeypatch, caplog):
-    import zimantic.providers.zim.discovery as discovery
+    from zimantic.providers.zim import discovery
 
     zims = tmp_path / "zims"
     (zims / "a").mkdir(parents=True)
@@ -570,7 +570,7 @@ def test_directory_collection_discovers_nested_zim_files_only(tmp_path):
     _create_zim(zims / "manual.zim")
     _create_zim(zims / "nested" / "other.zim")
     (zims / "notes.txt").write_text("not an archive")
-    config, batch, runtime = _open(tmp_path, zims)
+    _config, batch, runtime = _open(tmp_path, zims)
     try:
         assert {source.key for source in runtime.library_sources()} == {
             zim_source_key("library", "manual.zim"),

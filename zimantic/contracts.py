@@ -1,9 +1,10 @@
 """Shared data contracts for source discovery and progressive search."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, TypedDict
+from typing import Any, Literal, TypedDict
 
 from .media_types import ordered_media_types
 

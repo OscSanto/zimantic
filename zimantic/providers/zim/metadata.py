@@ -7,7 +7,6 @@ and core search must not import it.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import posixpath
 import re
@@ -16,12 +15,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ...catalog import absolute_path
 from ...content.reader import resolve_archive_href
+from ...contracts import SourceInfo
 from ...media_types import classify_mime_counts, ordered_media_types
 from ...redirects import resolve_redirect_entry
 from ...searching.query import INTENT_RULES
-from ...contracts import SourceInfo
-from ...catalog import absolute_path
 
 logger = logging.getLogger(__name__)
 

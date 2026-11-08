@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 from zimantic.providers.kolibri.discovery import (
     kolibri_collapsed_key,
@@ -96,7 +95,7 @@ def test_max_sources_collapses_and_root_override_does_not_apply(tmp_path, caplog
     fixture = make_two_channel_fixture(tmp_path)
     index_dir = tmp_path / "indexes"
     config = kolibri_config(fixture, max_sources=1)
-    runtime, batch, runtime_config_value = open_runtime(index_dir, config)
+    runtime, batch, _runtime_config_value = open_runtime(index_dir, config)
     try:
         assert [source.key for source in runtime.library_sources()] == [
             kolibri_collapsed_key("kolibri", "channel-a")

@@ -7,7 +7,8 @@ search pipeline in tests without any of those optional dependencies.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, NamedTuple, Protocol, Sequence, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 # SQLite row ids written to docs.rowid, vecs.id, and FAISS are non-negative
 # signed 63-bit integers.  Keeping the bound in one place lets providers reject
@@ -114,12 +115,12 @@ class DerivedTextProducer(Protocol):
 
 
 __all__ = [
+    "MAX_ROW_ID",
     "DerivedTextInput",
     "DerivedTextProducer",
     "EntryProducer",
     "EntryRecord",
     "IndexSource",
-    "MAX_ROW_ID",
     "NativeHit",
     "NativeSearcher",
 ]

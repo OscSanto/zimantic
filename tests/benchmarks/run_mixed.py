@@ -143,6 +143,7 @@ def run(
                 env=env,
                 text=True,
                 capture_output=True,
+                check=False,
             )
         except BaseException:
             xdg_config.cleanup()

@@ -510,7 +510,7 @@ class ServerTests(unittest.TestCase):
                 "content": body,
             },
             create=True,
-        ), patch.object(self.search, "source_dicts", lambda: []):
+        ), patch.object(self.search, "source_dicts", list):
             shell = self.client.get("/content/manual/page")
 
         self.assertEqual(shell.status_code, 200)

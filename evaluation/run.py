@@ -24,11 +24,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import queries as Q  # noqa: E402
+import queries as Q
 
 RESULTS = Path(__file__).parent / "results"
 class Unsupported(Exception):
@@ -213,7 +213,7 @@ def main(argv=None):
         print(f"warning: left out results from other sources ({', '.join(f'{z}: {c}' for z, c in sorted(foreign.items()))}); "
               "the server did not scope the search to the requested ZIM")
     meta = {"label": args.label, "engine": args.engine, "url": args.url, "commit": args.commit, "k": args.k,
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), "unsupported": unsupported}
+            "date": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"), "unsupported": unsupported}
     if args.source_key:
         meta["source_key"] = args.source_key
     if isinstance(config.get("max_results"), int):

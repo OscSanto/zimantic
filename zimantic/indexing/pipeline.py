@@ -16,13 +16,14 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from concurrent.futures import Future
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import Any, Mapping
+from typing import Any
 
 from tqdm import tqdm
 
@@ -269,7 +270,6 @@ _DEFAULT_BODY_BUDGET = BodyBudget()
 
 def shared_body_budget(max_body_text_bytes: int) -> BodyBudget:
     """Return the process-wide budget, growing it to admit one max body."""
-    global _DEFAULT_BODY_BUDGET
     if max_body_text_bytes > _DEFAULT_BODY_BUDGET.capacity:
         with _DEFAULT_BODY_BUDGET._condition:
             _DEFAULT_BODY_BUDGET.capacity = max_body_text_bytes
@@ -729,7 +729,7 @@ def _index_entries(
                         for contribution in outcome.contributions
                     ]
                     if contributed:
-                        body, body_truncated, used = compose_body(
+                        body, body_truncated, _used = compose_body(
                             row.body, contributed, max_body_text_bytes
                         )
                         row = row._replace(
@@ -1614,12 +1614,12 @@ def _faiss_training_step(n: int, cluster_centre_count: int) -> int:
 
 
 __all__ = [
+    "SCHEMA",
     "BodyBudget",
     "BuildError",
     "EmbeddingPipeline",
     "InsufficientSpaceError",
     "PartialEnrichmentError",
-    "SCHEMA",
     "SnapshotChangedError",
     "build_index",
     "shared_body_budget",
