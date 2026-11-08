@@ -301,7 +301,10 @@ class _TestZimRuntime(IndexedRuntime, EnrichingRuntime):
         return True
 
     def close(self):
-        pass
+        indexes = list(self.core.indexes.values())
+        self.core.indexes.clear()
+        for index in indexes:
+            index.close()
 
 
 class RuntimeCapabilityTests(unittest.TestCase):
@@ -1986,6 +1989,22 @@ class GracefulDegradationTests(unittest.TestCase):
             "zim_dir": str(tmp),
             "candidate_count": 16,
         }
+
+    def test_close_releases_fixture_index_connections(self):
+        with _temp_dir(self) as tmp:
+            _write_index(tmp, "manual")
+            search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search.close)
+            _attach_index_fixtures(search)
+            index = search.indexes["manual"]
+            worker_db = search._executor.submit(index.db_for_thread).result(timeout=5)
+
+            search.close()
+
+            for db in (index.db, worker_db):
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    db.execute("SELECT 1")
+            self.assertEqual(search.indexes, {})
 
     def test_embedding_model_warning_includes_model_file_path(self):
         with _temp_dir(self) as tmp:

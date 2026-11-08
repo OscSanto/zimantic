@@ -253,6 +253,7 @@ _MIME_BY_EXTENSION: dict[str, str] = {
     ".vtt": "text/vtt",
     ".csv": "text/csv",
     ".tsv": "text/tab-separated-values",
+    ".zip": "application/zip",
 }
 
 _NATIVE_DOCUMENT_EXTENSIONS = frozenset(

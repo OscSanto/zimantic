@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import shutil
 import subprocess
 from pathlib import Path
@@ -105,6 +106,16 @@ def test_manifest_matches_every_committed_file():
         assert (MEDIA_ROOT / path).is_file(), path
         assert extension_mimetype(path) == record["mimetype"], path
         assert content_family(path) == record["media_family"], path
+
+
+@pytest.mark.parametrize("path", ["archive.zip", "archive.ZIP"])
+def test_zip_mimetype_is_independent_of_system_mapping(monkeypatch, path):
+    monkeypatch.setattr(
+        mimetypes,
+        "guess_type",
+        lambda *_args, **_kwargs: ("application/x-zip-compressed", None),
+    )
+    assert extension_mimetype(path) == "application/zip"
 
 
 def test_caption_samples_parse_to_known_text():

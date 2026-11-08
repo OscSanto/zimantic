@@ -57,7 +57,7 @@ console.log(JSON.stringify({{
         result = subprocess.run(
             [NODE, "-e", script],
             check=True,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
         payload = json.loads(result.stdout)
@@ -114,7 +114,7 @@ console.log(JSON.stringify({{
         result = subprocess.run(
             [NODE, "-e", script],
             check=True,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
         payload = json.loads(result.stdout)
@@ -211,7 +211,7 @@ const summarize = () => {{
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
         result = subprocess.run(
-            [NODE, "-e", script], text=True, capture_output=True
+            [NODE, "-e", script], encoding="utf-8", capture_output=True
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
@@ -268,7 +268,7 @@ console.log(JSON.stringify({{
         result = subprocess.run(
             [NODE, "-e", script],
             check=True,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
         payload = json.loads(result.stdout)
@@ -304,7 +304,7 @@ console.log(JSON.stringify({{full, display, collection}}));
         result = subprocess.run(
             [NODE, "-e", script],
             check=True,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
         payload = json.loads(result.stdout)
@@ -360,7 +360,7 @@ console.log(JSON.stringify(layout.groups.map((group) => ({{
         result = subprocess.run(
             [NODE, "-e", script],
             check=True,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
         payload = json.loads(result.stdout)
@@ -403,7 +403,7 @@ console.log(JSON.stringify({{zero, one, decimal, high}}));
         result = subprocess.run(
             [NODE, "-e", script],
             check=True,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
         payload = json.loads(result.stdout)
@@ -445,7 +445,7 @@ console.log(JSON.stringify({{inside, outside, narrowed, same, cleared}}));
         result = subprocess.run(
             [NODE, "-e", script],
             check=True,
-            text=True,
+            encoding="utf-8",
             capture_output=True,
         )
         payload = json.loads(result.stdout)
