@@ -572,7 +572,7 @@ class TestSourcesAndPrune:
             'path = "files"\n',
         )
         cfg = load_config(config, warn=lambda _message: None)
-        search = Search(cfg, semantic=False)
+        search = Search(cfg["runtime_config"], semantic=False)
         try:
             assert "zim:library" in search.collections
             deadline = time.monotonic() + 5

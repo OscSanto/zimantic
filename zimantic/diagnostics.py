@@ -19,7 +19,9 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable
+
+from .providers.config import RuntimeConfig
 
 PRIVATE_PLACEHOLDER = "<private>"
 
@@ -52,37 +54,16 @@ def _add_path(values: set[str], value: Any) -> None:
         pass
 
 
-def private_locators(
-    cfg: Mapping[str, Any] | None = None,
-    runtime_config: Any | None = None,
-) -> tuple[str, ...]:
-    """Return configured private path strings without publishing their order.
-
-    The list is used only for string replacement.  It intentionally accepts
-    both the older dict-style settings and a :class:`RuntimeConfig` so callers
-    do not need provider-specific knowledge.
-    """
+def private_locators(config: RuntimeConfig) -> tuple[str, ...]:
+    """Return configured private paths for diagnostic string replacement."""
     values: set[str] = set()
-    if isinstance(cfg, Mapping):
-        for key in (
-            "zim_dir",
-            "model_dir",
-            "index_dir",
-            "config_dir",
-            "config_path",
-        ):
-            _add_path(values, cfg.get(key))
-        for entry in cfg.get("collections") or ():
-            for attribute in ("path", "database_path", "storage"):
-                _add_path(values, getattr(entry, attribute, None))
-    collections = getattr(runtime_config, "collections", ()) if runtime_config else ()
-    for entry in collections:
+    for key in ("zim_dir", "model_dir", "index_dir"):
+        _add_path(values, config.get(key))
+    for entry in config.collections:
         for attribute in ("path", "database_path", "storage"):
             _add_path(values, getattr(entry, attribute, None))
-    config_path = getattr(runtime_config, "config_path", None)
-    _add_path(values, config_path)
-    config_dir = getattr(runtime_config, "config_dir", None)
-    _add_path(values, config_dir)
+    _add_path(values, config.config_path)
+    _add_path(values, config.config_dir)
     # Longest first so a nested locator is replaced before its parent.
     return tuple(sorted(values, key=len, reverse=True))
 

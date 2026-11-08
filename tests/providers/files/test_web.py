@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -39,8 +40,6 @@ def files_site(tmp_path):
         batch.close()
     search_cfg = {
         "index_dir": str(index_dir),
-        "runtime_config": runtime_config,
-        "collections": (config,),
         "candidate_count": 16,
         "page_size": 10,
         "max_results": 100,
@@ -49,7 +48,7 @@ def files_site(tmp_path):
         "max_html_bytes": 512 << 10,
         "preview_limit": 10,
     }
-    search = Search(search_cfg, semantic=False)
+    search = Search(replace(runtime_config, settings=search_cfg), semantic=False)
     client = TestClient(create_app(search))
     key = files_dir_key("modules", "algebra")
     try:

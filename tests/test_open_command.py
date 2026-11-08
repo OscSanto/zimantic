@@ -23,7 +23,7 @@ from zimantic.open_scope import (
     build_open_scope,
     expand_open_paths,
 )
-from zimantic.providers.config import ZimConfig
+from zimantic.providers.config import RuntimeConfig, ZimConfig
 from zimantic.providers.zim.discovery import scan_collection, zim_source_key
 from zimantic.search import Search
 from zimantic.web.app import create_app
@@ -70,12 +70,14 @@ def _create_zim(path: Path, *, title: str, indexing: bool = True) -> Path:
 
 
 def _config(root: Path) -> dict:
-    return {
+    cfg = {
         "index_dir": str(root / "indexes"),
         "model_dir": str(root / "model"),
         "collections": (),
         "page_size": 10,
     }
+    cfg["runtime_config"] = RuntimeConfig(settings=cfg)
+    return cfg
 
 
 def _scan(root: Path, name: str, *, archive_factory=Archive) -> SourceCatalog:
@@ -279,7 +281,7 @@ class TestScopedRuntime:
         paths = expand_open_paths(archives)
         cfg = _config(tmp_path)
         scope = build_open_scope(paths, cfg)
-        return Search(cfg, semantic=semantic, scope=scope), scope
+        return Search(cfg["runtime_config"], semantic=semantic, scope=scope), scope
 
     def test_scope_exposes_only_selected_archives_in_cli_order(self, tmp_path):
         zims = tmp_path / "zims"
@@ -402,7 +404,7 @@ class TestScopedRuntime:
         zims.mkdir()
         _create_zim(zims / "manual.zim", title="Manual")
         cfg = _config(tmp_path)
-        search = Search(cfg, semantic=False)
+        search = Search(cfg["runtime_config"], semantic=False)
         try:
             assert search.open_scope is None
             assert search.source_neighbors("anything") is None

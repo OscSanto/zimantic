@@ -83,6 +83,7 @@ def serve(args):
     from zimantic.embed import Embedder
     from zimantic.indexing.locator import IndexLocator
     from zimantic.indexing.pipeline import build_index
+    from zimantic.providers.config import RuntimeConfig, ZimConfig
     from zimantic.providers.zim.entries import ArchiveEntryProducer
     from zimantic.search import Search
     from zimantic.settings import DESKTOP
@@ -96,10 +97,14 @@ def serve(args):
         "cache_size": 0, "cache_bytes": 0,
     }
     metrics = {"save_seconds": 0.0, "body_docs": 0}
+    collections = (ZimConfig(name="library", path=cfg["zim_dir"]),)
     with variant_patches(args.variant, metrics):
         embedder = Embedder(args.model, threads=args.threads, device="cpu")
         embedder.embed(["passage: warm up"])
-        search = Search(cfg, embedder=embedder, semantic=True)
+        search = Search(
+            RuntimeConfig(settings=cfg, collections=collections),
+            embedder=embedder, semantic=True,
+        )
         lexical = None
         try:
             sources = [
@@ -133,7 +138,11 @@ def serve(args):
                 time.sleep(0.02)
             search.start_fulltext_isolation()
             lexical = Search(
-                {**cfg, "web_base_path": "/lexical"}, semantic=False,
+                RuntimeConfig(
+                    settings={**cfg, "web_base_path": "/lexical"},
+                    collections=collections,
+                ),
+                semantic=False,
             )
             lexical.start_fulltext_isolation()
             lease = locator.paths(source)

@@ -17,15 +17,10 @@ from .helpers import (
 
 def _search(tmp_path, config):
     index_dir = tmp_path / "indexes"
-    runtime_config_value = runtime_config(index_dir, config)
-    cfg = {
-        "index_dir": str(index_dir),
-        "collections": (config,),
-        "runtime_config": runtime_config_value,
-        "web_base_path": "",
-        "page_size": 10,
-    }
-    return Search(cfg, semantic=False)
+    return Search(
+        runtime_config(index_dir, config, web_base_path="", page_size=10),
+        semantic=False,
+    )
 
 
 def test_source_metadata_and_public_payload_hide_locators(tmp_path):

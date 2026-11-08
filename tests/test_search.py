@@ -37,6 +37,7 @@ from zimantic.providers.zim.search import (
 from zimantic.searching.index import IndexHandle, _nprobe
 from zimantic.searching.sources import _html_attribute
 from zimantic.indexing import schema as index_schema
+from zimantic.providers.config import RuntimeConfig, ZimConfig
 
 
 Search = _SearchBase
@@ -106,7 +107,8 @@ def _bare_search(cfg):
     search._discovery_batches = []
     search._process_token = "test"
     search._aggregate_revision = 0
-    search.runtime_config = None
+    search.runtime_config = RuntimeConfig(settings=cfg)
+    search.refresh_collections = lambda **_kwargs: search.source_dicts()
     search.providers = {}
     search._defer_faiss = False
     search.fulltext_pool = None
@@ -115,10 +117,9 @@ def _bare_search(cfg):
     return search
 
 
-def _zim_runtime_config(path):
-    from zimantic.providers.config import RuntimeConfig, ZimConfig
-
+def _zim_runtime_config(path, **settings):
     return RuntimeConfig(
+        settings=settings,
         collections=(ZimConfig(name="library", path=str(path)),)
     )
 
@@ -3030,7 +3031,7 @@ class SourceScopeTests(unittest.TestCase):
     def test_search_uses_an_in_memory_catalog_without_index_dir(self):
         with _temp_dir(self) as tmp:
             search = Search(
-                {"runtime_config": _zim_runtime_config(tmp)},
+                _zim_runtime_config(tmp),
                 semantic=False,
                 archive_factory=object,
             )
@@ -3539,11 +3540,7 @@ class CatalogLocationTests(unittest.TestCase):
     def test_search_passes_its_archive_factory_to_the_catalog(self):
         with _temp_dir(self) as tmp:
             search = Search(
-                {
-                    "runtime_config": _zim_runtime_config(
-                        Path(tmp) / "missing"
-                    )
-                },
+                _zim_runtime_config(Path(tmp) / "missing"),
                 semantic=False,
                 archive_factory=object,
             )
@@ -3562,7 +3559,10 @@ class CatalogLocationTests(unittest.TestCase):
                 "page_size": 50,
                 "max_results": 10,
             }
-            search = Search(cfg, semantic=False, archive_factory=object)
+            search = Search(
+                RuntimeConfig(settings=cfg, page_size=50),
+                semantic=False, archive_factory=object,
+            )
             self.addCleanup(search.close)
             self.assertEqual(search.page_size, 10)
 
@@ -3578,12 +3578,11 @@ class CatalogLocationTests(unittest.TestCase):
             )
             cfg = {
                 "index_dir": str(index_dir),
-                "runtime_config": _zim_runtime_config(index_dir),
                 "candidate_count": 16,
                 "page_size": 10,
                 "max_results": 100,
             }
-            search = Search(cfg, semantic=False)
+            search = Search(_zim_runtime_config(index_dir, **cfg), semantic=False)
             self.addCleanup(search.close)
             self.assertTrue((root / "catalog.sqlite").exists())
             self.assertFalse((index_dir / "catalog.sqlite").exists())

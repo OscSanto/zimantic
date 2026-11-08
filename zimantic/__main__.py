@@ -933,6 +933,7 @@ def _persist_unmatched_zim_paths(
     The real update takes the target-based config lock, rereads the config, and
     rechecks containment and name uniqueness immediately before replacement.
     """
+    from dataclasses import replace
     from types import SimpleNamespace
 
     from .config_writer import append_collection, config_target_path
@@ -996,6 +997,11 @@ def _persist_unmatched_zim_paths(
         if parsed_entry is None:
             continue
         cfg["collections"] = tuple(cfg.get("collections") or ()) + (parsed_entry,)
+        cfg["runtime_config"] = replace(
+            cfg["runtime_config"],
+            settings={**cfg["runtime_config"].settings, "collections": cfg["collections"]},
+            collections=cfg["collections"],
+        )
         entries.append(parsed_entry)
         used_names.add(parsed_entry.name)
         appended.append(
@@ -1417,7 +1423,7 @@ def _sanitize_public_text(text: Any, cfg: dict) -> Any:
 
     return sanitize_public_text(
         text,
-        private_locators(cfg, cfg.get("runtime_config")),
+        private_locators(cfg["runtime_config"]),
     )
 
 
@@ -1682,6 +1688,8 @@ def _launch_browser(url: str) -> None:
 
 def _run_open(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     """Serve only the ZIM files named on the command line, in memory."""
+    from dataclasses import replace
+
     from .open_scope import OpenScopeError, build_open_scope, expand_open_paths
     from .search import Search
     from .web.app import bind_local_socket, run_server
@@ -1699,8 +1707,9 @@ def _run_open(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         paths = expand_open_paths(args.paths, max_sources=args.max_sources)
         # An open process is a direct loopback server, not a reverse-proxied
         # deployment. Generated links therefore start at the server root.
-        open_cfg = dict(cfg)
+        open_cfg = dict(cfg["runtime_config"].settings)
         open_cfg["web_base_path"] = ""
+        open_config = replace(cfg["runtime_config"], settings=open_cfg)
         scope = build_open_scope(paths, open_cfg)
     except OpenScopeError as error:
         parser.error(str(error))
@@ -1717,7 +1726,7 @@ def _run_open(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
 
-    search = Search(open_cfg, semantic=not args.fast, scope=scope)
+    search = Search(open_config, semantic=not args.fast, scope=scope)
     try:
         if not args.fast:
             def _make_embedder():
@@ -1781,7 +1790,7 @@ def _run_serve(args, cfg: dict) -> None:
             "zimantic: --device is ignored with --fast (no embeddings are computed)"
         )
 
-    search = Search(cfg, semantic=not args.fast)
+    search = Search(cfg["runtime_config"], semantic=not args.fast)
     if not search.source_keys():
         configured = ", ".join(
             f"{kind} ({sum(1 for entry in cfg.get('collections') or () if entry.kind == kind)})"

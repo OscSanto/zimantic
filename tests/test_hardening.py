@@ -14,6 +14,7 @@ from zimantic.diagnostics import private_locators, public_cause, sanitize_public
 from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.indexing.types import EntryRecord
+from zimantic.providers.config import FilesConfig, KolibriConfig, RuntimeConfig
 
 
 class Producer:
@@ -45,7 +46,7 @@ class Producer:
 
 def test_public_diagnostics_redact_configured_and_windows_roots():
     root = "/srv/private/library"
-    locators = private_locators({"index_dir": root, "collections": []})
+    locators = private_locators(RuntimeConfig(settings={"index_dir": root}))
     text = (
         f"cannot read {root}/missing.html or {root} "
         r"or C:\Users\alice\private\db.sqlite3"
@@ -54,6 +55,47 @@ def test_public_diagnostics_redact_configured_and_windows_roots():
     assert root not in str(public)
     assert "alice" not in str(public)
     assert "<private>" in str(public)
+
+
+def test_runtime_config_redacts_all_provider_and_global_paths(tmp_path):
+    paths = [
+        tmp_path / name
+        for name in ("models", "indexes", "files", "kolibri", "database", "storage", "config")
+    ]
+    model, index, files, kolibri, database, storage, config_dir = paths
+    config_file = config_dir / "config.toml"
+    config = RuntimeConfig(
+        settings={"model_dir": model, "index_dir": index},
+        collections=(
+            FilesConfig(name="files", path=str(files)),
+            KolibriConfig(
+                name="kolibri", path=str(kolibri),
+                database_path=str(database), storage=str(storage),
+            ),
+        ),
+        config_path=config_file,
+        config_dir=config_dir,
+    )
+    text = " ".join(str(path) for path in [*paths, config_file]) + " /search"
+    public = sanitize_public_text(text, private_locators(config))
+    assert str(tmp_path) not in public
+    assert str(public).endswith(" /search")
+
+
+def test_appended_collection_remains_redacted(tmp_path):
+    from zimantic.__main__ import _persist_unmatched_zim_paths, _sanitize_public_text
+    from zimantic.settings import load_config
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_file = config_dir / "config.toml"
+    config_file.write_text("", encoding="utf-8")
+    archive = tmp_path / "private-source.zim"
+    archive.write_bytes(b"source")
+    cfg = load_config(config_file, warn=lambda _message: None)
+    _persist_unmatched_zim_paths(cfg, [archive])
+    assert _sanitize_public_text(f"cannot read {archive}", cfg) == "cannot read <private>"
+
 
 
 def test_public_cause_never_echoes_an_os_filename(tmp_path):

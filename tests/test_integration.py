@@ -19,7 +19,7 @@ from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.locator import IndexLocator
-from zimantic.providers.config import ZimConfig
+from zimantic.providers.config import RuntimeConfig, ZimConfig
 from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
 from zimantic.providers.zim.entries import ArchiveEntryProducer
 from zimantic.search import Search
@@ -213,15 +213,17 @@ ZIM_KEY = _zim_key()
 ZIM_URL = quote(ZIM_KEY, safe="")
 
 
-def _config(root: Path, *, max_results: int = 100) -> dict:
-    return {
-        "index_dir": str(root / "indexes"),
-        "collections": (ZimConfig(name="library", path=str(root / "zims")),),
-        "candidate_count": 16,
-        "page_size": 10,
-        "max_results": max_results,
-        "search_workers": 1,
-    }
+def _config(root: Path, *, max_results: int = 100) -> RuntimeConfig:
+    return RuntimeConfig(
+        settings={
+            "index_dir": str(root / "indexes"),
+            "candidate_count": 16,
+            "page_size": 10,
+            "max_results": max_results,
+            "search_workers": 1,
+        },
+        collections=(ZimConfig(name="library", path=str(root / "zims")),),
+    )
 
 
 def _close_search(search: Search) -> None:

@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,7 +168,7 @@ def _source_title(source: SourceInfo) -> str:
 
 
 class Search:
-    cfg: dict[str, Any] = {}
+    cfg: Mapping[str, Any] = {}
     semantic: bool = False
     open_scope: Any | None = None
     embedder: Any = None
@@ -178,7 +178,7 @@ class Search:
     _library_source_index: dict[str, SourceInfo] = {}
     _discovery_batches: tuple[Any, ...] = ()
     _collection_snapshots: dict[str, CollectionSnapshot] = {}
-    runtime_config: RuntimeConfig | None = None
+    runtime_config: RuntimeConfig
     providers: dict[str, Any] = {}
     _library_scan_at: float = 0.0
     _library_version_at: float = 0.0
@@ -255,13 +255,14 @@ class Search:
 
     def __init__(
         self,
-        cfg: dict,
+        config: RuntimeConfig,
         embedder=None,
         semantic: bool = True,
         archive_factory: Any | None = None,
         scope: Any | None = None,
     ):
-        self.cfg = cfg
+        self.runtime_config = config
+        self.cfg = cfg = config.settings
         self.embedder = embedder
         # An explicit, process-scoped ZIM selection for ``zimantic open``.
         # ``serve`` passes None and keeps configured-library discovery.
@@ -375,19 +376,7 @@ class Search:
         self._aggregate_revision = 0
         self._closed = False
         self._background_discovery_threads: list[threading.Thread] = []
-        runtime_config = cfg.get("runtime_config")
-        if not isinstance(runtime_config, RuntimeConfig):
-            runtime_config = RuntimeConfig(
-                settings=dict(cfg),
-                collections=tuple(cfg.get("collections") or ()),
-                config_dir=Path(cfg.get("config_dir") or Path.cwd()),
-                search_timeout_seconds=_float_config(
-                    cfg, "search_timeout_seconds", 30.0, 0.1, math.inf
-                ),
-                page_size=_int_config(cfg, "page_size", DEFAULT_PAGE_SIZE),
-            )
-        self.runtime_config = runtime_config
-        self.search_timeout_seconds = float(runtime_config.search_timeout_seconds)
+        self.search_timeout_seconds = float(config.search_timeout_seconds)
         # Provider runtimes own their discovery.  Kiwix starts a bounded
         # background catalog refresh when its batch opens, so an unreachable
         # server cannot delay startup.
@@ -400,12 +389,7 @@ class Search:
 
     def private_locators(self) -> tuple[str, ...]:
         """Configured filesystem locators that must never leave the process."""
-        locators = private_locators(self.cfg, getattr(self, "runtime_config", None))
-        if locators:
-            return locators
-        # Lightweight direct callers may only set an index directory.
-        value = self.cfg.get("index_dir")
-        return (str(value),) if value else ()
+        return private_locators(self.runtime_config)
 
     def public_error(self, error: BaseException) -> str:
         """Return a stable, locator-free cause for a provider failure."""
@@ -639,20 +623,14 @@ class Search:
             return self._library_source_index.get(str(identifier))
 
     def _configured_provider_entries(self) -> tuple[ProviderConfig, ...]:
-        runtime_config = self.runtime_config
-        return tuple(runtime_config.collections) if runtime_config else ()
+        return self.runtime_config.collections
 
     def refresh_collections(self, *, wait: bool = False) -> list[dict[str, Any]]:
         """Rerun provider discovery for configured entries and publish snapshots."""
         if self.open_scope is not None:
             return self._refresh_open_scope(wait=wait)
-        runtime_config = getattr(self, "runtime_config", None)
-        if runtime_config is None:
-            # Lightweight test doubles intentionally skip __init__; there is no
-            # configured entry set to rediscover.
-            return self.source_dicts()
         ctx = ProviderContext(
-            config=runtime_config,
+            config=self.runtime_config,
             index_dir=Path(self.cfg.get("index_dir") or "."),
             web_base_path=self.web_base_path,
             logger=logger,

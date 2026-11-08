@@ -531,13 +531,10 @@ def test_search_republishes_background_catalog_sources(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(catalog, "urlopen", fake)
     search = Search(
-        {
-            "index_dir": str(tmp_path),
-            "source_timeout": 1,
-            "collections": (
-                KiwixConfig(name="remote", server="http://kiwix"),
-            ),
-        },
+        RuntimeConfig(
+            settings={"index_dir": str(tmp_path), "source_timeout": 1},
+            collections=(KiwixConfig(name="remote", server="http://kiwix"),),
+        ),
         semantic=False,
     )
     try:
@@ -564,7 +561,7 @@ def test_no_network_access_without_a_configured_kiwix_collection(
 
     monkeypatch.setattr(catalog, "urlopen", fail)
     search = Search(
-        {"index_dir": str(tmp_path)},
+        RuntimeConfig(settings={"index_dir": str(tmp_path)}),
         semantic=False,
     )
     try:
