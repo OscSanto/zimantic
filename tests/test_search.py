@@ -19,12 +19,14 @@ from zimantic.search import (
     Search as _SearchBase,
     SearchBusyError,
     SearchQueryError,
+)
+from zimantic.searching.query import (
     _fulltext_query,
     _phrase_words,
     _query_terms,
+    _title_prefix_query,
     _title_query,
 )
-from zimantic.searching.query import _title_prefix_query
 from zimantic.providers.zim.metadata import (
     find_archive_icon_path as _find_archive_icon_path,
     source_icon_url as _source_icon_url,

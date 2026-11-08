@@ -23,7 +23,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from ..content.serving import content_disposition, is_inline_mimetype
 from ..diagnostics import public_cause
-from ..search import (
+from ..content.store import (
     ArticleNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,

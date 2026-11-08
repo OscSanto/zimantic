@@ -6,13 +6,13 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from zimantic.cache import QueryCache
-from zimantic.search import (
+from zimantic.content.store import (
     ArticleNotFoundError,
     ArticleSourceNotFoundError,
     ArticleTooLargeError,
     ArticleUnavailableError,
-    SearchQueryError,
 )
+from zimantic.search import SearchQueryError
 from zimantic.web.app import _article_http_error, create_app
 
 

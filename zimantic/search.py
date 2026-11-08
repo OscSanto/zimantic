@@ -18,7 +18,6 @@ from typing import Any
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
 from .content.path import normalize_article_path
 from .content.reader import DEFAULT_MAX_HTML_BYTES, DEFAULT_PREVIEW_CHARS
-from .content.serving import HEAD_READ_BYTES, RANDOM_ARTICLE_ATTEMPTS
 from .content.store import (
     ArticleData,
     ArticleNotFoundError,
@@ -49,18 +48,7 @@ from .searching.query import (
     _title_query,
 )
 from .searching.ranking import (
-    DEFAULT_LONG_QUERY,
-    FULLTEXT_WEIGHT,
-    KEYWORD_WEIGHT,
-    LONG_FULLTEXT_WEIGHT,
-    RRF_K,
-    SEMANTIC_WEIGHT,
-    _RankedAssessment,
-    _assess_ranked_document,
     _collect_ranked_candidates,
-    _deduplicate_ranked,
-    _render_ranked_document,
-    _rrf_scores,
     matched_by,
     rank_results,
 )
@@ -69,29 +57,10 @@ from .settings import normalize_web_base_path
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "ArticleNotFoundError",
-    "ArticleSourceNotFoundError",
-    "ArticleTooLargeError",
-    "ArticleUnavailableError",
-    "DEFAULT_LONG_QUERY",
-    "FULLTEXT_WEIGHT",
-    "HEAD_READ_BYTES",
-    "KEYWORD_WEIGHT",
-    "LONG_FULLTEXT_WEIGHT",
-    "RANDOM_ARTICLE_ATTEMPTS",
-    "RRF_K",
-    "SEMANTIC_WEIGHT",
     "Search",
+    "SearchBusyError",
+    "SearchQueryError",
     "SourceNavigation",
-    "_RankedAssessment",
-    "_assess_ranked_document",
-    "_collect_ranked_candidates",
-    "_deduplicate_ranked",
-    "_render_ranked_document",
-    "_rrf_scores",
-    "matched_by",
-    "normalize_article_path",
-    "rank_results",
 ]
 
 
