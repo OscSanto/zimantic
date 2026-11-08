@@ -92,8 +92,9 @@ keeps a setting from being fitted to the very queries used to judge it.
 Start the engines you want to measure, then:
 
 ```bash
-# a Zimantic server (current versions serve /search; v0.1.x served /api/search)
-python evaluation/run.py --engine zimantic --url http://localhost:8090 --label my-branch --commit abc1234
+# a current Zimantic server; select one query-file ZIM and its key from /sources
+python evaluation/run.py --engine zimantic --url http://localhost:8090 \
+  --label my-branch --commit abc1234 --zims archive_name --source-key '<canonical key>'
 
 # Kiwix's full-text search; --zim-dir lets redirects in its results be followed
 python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwix-serve --zim-dir ./zims
@@ -102,12 +103,11 @@ python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwi
 python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
 ```
 
-`run.py` detects the server API by probing `/api/zims`, `/zims`, `/library.json`,
-and `/sources` in that order. It reads `/config` when available. Only ZIMs the
-server reports as **local and searchable** are measured: remote Kiwix
-catalog books and readable-but-unindexed archives are skipped, and so are queries for ZIMs the server
-does not have (listed in the output). When the server reports the source for
-each hit, `run.py` ignores hits from another ZIM and reports them in a warning.
+`run.py` supports only the current Zimantic API. It reads `/sources?provider=zim`
+and `/config`, and requires the selected source to be **searchable**.
+Every result must carry a canonical source key; hits from another source are
+ignored and reported in a warning. Historical endpoints and source-name aliases
+are not supported.
 
 The server caps how many results it keeps per query (`max_results` in `/config`, 100 by default) and how
 long a query may be; `run.py` lowers `--k` to the cap and leaves out over-long queries instead of
@@ -119,7 +119,8 @@ results file), `--results-dir` (write the results somewhere other than `evaluati
 are saved as `<results-dir>/<label>.json`.
 
 Current servers expose canonical source keys rather than archive filenames.
-For a single-ZIM run, map the query file's ZIM name explicitly:
+Every Zimantic run requires exactly one `--zims` name and its `--source-key`.
+Map the query file's ZIM name explicitly:
 
 ```bash
 uv run python evaluation/run.py --engine zimantic --url http://127.0.0.1:8090 \
@@ -128,7 +129,8 @@ uv run python evaluation/run.py --engine zimantic --url http://127.0.0.1:8090 \
 ```
 
 This sends the canonical `source` filter and checks each hit against that key;
-display titles are not archive identities.
+display titles are not archive identities. Use the same label with `--append`
+to combine evaluations of multiple ZIMs.
 
 For a fair comparison, both runs use the same ZIM files. Each run also uses
 indexes built by its own code when the index format or build behavior differs.

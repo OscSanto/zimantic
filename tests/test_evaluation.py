@@ -1,4 +1,4 @@
-"""The evaluation runner against the API shapes current and older Zimantic servers expose.
+"""The evaluation runner against the current Zimantic API.
 
 The runner is deliberately outside the package (standard library only), so it is loaded by path.
 """
@@ -69,64 +69,46 @@ def stub(routes):
 
 
 def local(name, **extra):
-    source = {"mode": "local", "local_name": name, "name": name, "book": name,
-              "available": True, "searchable": True}
+    source = {"key": f"zim:library:{name}", "provider": "zim", "searchable": True}
     source.update(extra)
     return source
 
 
 class SourceDiscoveryTests(unittest.TestCase):
-    def test_library_json_is_preferred_and_only_indexed_local_zims_count(self):
+    def test_only_current_sources_endpoint_and_searchable_zims_are_used(self):
         routes = {
-            "/library.json": lambda query: (200, [
+            "/sources": lambda query: (200, [
                 local("zim_a_2026-01"),
                 local("zim_b_2026-01", searchable=False),
-                local("zim_c_2026-01", available=False),
-                {"mode": "kiwix", "name": "Wikipedia", "book": "wikipedia_en_all",
-                 "available": True, "searchable": True},
+                {"key": "kiwix:library:wiki", "provider": "kiwix", "searchable": True},
             ]),
-            "/sources": lambda query: (200, [local("zim_a_2026-01")]),
+            "/api/zims": lambda query: (200, ["old-zim"]),
         }
         with stub(routes) as server:
-            base, names = run.zimantic_api(server.url, 5)
-            self.assertEqual(base, server.url)
-            self.assertEqual(names, {"zim_a_2026-01"})
-            self.assertIn("/library.json", server.requests)
-            self.assertNotIn("/sources", server.requests)
+            self.assertEqual(run.zimantic_sources(server.url, 5), {"zim:library:zim_a_2026-01"})
+            self.assertEqual(server.requests, ["/sources?provider=zim"])
 
-    def test_sources_is_used_when_library_json_is_missing(self):
-        routes = {"/sources": lambda query: (200, [
-            local("zim_a_2026-01"),
-            {"mode": "kiwix", "name": "Wikipedia", "book": "wikipedia_en_all"},
-        ])}
-        with stub(routes) as server:
-            self.assertEqual(run.zimantic_api(server.url, 5), (server.url, {"zim_a_2026-01"}))
-
-    def test_empty_library_falls_through_to_sources(self):
-        routes = {
-            "/library.json": lambda query: (200, []),
-            "/sources": lambda query: (200, [local("zim_a_2026-01")]),
-        }
-        with stub(routes) as server:
-            self.assertEqual(run.zimantic_api(server.url, 5), (server.url, {"zim_a_2026-01"}))
-
-    def test_v01_api_is_still_found(self):
+    def test_historical_api_is_not_used(self):
         routes = {"/api/zims": lambda query: (200, [{"name": "zim_a_2026-01"}])}
         with stub(routes) as server:
-            base, names = run.zimantic_api(server.url, 5)
-            self.assertEqual(base, f"{server.url}/api")
-            self.assertEqual(names, {"zim_a_2026-01"})
+            with self.assertRaises(urllib.error.HTTPError):
+                run.zimantic_sources(server.url, 5)
+            self.assertEqual(server.requests, ["/sources?provider=zim"])
 
-    def test_no_known_api_exits(self):
-        with stub({}) as server:
-            with self.assertRaises(SystemExit):
-                run.zimantic_api(server.url, 5)
+    def test_empty_source_listing_is_not_replaced(self):
+        with stub({
+            "/sources": lambda query: (200, []),
+            "/library.json": lambda query: (200, [local("zim_a_2026-01")]),
+        }) as server:
+            self.assertEqual(run.zimantic_sources(server.url, 5), set())
+            self.assertEqual(server.requests, ["/sources?provider=zim"])
 
-    def test_config_is_optional(self):
+    def test_config_is_required(self):
         with stub({"/config": lambda query: (200, {"max_results": 100, "max_query_length": 4096})}) as server:
             self.assertEqual(run.zimantic_config(server.url, 5)["max_results"], 100)
         with stub({}) as server:
-            self.assertEqual(run.zimantic_config(server.url, 5), {})
+            with self.assertRaises(urllib.error.HTTPError):
+                run.zimantic_config(server.url, 5)
 
     def test_canonical_sources_exclude_other_providers_and_unindexed_zims(self):
         self.assertEqual(run.source_names([
@@ -138,22 +120,23 @@ class SourceDiscoveryTests(unittest.TestCase):
 
 
 class ResultSourceTests(unittest.TestCase):
-    def test_hits_are_matched_to_the_requested_zim(self):
-        self.assertTrue(run.belongs({"path": "A", "source": "zim_a_2026-01", "source_key": "zim_a"}, "zim_a_2026-01"))
-        self.assertTrue(run.belongs({"path": "A", "source": None, "source_key": "zim_a"}, "zim_a_2026-01"))
-        # Older servers do not report a source at all.
-        self.assertTrue(run.belongs({"path": "A", "source": None, "source_key": None}, "zim_a_2026-01"))
-        # Another ZIM, even one with the same article path, must not count.
-        self.assertFalse(run.belongs({"path": "A", "source": "zim_b_2026-01", "source_key": "zim_b"}, "zim_a_2026-01"))
-
-    def test_perma_ref_strips_release_dates_only(self):
-        self.assertEqual(run.perma_ref("wikipedia_en_medicine_maxi_2026-04"), "wikipedia_en_medicine_maxi")
-        self.assertEqual(run.perma_ref("wikipedia_en_medicine_maxi_2026-04-15"), "wikipedia_en_medicine_maxi")
-        self.assertEqual(run.perma_ref("cooking.stackexchange.com_en_all_2026-07"), "cooking.stackexchange.com_en_all")
-        self.assertEqual(run.perma_ref("manual"), "manual")
+    def test_hits_require_the_exact_source_key(self):
+        key = "zim:library:archive-abc123"
+        self.assertTrue(run.belongs({"path": "A", "source_key": key}, key))
+        self.assertFalse(run.belongs({"path": "A", "source": key, "source_key": "other"}, key))
+        self.assertFalse(run.belongs({"path": "A", "source": key}, key))
+        self.assertFalse(run.belongs({"path": "A", "source_key": None}, key))
 
 
 class RunnerTests(unittest.TestCase):
+    def test_zimantic_requires_one_zim_and_an_explicit_key(self):
+        base = ["--engine", "zimantic", "--url", "http://localhost:8090", "--label", "test"]
+        for extra in ([], ["--zims", "one"], ["--source-key", "zim:key"],
+                      ["--source-key", "zim:key", "--zims", "one", "two"]):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit) as error:
+                run.main(base + extra)
+            self.assertEqual(error.exception.code, 2)
+
     def _queries(self, root: Path):
         folder = root / "queries" / "zim_a_2026-01"
         folder.mkdir(parents=True)
@@ -174,21 +157,22 @@ class RunnerTests(unittest.TestCase):
         return root / "queries"
 
     def test_run_filters_sources_lengths_and_clamps_k(self):
+        key = "zim:library:zim_a_2026-01"
+
         def search(query):
             pattern = (query.get("q") or [""])[0]
-            zim = (query.get("zim") or [""])[0]
-            if zim != "zim_a_2026-01":
-                return 200, [{"path": "Ghost", "source": "zim_a_2026-01", "source_key": "zim_a"}]
+            self.assertEqual(query["source"], [key])
+            self.assertNotIn("zim", query)
             if pattern == "alpha":
                 return 200, [
-                    {"path": "Alpha", "source": "zim_a_2026-01", "source_key": "zim_a"},
-                    {"path": "Other", "source": "zim_b_2026-01", "source_key": "zim_b"},
+                    {"path": "Alpha#Section", "source_key": key},
+                    {"path": "Other", "source_key": "zim:library:other"},
                 ]
             # The server fell back to every source: this hit is not from the requested ZIM.
-            return 200, [{"path": "Beta", "source": "zim_b_2026-01", "source_key": "zim_b"}]
+            return 200, [{"path": "Beta", "source_key": "zim:library:other"}]
 
         routes = {
-            "/library.json": lambda query: (200, [local("zim_a_2026-01")]),
+            "/sources": lambda query: (200, [local("zim_a_2026-01")]),
             "/config": lambda query: (200, {"max_results": 5, "max_query_length": 10}),
             "/search": search,
         }
@@ -198,7 +182,8 @@ class RunnerTests(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 run.main(["--engine", "zimantic", "--url", server.url, "--label", "stub",
-                          "--queries", str(queries), "--results-dir", str(root / "results"), "--k", "20"])
+                          "--queries", str(queries), "--results-dir", str(root / "results"), "--k", "20",
+                          "--zims", "zim_a_2026-01", "--source-key", key])
             data = json.loads((root / "results" / "stub.json").read_text())
             self.assertEqual(data["meta"]["k"], 5)
             # A hit from another source is ignored and the query counts as a miss.
@@ -210,15 +195,16 @@ class RunnerTests(unittest.TestCase):
             self.assertNotIn("zim_a_2026-01|suite/long/000", data["results"])
             self.assertNotIn("gone_2025-01|suite/title/000", data["results"])
             text = output.getvalue()
-            self.assertIn("left out of this run: gone_2025-01", text)
             self.assertIn("1 queries longer than the server's 10-character limit", text)
             self.assertIn("left out results from other sources", text)
             self.assertFalse(any("x" * 30 in request for request in server.requests))
 
     def test_append_keeps_earlier_zims(self):
+        key = "zim:library:zim_a_2026-01"
         routes = {
-            "/library.json": lambda query: (200, [local("zim_a_2026-01")]),
-            "/search": lambda query: (200, [{"path": "Alpha", "source": "zim_a_2026-01", "source_key": "zim_a"}]),
+            "/sources": lambda query: (200, [local("zim_a_2026-01")]),
+            "/config": lambda query: (200, {"max_results": 100, "max_query_length": 4096}),
+            "/search": lambda query: (200, [{"path": "Alpha", "source_key": key}]),
         }
         with tempfile.TemporaryDirectory() as tmp, stub(routes) as server:
             root = Path(tmp)
@@ -230,7 +216,8 @@ class RunnerTests(unittest.TestCase):
                  "results": {"other_2025-01|suite/title/000": {"rank": 1, "ms": 1.0, "top": ["Other"]}}}))
             with redirect_stdout(io.StringIO()):
                 run.main(["--engine", "zimantic", "--url", server.url, "--label", "combined",
-                          "--queries", str(queries), "--results-dir", str(out), "--append"])
+                          "--queries", str(queries), "--results-dir", str(out), "--append",
+                          "--zims", "zim_a_2026-01", "--source-key", key])
             data = json.loads((out / "combined.json").read_text())
             self.assertEqual(data["results"]["other_2025-01|suite/title/000"]["rank"], 1)
             self.assertEqual(data["results"]["zim_a_2026-01|suite/title/000"]["rank"], 1)
@@ -240,7 +227,7 @@ class RunnerTests(unittest.TestCase):
 
         def search(query):
             self.assertEqual(query["source"], [key])
-            self.assertEqual(query["zim"], ["zim_a_2026-01"])
+            self.assertNotIn("zim", query)
             return 200, [
                 {"path": "Alpha", "source": "Display title", "source_key": key},
                 {"path": "Beta", "source": "Other title", "source_key": "zim:other"},
@@ -250,6 +237,7 @@ class RunnerTests(unittest.TestCase):
             "/sources": lambda query: (200, [
                 {"key": key, "provider": "zim", "searchable": True},
             ]),
+            "/config": lambda query: (200, {"max_results": 100, "max_query_length": 4096}),
             "/search": search,
         }) as server:
             root = Path(tmp)
@@ -263,8 +251,35 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(data["results"]["zim_a_2026-01|suite/title/000"]["rank"], 1)
             self.assertIsNone(data["results"]["zim_a_2026-01|suite/foreign/000"]["rank"])
 
+    def test_unsearchable_key_aborts_before_search(self):
+        with tempfile.TemporaryDirectory() as tmp, stub({
+            "/sources": lambda query: (200, [local("zim_a_2026-01", searchable=False)]),
+            "/config": lambda query: (200, {"max_results": 100, "max_query_length": 4096}),
+        }) as server:
+            root = Path(tmp)
+            queries = self._queries(root)
+            with self.assertRaisesRegex(SystemExit, "source is not searchable"):
+                run.main(["--engine", "zimantic", "--url", server.url, "--label", "missing",
+                          "--queries", str(queries), "--results-dir", str(root / "results"),
+                          "--zims", "zim_a_2026-01", "--source-key", "zim:library:zim_a_2026-01"])
+            self.assertFalse((root / "results").exists())
+            self.assertFalse(any(request.startswith("/search?") for request in server.requests))
+
 
 class KiwixTests(unittest.TestCase):
+    def test_run_keeps_kiwix_results_without_zimantic_source_keys(self):
+        with tempfile.TemporaryDirectory() as tmp, stub({
+            "/search": lambda query: (200, '<a href="/content/zim_a_2026-01/Alpha">Alpha</a>'),
+        }) as server:
+            root = Path(tmp)
+            queries = RunnerTests()._queries(root)
+            with redirect_stdout(io.StringIO()):
+                run.main(["--engine", "kiwix", "--url", server.url, "--label", "kiwix",
+                          "--queries", str(queries), "--results-dir", str(root / "results"),
+                          "--zims", "zim_a_2026-01"])
+            data = json.loads((root / "results" / "kiwix.json").read_text())
+            self.assertEqual(data["results"]["zim_a_2026-01|suite/title/000"]["rank"], 1)
+
     def test_result_links_are_decoded(self):
         html = ('<a href="/content/zim_a_2026-01/Alpha">Alpha</a>'
                 '<a href="/content/zim_a_2026-01/Pr%C3%A9cis">Précis</a>'

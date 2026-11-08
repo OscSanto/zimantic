@@ -1,13 +1,11 @@
 """Run the evaluation queries against one search engine over HTTP and save where the right article lands.
 
-    python evaluation/run.py --engine zimantic --url http://localhost:8090 --label my-branch
-    python evaluation/run.py --engine zimantic --url http://localhost:8090 --label my-branch --commit abc1234
+    python evaluation/run.py --engine zimantic --url http://localhost:8090 --label my-branch --zims archive_name --source-key zim:library:archive-key
     python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwix --zim-dir ./zims
 
 Engines:
-  zimantic   the current server, which serves /search, or v0.1.x, which served /api/search. The runner
-             probes /api/zims, /zims, /library.json and /sources to find the API and the indexed ZIMs,
-             and reads /config for the server's result and query-length limits.
+  zimantic   the current server's /search, /sources and /config endpoints. Requires one query-file
+             ZIM name and its canonical source key; use --append to combine runs.
   kiwix      GET <url>/search?content=<zim>&pattern=...&pageLength=<k>; kiwix-serve's full-text search
 
 Results go to evaluation/results/<label>.json: for every query its rank (1..k, or null when the right
@@ -33,26 +31,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import queries as Q  # noqa: E402
 
 RESULTS = Path(__file__).parent / "results"
-# A release suffix on a ZIM name ("_2026-04" or "_2026-04-15"). Newer servers expose a date-stripped
-# source key next to the archive name, so a result can be linked back to the ZIM it came from.
-ZIM_DATE = re.compile(r"_\d{4}-\d{2}(?:-\d{2})?$")
-
-
 class Unsupported(Exception):
     """The engine refuses to search this ZIM at all (reported, not counted as misses)."""
 
 
-def perma_ref(name: str) -> str:
-    """A ZIM name without its release date, the key newer servers use for local sources."""
-    return ZIM_DATE.sub("", name)
-
-
-def zimantic(url, zim, query, k, timeout, source_key=None):
-    """url is the API base: <server>/api for v0.1.x, <server> for newer versions."""
-    params = {"q": query, "zim": zim, "limit": k}
-    if source_key is not None:
-        params["source"] = source_key
-    params = urllib.parse.urlencode(params)
+def zimantic(url, source_key, query, k, timeout):
+    params = urllib.parse.urlencode({"q": query, "source": source_key, "limit": k})
     for attempt in range(10):
         try:
             with urllib.request.urlopen(f"{url}/search?{params}", timeout=timeout) as response:
@@ -63,76 +47,25 @@ def zimantic(url, zim, query, k, timeout, source_key=None):
             time.sleep(float(error.headers.get("Retry-After") or 1))
             continue
         # A result may point into an article (e.g. "Malaria#Treatment" when indexing by section);
-        # it counts as finding that article. Newer servers also say which source it came from, so
-        # results from another ZIM can be recognised (and left out) if the server ignored the filter.
+        # it counts as finding that article.
         return [{"path": hit["path"].split("#", 1)[0],
-                 "source": hit.get("source"), "source_key": hit.get("source_key")} for hit in hits]
+                 "source_key": hit["source_key"]} for hit in hits]
 
 
 def source_names(payload):
-    """ZIM names a /sources or /library.json payload says are local and searchable.
-
-    Returns None when the payload is not a source listing (an error object, for example).
-    """
-    names = set()
-    for entry in payload:
-        if isinstance(entry, str):
-            names.add(entry)   # v0.1.x /api/zims returned bare names
-            continue
-        if not isinstance(entry, dict):
-            return None
-        # /sources mixes local ZIMs with remote Kiwix catalog books; only local indexes can answer
-        # the queries, whose answers are paths inside a local archive. Readable-but-unindexed local
-        # archives (library.json) are not searchable either.
-        if entry.get("mode") not in (None, "local"):
-            continue
-        if entry.get("provider") not in (None, "zim"):
-            continue
-        if not entry.get("available", True) or not entry.get("searchable", True):
-            continue
-        for field in ("local_name", "name", "book", "key"):
-            value = entry.get(field)
-            if isinstance(value, str) and value:
-                names.add(value)
-    return names
+    """Canonical keys of searchable local ZIM sources."""
+    return {entry["key"] for entry in payload
+            if entry["provider"] == "zim" and entry["searchable"]}
 
 
-def zimantic_api(url, timeout):
-    """Find where this Zimantic version serves its API and which ZIMs it can search: (api base, names)."""
-    # v0.1.x: <url>/api/zims. Middle versions: <url>/zims. Current versions: <url>/library.json
-    # (local archives only, so a large remote catalog does not have to be downloaded) or
-    # <url>/sources (every source). Prefer the first non-empty listing; keep an empty one as fallback.
-    empty = None
-    for base, listing in ((f"{url}/api", "zims"), (url, "zims"), (url, "library.json"), (url, "sources")):
-        try:
-            with urllib.request.urlopen(f"{base}/{listing}", timeout=timeout) as response:
-                payload = json.load(response)
-        except urllib.error.HTTPError:
-            continue   # this version does not have that endpoint
-        except ValueError:
-            continue   # not JSON: some other app, or a different API shape
-        if not isinstance(payload, list):
-            continue
-        names = source_names(payload)
-        if names is None:
-            continue
-        if names:
-            return base, names
-        if empty is None:
-            empty = (base, names)
-    if empty is not None:
-        return empty
-    sys.exit(f"no Zimantic API found at {url}/api/zims, {url}/zims, {url}/library.json or {url}/sources")
+def zimantic_sources(url, timeout):
+    with urllib.request.urlopen(f"{url}/sources?provider=zim", timeout=timeout) as response:
+        return source_names(json.load(response))
 
 
 def zimantic_config(url, timeout):
-    """Server limits from /config (newer versions); an empty dict on older ones."""
-    try:
-        with urllib.request.urlopen(f"{url}/config", timeout=timeout) as response:
-            config = json.load(response)
-    except (urllib.error.URLError, ValueError):
-        return {}
-    return config if isinstance(config, dict) else {}
+    with urllib.request.urlopen(f"{url}/config", timeout=timeout) as response:
+        return json.load(response)
 
 
 def kiwix(url, zim, query, k, timeout):
@@ -144,22 +77,16 @@ def kiwix(url, zim, query, k, timeout):
         if error.code == 400:   # e.g. kiwix-serve refuses multi-language ("mul") ZIMs
             raise Unsupported(f"kiwix-serve answered HTTP 400 for {zim}") from error
         raise
-    return [{"path": urllib.parse.unquote(p), "source": None, "source_key": None}
+    return [{"path": urllib.parse.unquote(p)}
             for p in re.findall(rf'href="[^"]*?/content/{re.escape(zim)}/([^"#?]+)"', html)]
 
 
 ENGINES = {"zimantic": zimantic, "kiwix": kiwix}
 
 
-def belongs(hit, zim):
-    """Whether a hit came from the requested ZIM.
-
-    Older servers do not report the source, so every hit is trusted there. Newer ones do, and the
-    request must not silently score articles from other sources: the server falls back to a search
-    over every source when the `zim` filter matches nothing.
-    """
-    names = {hit.get("source"), hit.get("source_key")} - {None}
-    return not names or zim in names or perma_ref(zim) in names
+def belongs(hit, source_key):
+    """Match source identity, never display titles or archive-name aliases."""
+    return hit.get("source_key") == source_key
 
 
 class Resolver:
@@ -200,12 +127,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", choices=ENGINES, required=True)
     ap.add_argument("--url", required=True, help="engine base URL, e.g. http://localhost:8090")
-    ap.add_argument("--label", required=True, help="name for this run, e.g. v0.1.0-lite or kiwix")
+    ap.add_argument("--label", required=True, help="name for this run, e.g. main or kiwix")
     ap.add_argument("--commit", default="", help="optional: version or git commit being measured")
     ap.add_argument("--queries", default=str(Q.QUERIES), help="queries folder")
     ap.add_argument("--results-dir", default=str(RESULTS), help="where to write <label>.json")
     ap.add_argument("--zims", nargs="*", help="only these ZIMs (default: all with query files)")
-    ap.add_argument("--source-key", help="canonical Zimantic source key; requires exactly one --zims name")
+    ap.add_argument("--source-key", help="required for Zimantic: canonical source key for exactly one --zims name")
     ap.add_argument("--suites", nargs="*"); ap.add_argument("--sets", nargs="*"); ap.add_argument("--langs", nargs="*")
     ap.add_argument("--split", choices=("all", "dev", "test"), default="all")
     ap.add_argument("--k", type=int, default=20, help="results requested per query (default 20)")
@@ -214,8 +141,11 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--append", action="store_true", help="add to an existing results file instead of replacing it")
     args = ap.parse_args(argv)
-    if args.source_key and (args.engine != "zimantic" or not args.zims or len(args.zims) != 1):
-        ap.error("--source-key requires --engine zimantic and exactly one --zims name")
+    if args.engine == "zimantic":
+        if not args.source_key or not args.zims or len(args.zims) != 1:
+            ap.error("--engine zimantic requires --source-key and exactly one --zims name")
+    elif args.source_key:
+        ap.error("--source-key requires --engine zimantic")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
@@ -231,31 +161,22 @@ def main(argv=None):
     # On Windows "localhost" tries IPv6 (::1) first; a server listening on IPv4 only then costs ~2 s per
     # request before the fallback, which would swamp the timings. 127.0.0.1 is the same machine, IPv4 directly.
     args.url = re.sub(r"//localhost(?=[:/]|$)", "//127.0.0.1", args.url).rstrip("/")
-    endpoint, config = args.url, {}
+    config = {}
     if args.engine == "zimantic":
-        # Zimantic silently ignores ZIMs it has no index for and would search every source instead,
-        # which would count as misses (or worse, as hits from the wrong article). Ask which ZIMs the
-        # server can search and leave the others out of this run.
         try:
-            endpoint, served = zimantic_api(args.url, args.timeout)
+            served = zimantic_sources(args.url, args.timeout)
+            config = zimantic_config(args.url, args.timeout)
         except urllib.error.URLError as error:
             sys.exit(f"could not reach {args.url}: {error}")
-        config = zimantic_config(args.url, args.timeout)
-        missing = sorted({
-            q["zim"] for q in todo if (args.source_key or q["zim"]) not in served
-        })
-        if missing:
-            print(f"not searchable on this server, left out of this run: {', '.join(missing)}")
-            todo = [q for q in todo if q["zim"] in served]
-        if not todo:
-            sys.exit("the server has none of the ZIMs these queries are for")
-        # Newer servers keep a fixed pool of results and cap every page at max_results. Asking for
+        if args.source_key not in served:
+            sys.exit(f"source is not searchable on this server: {args.source_key}")
+        # The server keeps a fixed pool of results and caps every page at max_results. Asking for
         # more than that would only hide that the top k cannot be observed.
-        max_results = config.get("max_results")
+        max_results = config["max_results"]
         if isinstance(max_results, int) and 0 < max_results < args.k:
             print(f"server keeps at most {max_results} results per query; using --k {max_results} instead of {args.k}")
             args.k = max_results
-        max_query = config.get("max_query_length")
+        max_query = config["max_query_length"]
         if isinstance(max_query, int) and max_query > 0:
             too_long = [q for q in todo if len(q["query"]) > max_query]
             if too_long:
@@ -271,17 +192,14 @@ def main(argv=None):
             continue
         t = time.perf_counter()
         try:
-            if args.source_key:
-                hits = search(endpoint, q["zim"], q["query"], args.k, args.timeout,
-                              source_key=args.source_key)
-            else:
-                hits = search(endpoint, q["zim"], q["query"], args.k, args.timeout)
+            hits = search(args.url, args.source_key or q["zim"], q["query"], args.k, args.timeout)
         except Unsupported as error:
             unsupported[q["zim"]] = str(error)
             print(f"  {q['zim']}: unsupported by this engine ({error}); skipping it")
             continue
         ms = 1000 * (time.perf_counter() - t)
-        wanted = [hit for hit in hits if belongs(hit, args.source_key or q["zim"])]
+        wanted = ([hit for hit in hits if belongs(hit, args.source_key)]
+                  if args.engine == "zimantic" else hits)
         if len(wanted) < len(hits):
             foreign[q["zim"]] += len(hits) - len(wanted)
         top = resolve(q["zim"], [hit["path"] for hit in wanted])[: args.k]
