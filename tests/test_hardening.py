@@ -22,6 +22,10 @@ class Producer:
         self.key = key
         self.provider = "files"
         self.collection_key = "files:test"
+        self.source = SourceInfo(
+            key, provider="files", collection_key="files:test"
+        )
+        self.source_size = 0
         self.fingerprint = "fp"
         self.count = len(self.rows)
         self.truncated = True

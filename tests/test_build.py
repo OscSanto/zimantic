@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from zimantic.contracts import SourceInfo
 from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.schema import (
@@ -23,7 +24,7 @@ from zimantic.indexing.types import EntryRecord
 
 
 def _source(key="files:test:manual-0123", provider="files", collection_key="files:test"):
-    return SimpleNamespace(
+    return SourceInfo(
         key=key, provider=provider, collection_key=collection_key
     )
 
@@ -45,6 +46,7 @@ class Producer:
         self.key = self.source.key
         self.provider = self.source.provider
         self.collection_key = self.source.collection_key
+        self.source_size = 0
         self.fingerprint = fingerprint
         self.count = len(self.rows)
         self.truncated = truncated

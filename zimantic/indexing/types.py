@@ -39,6 +39,13 @@ class EntryRecord(NamedTuple):
 
 
 @runtime_checkable
+class IndexSource(Protocol):
+    key: str
+    provider: str
+    collection_key: str
+
+
+@runtime_checkable
 class EntryProducer(Protocol):
     """A bounded, resumable sequence of :class:`EntryRecord` values.
 
@@ -48,6 +55,9 @@ class EntryProducer(Protocol):
 
     key: str
     provider: str
+    collection_key: str
+    source: IndexSource
+    source_size: int
     fingerprint: str
     count: int
 
@@ -108,6 +118,7 @@ __all__ = [
     "DerivedTextProducer",
     "EntryProducer",
     "EntryRecord",
+    "IndexSource",
     "MAX_ROW_ID",
     "NativeHit",
     "NativeSearcher",

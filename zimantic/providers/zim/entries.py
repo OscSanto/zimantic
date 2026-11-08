@@ -82,8 +82,7 @@ class ArchiveEntryProducer:
         self._owns_archive = archive is None
         self._closed = False
         self._stat = self.path.stat()
-        self.filesize = max(0, int(self._stat.st_size))
-        self.source_size = self.filesize
+        self.source_size = max(0, int(self._stat.st_size))
         self.source_mtime = round(self._stat.st_mtime_ns / 1_000_000_000)
         try:
             self._uuid = header_uuid(self.path)

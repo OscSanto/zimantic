@@ -9,6 +9,7 @@ from .types import (
     DerivedTextProducer,
     EntryProducer,
     EntryRecord,
+    IndexSource,
     NativeHit,
     NativeSearcher,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "DerivedTextProducer",
     "EntryProducer",
     "EntryRecord",
+    "IndexSource",
     "NativeHit",
     "NativeSearcher",
 ]

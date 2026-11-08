@@ -180,8 +180,8 @@ class KolibriEntryProducer:
         cfg: Mapping[str, Any] | None = None,
         snapshot_factory: Callable[[], Any] | None = None,
     ) -> None:
-        self.source = source
         self.info = getattr(source, "info", source)
+        self.source = self.info
         self.key = str(getattr(self.info, "key", ""))
         self.collection_key = str(getattr(self.info, "collection_key", ""))
         self.provider = str(getattr(self.info, "provider", self.provider))

@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
 from threading import Thread
-from types import SimpleNamespace
 from typing import Any, Mapping
 
 from tqdm import tqdm
@@ -35,6 +34,7 @@ from ..model_meta import (
     MODEL_PROBE_VECTORS_KEY,
 )
 from . import schema as index_schema
+from .locator import IndexLocator
 from .types import EntryProducer, EntryRecord
 
 SCHEMA = index_schema.SCHEMA
@@ -295,35 +295,6 @@ def _producer_attr(producer: Any, name: str, default: Any = None) -> Any:
     return getattr(producer, name, default)
 
 
-def _source_for_locator(producer: Any) -> Any:
-    if all(hasattr(producer, name) for name in ("key", "provider")):
-        return producer
-    source = _producer_attr(producer, "source", None)
-    if source is not None:
-        return source
-    return SimpleNamespace(
-        key=str(_producer_attr(producer, "key", "")),
-        provider=str(_producer_attr(producer, "provider", "")),
-        collection_key=str(_producer_attr(producer, "collection_key", "")),
-    )
-
-
-def _locator_for(locator: Any) -> Any:
-    if hasattr(locator, "source_directory") and hasattr(locator, "paths"):
-        return locator
-    from .locator import IndexLocator
-
-    return IndexLocator(locator)
-
-
-def _filesize_for(producer: Any) -> int:
-    for name in ("filesize", "source_size", "size"):
-        value = _producer_attr(producer, name, None)
-        if isinstance(value, int) and not isinstance(value, bool):
-            return max(0, value)
-    return 0
-
-
 def _directory_bytes(path: Path) -> int:
     total = 0
     try:
@@ -423,7 +394,7 @@ def _reset_staging(db_path: Path, faiss_path: Path) -> sqlite3.Connection:
 
 def _prepare_build_state(
     producer: EntryProducer,
-    locator: Any,
+    locator: IndexLocator,
     *,
     fast: bool,
     force: bool,
@@ -431,10 +402,9 @@ def _prepare_build_state(
 ) -> _BuildState | None:
     """Resolve, validate, and resume-or-create one staging generation."""
     cfg = cfg or {}
-    locator = _locator_for(locator)
-    source = _source_for_locator(producer)
+    source = producer.source
     directory = locator.source_directory(
-        source.provider, getattr(source, "collection_key", ""), source.key
+        source.provider, source.collection_key, source.key
     )
     current: tuple[dict[str, str], Any] | None = None
     if not force:
@@ -515,7 +485,7 @@ def _prepare_build_state(
                         build_db_path=build_db_path,
                         build_faiss_path=build_faiss_path,
                         publish_upgrade=True,
-                        filesize=_filesize_for(producer),
+                        filesize=max(0, producer.source_size),
                         meta=meta,
                         source_fingerprint=fingerprint,
                         build_mode=mode,
@@ -594,7 +564,7 @@ def _prepare_build_state(
                 db,
                 {
                     index_schema.BUILD_FILESIZE: index_schema.encode_int(
-                        _filesize_for(producer)
+                        max(0, producer.source_size)
                     ),
                     index_schema.BUILD_MODE: mode,
                     index_schema.SCHEMA_VERSION: index_schema.encode_int(
@@ -603,7 +573,7 @@ def _prepare_build_state(
                     index_schema.BUILD_GENERATION: generation,
                     index_schema.PROVIDER: str(source.provider),
                     index_schema.COLLECTION_KEY: str(
-                        getattr(source, "collection_key", "") or ""
+                        source.collection_key
                     ),
                     index_schema.SOURCE_KEY: str(source.key),
                     index_schema.SOURCE_FINGERPRINT: fingerprint,
@@ -620,7 +590,7 @@ def _prepare_build_state(
             build_db_path=build_db_path,
             build_faiss_path=build_faiss_path,
             publish_upgrade=publish_upgrade,
-            filesize=_filesize_for(producer),
+            filesize=max(0, producer.source_size),
             meta=meta,
             source_fingerprint=fingerprint,
             build_mode=mode,
@@ -1030,7 +1000,7 @@ def _report_from_meta(
 
 def build_index(
     producer: EntryProducer,
-    locator: Any,
+    locator: IndexLocator,
     embedder,
     cfg: Mapping[str, Any] | None = None,
     *,
@@ -1059,8 +1029,7 @@ def build_index(
         or max_body_setting < 1
     ):
         raise ValueError("max_body_text_bytes must be a positive integer")
-    locator = _locator_for(locator)
-    source = _source_for_locator(producer)
+    source = producer.source
     state: _BuildState | None = None
     progress = None
     completed = False
@@ -1231,7 +1200,7 @@ def build_index(
             metadata={
                 "schema_version": index_schema.CURRENT_SCHEMA_VERSION,
                 "source_fingerprint": state.source_fingerprint,
-                "source_size": _producer_attr(producer, "source_size", state.filesize),
+                "source_size": producer.source_size,
                 "source_mtime": _producer_attr(producer, "source_mtime", None),
                 "build_generation": state.generation,
                 "provider_id": _producer_attr(producer, "provider_id", None),

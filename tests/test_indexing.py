@@ -23,6 +23,8 @@ class Producer:
         self.key = key
         self.provider = "files"
         self.collection_key = "files:test"
+        self.source = _source(key)
+        self.source_size = 0
         self.fingerprint = fingerprint
         self.count = len(self.rows)
         self.truncated = False
