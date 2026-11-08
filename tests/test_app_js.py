@@ -38,9 +38,9 @@ const t = (text) => text;
 const libraryTitle = (source) => source.key;
 const libraryHomepageUrl = () => "";
 const sourceStemName = () => "";
-const collectionLabelFor = () => "";
-const formatLibrarySize = () => "";
-const libraryLanguage = () => "";
+const collectionLabelFor = (source) => source.collection?.label || "";
+const formatLibrarySize = (bytes) => `${{Math.round(Number(bytes) / 1024 / 1024)}} MB`;
+const libraryLanguage = (source) => String(source.language || "").toUpperCase();
 const librarySearchText = (source) => source.key;
 const collectionDisplayName = (collection) => collection.title;
 const collections = [
@@ -50,6 +50,8 @@ const collections = [
 const libraryCollections = collections;
 const makeSources = (count, media) => Array.from({{length: count}}, (_, i) => ({{
   key: `${{media}}-${{i}}`, provider: "files", media_types: [media],
+  collection: {{label: `${{media}} collection`}},
+  language: "eng", date: "2025-08-27", size: 109 * 1024 * 1024, item_count: 34448,
 }}));
 const small = makeSources(766, "text"), large = makeSources(1001, "video");
 const libraryCollectionPages = new Map([
@@ -66,6 +68,7 @@ const summarize = () => elements.libraryGrid.children.map((section) => ({{
   key: section.dataset.libraryCollection,
   count: find(section, "library-grid library-collection-grid").children.length,
   meta: find(section, "library-collection-meta").textContent,
+  collection: find(section, "library-card-collection").textContent,
   details: find(section, "library-card-details").textContent,
   buttons: find(section, "library-collection-actions").children.map((button) => button.textContent),
   note: find(section, "library-collection-note")?.textContent,
@@ -102,7 +105,11 @@ console.log(JSON.stringify({{
             payload["initial"][1]["buttons"], ["Search collection", "Load more sources"]
         )
         self.assertEqual(payload["initial"][1]["meta"], "Files · 1,001 sources")
-        self.assertEqual(payload["initial"][1]["details"], "Files · Video")
+        self.assertEqual(payload["initial"][1]["collection"], "Files · video collection")
+        self.assertEqual(
+            payload["initial"][1]["details"],
+            "ENG · 2025-08-27\n34,448 items · 109 MB",
+        )
         self.assertEqual(payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources.")
         self.assertTrue(payload["loadingDisabled"])
         self.assertTrue(payload["reusedCard"])

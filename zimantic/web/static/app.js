@@ -1000,7 +1000,12 @@
                     }
                     heading.appendChild(titleLink);
                     body.appendChild(heading);
-                    const collectionLabel = collectionLabelFor(source);
+                    const collectionLabel = [
+                        providerLabel(source.provider),
+                        collectionLabelFor(source),
+                    ]
+                        .filter(Boolean)
+                        .join(" · ");
                     if (collectionLabel) {
                         const group = document.createElement("p");
                         group.className = "library-card-collection";
@@ -1023,11 +1028,11 @@
                     }
                     const details = document.createElement("p");
                     details.className = "library-card-details";
-                    const detailValues = [
-                        providerLabel(source.provider),
-                        ...mediaTypeLabels(source.media_types),
+                    const descriptiveDetails = [
                         libraryLanguage(source),
-                        formatLibrarySize(source.size),
+                        source.date || "",
+                    ].filter(Boolean);
+                    const inventoryDetails = [
                         Number(source.item_count) > 0
                             ? `${Number(source.item_count).toLocaleString()} ${
                                   Number(source.item_count) === 1
@@ -1035,10 +1040,13 @@
                                       : "items"
                               }`
                             : "",
-                        source.date || "",
+                        formatLibrarySize(source.size),
                     ].filter(Boolean);
-                    details.textContent = detailValues.join(" · ");
-                    details.hidden = !detailValues.length;
+                    const detailLines = [descriptiveDetails, inventoryDetails]
+                        .filter((line) => line.length)
+                        .map((line) => line.join(" · "));
+                    details.textContent = detailLines.join("\n");
+                    details.hidden = !detailLines.length;
                     body.appendChild(details);
                     if (source.creator) {
                         const creator = document.createElement("p");

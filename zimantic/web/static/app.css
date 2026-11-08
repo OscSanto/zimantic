@@ -661,6 +661,9 @@ ol.results {
     margin: 0 0 8px;
     overflow-wrap: anywhere;
 }
+.library-card-details {
+    white-space: pre-line;
+}
 .library-card-creator {
     margin-top: auto;
 }
