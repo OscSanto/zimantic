@@ -77,7 +77,14 @@ class XdgPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Path(tmp) / "runtime"
             runtime.mkdir()
-            with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime)}):
+            with (
+                patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime)}),
+                patch(
+                    "pathlib.Path.is_file",
+                    autospec=True,
+                    side_effect=lambda path: path == Path("zimantic.pid"),
+                ),
+            ):
                 expected = runtime / "zimantic" / "zimantic.pid"
                 self.assertEqual(runtime_pid_path(), expected)
                 self.assertEqual(server_pid_path(), expected)

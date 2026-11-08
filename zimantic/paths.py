@@ -48,16 +48,10 @@ def default_config_path(cwd: Path | None = None) -> Path:
 
 
 def reload_pid_path(explicit: Path | None = None) -> Path:
-    """Resolve the PID file, checking the old cwd location during migration."""
+    """Resolve the PID file used by a newly started server."""
     if explicit is not None:
         return explicit
-    runtime = runtime_pid_path()
-    legacy = Path("zimantic.pid")
-    if runtime is not None and runtime.is_file():
-        return runtime
-    if legacy.is_file():
-        return legacy
-    return runtime or legacy
+    return server_pid_path()
 
 
 def server_pid_path() -> Path:
