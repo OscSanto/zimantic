@@ -329,10 +329,10 @@ class BuildWorkerTests(unittest.TestCase):
         config = {
             "index_dir": "/unused/indexes",
             "model_dir": "/unused/model",
-            "embedding_workers": 3,
+            "onnx_build_workers": 3,
             "embedding_batch_tokens": 1000,
-            "embed_threads": 8,
-            "build_embed_threads": 2,
+            "onnx_query_threads": 8,
+            "onnx_build_threads": 2,
         }
         args = types.SimpleNamespace(workers=1, fast=False, force=False)
         with (

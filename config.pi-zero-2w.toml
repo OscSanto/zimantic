@@ -16,30 +16,21 @@ max_results = 50
 # Small batches save RAM.
 batch_size = 8
 
-# Keep builds serial on the low-memory profile.
-build_workers = 1
+# Available RAM keeps automatic source-build concurrency at one.
 
 max_html_bytes = 4_194_304
 max_entry_bytes = 268435456
 max_article_bytes = 33_554_432
 max_preview_chars = 1_000
 
-# Serving/query threads: leave CPU for search workers.
-embed_threads = 2
-# RAM normally limits this profile to one model worker; retain two threads
-# inside that call rather than leaving the other CPU cores idle.
-# WARNING: more threads reduce independent workers when several fit in RAM.
-build_embed_threads = 2
-# Model-call concurrency also applies to single-source builds.
-# embedding_workers = 1
+# Serving and build-model concurrency stay automatic, including cgroup limits.
+# The mobile profile normally uses two ONNX build threads, bounded by usable
+# physical cores; query embeddings have their own automatic thread budget.
 
 # nprobe = 64
 min_cosine_similarity = 0.85
 
-search_workers = 2
-# Native helpers are shared across collections; leave their CPU/RAM budget automatic.
-# fulltext_workers = 1
-max_concurrent_searches = 2
+# Source threads, native processes and user-search admission stay automatic.
 candidate_count = 16
 max_stream_ranks = 8
 source_timeout = 12

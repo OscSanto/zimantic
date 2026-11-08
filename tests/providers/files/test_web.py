@@ -42,7 +42,7 @@ def files_site(tmp_path):
         "candidate_count": 16,
         "page_size": 10,
         "max_results": 100,
-        "search_workers": 1,
+        "source_query_threads": 1,
         "max_article_bytes": 1 << 20,
         "max_html_bytes": 512 << 10,
         "preview_limit": 10,

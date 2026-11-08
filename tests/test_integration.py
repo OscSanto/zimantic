@@ -221,7 +221,7 @@ def _config(root: Path, *, max_results: int = 100) -> RuntimeConfig:
             "candidate_count": 16,
             "page_size": 10,
             "max_results": max_results,
-            "search_workers": 1,
+            "source_query_threads": 1,
         },
         collections=(ZimConfig(name="library", path=str(root / "zims")),),
     )

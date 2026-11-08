@@ -82,23 +82,6 @@ port = 8090
 # Increase for GPU throughput; decrease to reduce worker memory.
 # embedding_batch_tokens = 1000
 
-# Independent ZIMs can be built concurrently. When unset, the default scales with
-# available CPU and RAM; set it explicitly to override the automatic worker count.
-# Values below 1 warn and fall back to the automatic default.
-# build_workers = 2
-
-# ONNX Runtime threads per serving/query embedding call, not index builds.
-# Mobile 2, supercomputer 8; desktop uses at most 4 usable physical cores,
-# leaving one for search and the web server (at least 1 thread).
-# embed_threads = 3
-
-# Threads per build model call, independent of serving (desktop default 1).
-# The Pi 5/500 preset uses 3 for lower RAM at similar throughput. Mobile retains
-# 2 when RAM limits the pool to one worker; supercomputer retains 8 (not retuned).
-# WARNING: more threads introduce intra-call synchronization and reduce
-# independent model workers when several fit. Benchmark changes.
-# build_embed_threads = 1
-
 # Embedding device. "auto" (the default) tries every accelerated provider the
 # installed ONNX Runtime build exposes (CUDA, ROCm, DirectML, OpenVINO) and
 # otherwise runs on the CPU. "gpu" requires an accelerated provider; "cpu"
@@ -111,12 +94,6 @@ port = 8090
 # `zimantic build --device ...` and `zimantic serve --device ...` override this
 # setting.
 # embed_device = "auto"
-
-# Maximum simultaneous embedding calls, including a single-source build.
-# When unset, physical cores (with affinity/cgroup limits), build_embed_threads and
-# available RAM bound the default. Each worker shares the same loaded model.
-# Values below 1 warn and fall back to the automatic default.
-# embedding_workers = 2
 
 # Maximum HTML read per article.
 # max_html_bytes = 4_194_304
@@ -194,17 +171,9 @@ port = 8090
 # matches, for example for cross-language queries.
 # min_cosine_similarity = 0.85
 
-# Search workers. Desktop 8, mobile 2, supercomputer 16. More workers reduce
-# wall-clock time when many ZIMs are on separate storage, but increase
-# concurrent I/O and SQLite connections.
-# search_workers = 8
-# Server-wide native ZIM helper budget, shared by every collection. Independent
-# of search_workers. Omit to budget from CPU affinity/quota and available RAM.
-# A positive explicit value overrides the automatic budget; benchmark increases.
-# fulltext_workers = 2
-# Maximum simultaneous user searches. Desktop 4, mobile 2, supercomputer 8.
-# Several people can search at once up to this many; each search may still use
-# all source workers. Lower it on a Pi.
+# Maximum admitted user searches, not source threads or libzim processes.
+# Profile ceilings (desktop 4, mobile 2, supercomputer 8) are automatically
+# reduced for CPU quotas and available RAM. A positive override wins.
 # max_concurrent_searches = 4
 # Minimum candidates requested from each source before fusion. Desktop/mobile
 # 16, supercomputer 32. The per-source count scales with the number of sources;
@@ -242,6 +211,41 @@ port = 8090
 # Scoped cache quotas remain inside these global ceilings. A mixed-source entry
 # counts against every participating source. cache_size = 0 disables admission;
 # cache_bytes = 0 means count-only caching.
+
+# ADVANCED RESOURCE OVERRIDES
+#
+# Normally omit all of these. Automatic counts respect CPU affinity/cgroup
+# quotas; memory-heavy workers also use available RAM/cgroup headroom.
+# These are different layers, not one count to copy between settings.
+# Positive explicit values override automatic bounds. Benchmark increases.
+# See docs/usage.md#advanced-resource-overrides.
+#
+# Shared source-query/preview thread pool: SQLite/FAISS, remote requests and
+# calls into native helpers. Automatic = min(8, usable logical CPU threads).
+# source_query_threads = 8
+#
+# ONNX threads inside one query-embedding call, NOT source fan-out or builds.
+# Automatic = min(4, usable physical cores minus one), at least one.
+# onnx_query_threads = 3
+#
+# Shared native libzim full-text subprocess pool across all collections.
+# Automatic = up to 8, bounded by CPU/source threads and available RAM,
+# reserving 256 MiB for the server/model and 128 MiB per helper.
+# libzim_search_processes = 2
+#
+# Independent source builds. Automatic = up to 8, allowing four usable logical
+# CPU threads and four GiB of available RAM per worker, at least one.
+# build_workers = 2
+#
+# ONNX threads inside each BUILD model call. Profile defaults: desktop 1,
+# mobile 2, supercomputer 8, bounded by usable physical cores. The Pi 5/500
+# preset uses 3 for lower RAM at similar throughput. More threads can reduce
+# the number of independent model calls and add synchronization overhead.
+# onnx_build_threads = 1
+#
+# Concurrent BUILD model calls, including single-source builds. Workers share
+# one loaded model. CPU, onnx_build_threads and available RAM bound the default.
+# onnx_build_workers = 2
 
 # COLLECTIONS
 #

@@ -3,14 +3,36 @@
 import os
 import sys
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
+from . import hardware
 from .paths import default_config_path, xdg_data_dir
 from .scoped_settings import SCOPED_KEYS, parse_scoped_settings
 from .searching.config import DEFAULT_MAX_ARTICLE_BYTES
 
 DEFAULT_EMBEDDING_TOKENS = 256
 MAX_AUTO_FULLTEXT_WORKERS = 8
+MAX_AUTO_SOURCE_QUERY_THREADS = 8
+MAX_AUTO_ONNX_QUERY_THREADS = 4
+
+RESOURCE_KEY_ALIASES = {
+    "embed_threads": "onnx_query_threads",
+    "search_workers": "source_query_threads",
+    "fulltext_workers": "libzim_search_processes",
+    "build_embed_threads": "onnx_build_threads",
+    "embedding_workers": "onnx_build_workers",
+}
+_AUTOMATIC_RESOURCE_KEYS = frozenset(
+    {
+        "build_workers",
+        "onnx_build_workers",
+        "onnx_query_threads",
+        "source_query_threads",
+        "libzim_search_processes",
+    }
+)
+_OPTIONAL_INT_KEYS = _AUTOMATIC_RESOURCE_KEYS | {"nprobe", "collection_source_limit"}
 
 # Accepted embed_device values. Kept here (instead of embed.py) so config values
 # are validated at load time, before a model is loaded and even in --fast mode.
@@ -34,8 +56,8 @@ EMBED_DEVICES = frozenset(
 # fall back to the profile that matches the machine running Zimantic.
 # Keys that do not differ per machine live in _COMMON; each profile only
 # overrides the tuning keys that vary (memory, parallelism, cache and
-# result-pool sizes). Build, embedding and full-text worker counts are computed
-# from the host by load_config unless the user sets them.
+# result-pool sizes). Serving parallelism and build worker counts are computed
+# from usable resources by load_config unless the user sets them.
 _COMMON = {
     "model_dir": "./model/int8",
     "index_dir": "./indexes",
@@ -49,7 +71,7 @@ _COMMON = {
     # Global request-work cap for an explicitly selected Kiwix collection.
     "max_explicit_collection_sources": 500,
     "embed_device": "auto",
-    "build_embed_threads": 1,
+    "onnx_build_threads": 1,
     "embedding_batch_tokens": 1000,
     "max_html_bytes": 4_194_304,
     "max_article_bytes": DEFAULT_MAX_ARTICLE_BYTES,
@@ -81,9 +103,7 @@ MOBILE = {  # ~512 MB - 1 GB RAM: Raspberry Pi Zero 2 W and similar
     "max_results": 50,
     "batch_size": 8,
     "max_entry_bytes": 256 * 1024 * 1024,
-    "embed_threads": 2,
-    "build_embed_threads": 2,
-    "search_workers": 2,
+    "onnx_build_threads": 2,
     "max_concurrent_searches": 2,
     "candidate_count": 16,
     "max_stream_ranks": 8,
@@ -96,8 +116,6 @@ DESKTOP = {  # baseline settings for typical PCs
     "max_results": 100,
     "batch_size": 32,
     "max_entry_bytes": 1 * 1024 * 1024 * 1024,
-    "embed_threads": None,  # let the Embedder pick a sensible budget
-    "search_workers": 8,
     "max_concurrent_searches": 4,
     "candidate_count": 16,
     "max_stream_ranks": 16,
@@ -110,9 +128,7 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
     "max_results": 200,
     "batch_size": 128,
     "max_entry_bytes": 4 * 1024 * 1024 * 1024,
-    "embed_threads": 8,
-    "build_embed_threads": 8,
-    "search_workers": 16,
+    "onnx_build_threads": 8,
     "max_concurrent_searches": 8,
     "candidate_count": 32,
     "max_stream_ranks": 32,
@@ -123,28 +139,31 @@ SUPERCOMPUTER = {  # many cores and/or lots of RAM: scale the parallel settings 
 PROFILES = {"mobile": MOBILE, "desktop": DESKTOP, "supercomputer": SUPERCOMPUTER}
 
 # Every key Zimantic reads, including optional ones not present in the profiles.
-# build_workers and embedding_workers are computed from the host by load_config
+# Build and serving worker counts are computed from the host by load_config
 # but remain user-settable, so they must stay known.
 KNOWN_KEYS = (
     frozenset(key for profile in PROFILES.values() for key in profile)
-    | SCOPED_KEYS | {
-        "nprobe",
-        "build_workers",
-        "embedding_workers",
-        "fulltext_workers",
-        "collection_source_limit",
-    }
+    | SCOPED_KEYS | frozenset(RESOURCE_KEY_ALIASES) | _OPTIONAL_INT_KEYS
 )
-# Optional integer keys that have no value in the hardware profiles.
-_OPTIONAL_INT_KEYS = frozenset(
-    {
-        "nprobe",
-        "build_workers",
-        "embedding_workers",
-        "fulltext_workers",
-        "collection_source_limit",
-    }
-)
+
+
+def normalize_resource_settings(values: Mapping, warn=None) -> dict:
+    """Accept renamed resource keys without retaining duplicate settings."""
+    normalized = dict(values)
+    for old, new in RESOURCE_KEY_ALIASES.items():
+        if old not in normalized:
+            continue
+        value = normalized.pop(old)
+        duplicate = new in normalized
+        if not duplicate:
+            normalized[new] = value
+        if warn is not None:
+            suffix = "; the new key takes precedence" if duplicate else ""
+            warn(
+                f"zimantic: warning: config key {old!r} is deprecated; "
+                f"use {new!r}{suffix}"
+            )
+    return normalized
 
 
 def _coerce_config_value(key: str, value: object, default: object) -> object | None:
@@ -168,9 +187,7 @@ def _coerce_config_value(key: str, value: object, default: object) -> object | N
         return value
     if isinstance(default, str):
         return value if isinstance(value, str) else None
-    # ``embed_threads`` is None in the desktop profile but is still an integer
-    # setting when present.
-    if key in _OPTIONAL_INT_KEYS or key == "embed_threads":
+    if key in _OPTIONAL_INT_KEYS:
         if isinstance(value, bool) or not isinstance(value, int):
             return None
         return value
@@ -195,7 +212,7 @@ def _typed_user_values(
         default = defaults.get(key)
         corrected = _coerce_config_value(key, value, default)
         if corrected is None:
-            if key in _OPTIONAL_INT_KEYS or key == "embed_threads":
+            if key in _OPTIONAL_INT_KEYS:
                 expected = "integer"
             elif isinstance(default, bool):
                 expected = "boolean"
@@ -207,9 +224,10 @@ def _typed_user_values(
                 expected = "string"
             else:
                 expected = "valid value"
+            fallback = "automatic default" if key in _AUTOMATIC_RESOURCE_KEYS else "profile default"
             warn(
                 f"zimantic: warning: config key {key!r} in {path} "
-                f"must be a {expected}; using the profile default"
+                f"must be a {expected}; using the {fallback}"
             )
             continue
         values[key] = corrected
@@ -222,48 +240,25 @@ def normalize_web_base_path(value: object) -> str:
     return f"/{path}" if path else ""
 
 
-def _system_memory_gb() -> float:
-    """Total physical memory in GiB, 0.0 when unknown."""
-    if os.name == "nt":
-        # os.sysconf does not exist on Windows; ask the Win32 API instead so
-        # the mobile profile can still be selected on low-memory tablets.
-        try:
-            import ctypes
+def default_source_query_threads(threads: int | None = None) -> int:
+    """Bound source fan-out without tying lightweight threads to helper RAM."""
+    threads = hardware.detect().threads if threads is None else threads
+    return min(MAX_AUTO_SOURCE_QUERY_THREADS, max(1, threads))
 
-            class _MemoryStatusEx(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
 
-            status = _MemoryStatusEx()
-            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return status.ullTotalPhys / (1024 ** 3)
-        except (AttributeError, OSError, ValueError):
-            pass
-        return 0.0
-    try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-    except (AttributeError, OSError, ValueError):
-        return 0.0
-    return (pages * page_size) / (1024 ** 3)
+def default_onnx_query_threads(cores: int | None = None) -> int:
+    """Leave a core for other work and avoid oversized short-query ORT pools."""
+    cores = hardware.detect().cores if cores is None else cores
+    return min(MAX_AUTO_ONNX_QUERY_THREADS, max(1, cores - 1))
 
 
 def default_build_workers(cores: int | None = None, memory_gb: float | None = None) -> int:
-    """Choose a bounded build pool from the host's CPU and memory budget."""
-    cores = max(1, cores or os.cpu_count() or 1)
-    memory_gb = _system_memory_gb() if memory_gb is None else memory_gb
+    """Choose a bounded build pool from usable CPU and available memory."""
+    hw = hardware.detect() if cores is None or memory_gb is None else None
+    cores = max(1, cores if cores is not None else hw.threads)
+    memory_gb = hw.ram_available / (1 << 30) if memory_gb is None else memory_gb
     cpu_limit = max(1, cores // 4)
-    memory_limit = max(1, int(memory_gb // 4)) if memory_gb > 0 else cpu_limit
+    memory_limit = max(1, int(memory_gb // 4))
     return min(8, cpu_limit, memory_limit)
 
 
@@ -309,15 +304,26 @@ def default_fulltext_workers(
     return min(MAX_AUTO_FULLTEXT_WORKERS, cpu_limit, memory_limit)
 
 
-def profile_for_hardware() -> str:
+def profile_for_hardware(hw: hardware.Hardware | None = None) -> str:
     """Pick mobile/desktop/supercomputer from a simple hardware heuristic."""
-    cores = os.cpu_count() or 1
-    memory = _system_memory_gb()
+    hw = hardware.detect() if hw is None else hw
+    cores = hw.cores
+    memory = hw.ram_total / (1 << 30)
     if 0 < memory <= 1.0:  # Pi Zero 2 W (512 MB) through 1 GB hosts
         return "mobile"
     if memory >= 128.0 or cores >= 32:
         return "supercomputer"
     return "desktop"
+
+
+def default_max_concurrent_searches(
+    hw: hardware.Hardware | None = None, *, maximum: int | None = None
+) -> int:
+    """Trim profile admission ceilings for CPU quotas and memory pressure."""
+    hw = hardware.detect() if hw is None else hw
+    if maximum is None:
+        maximum = PROFILES[profile_for_hardware(hw)]["max_concurrent_searches"]
+    return max(1, min(maximum, hw.threads, hw.ram_available // (256 << 20)))
 
 
 def load_config(path: str | Path | None = None, warn=None) -> dict:
@@ -333,7 +339,8 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
             print(message, file=sys.stderr)
 
         warn = warn_to_stderr
-    profile = profile_for_hardware()
+    hw = hardware.detect()
+    profile = profile_for_hardware(hw)
     cfg = dict(PROFILES[profile])
     data_dir: Path | None = None
     if path is None:
@@ -369,6 +376,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # afterwards contradicts that message.
     if loaded and not user:
         warn(f"zimantic: warning: {config_path} is empty; using {profile} defaults")
+    user = normalize_resource_settings(user, warn)
     from .providers.config import RuntimeConfig, parse_collections
 
     config_dir = Path(config_path).resolve().parent
@@ -377,7 +385,8 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         if loaded
         else None
     )
-    cfg.update(_typed_user_values(user, cfg, config_path, warn))
+    user_values = _typed_user_values(user, cfg, config_path, warn)
+    cfg.update(user_values)
     if data_dir is not None:
         for key in ("model_dir", "index_dir"):
             configured_path = Path(cfg[key]).expanduser()
@@ -391,6 +400,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         "max_explicit_collection_sources",
         "search_timeout_seconds",
         "collection_source_limit",
+        "max_concurrent_searches",
     ):
         value = cfg.get(key)
         if (
@@ -423,14 +433,14 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         cfg["embed_device"] = "auto"
     # Worker counts are intentionally computed at load time so missing config
     # keys adapt to the machine instead of inheriting fixed profile values.
-    # Apply this after user settings so build_embed_threads participates in the
+    # Apply this after user settings so onnx_build_threads participates in the
     # automatic embedding concurrency calculation.
     # Use the validated values in ``cfg``, not the raw user mapping: an
     # invalid worker type is skipped above and must still get a computed
     # default instead of leaving the key missing.
-    for key in ("build_workers", "embedding_workers", "fulltext_workers", "build_embed_threads", "embedding_batch_tokens"):
+    for key in (*sorted(_AUTOMATIC_RESOURCE_KEYS), "onnx_build_threads", "embedding_batch_tokens"):
         if key in cfg and (not isinstance(cfg[key], int) or isinstance(cfg[key], bool) or cfg[key] < 1):
-            if key in {"build_workers", "embedding_workers", "fulltext_workers"}:
+            if key in _AUTOMATIC_RESOURCE_KEYS:
                 warn(
                     f"zimantic: warning: config key {key!r} in {config_path} "
                     "must be at least 1; using the automatic default"
@@ -442,19 +452,34 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
                     "must be a positive integer; using the profile default"
                 )
                 cfg[key] = PROFILES[profile][key]
+    if user_values.get("onnx_build_threads", 0) < 1:
+        cfg["onnx_build_threads"] = min(cfg["onnx_build_threads"], hw.cores)
+    if user_values.get("max_concurrent_searches", 0) < 1:
+        cfg["max_concurrent_searches"] = default_max_concurrent_searches(
+            hw, maximum=cfg["max_concurrent_searches"]
+        )
+    available_gb = hw.ram_available / (1 << 30)
+    if "source_query_threads" not in cfg:
+        cfg["source_query_threads"] = default_source_query_threads(hw.threads)
+    if "onnx_query_threads" not in cfg:
+        cfg["onnx_query_threads"] = default_onnx_query_threads(hw.cores)
     if "build_workers" not in cfg:
-        cfg["build_workers"] = default_build_workers()
-    if "embedding_workers" not in cfg:
+        cfg["build_workers"] = default_build_workers(hw.threads, available_gb)
+    if "onnx_build_workers" not in cfg:
         build_workers = cfg.get("build_workers")
-        build_embed_threads = cfg.get("build_embed_threads")
-        cfg["embedding_workers"] = default_embedding_workers(
+        build_embed_threads = cfg.get("onnx_build_threads")
+        cfg["onnx_build_workers"] = default_embedding_workers(
+            cores=hw.cores,
+            memory_gb=available_gb,
             build_workers=build_workers if isinstance(build_workers, int) else None,
             build_embed_threads=build_embed_threads if isinstance(build_embed_threads, int) else None,
             token_budget=cfg["embedding_batch_tokens"],
         )
-    if "fulltext_workers" not in cfg:
-        cfg["fulltext_workers"] = default_fulltext_workers(
-            source_workers=cfg["search_workers"]
+    if "libzim_search_processes" not in cfg:
+        cfg["libzim_search_processes"] = default_fulltext_workers(
+            cores=hw.threads,
+            memory_gb=available_gb,
+            source_workers=cfg["source_query_threads"],
         )
     # Every collection is explicit.  A missing or empty config is an explicitly
     # empty library, not an implicit scan of the historical zim_dir default.

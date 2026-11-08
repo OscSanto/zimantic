@@ -1149,7 +1149,7 @@ def _build_tasks(
     if not args.fast:
         from .embed import Embedder
 
-        build_embed_threads = cfg.get("build_embed_threads") or 1
+        build_embed_threads = cfg.get("onnx_build_threads") or 1
 
         def _make_embedder():
             return Embedder(
@@ -1164,11 +1164,11 @@ def _build_tasks(
 
         hw = detect()
         token_budget = int(cfg.get("embedding_batch_tokens", 1000))
-        embedding_workers = int(cfg.get("embedding_workers") or default_embedding_workers(
+        embedding_workers = int(cfg.get("onnx_build_workers") or default_embedding_workers(
             build_embed_threads=build_embed_threads, token_budget=token_budget
         ))
         if embedding_workers < 1 or token_budget < 1:
-            parser.error("embedding_workers and embedding_batch_tokens must be at least 1")
+            parser.error("onnx_build_workers and embedding_batch_tokens must be at least 1")
         logger.info(
             "zimantic: build hardware: %s; %d embedding workers x %d threads, "
             "%d padded tokens per call",
@@ -1392,15 +1392,15 @@ def _run_positional_zim_build(
         def _make_embedder():
             return Embedder(
                 cfg["model_dir"],
-                threads=cfg.get("embed_threads"),
+                threads=cfg.get("onnx_build_threads"),
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
             )
 
         embedder = _LazyEmbedder(_make_embedder)
         if workers > 1 and len(zims) > 1:
-            embedding_workers = int(cfg.get("embedding_workers", 2))
+            embedding_workers = int(cfg.get("onnx_build_workers", 2))
             if embedding_workers < 1:
-                parser.error("embedding_workers must be at least 1")
+                parser.error("onnx_build_workers must be at least 1")
             embedding_pipeline = EmbeddingPipeline(
                 embedder,
                 workers=min(embedding_workers, workers),
@@ -1970,7 +1970,7 @@ def _run_open(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
 
                 return Embedder(
                     open_cfg["model_dir"],
-                    threads=open_cfg.get("embed_threads"),
+                    threads=open_cfg.get("onnx_query_threads"),
                     device=getattr(args, "device", None) or open_cfg.get("embed_device"),
                 )
 
@@ -2048,7 +2048,7 @@ def _run_serve(args, cfg: dict) -> None:
 
             return Embedder(
                 cfg["model_dir"],
-                threads=cfg.get("embed_threads"),
+                threads=cfg.get("onnx_query_threads"),
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
             )
 

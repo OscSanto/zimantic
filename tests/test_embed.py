@@ -165,11 +165,23 @@ class ModelProbeTests(unittest.TestCase):
 
 
 class ThreadConfigTests(unittest.TestCase):
-    def test_default_thread_budget_leaves_at_least_one_thread(self):
-        self.assertEqual(
-            embed.DEFAULT_EMBED_THREADS,
-            min(4, max(1, embed.detect().cores - 1)),
-        )
+    def test_thread_budget_is_resolved_at_construction_and_can_be_overridden(self):
+        from zimantic.hardware import Hardware
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(embed.ort, "InferenceSession"),
+            patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+        ):
+            _sentencepiece_dir(tmp)
+            for cores, threads, expected in ((1, None, 1), (4, None, 3), (1, 7, 7)):
+                with self.subTest(cores=cores, threads=threads):
+                    with patch.object(
+                        embed.hardware, "detect",
+                        return_value=Hardware(cores, cores, 8 << 30, 8 << 30),
+                    ):
+                        model = embed.Embedder(tmp, threads=threads, low_memory=False)
+                    self.assertEqual(model.threads, expected)
 
 
 class LowMemoryArenaTests(unittest.TestCase):
@@ -189,7 +201,12 @@ class LowMemoryArenaTests(unittest.TestCase):
                 "SentencePieceProcessor",
                 return_value=tokenizer or MagicMock(),
             ),
-            patch.object(embed, "_system_memory_gb", return_value=memory_gb),
+            patch.object(
+                embed.hardware, "detect",
+                return_value=embed.hardware.Hardware(
+                    4, 4, int(memory_gb * (1 << 30)), int(memory_gb * (1 << 30))
+                ),
+            ),
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 _sentencepiece_dir(tmp)

@@ -12,7 +12,7 @@ import numpy as np
 import onnxruntime as ort
 import sentencepiece
 
-from .hardware import detect
+from . import hardware
 from .model_files import DEFAULT_MODEL_CHECKSUMS
 from .model_files import (
     sha256_file as _sha256,
@@ -25,7 +25,7 @@ from .model_meta import (
     MODEL_PROBE_TEXTS_KEY,
     MODEL_PROBE_VECTORS_KEY,
 )
-from .settings import DEFAULT_EMBEDDING_TOKENS, _system_memory_gb
+from .settings import DEFAULT_EMBEDDING_TOKENS, default_onnx_query_threads
 from .wordpiece import WordPieceTokenizer
 
 logger = logging.getLogger(__name__)
@@ -159,7 +159,7 @@ def _reclaim_native_memory() -> None:
 
 def _low_memory_host() -> bool:
     """True for small hosts, where retained arena memory risks OOM."""
-    total_gb = _system_memory_gb()
+    total_gb = hardware.detect().ram_total / (1 << 30)
     return 0.0 < total_gb <= LOW_MEMORY_GB
 
 
@@ -167,10 +167,6 @@ def _low_memory_host() -> bool:
 # precision of the default model is accepted, so downloading fp32 or fp16 does
 # not produce a checksum warning for a file this project downloaded itself.
 EXPECTED_CHECKSUMS = DEFAULT_MODEL_CHECKSUMS
-
-# Leave a usable core for search; larger ORT pools hurt short-query latency.
-DEFAULT_EMBED_THREADS = min(4, max(1, detect().cores - 1))
-
 
 def _configured_tokenizer_class(model_dir) -> str:
     """Read the optional tokenizer_config.json from a Hugging Face export."""
@@ -441,7 +437,7 @@ class Embedder:
         self.model_dir = model_dir
         hashes = verify_model_files(model_dir)
         self.threads = (
-            int(threads) if threads and int(threads) > 0 else DEFAULT_EMBED_THREADS
+            int(threads) if threads and int(threads) > 0 else default_onnx_query_threads()
         )
         self.low_memory = _low_memory_host() if low_memory is None else low_memory
         self.providers, device_warning = resolve_providers(device)

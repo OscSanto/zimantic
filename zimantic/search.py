@@ -61,7 +61,11 @@ from .searching.ranking import (
     matched_by,
     rank_results,
 )
-from .settings import normalize_web_base_path
+from .settings import (
+    default_max_concurrent_searches,
+    default_source_query_threads,
+    normalize_web_base_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +274,9 @@ class Search:
         self._reload_lock = threading.Lock()
         self.source_timeout = _int_config(cfg, "source_timeout", DEFAULT_SOURCE_TIMEOUT)
         self.candidate_count = _int_config(cfg, "candidate_count", DEFAULT_CANDIDATES)
-        self.source_workers = _int_config(cfg, "search_workers", 4)
+        self.source_workers = _int_config(
+            cfg, "source_query_threads", default_source_query_threads()
+        )
         self.source_filter_limit = _int_config(
             cfg, "source_filter_limit", DEFAULT_SOURCE_FILTER_LIMIT
         )
@@ -302,7 +308,7 @@ class Search:
         # request path; 0 turns previews off (the lead field stays empty).
         self.preview_limit = _int_config(cfg, "preview_limit", self.page_size, minimum=0)
         self.max_concurrent_searches = _int_config(
-            cfg, "max_concurrent_searches", DEFAULT_MAX_CONCURRENT_SEARCHES
+            cfg, "max_concurrent_searches", default_max_concurrent_searches()
         )
         self.slot_wait_seconds = _float_config(
             cfg, "slot_wait_seconds", SLOT_WAIT_SECONDS, 0.0, 120.0
@@ -513,7 +519,7 @@ class Search:
                 if isinstance(runtime, IsolatedFulltextRuntime)
             ]
             if self.fulltext_pool is None:
-                configured = self.cfg.get("fulltext_workers")
+                configured = self.cfg.get("libzim_search_processes")
                 workers = (
                     configured if isinstance(configured, int)
                     and not isinstance(configured, bool) and configured > 0

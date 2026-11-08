@@ -123,7 +123,7 @@ subprocesses start only when native search first uses those slots.
 Each helper still caches at most four archive/searcher pairs. Deployment
 budgets must include helpers, not just the server's own RSS.
 
-`fulltext_workers` is an independent global setting, not a multiplier per
+`libzim_search_processes` is an independent global setting, not a multiplier per
 collection. Its automatic budget uses usable CPU threads, source-executor
 capacity, and available RAM, including ancestor cgroup quotas and
 memory limits, with a ceiling of eight helpers. The estimate reserves
@@ -136,6 +136,15 @@ helpers than source threads usually wastes cache memory without increasing
 parallelism.
 The estimate retains server/model headroom even in `--fast` mode; a
 lexical-only deployment can override it after measuring its full memory use.
+
+All hardware profiles use the same serving defaults: `source_query_threads`
+budgets one shared source/preview thread pool from usable logical CPUs, capped
+at eight, while `onnx_query_threads` budgets threads inside a query embedding
+from usable physical cores, leaving one and capped at four. These are separate
+from native subprocess memory and user-request admission. Profile selection
+and build budgeting use the same affinity/cgroup-aware hardware detector.
+Normal configs omit these counts; old names remain deprecated aliases.
+See [advanced resource overrides](usage.md#advanced-resource-overrides).
 
 Resource kills must not masquerade as archive corruption. Native fatal
 signals such as SIGABRT and SIGSEGV disable the offending archive's native
@@ -221,7 +230,7 @@ be changed together:
 |---|---|---|
 | `MAX_CACHED_ARCHIVES = 4` | Archive/searcher pairs cached by each helper | Bounds retained handles and memory; the four-archive workload does not establish an optimum for larger libraries, so this LRU cap is not retuned |
 | `max_concurrent_searches = 4` on desktop | Admitted user searches, not native processes | Bounds model work, previews, and request backlog; configurable and separate from this benchmark |
-| Desktop query embedding threads capped at four | ONNX threads per query | Short-query synchronization tradeoff; `embed_threads` overrides it, and [embedding measurements](usage.md#build-behavior-and-locking) are separate |
+| Query embedding threads capped at four across profiles | ONNX threads per query | Short-query synchronization tradeoff; `onnx_query_threads` overrides it, and [embedding measurements](usage.md#build-behavior-and-locking) are separate |
 | Automatic build worker CPU/RAM divisors of four | Approximately four CPU threads/four GiB per source build | A build resource heuristic, not a four-worker maximum; unrelated to the native-search pool |
 
 ## Resource limits and status

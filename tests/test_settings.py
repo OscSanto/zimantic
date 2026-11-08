@@ -4,12 +4,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from zimantic import settings
+from zimantic import hardware, settings
+from zimantic.hardware import Hardware
 from zimantic.settings import (
     PROFILES,
     default_build_workers,
     default_embedding_workers,
     default_fulltext_workers,
+    default_max_concurrent_searches,
+    default_onnx_query_threads,
+    default_source_query_threads,
     load_config,
     normalize_web_base_path,
     profile_for_hardware,
@@ -26,41 +30,42 @@ class HardwareProfileTests(unittest.TestCase):
         self.assertEqual(normalize_web_base_path(""), "")
         self.assertEqual(normalize_web_base_path(None), "")
 
-    @patch.object(settings, "_system_memory_gb", return_value=0.5)
-    def test_low_memory_is_mobile(self, _memory):
-        with patch("os.cpu_count", return_value=4):
-            self.assertEqual(profile_for_hardware(), "mobile")
-
-    @patch.object(settings, "_system_memory_gb", return_value=1.0)
-    def test_one_gb_hosts_use_mobile_profile(self, _memory):
-        with patch("os.cpu_count", return_value=4):
-            self.assertEqual(profile_for_hardware(), "mobile")
-
-    @patch.object(settings, "_system_memory_gb", return_value=2.0)
-    def test_two_gb_hosts_use_desktop_profile(self, _memory):
-        with patch("os.cpu_count", return_value=4):
-            self.assertEqual(profile_for_hardware(), "desktop")
-
-    @patch.object(settings, "_system_memory_gb", return_value=8.0)
-    def test_mid_memory_is_desktop(self, _memory):
-        with patch("os.cpu_count", return_value=8):
-            self.assertEqual(profile_for_hardware(), "desktop")
-
-    @patch.object(settings, "_system_memory_gb", return_value=256.0)
-    def test_lots_of_memory_is_supercomputer(self, _memory):
-        with patch("os.cpu_count", return_value=16):
-            self.assertEqual(profile_for_hardware(), "supercomputer")
-
-    @patch.object(settings, "_system_memory_gb", return_value=16.0)
-    def test_many_cores_is_supercomputer(self, _memory):
-        with patch("os.cpu_count", return_value=64):
-            self.assertEqual(profile_for_hardware(), "supercomputer")
+    def test_profiles_use_effective_resources_not_host_cpu_count(self):
+        for cores, memory_gb, expected in (
+            (4, 0.5, "mobile"),
+            (4, 1, "mobile"),
+            (4, 2, "desktop"),
+            (8, 8, "desktop"),
+            (16, 256, "supercomputer"),
+            (32, 16, "supercomputer"),
+            (1, 0, "desktop"),
+        ):
+            with self.subTest(cores=cores, memory_gb=memory_gb):
+                memory = int(memory_gb * (1 << 30))
+                with (
+                    patch.object(hardware, "detect", return_value=Hardware(cores, cores, memory, memory)),
+                    patch("os.cpu_count", return_value=256),
+                ):
+                    self.assertEqual(profile_for_hardware(), expected)
 
     def test_build_workers_scale_with_cpu_and_memory(self):
         self.assertEqual(default_build_workers(4, 0.5), 1)
         self.assertEqual(default_build_workers(8, 8), 2)
         self.assertEqual(default_build_workers(20, 32), 5)
         self.assertEqual(default_build_workers(64, 256), 8)
+        with patch.object(
+            hardware, "detect", return_value=Hardware(2, 2, 256 << 30, 512 << 20)
+        ):
+            self.assertEqual(default_build_workers(), 1)
+
+    def test_serving_defaults_bound_cpu_without_conflating_thread_layers(self):
+        with patch.object(
+            hardware, "detect", return_value=Hardware(4, 8, 1 << 30, 384 << 20)
+        ):
+            self.assertEqual(default_source_query_threads(), 8)
+            self.assertEqual(default_onnx_query_threads(), 3)
+            self.assertEqual(default_max_concurrent_searches(), 1)
+            self.assertEqual(default_fulltext_workers(), 1)
 
     def test_embedding_workers_respect_thread_budget(self):
         self.assertEqual(default_embedding_workers(4, 0.5, 1, 2), 1)
@@ -83,6 +88,120 @@ class HardwareProfileTests(unittest.TestCase):
 
 
 class LoadConfigTests(unittest.TestCase):
+    def test_automatic_serving_counts_follow_constrained_resources(self):
+        for cores, total_mib, available_mib, expected in (
+            (1, 512, 448, (1, 1, 1, 1)),
+            (2, 512, 448, (2, 1, 1, 1)),
+            (4, 1024, 960, (4, 3, 4, 2)),
+            (8, 1024, 960, (8, 4, 5, 2)),
+            (8, 2048, 1984, (8, 4, 8, 4)),
+            (1, 262144, 204800, (1, 1, 1, 1)),
+        ):
+            with self.subTest(cores=cores, total_mib=total_mib):
+                with patch.object(
+                    hardware, "detect",
+                    return_value=Hardware(cores, cores, total_mib << 20, available_mib << 20),
+                ):
+                    cfg = load_config("/nonexistent/config.toml", warn=lambda _: None)
+                self.assertEqual(
+                    tuple(cfg[key] for key in (
+                        "source_query_threads", "onnx_query_threads",
+                        "libzim_search_processes", "max_concurrent_searches",
+                    )),
+                    expected,
+                )
+                self.assertEqual(cfg["build_workers"], 1)
+                self.assertLessEqual(cfg["onnx_build_threads"], cores)
+
+    def test_explicit_resource_counts_override_automatic_limits(self):
+        values = {
+            "source_query_threads": 13,
+            "onnx_query_threads": 7,
+            "libzim_search_processes": 9,
+            "onnx_build_threads": 5,
+            "onnx_build_workers": 12,
+            "build_workers": 10,
+            "max_concurrent_searches": 6,
+        }
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(hardware, "detect", return_value=Hardware(1, 1, 512 << 20, 384 << 20)),
+        ):
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                "".join(f"{key} = {value}\n" for key, value in values.items()),
+                encoding="utf-8",
+            )
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+        self.assertEqual({key: cfg[key] for key in values}, values)
+        self.assertEqual(warnings, [])
+
+    def test_renamed_resource_keys_accept_legacy_configs(self):
+        for old, new in (
+            ("embed_threads", "onnx_query_threads"),
+            ("search_workers", "source_query_threads"),
+            ("fulltext_workers", "libzim_search_processes"),
+            ("build_embed_threads", "onnx_build_threads"),
+            ("embedding_workers", "onnx_build_workers"),
+        ):
+            with self.subTest(old=old), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.toml"
+                path.write_text(f"{old} = 3\n", encoding="utf-8")
+                warnings = []
+                cfg = load_config(path, warn=warnings.append)
+                self.assertEqual(cfg[new], 3)
+                self.assertEqual(cfg["runtime_config"].settings[new], 3)
+                self.assertNotIn(old, cfg)
+                self.assertNotIn(old, cfg["runtime_config"].settings)
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(old, warnings[0])
+                self.assertIn(new, warnings[0])
+
+    def test_canonical_key_wins_over_alias_regardless_of_order_or_validity(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(hardware, "detect", return_value=Hardware(1, 1, 512 << 20, 384 << 20)),
+        ):
+            path = Path(tmp) / "config.toml"
+            for text, expected in (
+                ("search_workers = 3\nsource_query_threads = 5\n", 5),
+                ('source_query_threads = 5\nsearch_workers = "bad"\n', 5),
+                ("source_query_threads = 0\nsearch_workers = 3\n", 1),
+            ):
+                with self.subTest(text=text):
+                    path.write_text(text, encoding="utf-8")
+                    warnings = []
+                    cfg = load_config(path, warn=warnings.append)
+                    self.assertEqual(cfg["source_query_threads"], expected)
+                    self.assertTrue(any("takes precedence" in message for message in warnings))
+
+    def test_invalid_serving_counts_warn_and_resolve_automatically(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(hardware, "detect", return_value=Hardware(1, 1, 512 << 20, 384 << 20)),
+        ):
+            path = Path(tmp) / "config.toml"
+            for key in ("onnx_query_threads", "source_query_threads", "libzim_search_processes"):
+                for value in ("0", "-1", "true", '"two"'):
+                    with self.subTest(key=key, value=value):
+                        path.write_text(f"{key} = {value}\n", encoding="utf-8")
+                        warnings = []
+                        cfg = load_config(path, warn=warnings.append)
+                        self.assertEqual(cfg[key], 1)
+                        self.assertEqual(len(warnings), 1)
+                        self.assertIn(key, warnings[0])
+
+    def test_runtime_config_normalizes_legacy_keys_without_mutating_input(self):
+        from zimantic.providers.config import RuntimeConfig
+
+        values = {"embed_threads": 2, "fulltext_workers": 3}
+        runtime = RuntimeConfig(settings=values)
+        self.assertEqual(dict(runtime.settings), {
+            "onnx_query_threads": 2, "libzim_search_processes": 3,
+        })
+        self.assertEqual(values, {"embed_threads": 2, "fulltext_workers": 3})
+
     def test_dotted_traversal_limits_apply_to_each_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
@@ -308,7 +427,7 @@ class LoadConfigTests(unittest.TestCase):
     def test_zero_worker_counts_warn_and_fall_back_to_automatic_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
-            path.write_text("build_workers = 0\nembedding_workers = 0\nfulltext_workers = 0\n", encoding="utf-8")
+            path.write_text("build_workers = 0\nonnx_build_workers = 0\nlibzim_search_processes = 0\n", encoding="utf-8")
             warnings = []
             with (
                 patch.object(settings, "profile_for_hardware", return_value="desktop"),
@@ -318,20 +437,20 @@ class LoadConfigTests(unittest.TestCase):
             ):
                 cfg = load_config(path, warn=warnings.append)
         self.assertEqual(cfg["build_workers"], 5)
-        self.assertEqual(cfg["embedding_workers"], 3)
-        self.assertEqual(cfg["fulltext_workers"], 2)
+        self.assertEqual(cfg["onnx_build_workers"], 3)
+        self.assertEqual(cfg["libzim_search_processes"], 2)
         self.assertTrue(any("build_workers" in message for message in warnings))
-        self.assertTrue(any("embedding_workers" in message for message in warnings))
-        self.assertTrue(any("fulltext_workers" in message for message in warnings))
+        self.assertTrue(any("onnx_build_workers" in message for message in warnings))
+        self.assertTrue(any("libzim_search_processes" in message for message in warnings))
 
     def test_explicit_fulltext_workers_are_not_capped_by_source_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
-            path.write_text("search_workers = 2\nfulltext_workers = 8\n", encoding="utf-8")
+            path.write_text("source_query_threads = 2\nlibzim_search_processes = 8\n", encoding="utf-8")
             with patch.object(settings, "default_fulltext_workers") as automatic:
                 cfg = load_config(path, warn=lambda _: None)
             automatic.assert_not_called()
-        self.assertEqual(cfg["fulltext_workers"], 8)
+        self.assertEqual(cfg["libzim_search_processes"], 8)
 
     def test_worker_defaults_are_dynamic_but_explicit_values_override(self):
         with patch.object(settings, "profile_for_hardware", return_value="desktop"):
@@ -339,15 +458,15 @@ class LoadConfigTests(unittest.TestCase):
                 with patch.object(settings, "default_embedding_workers", return_value=3):
                     cfg = load_config("/nonexistent/config.toml", warn=lambda _: None)
         self.assertEqual(cfg["build_workers"], 5)
-        self.assertEqual(cfg["embedding_workers"], 3)
+        self.assertEqual(cfg["onnx_build_workers"], 3)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
-            path.write_text("build_workers = 7\nembedding_workers = 6\n", encoding="utf-8")
+            path.write_text("build_workers = 7\nonnx_build_workers = 6\n", encoding="utf-8")
             with patch.object(settings, "profile_for_hardware", return_value="desktop"):
                 cfg = load_config(path, warn=lambda _: None)
             self.assertEqual(cfg["build_workers"], 7)
-            self.assertEqual(cfg["embedding_workers"], 6)
+            self.assertEqual(cfg["onnx_build_workers"], 6)
 
     def test_embedding_default_uses_build_not_serving_threads(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,19 +478,22 @@ class LoadConfigTests(unittest.TestCase):
                 ("supercomputer", None, 8),
             ):
                 with self.subTest(profile=profile, build_threads=build_threads):
-                    text = "embed_threads = 8\n"
+                    text = "onnx_query_threads = 8\n"
                     if build_threads is not None:
-                        text += f"build_embed_threads = {build_threads}\n"
+                        text += f"onnx_build_threads = {build_threads}\n"
                     path.write_text(text, encoding="utf-8")
                     with (
                         patch.object(settings, "profile_for_hardware", return_value=profile),
                         patch.object(settings, "default_build_workers", return_value=5),
+                        patch.object(hardware, "detect", return_value=Hardware(8, 8, 16 << 30, 16 << 30)),
                         patch.object(settings, "default_embedding_workers", return_value=2) as workers,
                     ):
                         cfg = load_config(path, warn=lambda _: None)
-                    self.assertEqual(cfg["embed_threads"], 8)
-                    self.assertEqual(cfg["build_embed_threads"], expected)
+                    self.assertEqual(cfg["onnx_query_threads"], 8)
+                    self.assertEqual(cfg["onnx_build_threads"], expected)
                     workers.assert_called_once_with(
+                        cores=8,
+                        memory_gb=16.0,
                         build_workers=5,
                         build_embed_threads=expected,
                         token_budget=1000,
@@ -385,12 +507,12 @@ class LoadConfigTests(unittest.TestCase):
             path = Path(tmp) / "config.toml"
             for value in ("0", "-1", "true", '"two"'):
                 with self.subTest(value=value):
-                    path.write_text(f"build_embed_threads = {value}\n", encoding="utf-8")
+                    path.write_text(f"onnx_build_threads = {value}\n", encoding="utf-8")
                     warnings = []
                     cfg = load_config(path, warn=warnings.append)
-                    self.assertEqual(cfg["build_embed_threads"], 1)
+                    self.assertEqual(cfg["onnx_build_threads"], 1)
                     self.assertEqual(
-                        len([msg for msg in warnings if "build_embed_threads" in msg]),
+                        len([msg for msg in warnings if "onnx_build_threads" in msg]),
                         1,
                     )
 
@@ -523,8 +645,22 @@ class LoadConfigTests(unittest.TestCase):
         root_config = Path(__file__).resolve().parents[1] / "config.toml"
         with patch.object(settings, "profile_for_hardware", return_value="mobile"):
             cfg = load_config(root_config, warn=lambda _message: None)
-        for key in ("batch_size", "max_entry_bytes", "search_workers", "cache_size"):
+        for key in ("batch_size", "max_entry_bytes", "cache_size"):
             self.assertEqual(cfg[key], PROFILES["mobile"][key])
+
+    def test_shipped_presets_do_not_pin_serving_concurrency(self):
+        root = Path(__file__).resolve().parents[1]
+        with patch.object(
+            hardware, "detect", return_value=Hardware(1, 1, 512 << 20, 384 << 20)
+        ):
+            for name in ("config.toml", "config.pi-zero-2w.toml", "config.pi-5.toml"):
+                with self.subTest(config=name):
+                    cfg = load_config(root / name, warn=lambda _: None)
+                    for key in (
+                        "source_query_threads", "onnx_query_threads",
+                        "libzim_search_processes", "max_concurrent_searches", "build_workers",
+                    ):
+                        self.assertEqual(cfg[key], 1)
 
 
 if __name__ == "__main__":

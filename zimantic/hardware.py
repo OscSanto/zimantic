@@ -1,4 +1,4 @@
-"""Best-effort CPU and available-memory budgets for index builds."""
+"""Best-effort CPU and memory budgets for index builds and serving."""
 
 import ctypes
 import math

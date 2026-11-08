@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from ..scoped_settings import FILTER_KEYS, SCOPED_KEYS, parse_scoped_settings
-from ..settings import KNOWN_KEYS
+from ..settings import KNOWN_KEYS, normalize_resource_settings
 
 ProviderKind = Literal["zim", "kiwix", "files", "kolibri"]
 Granularity = Literal["collection", "children"]
@@ -376,7 +376,7 @@ class RuntimeConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "settings", MappingProxyType(dict(self.settings))
+            self, "settings", MappingProxyType(normalize_resource_settings(self.settings))
         )
         object.__setattr__(
             self, "envelope", MappingProxyType(dict(self.envelope))

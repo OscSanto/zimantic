@@ -159,7 +159,7 @@ Reloading indexes without a restart. `zimantic reload` sends `SIGHUP` to a norma
 ### 3. Each search
 
 1. **Embed the query** with the same model used to index.
-2. Run three searches on each selected local source. Sources run in parallel, up to `search_workers` at a time:
+2. Run three searches on each selected local source. Sources run in parallel, up to `source_query_threads` at a time:
 
    | Search | Finds | Good at | Time |
    |---|---|---|---|

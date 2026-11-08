@@ -319,12 +319,25 @@ class _TestZimRuntime(IndexedRuntime, EnrichingRuntime):
 
 
 class RuntimeCapabilityTests(unittest.TestCase):
+    def test_legacy_resource_keys_still_control_runtime_pools(self):
+        search = Search(
+            RuntimeConfig(settings={"search_workers": 2, "fulltext_workers": 3}),
+            semantic=False,
+        )
+        with patch("zimantic.fulltext.FulltextPool") as pool_factory:
+            try:
+                self.assertEqual(search.source_workers, 2)
+                search.start_fulltext_isolation()
+                pool_factory.assert_called_once_with(3)
+            finally:
+                search.close()
+
     def test_late_native_runtime_borrows_pool_when_startup_had_no_sources(self):
         class _IsolatedRuntime(IsolatedFulltextRuntime):
             def set_fulltext_pool(self, pool):
                 self.pool = pool
 
-        search = _bare_search({"fulltext_workers": 1})
+        search = _bare_search({"libzim_search_processes": 1})
         search.runtimes = {}
         with patch("zimantic.fulltext.FulltextPool") as pool_factory:
             try:
@@ -377,7 +390,7 @@ class RuntimeCapabilityTests(unittest.TestCase):
             def set_fulltext_pool(self, pool):
                 self.pool = pool
 
-        search = _bare_search({"fulltext_workers": 6})
+        search = _bare_search({"libzim_search_processes": 6})
         isolated = _IsolatedRuntime()
         second = _IsolatedRuntime()
         with patch("zimantic.fulltext.FulltextPool") as pool_factory:

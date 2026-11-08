@@ -71,7 +71,7 @@ def _config(root: Path, *, max_article_bytes: int | None = None) -> RuntimeConfi
         "candidate_count": 16,
         "page_size": 10,
         "max_results": 100,
-        "search_workers": 1,
+        "source_query_threads": 1,
     }
     if max_article_bytes is not None:
         cfg["max_article_bytes"] = max_article_bytes

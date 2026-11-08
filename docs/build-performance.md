@@ -307,8 +307,9 @@ single-query serving.
 
 ## Separate build and query thread budgets
 
-`build_embed_threads` controls build calls and automatic embedding-worker
-sizing. `embed_threads` controls query serving. These settings are independent.
+`onnx_build_threads` controls build calls and automatic embedding-worker
+sizing. `onnx_query_threads` controls query serving. These settings are independent.
+The former names remain deprecated configuration aliases.
 
 The following tuning used the same 6.33 MB archive and model. Desktop affinity
 was CPUs 0–7: **four physical/eight logical cores**. The Pi was a **Pi 500,
@@ -392,8 +393,9 @@ cores, leaving one available** (minimum one thread), favoring typical short
 searches; this yields **three on a four-core Pi**. Override to eight for a
 near-limit-query workload. A blanket one-thread serving default is not supported.
 
-The mobile profile uses two threads per call; the supercomputer profile uses
-eight. Build and serving thread settings are separate. Pi Zero 2 W and
+Every profile now uses the same automatic query-thread rule above. Build
+profiles retain two threads on mobile and eight on supercomputer, bounded by
+usable cores; build and serving settings remain separate. Pi Zero 2 W and
 large-core servers were **not** benchmarked here; the results do not set
 optima for those devices. A RAM-limited single model worker can still benefit from intra-call
 parallelism, as the Pi 1×1 versus 1×2 sweep illustrates.
