@@ -219,10 +219,11 @@ class KolibriEntryProducer:
         self.traversal_timeout = float(
             getattr(traversal, "traversal_timeout_seconds", 300)
         )
-        from ...indexing.derived import source_operations
+        from ...indexing.derived import source_derived_config, source_operations
 
         operations = source_operations(self.cfg, self.info)
         self.operations = operations
+        self.derived_config = source_derived_config(self.cfg, self.info)
         self.captions_enabled = bool(getattr(operations, "captions", False))
         self.ocr_enabled = bool(getattr(operations, "ocr", None))
         self.asr_enabled = bool(getattr(operations, "asr", None))
@@ -415,7 +416,7 @@ class KolibriEntryProducer:
                 for item in items
             ],
             "operations": _operations_state(self.operations),
-            "derived_text": _derived_config_payload(self.cfg.get("derived_text")),
+            "derived_text": _derived_config_payload(self.derived_config),
             "engines": sorted(
                 str(name) for name in (self.cfg.get("derived_engines") or {})
             ),

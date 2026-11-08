@@ -460,6 +460,55 @@ def test_ocr_and_asr_use_fake_engines(tmp_path):
     assert derived["operations"]["asr"] == "ready"
 
 
+@pytest.mark.parametrize("scope", ["collection", "source"])
+def test_derived_language_overrides_rebuild_and_index_with_effective_options(tmp_path, scope):
+    from zimantic.settings import load_config
+
+    root = tmp_path / "media"
+    root.mkdir()
+    copy_sample("image/scan.png", root / "scan.png")
+    path = tmp_path / "config.toml"
+    calls = []
+
+    def engine(data, **options):
+        calls.append(options["ocr_languages"])
+        return "zebra" if options["ocr_languages"] == ["fra"] else "unicorn"
+
+    def settings(language):
+        derived = 'ocr = "tesseract"'
+        sources = ""
+        if scope == "collection":
+            derived += f', ocr_languages = ["{language}"]'
+        else:
+            sources = f'sources = [{{ key = "files:media:root", ocr_languages = ["{language}"] }}]\n'
+        path.write_text(
+            '[derived_text]\nocr_languages = ["eng"]\n'
+            '[[collections]]\ntype = "files"\nname = "media"\npath = "./media"\n'
+            f'derived_text = {{ {derived} }}\n{sources}',
+            encoding="utf-8",
+        )
+        cfg = load_config(path, warn=lambda _: None)
+        cfg["derived_engines"] = {"ocr": engine}
+        cfg["batch_size"] = 1
+        return cfg
+
+    locator = IndexLocator(tmp_path / "indexes")
+    cfg = settings("fra")
+    config = cfg["collections"][0]
+    source = _source(config, "files:media:root")
+    first = _producer(root, config, source, cfg=cfg)
+    build_index(first, locator, None, cfg)
+    assert _body_hits(locator, source.info, "zebra")
+    assert build_index(_producer(root, config, source, cfg=cfg), locator, None, cfg).status == "skipped"
+    cfg = settings("deu")
+    changed = _producer(root, cfg["collections"][0], source, cfg=cfg)
+    assert changed.fingerprint != first.fingerprint
+    build_index(changed, locator, None, cfg)
+    assert _body_hits(locator, source.info, "unicorn")
+    assert not _body_hits(locator, source.info, "zebra")
+    assert calls == [["fra"], ["deu"]]
+
+
 def test_image_only_pdf_is_ocr_eligible(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()

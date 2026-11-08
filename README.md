@@ -303,25 +303,25 @@ a build that enables ASR while online.
 ### Quick start: Tesseract OCR
 
 ```bash
-sudo apt install tesseract-ocr tesseract-ocr-eng
+sudo apt install tesseract-ocr tesseract-ocr-fra
 # add tesseract-ocr-<lang> for every language you list
 ```
 
 ```toml
-[derived_text]
-ocr_languages = ["eng"]
-
 [[collections]]
 type = "files"
 name = "media"
 path = "./media"
-derived_text = { ocr = "tesseract" }
+derived_text = { ocr = "tesseract", ocr_languages = ["fra"] }
 ```
 
 OCR reads the same trained-data files as the `tesseract` command. List the
-languages in the global derived-text config. Collection defaults are supported
-for files and Kolibri collections; ZIM embedded-media enrichment is not
-implemented.
+languages globally or override them for a collection or exact source. Use the
+installed trained-data names: French is normally `fra`, not `fre`. Codes pass
+through unchanged; Zimantic does not translate aliases or install language data.
+For the example above, install `tesseract-ocr-fra`. Collection defaults are
+supported for files and Kolibri collections; ZIM embedded-media enrichment is
+not implemented.
 
 ```toml
 [derived_text]
@@ -467,20 +467,36 @@ Accepted operation values are:
 `asr_engine` separately selects the Whisper backend: `"auto"`,
 `"whisper.cpp"`, or `"faster-whisper"`.
 
+All options accepted under global `[derived_text]` (languages, ASR backend/model,
+caps, timeout, workers, and cache) can also appear in a collection's
+`derived_text` table or an exact-source override. Precedence is built-in defaults
+→ global `[derived_text]` → collection `derived_text` → exact source. Only
+specified fields override inherited values; language lists replace rather than
+append. Engine options alone never enable an operation.
+
 **Advanced: per-source overrides.** Use `sources` only when a source needs
-different operations from its collection defaults. Each entry overrides only
-the operation fields it specifies:
+different operations or engine options from its collection defaults. Each entry
+overrides only the fields it specifies:
 
 ```toml
+[derived_text]
+ocr_languages = ["eng"]
+asr_model = "base"
+
 [[collections]]
 type = "files"
 name = "media"
 path = "./media"
-derived_text = { captions = "index", ocr = "tesseract", asr = "whisper" }
+derived_text = { captions = "index", ocr = "tesseract", ocr_languages = ["fra"], asr = "whisper" }
 sources = [
-  { key = "files:media:root", ocr = "off" },
+  { key = "files:media:french", asr_model = "small" },
+  { key = "files:media:german", ocr_languages = ["deu"], asr = "off" },
 ]
 ```
+
+Use keys from `/sources`; the example keys are illustrative. Effective options
+participate in source build fingerprints and derived-output cache keys, so
+changing them rebuilds affected sources and does not reuse incompatible text.
 
 Setting one does not enable the others. Engines run locally at build time only
 and are never loaded by `serve`; a missing engine marks only that operation

@@ -101,6 +101,113 @@ class TestConfigSchema:
         assert cfg["collections"][0].path == str(tmp_path / "zims")
         assert cfg["collections"][1].path == str(tmp_path / "modules")
 
+    @pytest.mark.parametrize("provider", ["files", "kolibri"])
+    def test_derived_options_inherit_global_collection_and_source(self, tmp_path, provider):
+        from zimantic.indexing.derived import source_derived_config, source_operations
+
+        config = _write(
+            tmp_path / "config.toml",
+            '[derived_text]\n'
+            'ocr_languages = ["eng", "ita"]\n'
+            'asr_model = "base"\n'
+            'asr_threads = 2\n'
+            'max_ocr_pages = 7\n'
+            'task_timeout_seconds = 50\n'
+            '[[collections]]\n'
+            f'type = "{provider}"\n'
+            'name = "media"\n'
+            'path = "./media"\n'
+            'derived_text = { ocr = "tesseract", ocr_languages = ["fre"], asr_model = "tiny", cache = false }\n'
+            'sources = [\n'
+            f'  {{ key = "{provider}:media:custom", ocr_languages = ["fra"], max_ocr_pages = 2 }},\n'
+            f'  {{ key = "{provider}:media:disabled", ocr = "off", asr_model = "small" }},\n'
+            ']\n'
+            '[[collections]]\n'
+            f'type = "{provider}"\n'
+            'name = "other"\n'
+            'path = "./other"\n'
+            'sources = [\n'
+            f'  {{ key = "{provider}:other:custom", ocr_languages = ["deu"] }},\n'
+            ']\n',
+        )
+        cfg = load_config(config, warn=lambda _: None)
+        assert not cfg["config_issues"]
+
+        def source(name, suffix):
+            return SimpleNamespace(
+                key=f"{provider}:{name}:{suffix}", collection_key=f"{provider}:{name}"
+            )
+
+        inherited = source_derived_config(cfg, source("media", "default"))
+        assert inherited.ocr_languages == ("fre",)
+        assert inherited.asr_model == "tiny"
+        assert inherited.asr_threads == 2
+        assert inherited.max_ocr_pages == 7
+        assert inherited.task_timeout_seconds == 50
+        assert inherited.cache is False
+        custom = source_derived_config(cfg, source("media", "custom"))
+        assert custom.ocr_languages == ("fra",)
+        assert custom.max_ocr_pages == 2
+        assert custom.asr_model == "tiny"
+        assert source_operations(cfg, source("media", "custom")).ocr == "tesseract"
+        assert source_operations(cfg, source("media", "disabled")).any_enabled is False
+        assert source_derived_config(cfg, source("media", "disabled")).asr_model == "small"
+        assert source_operations(cfg, source("other", "custom")).any_enabled is False
+        other = source_derived_config(cfg, source("other", "default"))
+        assert other.ocr_languages == ("eng", "ita")
+        assert other.asr_model == "base"
+        assert other.cache is True
+        assert cfg["derived_text"].ocr_languages == ("eng", "ita")
+        envelope = json.loads(json.dumps(dict(cfg["runtime_config"].envelope)))
+        assert envelope["collection_derived_text"]["media"]["ocr_languages"] == ["fre"]
+        assert envelope["source_operations"][f"{provider}:media:custom"]["max_ocr_pages"] == 2
+
+    @pytest.mark.parametrize("scope", ["global", "collection", "source"])
+    @pytest.mark.parametrize(
+        "option",
+        [
+            'ocr_languages = []',
+            'ocr_languages = "fra"',
+            'ocr_languages = [" "]',
+            'max_ocr_pages = 0',
+            'asr_engine = "unknown"',
+            'asr_model = 3',
+            'cache = "false"',
+            'workers = true',
+        ],
+    )
+    def test_invalid_derived_options_are_rejected_at_every_scope(self, tmp_path, scope, option):
+        collection = '[[collections]]\ntype = "files"\nname = "media"\npath = "media"\n'
+        if scope == "global":
+            text = f"[derived_text]\n{option}\n{collection}"
+        elif scope == "collection":
+            text = collection + f"derived_text = {{ {option} }}\n"
+        else:
+            text = collection + f'sources = [{{ key = "files:media:root", {option} }}]\n'
+        config = _write(tmp_path / "config.toml", text)
+        if scope == "collection":
+            cfg = load_config(config, warn=lambda _: None)
+            assert cfg["collections"] == ()
+            assert cfg["config_issues"]
+        else:
+            with pytest.raises(ConfigValidationError):
+                load_config(config, warn=lambda _: None)
+
+    @pytest.mark.parametrize("scope", ["collection", "source"])
+    def test_unknown_derived_override_options_are_rejected(self, tmp_path, scope):
+        text = '[[collections]]\ntype = "files"\nname = "media"\npath = "media"\n'
+        if scope == "collection":
+            text += 'derived_text = { ocr_languges = ["fra"] }\n'
+        else:
+            text += 'sources = [{ key = "files:media:root", ocr_languges = ["fra"] }]\n'
+        config = _write(tmp_path / "config.toml", text)
+        if scope == "collection":
+            cfg = load_config(config, warn=lambda _: None)
+            assert any("unknown derived_text" in issue.message for issue in cfg["config_issues"])
+        else:
+            with pytest.raises(ConfigValidationError, match="unknown source override"):
+                load_config(config, warn=lambda _: None)
+
     def test_duplicate_unknown_and_invalid_entries_do_not_hide_valid_ones(
         self, tmp_path
     ):

@@ -130,6 +130,7 @@ class CollectionDerivedTextConfig:
     captions: Literal["off", "index"] = "off"
     ocr: Literal["off", "tesseract"] = "off"
     asr: Literal["off", "whisper"] = "off"
+    options: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _derived_text(value: Any) -> CollectionDerivedTextConfig | None:
@@ -137,7 +138,9 @@ def _derived_text(value: Any) -> CollectionDerivedTextConfig | None:
         return None
     if not isinstance(value, Mapping):
         raise ConfigValidationError("derived_text must be a table")
-    unknown = sorted(set(value) - {"captions", "ocr", "asr"})
+    from ..indexing.derived import DERIVED_TEXT_KEYS, parse_derived_options
+
+    unknown = sorted(set(value) - {"captions", "ocr", "asr"} - DERIVED_TEXT_KEYS)
     if unknown:
         raise ConfigValidationError(
             "unknown derived_text key(s): " + ", ".join(unknown)
@@ -151,7 +154,15 @@ def _derived_text(value: Any) -> CollectionDerivedTextConfig | None:
         raise ConfigValidationError("derived_text.ocr accepts 'off' or 'tesseract'")
     if not isinstance(asr, str) or asr not in {"off", "whisper"}:
         raise ConfigValidationError("derived_text.asr accepts 'off' or 'whisper'")
-    return CollectionDerivedTextConfig(captions=captions, ocr=ocr, asr=asr)
+    try:
+        options = parse_derived_options(
+            {name: item for name, item in value.items() if name in DERIVED_TEXT_KEYS}
+        )
+    except ValueError as error:
+        raise ConfigValidationError(f"derived_text: {error}") from error
+    return CollectionDerivedTextConfig(
+        captions=captions, ocr=ocr, asr=asr, options=options
+    )
 
 
 def _traversal(entry: Mapping[str, Any], name: str) -> TraversalLimits:

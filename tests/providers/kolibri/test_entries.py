@@ -350,3 +350,28 @@ def test_fingerprint_tracks_relevant_changes_and_validation_detects_writes(tmp_p
         fixture.db.close()
         runtime.close()
         batch.close()
+
+
+def test_fingerprint_tracks_effective_derived_options(tmp_path):
+    fixture = make_two_channel_fixture(tmp_path)
+    runtime, batch, _ = open_runtime(tmp_path / "indexes", kolibri_config(fixture))
+    try:
+        source = runtime.library_sources()[0]
+        runtime._cfg["derived_collection_operations"] = {
+            "kolibri": SourceDerivedOperations(options={"asr_model": "tiny"})
+        }
+        inherited = runtime.entry_producer(source, fast=False)
+        runtime._cfg["derived_source_operations"] = {
+            source.key: SourceDerivedOperations(options={"asr_model": "small"})
+        }
+        overridden = runtime.entry_producer(source, fast=False)
+        assert overridden.fingerprint != inherited.fingerprint
+        runtime._cfg["derived_collection_operations"] = {
+            "kolibri": SourceDerivedOperations(options={"asr_model": "base"})
+        }
+        unchanged = runtime.entry_producer(source, fast=False)
+        assert unchanged.fingerprint == overridden.fingerprint
+    finally:
+        fixture.db.close()
+        runtime.close()
+        batch.close()

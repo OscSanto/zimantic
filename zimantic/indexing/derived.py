@@ -22,7 +22,7 @@ import stat
 import tempfile
 import unicodedata
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -211,34 +211,44 @@ class DerivedTextConfig:
             or self.asr_threads < 0
         ):
             raise ValueError("asr_threads must be zero or a positive integer")
-        if not isinstance(self.asr_batched, bool):
-            raise ValueError("asr_batched must be true or false")
-        if not self.asr_model:
+        for name in ("asr_batched", "cache"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be true or false")
+        if not isinstance(self.asr_model, str) or not self.asr_model.strip():
             raise ValueError("asr_model must not be empty")
         if not self.ocr_languages:
             raise ValueError("ocr_languages must not be empty")
 
+    def to_dict(self) -> dict[str, Any]:
+        values = {name: getattr(self, name) for name in self.__dataclass_fields__}
+        values["ocr_languages"] = list(self.ocr_languages)
+        return values
 
-_DERIVED_KEYS = frozenset(DerivedTextConfig.__dataclass_fields__)
+
+DERIVED_TEXT_KEYS = frozenset(DerivedTextConfig.__dataclass_fields__)
 
 
-def parse_derived_text(data: Mapping[str, Any] | None) -> DerivedTextConfig:
-    """Validate the normalized global ``[derived_text]`` schema."""
+def parse_derived_text(
+    data: Mapping[str, Any] | None, *, strict: bool = False
+) -> DerivedTextConfig:
+    """Validate derived-text options, retaining global unknown-key warnings."""
     if data is None:
         return DerivedTextConfig()
     if not isinstance(data, Mapping):
         raise ValueError("[derived_text] must be a table")
     values = dict(data)
-    unknown = sorted(set(values) - _DERIVED_KEYS)
+    unknown = sorted(set(values) - DERIVED_TEXT_KEYS)
     if unknown:
+        if strict:
+            raise ValueError(f"unknown derived_text key(s): {', '.join(unknown)}")
         logger.warning(
             "zimantic: warning: unknown [derived_text] key(s) ignored: %s",
             ", ".join(unknown),
         )
         for key in unknown:
             values.pop(key, None)
-    languages = values.get("ocr_languages")
-    if languages is not None:
+    if "ocr_languages" in values:
+        languages = values["ocr_languages"]
         if not isinstance(languages, (list, tuple)) or not all(
             isinstance(item, str) and item.strip() for item in languages
         ):
@@ -247,18 +257,34 @@ def parse_derived_text(data: Mapping[str, Any] | None) -> DerivedTextConfig:
     return DerivedTextConfig(**values)
 
 
+def parse_derived_options(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate only supplied options, without filling in inherited defaults."""
+    validated = parse_derived_text(data, strict=True)
+    return {name: getattr(validated, name) for name in data}
+
+
 @dataclass(frozen=True)
 class SourceDerivedOperations:
     captions: bool = False
     ocr: str | None = None
     asr: str | None = None
     overrides: frozenset[str] = frozenset()
+    options: Mapping[str, Any] = field(default_factory=dict)
 
     def state(self) -> dict[str, str]:
         return {
             "captions": "index" if self.captions else OPERATION_OFF,
             "ocr": self.ocr or OPERATION_OFF,
             "asr": self.asr or OPERATION_OFF,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.state(),
+            **{
+                name: list(value) if name == "ocr_languages" else value
+                for name, value in self.options.items()
+            },
         }
 
     @property
@@ -282,7 +308,7 @@ def parse_source_override(
             f"source override {key!r} does not belong to collection "
             f"{collection_name!r}"
         )
-    unknown = sorted(set(entry) - {"key", "captions", "ocr", "asr"})
+    unknown = sorted(set(entry) - {"key", *DERIVED_ORDER, *DERIVED_TEXT_KEYS})
     if unknown:
         raise ValueError(f"unknown source override key(s): {', '.join(unknown)}")
     captions = entry.get("captions", "off")
@@ -299,6 +325,9 @@ def parse_source_override(
         ocr=None if ocr == "off" else "tesseract",
         asr=None if asr == "off" else "whisper",
         overrides=frozenset(set(entry) & {"captions", "ocr", "asr"}),
+        options=parse_derived_options(
+            {name: value for name, value in entry.items() if name in DERIVED_TEXT_KEYS}
+        ),
     )
 
 
@@ -376,7 +405,20 @@ def source_operations(
             if "asr" in source_override.overrides
             else defaults.asr
         ),
+        options={**defaults.options, **source_override.options},
     )
+
+
+def source_derived_config(cfg: Mapping[str, Any], source: Any) -> DerivedTextConfig:
+    """Resolve engine options from global defaults, collection, then source."""
+    configured = cfg.get("derived_text")
+    defaults = (
+        configured
+        if isinstance(configured, DerivedTextConfig)
+        else parse_derived_text(configured)
+    )
+    operations = source_operations(cfg, source)
+    return replace(defaults, **operations.options) if operations else defaults
 
 
 # -- cache -----------------------------------------------------------------
@@ -720,9 +762,9 @@ class DerivedTextStage:
         worker_pool: DerivedWorkerPool | None = None,
         spool_directory: Path | str | None = None,
     ) -> None:
-        self.config = config or DerivedTextConfig()
         self.operations = operations or SourceDerivedOperations()
-        self.cache = cache
+        self.config = replace(config or DerivedTextConfig(), **self.operations.options)
+        self.cache = cache if self.config.cache else None
         self.engines = dict(engines or {})
         # Standalone SubRip/WebVTT parsing is pure Python and needs no extra
         # dependency or external tool.
@@ -751,20 +793,7 @@ class DerivedTextStage:
         return states
 
     def _options(self) -> dict[str, Any]:
-        return {
-            "max_caption_bytes": self.config.max_caption_bytes,
-            "ocr_languages": list(self.config.ocr_languages),
-            "max_ocr_pages": self.config.max_ocr_pages,
-            "max_ocr_pixels": self.config.max_ocr_pixels,
-            "max_ocr_output_bytes": self.config.max_ocr_output_bytes,
-            "asr_engine": self.config.asr_engine,
-            "asr_model": self.config.asr_model,
-            "asr_threads": self.config.asr_threads,
-            "asr_batched": self.config.asr_batched,
-            "max_asr_seconds": self.config.max_asr_seconds,
-            "max_asr_bytes": self.config.max_asr_bytes,
-            "max_asr_output_bytes": self.config.max_asr_output_bytes,
-        }
+        return self.config.to_dict()
 
     def _failure_state(self, operation: str) -> str:
         return (
@@ -919,7 +948,9 @@ class DerivedTextStage:
             return "", f"{operation} engine {engine!r} is unavailable"
         try:
             spool, digest, size = spool_input(
-                input, max_bytes=max(1, int(cap)), directory=self.spool_directory
+                input,
+                max_bytes=min(max(1, int(cap)), self.config.max_spool_bytes),
+                directory=self.spool_directory,
             )
         except Exception as error:
             return "", f"{operation} input could not be read safely: {error}"
@@ -949,6 +980,7 @@ class DerivedTextStage:
 __all__ = [
     "ASR_ENGINES",
     "DERIVED_ORDER",
+    "DERIVED_TEXT_KEYS",
     "DerivedContribution",
     "DerivedResult",
     "DerivedTextCache",
@@ -966,11 +998,13 @@ __all__ = [
     "derived_text_preview",
     "normalize_for_equality",
     "parse_caption_bytes",
+    "parse_derived_options",
     "parse_derived_text",
     "parse_source_override",
     "parse_source_overrides",
     "read_cached_text",
     "resolve_workers",
+    "source_derived_config",
     "source_operations",
     "spool_input",
 ]

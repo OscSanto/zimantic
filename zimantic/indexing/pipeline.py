@@ -1094,15 +1094,10 @@ def build_index(
                 from .derived import (
                     DerivedTextCache,
                     DerivedTextStage,
-                    parse_derived_text,
+                    source_derived_config,
                 )
 
-                configured = cfg.get("derived_text")
-                derived_config = (
-                    configured
-                    if hasattr(configured, "max_caption_bytes")
-                    else parse_derived_text(configured)
-                )
+                derived_config = source_derived_config(cfg, producer)
                 cache = cfg.get("derived_cache")
                 if cache is None and derived_config.cache:
                     source_directory = locator.source_directory(

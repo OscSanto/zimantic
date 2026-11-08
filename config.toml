@@ -144,9 +144,11 @@ port = 8090
 
 # Optional build-time derived-text engines. Operations stay off unless a
 # collection derived_text default or an exact source override enables them.
+# Options below are global defaults; collections can override them in their
+# derived_text table, and exact sources can override them alongside ocr/asr/etc.
 # [derived_text]
 # max_caption_bytes = 1_048_576
-# ocr_languages = ["eng"]
+# ocr_languages = ["eng"]  # installed Tesseract data names; French is "fra"
 # max_ocr_pages = 20
 # max_ocr_pixels = 50_000_000
 # max_ocr_output_bytes = 262_144

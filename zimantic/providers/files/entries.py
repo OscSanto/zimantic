@@ -321,10 +321,11 @@ class FilesEntryProducer:
             self.cfg, "max_body_text_bytes", DEFAULT_MAX_BODY_TEXT_BYTES
         )
         self.max_visited, self.traversal_timeout = _traversal_limits(config)
-        from ...indexing.derived import source_operations
+        from ...indexing.derived import source_derived_config, source_operations
 
         operations = source_operations(self.cfg, self.source)
         self.operations = operations
+        self.derived_config = source_derived_config(self.cfg, self.source)
         self.captions_enabled = bool(getattr(operations, "captions", False))
         self.ocr_enabled = bool(getattr(operations, "ocr", None))
         self.asr_enabled = bool(getattr(operations, "asr", None))
@@ -595,7 +596,7 @@ class FilesEntryProducer:
             ],
             "operations": _operations_state(self.operations),
             "derived_text": _derived_config_payload(
-                self.cfg.get("derived_text")
+                self.derived_config
             ),
             "engines": sorted(
                 str(name) for name in (self.cfg.get("derived_engines") or {})

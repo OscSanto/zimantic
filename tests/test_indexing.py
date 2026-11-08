@@ -650,6 +650,59 @@ def test_full_derived_cache_omits_new_refs_but_keeps_searchable_text():
         assert used == ("ocr",)
 
 
+def test_derived_overrides_reach_engines_and_separate_cache_entries(tmp_path):
+    cache = derived_module.DerivedTextCache(tmp_path)
+    calls = []
+
+    def engine(data, **options):
+        calls.append(options)
+        return options["ocr_languages"][0]
+
+    def stage(language, **options):
+        return derived_module.DerivedTextStage(
+            derived_module.DerivedTextConfig(task_timeout_seconds=60),
+            operations=derived_module.SourceDerivedOperations(
+                ocr="tesseract", options={"ocr_languages": (language,), **options}
+            ),
+            cache=cache,
+            engines={"ocr": engine},
+        )
+
+    french = stage("fre", task_timeout_seconds=5)
+    german = stage("deu")
+    for current, expected in [(french, "fre"), (german, "deu"), (french, "fre")]:
+        result = current.process(0, "", [_Input("image", "same image")])
+        assert result.contributions[0].text == expected
+    assert len(calls) == 2
+    assert calls[0]["task_timeout_seconds"] == 5
+    assert calls[1]["task_timeout_seconds"] == 60
+    uncached = stage("fre", task_timeout_seconds=5, cache=False)
+    result = uncached.process(0, "", [_Input("image", "same image")])
+    assert len(calls) == 3
+    assert result.contributions[0].cache_key is None
+
+
+def test_derived_override_caps_are_enforced_before_and_after_extraction():
+    calls = []
+
+    def engine(data, **options):
+        calls.append(data)
+        return "long output"
+
+    stage = derived_module.DerivedTextStage(
+        operations=derived_module.SourceDerivedOperations(
+            ocr="tesseract", options={"max_spool_bytes": 4, "max_ocr_output_bytes": 3}
+        ),
+        engines={"ocr": engine},
+    )
+    oversized = stage.process(0, "", [_Input("image", "too large")])
+    assert oversized.states["ocr"] == "partial"
+    assert calls == []
+    bounded = stage.process(0, "", [_Input("image", "fits")])
+    assert bounded.contributions[0].text == "lon"
+    assert calls == [b"fits"]
+
+
 def test_derived_config_and_workers_are_validated():
     config = derived_module.parse_derived_text(
         {

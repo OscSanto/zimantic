@@ -461,6 +461,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
                 captions=derived.captions == "index",
                 ocr=None if derived.ocr == "off" else derived.ocr,
                 asr=None if derived.asr == "off" else derived.asr,
+                options=derived.options,
             )
     except ValueError as error:
         from .providers.config import ConfigValidationError
@@ -472,29 +473,12 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         "resolved": derived_workers,
         "bound": worker_bound,
     }
-    envelope["derived_text"] = {
-        "max_caption_bytes": derived_text.max_caption_bytes,
-        "ocr_languages": list(derived_text.ocr_languages),
-        "max_ocr_pages": derived_text.max_ocr_pages,
-        "max_ocr_pixels": derived_text.max_ocr_pixels,
-        "max_ocr_output_bytes": derived_text.max_ocr_output_bytes,
-        "asr_engine": derived_text.asr_engine,
-        "asr_model": derived_text.asr_model,
-        "asr_threads": derived_text.asr_threads,
-        "asr_batched": derived_text.asr_batched,
-        "max_asr_seconds": derived_text.max_asr_seconds,
-        "max_asr_bytes": derived_text.max_asr_bytes,
-        "max_asr_output_bytes": derived_text.max_asr_output_bytes,
-        "task_timeout_seconds": derived_text.task_timeout_seconds,
-        "max_spool_bytes": derived_text.max_spool_bytes,
-        "workers": derived_text.workers,
-        "cache": derived_text.cache,
-    }
+    envelope["derived_text"] = derived_text.to_dict()
     envelope["source_operations"] = {
-        key: operations.state() for key, operations in overrides.items()
+        key: operations.to_dict() for key, operations in overrides.items()
     }
     envelope["collection_derived_text"] = {
-        name: operations.state()
+        name: operations.to_dict()
         for name, operations in collection_operations.items()
     }
     cfg["derived_text"] = derived_text
