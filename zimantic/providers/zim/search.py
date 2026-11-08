@@ -582,7 +582,7 @@ def preview(
     except RuntimeError:
         return str(document.get("lead") or ""), document.get("mimetype")
     try:
-        with index.read_lock:
+        with index.locks.read:
             try:
                 entry = archive.get_entry_by_path(path)
                 mimetype = document.get("mimetype")
@@ -660,7 +660,7 @@ def enrich(
         return False
     found = False
     try:
-        with index.read_lock:
+        with index.locks.read:
             for result in result_docs:
                 is_phrase_candidate = result["id"] in phrase_ids
                 if not is_phrase_candidate and result.get("mimetype"):

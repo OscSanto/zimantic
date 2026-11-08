@@ -240,12 +240,6 @@ class ChannelDiscovery:
     error: str | None = None
 
 
-# Provider-specific aliases used by callers and tests.
-KolibriDiscovery = ChannelDiscovery
-KolibriFile = FileRow
-KolibriNode = NodeRow
-
-
 def _row_limit(config: Any, name: str, default: int) -> int:
     value = getattr(config, name, None)
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
@@ -743,9 +737,7 @@ __all__ = [
     "ChannelRow",
     "DEFAULT_MAX_ENTRIES",
     "DEFAULT_MAX_SOURCES",
-    "KolibriDiscovery",
-    "KolibriFile",
-    "KolibriNode",
+    "FileRow",
     "KolibriSource",
     "KolibriTraversalError",
     "NodeRow",

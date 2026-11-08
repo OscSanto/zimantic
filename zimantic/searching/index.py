@@ -22,6 +22,7 @@ class IndexLocks:
     lifecycle: threading.Condition = field(
         default_factory=threading.Condition, repr=False
     )
+    # Bulk archive reads are serialized so they do not stall full-text search.
     read: threading.Lock = field(default_factory=threading.Lock, repr=False)
     close: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -41,17 +42,11 @@ class IndexHandle:
     archive: Any | None = None
     searcher: Any | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
-    # Serializes bulk archive-entry scans (previews, MIME fills, phrase
-    # checks, article reads) so they do not stall full-text search and vice
-    # versa. libzim entry reads are thread-safe, so this is a courtesy bound,
-    # not a correctness requirement.
-    read_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     db_path: str | Path | None = None  # read-only sqlite URI or path
     db_signature: tuple[int, int, int, int] | None = None
     faiss_signature: tuple[int, int, int, int] | None = None
     _thread: threading.local = field(default_factory=threading.local)
     _conns: list[sqlite3.Connection] = field(default_factory=list)
-    _lifecycle: threading.Condition = field(default_factory=threading.Condition, repr=False)
     _active_searches: int = 0
     _retired: bool = False
     _closed: bool = False
@@ -59,7 +54,7 @@ class IndexHandle:
     # Entry ids that /random accepts for an unindexed ZIM, built lazily on the
     # first request. Without a docs table there is no rowid set to sample, so a
     # sparse archive needs this one-time scan to remain both random and
-    # reliable. Guarded by read_lock; reset whenever the index is reopened.
+    # reliable. Guarded by locks.read; reset whenever the index is reopened.
     random_article_ids: list[int] | None = field(
         default=None, repr=False, compare=False
     )
@@ -82,10 +77,6 @@ class IndexHandle:
     index_meta: dict[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        # Keep one lifecycle/read lock regardless of which public/private name
-        # an older caller uses.
-        self._lifecycle = self.locks.lifecycle
-        self.read_lock = self.locks.read
         if self.signatures is None:
             db_stat = self._artifact_signature(self.db_path)
             faiss_stat = self._artifact_signature(self.faiss_path)
@@ -164,14 +155,14 @@ class IndexHandle:
 
     def acquire(self) -> None:
         """Pin this index for one active reader."""
-        with self._lifecycle:
+        with self.locks.lifecycle:
             if self._retired:
                 raise RuntimeError("index was retired during reload")
             self._active_searches += 1
 
     def release(self) -> None:
         """Release one active reader, closing a retired index when idle."""
-        with self._lifecycle:
+        with self.locks.lifecycle:
             self._active_searches -= 1
             should_close = (
                 self._retired
@@ -190,7 +181,7 @@ class IndexHandle:
 
     def close(self) -> None:
         """Retire and close this index after active readers finish."""
-        with self._lifecycle:
+        with self.locks.lifecycle:
             self._retired = True
             if self._active_searches or self._closed:
                 return
