@@ -1,4 +1,4 @@
-"""XDG base directories and legacy path selection."""
+"""XDG base directories and process paths."""
 
 from __future__ import annotations
 
@@ -40,22 +40,11 @@ def runtime_pid_path() -> Path | None:
     return runtime_dir / APP_NAME / "zimantic.pid"
 
 
-def default_config_path(cwd: Path | None = None) -> tuple[Path, bool]:
-    """Choose XDG config first, then an existing cwd config for compatibility.
-
-    The boolean indicates that the selected file is the legacy cwd config.
-    """
-    cwd = cwd or Path.cwd()
-    legacy = cwd / "config.toml"
+def default_config_path(cwd: Path | None = None) -> Path:
+    """Return the default config path for this platform."""
     if os.name == "nt":
-        return legacy, True
-
-    xdg = xdg_config_home() / APP_NAME / "config.toml"
-    if xdg.is_file():
-        return xdg, False
-    if legacy.is_file():
-        return legacy, True
-    return xdg, False
+        return (cwd or Path.cwd()) / "config.toml"
+    return xdg_config_home() / APP_NAME / "config.toml"
 
 
 def reload_pid_path(explicit: Path | None = None) -> Path:

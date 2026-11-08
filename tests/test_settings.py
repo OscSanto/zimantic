@@ -137,23 +137,32 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(cfg["index_dir"], str(data_dir / "indexes"))
 
     @unittest.skipIf(os.name == "nt", "XDG config paths are Unix-only")
-    def test_cwd_config_keeps_legacy_relative_defaults(self):
+    def test_cwd_config_is_ignored_and_xdg_data_defaults_are_used(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             work = root / "work"
             work.mkdir()
             (work / "config.toml").write_text("port = 8999\n", encoding="utf-8")
+            config_home = root / "config"
+            data_home = root / "data"
             with (
-                patch.dict(os.environ, {"XDG_CONFIG_HOME": str(root / "config")}),
+                patch.dict(
+                    os.environ,
+                    {
+                        "XDG_CONFIG_HOME": str(config_home),
+                        "XDG_DATA_HOME": str(data_home),
+                    },
+                ),
                 patch("zimantic.paths.Path.cwd", return_value=work),
                 patch.object(settings, "profile_for_hardware", return_value="desktop"),
             ):
                 cfg = load_config(warn=lambda _message: None)
 
-        self.assertEqual(cfg["port"], 8999)
-        self.assertEqual(cfg["zim_dir"], "./zims")
-        self.assertEqual(cfg["model_dir"], "./model/int8")
-        self.assertEqual(cfg["index_dir"], "./indexes")
+        data_dir = data_home / "zimantic"
+        self.assertEqual(cfg["port"], PROFILES["desktop"]["port"])
+        self.assertEqual(cfg["zim_dir"], str(data_dir / "zims"))
+        self.assertEqual(cfg["model_dir"], str(data_dir / "model/int8"))
+        self.assertEqual(cfg["index_dir"], str(data_dir / "indexes"))
 
     def test_explicit_config_path_keeps_existing_relative_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

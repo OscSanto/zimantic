@@ -28,6 +28,7 @@ import platform
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -115,8 +116,16 @@ def run(
     env["PYTHONPATH"] = str(REPO_ROOT) + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
     )
-    # Legacy current-directory config selection keeps the fixture self-contained
-    # without touching the host's XDG configuration.
+    xdg_config = tempfile.TemporaryDirectory()
+    config_dir = Path(xdg_config.name) / "zimantic"
+    try:
+        config_dir.mkdir()
+        (config_dir / "config.toml").symlink_to(root / "config.toml")
+    except BaseException:
+        xdg_config.cleanup()
+        raise
+    env["XDG_CONFIG_HOME"] = xdg_config.name
+    env["XDG_DATA_HOME"] = str(root)
     command = [sys.executable, "-m", "zimantic", "serve"]
     if fast:
         command.append("--fast")
@@ -127,13 +136,17 @@ def run(
         if build == "fast":
             build_command.append("--fast")
         started = time.perf_counter()
-        completed = subprocess.run(
-            build_command,
-            cwd=root,
-            env=env,
-            text=True,
-            capture_output=True,
-        )
+        try:
+            completed = subprocess.run(
+                build_command,
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+        except BaseException:
+            xdg_config.cleanup()
+            raise
         build_result = {
             "mode": build,
             "seconds": time.perf_counter() - started,
@@ -141,14 +154,18 @@ def run(
             "stderr_tail": completed.stderr.splitlines()[-10:],
         }
 
-    server = subprocess.Popen(
-        command,
-        cwd=root,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        server = subprocess.Popen(
+            command,
+            cwd=root,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except BaseException:
+        xdg_config.cleanup()
+        raise
     try:
         startup = wait_for_server("http://127.0.0.1:8099", server, startup_timeout)
         base = "http://127.0.0.1:8099"
@@ -197,6 +214,7 @@ def run(
         except subprocess.TimeoutExpired:
             server.kill()
             server.wait(timeout=5)
+        xdg_config.cleanup()
 
 
 def markdown(report: dict, identity: dict) -> str:

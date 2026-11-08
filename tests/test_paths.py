@@ -16,7 +16,7 @@ from zimantic.paths import (
 
 @unittest.skipIf(os.name == "nt", "XDG config and runtime paths are Unix-only")
 class XdgPathTests(unittest.TestCase):
-    def test_xdg_config_takes_precedence_over_cwd_config(self):
+    def test_xdg_config_path_is_used_even_when_cwd_config_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             xdg_config = root / "config"
@@ -28,12 +28,11 @@ class XdgPathTests(unittest.TestCase):
             (cwd / "config.toml").touch()
 
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg_config)}):
-                selected, legacy = default_config_path(cwd)
+                selected = default_config_path(cwd)
 
         self.assertEqual(selected, xdg_file)
-        self.assertFalse(legacy)
 
-    def test_existing_cwd_config_is_a_legacy_fallback(self):
+    def test_cwd_config_is_not_used_when_xdg_config_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cwd = root / "work"
@@ -41,10 +40,10 @@ class XdgPathTests(unittest.TestCase):
             legacy_file = cwd / "config.toml"
             legacy_file.touch()
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(root / "config")}):
-                selected, legacy = default_config_path(cwd)
+                selected = default_config_path(cwd)
 
-        self.assertEqual(selected, legacy_file)
-        self.assertTrue(legacy)
+        self.assertEqual(selected, root / "config" / "zimantic" / "config.toml")
+        self.assertNotEqual(selected, legacy_file)
 
     def test_missing_config_uses_xdg_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,10 +52,9 @@ class XdgPathTests(unittest.TestCase):
             cwd.mkdir()
             config_home = root / "config"
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_home)}):
-                selected, legacy = default_config_path(cwd)
+                selected = default_config_path(cwd)
 
         self.assertEqual(selected, config_home / "zimantic" / "config.toml")
-        self.assertFalse(legacy)
 
     def test_relative_xdg_homes_use_spec_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

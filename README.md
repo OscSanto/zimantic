@@ -334,7 +334,7 @@ and its language data are external. The `max_ocr_pages`, `max_ocr_pixels`, and
 
 ## Files and directories
 
-The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). Relative global path overrides (`model_dir`, `index_dir`) resolve under that data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. If no XDG config exists, Zimantic loads `config.toml` from the current directory and resolves relative global paths from that directory.
+The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). If the XDG config is missing, Zimantic uses profile defaults; it does not search the current directory. Relative global path overrides (`model_dir`, `index_dir`) resolve under the data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. On Windows, the default config remains `config.toml` in the current directory.
 
 ```
 ~/.local/share/zimantic/
@@ -806,7 +806,7 @@ The path-triggered fast build runs for each ZIM in `zims/`. The full build runs 
 
 The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server that cannot fit its archives fails visibly instead of looping through OOM kills. Check `systemctl --user status zimantic` and `journalctl --user -u zimantic`; after fixing the cause, `systemctl --user reset-failed zimantic` clears the rate limit. Its header also shows `MemoryHigh`/`MemoryMax` pairs for a Pi Zero 2 W and a Pi 5; uncomment and adjust them for the device, leaving headroom for the OS and kiwix-serve. `MemoryHigh` throttles first; `MemoryMax` is the hard limit that OOM-kills only Zimantic.
 
-Each unit has install instructions in its header. The units use the default XDG data directory, `~/.local/share/zimantic`, and the CLI at `~/.local/bin/zimantic`. Their working directory supports the current-directory `config.toml` fallback. An XDG config takes precedence. If you use a custom `XDG_DATA_HOME`, adjust `WorkingDirectory`, `ReadWritePaths`, and `PathChanged`. If your systemd user manager does not inherit custom XDG variables, add them to the units or a drop-in.
+Each unit has install instructions in its header. The units use the default XDG config/data directories, `~/.config/zimantic` and `~/.local/share/zimantic`, and the CLI at `~/.local/bin/zimantic`. If you use custom XDG directories, configure them in the unit or a drop-in; update `ReadWritePaths` and `PathChanged` for a custom data directory.
 
 The units call the installed `~/.local/bin/zimantic` executable. `reload` does not need the config file. It reads the PID from `$XDG_RUNTIME_DIR/zimantic/zimantic.pid`, then from `./zimantic.pid` when present, or from the file passed with `--pid`.
 

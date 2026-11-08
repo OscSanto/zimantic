@@ -304,10 +304,10 @@ def profile_for_hardware() -> str:
 def load_config(path: str | Path | None = None, warn=None) -> dict:
     """Read config.toml over hardware-matched defaults.
 
-    XDG config is preferred on Unix; an existing config.toml in the current
-    directory remains a compatibility fallback. A missing or unreadable config
-    is a warning, not an error.  Removed flat provider keys and malformed
-    ``[[collections]]`` values are fatal schema errors.
+    Unix uses the XDG config path; Windows uses config.toml in the current
+    directory. A missing or unreadable config is a warning, not an error.
+    Removed flat provider keys and malformed ``[[collections]]`` values are
+    fatal schema errors.
     """
     if warn is None:
         def warn_to_stderr(message):
@@ -316,11 +316,10 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         warn = warn_to_stderr
     profile = profile_for_hardware()
     cfg = dict(PROFILES[profile])
-    legacy_config = False
     data_dir: Path | None = None
     if path is None:
-        config_path, legacy_config = default_config_path()
-        if not legacy_config and os.name != "nt":
+        config_path = default_config_path()
+        if os.name != "nt":
             data_dir = xdg_data_dir()
             cfg.update(
                 zim_dir=str(data_dir / "zims"),
