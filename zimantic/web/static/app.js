@@ -1171,10 +1171,16 @@
                         $("libraryMediaFilter")?.value,
                 );
                 if (!views.length) {
-                    status.textContent = "";
+                    status.textContent = hasFilters
+                        ? `0 ${t("collections")} · ${librarySources.length} ${t(
+                              librarySources.length === 1
+                                  ? "loaded source"
+                                  : "loaded sources",
+                          )}`
+                        : "";
                     const empty = document.createElement("p");
                     empty.className = "empty";
-                    if (!collections.length) {
+                    if (!collections.length && !hasFilters) {
                         empty.textContent = t(
                             "No collections are configured. Add a [[collections]] entry to the server configuration, then restart the server.",
                         );

@@ -16,6 +16,65 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
+    def test_library_empty_state_distinguishes_filtered_from_unconfigured(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const elements = {{
+  libraryGrid: {{
+    children: [],
+    replaceChildren() {{ this.children = []; }},
+    appendChild(child) {{ this.children.push(child); }},
+  }},
+  libraryStatus: {{textContent: ""}},
+  libraryFilter: {{value: "", placeholder: ""}},
+  libraryProviderFilter: {{value: ""}},
+  libraryMediaFilter: {{value: ""}},
+}};
+const $ = (id) => elements[id] || null;
+const document = {{createElement: () => ({{}})}};
+const t = (value) => value;
+const librarySources = [];
+let collections = [];
+let query = "";
+const libraryCollectionViews = () => [];
+const libraryFilterTerms = () => query;
+{_function_source(source, "function renderLibrary()", "function resultKey(")}
+const renderCase = (filter, configuredCollections) => {{
+  query = filter;
+  collections = configuredCollections;
+  elements.libraryFilter.value = filter;
+  renderLibrary();
+  return {{
+    message: elements.libraryGrid.children[0].textContent,
+    status: elements.libraryStatus.textContent,
+  }};
+}};
+console.log(JSON.stringify({{
+  unconfigured: renderCase("", []),
+  noMatches: renderCase("missing", []),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["unconfigured"]["message"],
+            "No collections are configured. Add a [[collections]] entry to the server configuration, then restart the server.",
+        )
+        self.assertEqual(payload["unconfigured"]["status"], "")
+        self.assertEqual(
+            payload["noMatches"]["message"],
+            "No collection or source matches these filters.",
+        )
+        self.assertEqual(
+            payload["noMatches"]["status"],
+            "0 collections · 0 loaded sources",
+        )
+
     def test_search_urls_use_canonical_source_and_collection_selectors(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
