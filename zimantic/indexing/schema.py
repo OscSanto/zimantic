@@ -46,6 +46,7 @@ MODEL_PROBE_SHAPE = "model_probe_shape"
 MODEL_PROBE_VECTORS = "model_probe_vectors"
 FAISS_DIGEST = "faiss_digest"
 BUILD_GENERATION = "build_generation"
+BUILD_SCOPE = "build_scope"
 DERIVED_TEXT = "derived_text"
 
 CURRENT_SCHEMA_VERSION = 3
@@ -76,6 +77,7 @@ META_KEYS = frozenset(
         MODEL_PROBE_VECTORS,
         FAISS_DIGEST,
         BUILD_GENERATION,
+        BUILD_SCOPE,
         DERIVED_TEXT,
     }
 )
@@ -342,6 +344,34 @@ def read_index_meta(
                 decode_int(meta[key])
         if TRUNCATED in meta:
             decode_bool(meta[TRUNCATED])
+        if BUILD_SCOPE in meta:
+            coverage = decode_json(meta[BUILD_SCOPE])
+            if (
+                not isinstance(coverage, dict)
+                or set(coverage) != {"paths", "partial"}
+                or not isinstance(coverage["partial"], bool)
+                or not isinstance(coverage["paths"], list)
+                or not coverage["paths"]
+                or encode_json(coverage) != meta[BUILD_SCOPE]
+            ):
+                raise SchemaError("invalid build scope metadata")
+            for scope in coverage["paths"]:
+                if (
+                    not isinstance(scope, dict)
+                    or set(scope) != {"path", "recursive"}
+                    or not isinstance(scope["path"], str)
+                    or not isinstance(scope["recursive"], bool)
+                    or "\\" in scope["path"]
+                    or scope["path"].startswith("/")
+                    or (
+                        scope["path"]
+                        and any(part in {"", ".", ".."} for part in scope["path"].split("/"))
+                    )
+                    or (not scope["path"] and not scope["recursive"])
+                ):
+                    raise SchemaError("invalid build scope path")
+            if coverage["partial"] and meta.get(TRUNCATED) != encode_bool(True):
+                raise SchemaError("partial build scope must be marked truncated")
         if INDEXED_CHANNELS in meta:
             channels = decode_channels(meta[INDEXED_CHANNELS])
             if DONE in meta and CHANNEL_SEMANTIC in channels:
@@ -409,6 +439,7 @@ __all__ = [
     "BUILD_FILESIZE",
     "BUILD_GENERATION",
     "BUILD_MODE",
+    "BUILD_SCOPE",
     "CHANNEL_BODY",
     "CHANNEL_SEMANTIC",
     "CHANNEL_TITLE",

@@ -130,6 +130,7 @@ class CollectionSnapshot:
     last_refresh: float | None = None
     collapsed: bool = False
     index_count: int | None = None
+    index_partial: bool | None = None
     index_states: tuple[str, ...] = ()
     indexed_count: int | None = None
     truncated: bool | None = None
@@ -156,6 +157,7 @@ class CollectionSnapshot:
                 "last_refresh": self.last_refresh,
                 "collapsed": self.collapsed,
                 "index_count": self.index_count,
+                "index_partial": self.index_partial,
                 "index_states": list(self.index_states),
                 "indexed_count": self.indexed_count,
                 "truncated": self.truncated,

@@ -498,6 +498,304 @@ class TestCliSelectors:
         assert raised.value.code == 2
 
 
+class TestPositionalBuild:
+    def _config(self, tmp_path, collections=""):
+        config = default_config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        return _write(
+            config,
+            f"index_dir = {json.dumps(str(tmp_path / 'indexes'))}\n" + collections,
+        )
+
+    def _files_collection(self, root, *, name="modules", granularity="collection"):
+        return (
+            f'[[collections]]\ntype = "files"\nname = "{name}"\n'
+            f'path = {json.dumps(str(root))}\ngranularity = "{granularity}"\n'
+        )
+
+    def _index(self, tmp_path, key="files:modules:root"):
+        from index_helpers import docs, meta
+
+        source = _source(key, "files", ":".join(key.split(":")[:2]))
+        locator = IndexLocator(tmp_path / "indexes")
+        return docs(locator, source), meta(locator, source)
+
+    def test_configured_directory_builds_files_without_editing_config(self, tmp_path):
+        root = tmp_path / "modules"
+        root.mkdir()
+        _write(root / "alpha.txt", "alpha")
+        config = self._config(tmp_path, self._files_collection(root))
+        original = config.read_bytes()
+        main(["build", str(root), "--fast"])
+        rows, meta = self._index(tmp_path)
+        assert [row[2] for row in rows] == ["alpha.txt"]
+        assert meta["truncated"] == "0"
+        assert "build_scope" not in meta
+        assert config.read_bytes() == original
+
+    def test_empty_covered_directory_removes_previously_indexed_results(self, tmp_path):
+        root = tmp_path / "modules"
+        for child in ("first", "second"):
+            (root / child).mkdir(parents=True)
+            _write(root / child / "page.txt", child)
+        self._config(tmp_path, self._files_collection(root))
+        main(["build", str(root / "first"), "--fast"])
+        (root / "first" / "page.txt").unlink()
+        main(["build", str(root / "first"), "--fast"])
+        rows, meta = self._index(tmp_path)
+        assert rows == []
+        assert meta["truncated"] == "1"
+        assert json.loads(meta["build_scope"])["partial"] is True
+
+    def test_partial_scans_accumulate_update_and_remove_covered_files(self, tmp_path, monkeypatch):
+        from index_helpers import body_hits
+
+        root = tmp_path / "modules"
+        for child in ("first", "second", "third"):
+            (root / child).mkdir(parents=True)
+            _write(root / child / "page.txt", child + " zebra")
+        _write(root / "first" / "removed.txt", "obsolete")
+        config = self._config(tmp_path, self._files_collection(root))
+        original = config.read_bytes()
+        # Avoid a model download while exercising real body FTS publication.
+        from zimantic.__main__ import _make_parser, _run_build
+
+        cfg = load_config(config, warn=lambda _: None)
+        monkeypatch.setattr("zimantic.__main__._LazyEmbedder", lambda _: None)
+
+        def build(paths):
+            args = _make_parser().parse_args(["build", *map(str, paths)])
+            _run_build(args, cfg, _make_parser())
+
+        build([root / "first"])
+        rows, meta = self._index(tmp_path)
+        assert {row[2] for row in rows} == {"first/page.txt", "first/removed.txt"}
+        assert json.loads(meta["build_scope"])["partial"] is True
+        assert meta["truncated"] == "1"
+        generation = meta["build_generation"]
+        build([root / "first"])
+        assert self._index(tmp_path)[1]["build_generation"] == generation
+
+        (root / "first" / "removed.txt").unlink()
+        _write(root / "first" / "page.txt", "updated aardvark")
+        build([root / "second"])
+        rows, meta = self._index(tmp_path)
+        assert {row[2] for row in rows} == {"first/page.txt", "second/page.txt"}
+        coverage = json.loads(meta["build_scope"])
+        assert coverage == {
+            "partial": True,
+            "paths": [
+                {"path": "first", "recursive": True},
+                {"path": "second", "recursive": True},
+            ],
+        }
+        locator = IndexLocator(tmp_path / "indexes")
+        assert body_hits(locator, _source("files:modules:root", "files", "files:modules"), "aardvark")
+        assert not body_hits(locator, _source("files:modules:root", "files", "files:modules"), "obsolete")
+
+        build([root])
+        rows, meta = self._index(tmp_path)
+        assert len(rows) == 3
+        assert "build_scope" not in meta
+        assert meta["truncated"] == "0"
+        # A later narrow scan must not discard the complete generation's rows.
+        build([root / "first"])
+        assert self._index(tmp_path)[1]["build_generation"] == meta["build_generation"]
+        assert config.read_bytes() == original
+
+    def test_child_path_leaves_sibling_sources_unbuilt(self, tmp_path, capsys):
+        from zimantic.providers.files.discovery import files_dir_key
+
+        root = tmp_path / "modules"
+        for child in ("first", "second"):
+            (root / child).mkdir(parents=True)
+            _write(root / child / "page.txt", child)
+        self._config(tmp_path, self._files_collection(root, granularity="children"))
+        main(["build", str(root / "first"), "--fast"])
+        _, meta = self._index(tmp_path, files_dir_key("modules", "first"))
+        assert meta["truncated"] == "0"
+        assert "build_scope" not in meta
+        assert IndexLocator(tmp_path / "indexes").paths(
+            _source(files_dir_key("modules", "second"), "files", "files:modules")
+        ) is None
+        main(["sources", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["collections"][0]["index_count"] == 1
+        assert payload["collections"][0]["source_count"] == 2
+        assert payload["collections"][0]["index_partial"] is True
+        indexed = next(source for source in payload["sources"] if source["searchable"])
+        assert indexed["index_partial"] is False
+
+    def test_unmatched_file_registers_parent_but_indexes_only_named_file(self, tmp_path):
+        root = tmp_path / "notes"
+        root.mkdir()
+        _write(root / "alpha.txt", "alpha")
+        _write(root / "beta.txt", "beta")
+        config = self._config(tmp_path)
+        main(["build", str(root / "alpha.txt"), "--fast"])
+        cfg = load_config(config, warn=lambda _: None)
+        assert [(entry.kind, entry.name, entry.path) for entry in cfg["collections"]] == [
+            ("files", "notes", str(root))
+        ]
+        rows, meta = self._index(tmp_path, "files:notes:root")
+        assert [row[2] for row in rows] == ["alpha.txt"]
+        assert json.loads(meta["build_scope"])["partial"] is True
+        main(["build", str(root / "beta.txt"), "--fast"])
+        assert len(self._index(tmp_path, "files:notes:root")[0]) == 2
+        assert len(load_config(config, warn=lambda _: None)["collections"]) == 1
+
+    def test_mixed_directory_registers_and_builds_both_providers(self, tmp_path, capsys):
+        from providers.zim.test_provider import _create_zim
+
+        root = tmp_path / "mixed"
+        root.mkdir()
+        _create_zim(root / "book.zim")
+        _write(root / "notes.txt", "alpha")
+        config = self._config(tmp_path)
+        main(["build", str(root), "--fast"])
+        cfg = load_config(config, warn=lambda _: None)
+        assert [(entry.kind, entry.name) for entry in cfg["collections"]] == [
+            ("zim", "mixed"), ("files", "mixed-2")
+        ]
+        rows, _ = self._index(tmp_path, "files:mixed-2:root")
+        assert [row[2] for row in rows] == ["notes.txt"]
+        capsys.readouterr()
+        main(["sources", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert {source["provider"] for source in payload["sources"]} == {"zim", "files"}
+        assert all(source["searchable"] for source in payload["sources"])
+
+    def test_mixed_build_continues_files_after_a_zim_failure(self, tmp_path):
+        root = tmp_path / "mixed"
+        root.mkdir()
+        (root / "broken.zim").write_bytes(b"broken")
+        _write(root / "notes.txt", "alpha")
+        self._config(tmp_path)
+        with pytest.raises(SystemExit) as raised:
+            main(["build", str(root), "--fast"])
+        assert raised.value.code == 1
+        assert [row[2] for row in self._index(tmp_path, "files:mixed-2:root")[0]] == ["notes.txt"]
+
+    @pytest.mark.parametrize("overlapping", [False, True])
+    def test_explicit_zim_in_a_files_tree_is_built_as_an_archive(self, tmp_path, capsys, overlapping):
+        from providers.zim.test_provider import _create_zim
+
+        root = tmp_path / "modules"
+        root.mkdir()
+        archive = root / "book.zim"
+        _create_zim(archive)
+        collections = self._files_collection(root)
+        if overlapping:
+            collections += self._files_collection(root, name="other")
+        config = self._config(tmp_path, collections)
+        main(["build", str(archive), "--fast"])
+        assert [entry.kind for entry in load_config(config, warn=lambda _: None)["collections"]] == [
+            *(["files", "files"] if overlapping else ["files"]), "zim"
+        ]
+        capsys.readouterr()
+        main(["sources", "--json"])
+        sources = json.loads(capsys.readouterr().out)["sources"]
+        assert any(source["provider"] == "zim" and source["searchable"] for source in sources)
+
+    def test_concurrently_registered_collection_is_used_for_the_build(self, tmp_path, monkeypatch):
+        import zimantic.config_writer as writer
+
+        root = tmp_path / "modules"
+        root.mkdir()
+        _write(root / "page.txt", "alpha")
+        config = self._config(tmp_path)
+        append = writer.append_collection
+
+        def concurrent(config_path, factory):
+            _write(config, config.read_text() + self._files_collection(root))
+            return append(config_path, factory)
+
+        monkeypatch.setattr(writer, "append_collection", concurrent)
+        main(["build", str(root), "--fast"])
+        assert len(self._index(tmp_path)[0]) == 1
+        assert len(load_config(config, warn=lambda _: None)["collections"]) == 1
+
+    def test_kolibri_storage_paths_select_nodes_not_raw_files(self, tmp_path, capsys):
+        from providers.kolibri.helpers import make_two_channel_fixture
+
+        fixture = make_two_channel_fixture(tmp_path)
+        try:
+            config = self._config(
+                tmp_path,
+                '[[collections]]\ntype = "kolibri"\nname = "lessons"\n'
+                f'path = {json.dumps(str(fixture.home))}\ngranularity = "collection"\n',
+            )
+            original = config.read_bytes()
+            main(["build", str(fixture.home), "--list"])
+            assert "kolibri:lessons:channel-a:root" in capsys.readouterr().out
+            assert not (tmp_path / "indexes").exists()
+
+            storage_file = next(fixture.storage.rglob("*.pdf"))
+            main(["build", str(storage_file), "--fast"])
+            main(["sources", "--json"])
+            payload = json.loads(capsys.readouterr().out)
+            indexed = [source for source in payload["sources"] if source["searchable"]]
+            assert [source["key"] for source in indexed] == ["kolibri:lessons:channel-a:root"]
+            assert indexed[0]["index_partial"] is True
+            assert indexed[0]["indexed_count"] == 1
+
+            main(["build", str(fixture.db_path), "--fast"])
+            main(["sources", "--json"])
+            payload = json.loads(capsys.readouterr().out)
+            assert all(source["searchable"] and not source["index_partial"] for source in payload["sources"])
+            assert all(not collection["index_partial"] for collection in payload["collections"])
+            assert config.read_bytes() == original
+        finally:
+            fixture.dispose()
+
+    @pytest.mark.parametrize("configured", [False, True])
+    def test_positional_preview_is_read_only_and_filters_sources(
+        self, tmp_path, capsys, configured
+    ):
+        root = tmp_path / "modules"
+        for child in ("first", "second"):
+            (root / child).mkdir(parents=True)
+            _write(root / child / "page.txt", child)
+        config = self._config(
+            tmp_path,
+            self._files_collection(root, granularity="children") if configured else "",
+        )
+        before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+        main(["build", str(root / "first"), "--list"])
+        output = capsys.readouterr().out
+        assert "files:modules" in output if configured else "files:first" in output
+        assert "second" not in output
+        assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+        assert not (tmp_path / "indexes").exists()
+        assert not (tmp_path / ".build.lock").exists()
+        assert not config.with_name("config.toml.lock").exists()
+
+    def test_ambiguous_roots_fail_without_writing(self, tmp_path):
+        root = tmp_path / "modules"
+        root.mkdir()
+        _write(root / "page.txt", "alpha")
+        config = self._config(
+            tmp_path,
+            self._files_collection(root) + self._files_collection(root, name="other"),
+        )
+        original = config.read_bytes()
+        with pytest.raises(SystemExit) as raised:
+            main(["build", str(root), "--list"])
+        assert raised.value.code == 2
+        assert config.read_bytes() == original
+
+    def test_invalid_paths_fail_before_registering_other_paths(self, tmp_path):
+        root = tmp_path / "modules"
+        root.mkdir()
+        _write(root / "page.txt", "alpha")
+        config = self._config(tmp_path)
+        original = config.read_bytes()
+        with pytest.raises(SystemExit) as raised:
+            main(["build", str(root), str(tmp_path / "missing"), "--fast"])
+        assert raised.value.code == 2
+        assert config.read_bytes() == original
+
+
 class TestSourcesAndPrune:
     def test_sources_json_is_read_only_and_has_no_absolute_paths(
         self, tmp_path, capsys

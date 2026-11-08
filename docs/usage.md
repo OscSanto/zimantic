@@ -2,14 +2,16 @@
 ## Commands
 
 ```bash
-zimantic build                        # index every configured ZIM collection
+zimantic build                        # index every configured local collection
 zimantic -v build                     # show info-level logging
 zimantic build -vv                    # show debug-level logging
 zimantic build zims/x.zim             # index one file
 zimantic build zims/a.zim zims/b.zim  # several files
 zimantic build --workers 4            # build up to four independent ZIMs at once
-zimantic build /media/usb             # every .zim in a folder
+zimantic build /media/usb             # configured collections or detected ZIM/files trees
 zimantic build zims/a.zim /media/usb  # mix files and folders
+zimantic build /library/www/html/modules  # build an ordinary files tree
+zimantic build modules/algebra       # cumulatively index one subtree
 zimantic build --fast                 # title and ZIM full-text indexes (no vectors)
 zimantic build --wait-stable          # wait for changing download sizes, then index
 zimantic build --no-wait-lock         # exit 75 if another build holds the lock
@@ -49,9 +51,13 @@ zimantic model --dir ./models         # write models/<precision>/ instead of mod
 zimantic model --list                 # show supported models and precisions
 ```
 
-`build` accepts files or folders. A folder means every `*.zim` file under it, and with no arguments it builds every configured ZIM, files, and Kolibri collection; Kiwix collections are reported as skipped because they are remote/search-only. Positional paths and `--provider`/`--collection`/`--source` selectors are separate modes and cannot be combined. Selector values are repeatable: values within one selector are ORed, and different selector types are intersected. `--collection` accepts an exact collection key or a configured entry name; a Kolibri entry name selects all of its channels.
+`build` accepts local files or folders, independent of storage provider. Paths select matching configured ZIM, files, and Kolibri collections, including collections below a named parent directory. Enclosing roots use the most specific match per provider; equally specific roots of the same provider require an explicit `--collection` selector. With no arguments it builds every configured local collection; Kiwix collections are reported as skipped because they are remote/search-only. Positional paths and `--provider`/`--collection`/`--source` selectors are separate modes and cannot be combined. Selector values are repeatable: values within one selector are ORed, and different selector types are intersected. `--collection` accepts an exact collection key or a configured entry name; a Kolibri entry name selects all of its channels.
 
-An unmatched positional path is atomically appended as a `[[collections]]` ZIM entry so `serve` can discover it. The entry uses a relative path from the active config directory (or an absolute private locator) and a safe unique name. A matched configured ZIM root supplies defaults only: the build still covers exactly the files or folders named on the command line. Restart a running server to load edited configuration; `zimantic reload` rescans startup-configured providers but does not reread configuration. `build --list` previews configured or generated entries and never writes configuration or starts a build. Existing complete generations are skipped. Pass `--force` to rebuild selected indexes, or let a source fingerprint mismatch trigger a rebuild.
+Unmatched paths are atomically appended as `[[collections]]` entries so `serve` can discover them. A `.zim` file becomes a ZIM collection; an ordinary file becomes a files collection rooted at its parent, initially indexing only that named file. An unmatched directory becomes a ZIM collection if it contains archives, a files collection if it contains other files (or is empty), or both when mixed. Entries use paths relative to the active config directory (or absolute private locators) and safe unique names. Kolibri installations must already be configured; their home/database paths select installed channels and storage paths select the nodes backed by those files.
+
+Subpaths build only covered content, not unrelated sibling sources. Within a files or Kolibri source, successive scans accumulate source-relative file/directory scopes. The published generation stores those scopes and a partial-coverage flag; APIs expose `index_partial` for sources and collections, and partial source coverage is also marked `truncated`. Covered content is reread when the scope or source fingerprint changes, rebuilding the covered union so updates and deletions are reflected without losing earlier results. This avoids per-item coverage tables and keeps metadata proportional to the selected paths, but cumulative rebuilds can repeat extraction/embedding work. Source row IDs, derived-text inputs, and semantic vectors stay aligned, and interrupted builds of the same scope remain resumable. A whole-source build clears the scoped metadata; a later narrow scan never downgrades an already complete source to a subset. Collection completeness is separate from build mode: `fast`/`full` describes available search channels, not coverage.
+
+Restart a running server to load appended configuration; `zimantic reload` rescans startup-configured providers but does not reread configuration. `build --list` previews configured or generated entries and never writes configuration or starts a build. Unchanged covered generations are skipped. Pass `--force` to rebuild selected indexes, or let a source fingerprint mismatch trigger a rebuild.
 
 `zimantic sources` uses the discovery process from `serve`. It does not start the web server, load the model or FAISS, or modify the catalog, indexes, caches, PID/build/lease files, or configuration. Its `--json` document has `collections` and `sources` at the top level and uses the HTTP record schemas. It omits private locators and absolute paths. `zimantic prune --dry-run` provides the same read-only inventory.
 

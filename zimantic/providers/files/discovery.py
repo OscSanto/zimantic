@@ -553,6 +553,11 @@ def apply_index_metadata(source: SourceInfo, meta: Mapping[str, str]) -> None:
     object.__setattr__(
         source, "truncated", schema.decode_bool(meta[schema.TRUNCATED])
     )
+    object.__setattr__(
+        source, "index_partial",
+        schema.decode_json(meta[schema.BUILD_SCOPE])["partial"]
+        if schema.BUILD_SCOPE in meta else False,
+    )
     if schema.BODY_TRUNCATED_COUNT in meta:
         object.__setattr__(
             source, "body_truncated_count",

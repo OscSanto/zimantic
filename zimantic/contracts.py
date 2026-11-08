@@ -56,6 +56,7 @@ class SourceInfo:
     media_types: tuple[str, ...] = ()
     item_count: int | None = None
     indexed_count: int | None = None
+    index_partial: bool | None = None
     truncated: bool | None = None
     body_truncated_count: int | None = None
     index_freshness: str | None = None
@@ -109,6 +110,7 @@ class SourceInfo:
             "media_types": list(ordered_media_types(self.media_types)),
             "item_count": self.item_count,
             "indexed_count": self.indexed_count,
+            "index_partial": self.index_partial,
             "truncated": self.truncated,
             "body_truncated_count": self.body_truncated_count,
             "index_freshness": self.index_freshness,

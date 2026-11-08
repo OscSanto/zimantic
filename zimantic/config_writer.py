@@ -1,6 +1,6 @@
 """Safe, atomic updates to the active ``config.toml``.
 
-Ad-hoc ZIM builds and maintenance commands both need to append a collection
+Ad-hoc local builds and maintenance commands both need to append a collection
 without rewriting unrelated TOML.  The writer intentionally treats the resolved
 config target as the lock owner: accessing a symlink and its target therefore
 share one lock, and the symlink itself is never replaced.

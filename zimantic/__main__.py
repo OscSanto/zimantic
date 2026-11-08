@@ -286,8 +286,9 @@ def _make_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help=(
-            "ZIM files or folders containing *.zim; folders include all .zim "
-            "files below them. With no paths, build every configured collection. "
+            "local files or folders; match configured collections or register "
+            "new ZIM/files collections. Subpaths build cumulative partial indexes. "
+            "With no paths, build every configured collection. "
             "Do not combine paths with selectors."
         ),
     )
@@ -922,20 +923,20 @@ def _config_relative_path(path: Path, base: Path) -> str:
         return str(path)
 
 
-def _unique_collection_name(path: Path, used: set[str]) -> str:
+def _unique_collection_name(path: Path, used: set[str], *, kind: str = "zim") -> str:
     import re
 
     from .providers.config import RESERVED_ZIM_NAMES, SAFE_NAME
 
     stem = path.stem if path.is_file() else path.name
-    base = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._") or "zim"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._") or kind
     if not base[0].isalnum():
-        base = "zim-" + base
+        base = kind + "-" + base
     if base in RESERVED_ZIM_NAMES:
-        base = f"zim-{base}"
-    base = base[:64].strip("-._") or "zim"
+        base = f"{kind}-{base}"
+    base = base[:64].strip("-._") or kind
     if not SAFE_NAME.fullmatch(base):
-        base = "zim"
+        base = kind
     name = base
     suffix = 2
     while name in used or name in RESERVED_ZIM_NAMES:
@@ -985,17 +986,79 @@ def _most_specific_zim_entry(path: Path, entries):
     return winners[0]
 
 
-def _covered_by_zim_collection(path: Path, entries) -> bool:
-    return bool(_zim_matches(path, entries))
+def _local_entry_roots(entry) -> list[Path]:
+    if entry.kind == "kiwix":
+        return []
+    return [
+        Path(value).expanduser().resolve()
+        for field in ("path", "database_path", "storage")
+        if (value := getattr(entry, field, None))
+    ]
 
 
-def _persist_unmatched_zim_paths(
+def _matching_path_entries(path: Path, entries) -> list:
+    from .providers.config import ConfigValidationError
+
+    target = path.expanduser().resolve()
+    covering: dict[str, list[tuple[int, object]]] = {}
+    descendants = []
+    for entry in entries:
+        if entry.kind == "zim" and target.is_file() and target.suffix.casefold() != ".zim":
+            continue
+        roots = _local_entry_roots(entry)
+        matches = [root for root in roots if target == root or target.is_relative_to(root)]
+        if matches:
+            covering.setdefault(entry.kind, []).append(
+                (max(len(root.parts) for root in matches), entry)
+            )
+        elif target.is_dir() and any(root.is_relative_to(target) for root in roots):
+            descendants.append(entry)
+    result = []
+    for kind, matches in covering.items():
+        longest = max(length for length, _entry in matches)
+        winners = [entry for length, entry in matches if length == longest]
+        if len(winners) > 1:
+            names = ", ".join(sorted(_entry_collection_key(entry) for entry in winners))
+            raise ConfigValidationError(
+                f"{path} matches multiple configured {kind} collections equally "
+                f"specifically ({names}); use --collection to select one explicitly"
+            )
+        result.extend(winners)
+    return result + descendants
+
+
+def _infer_path_kinds(path: Path) -> list[str]:
+    from .providers.files.common import is_hidden_name, list_directory
+    from .providers.files.discovery import _Budget
+    from .providers.zim.discovery import is_zim_filename
+
+    if path.is_file():
+        return ["zim"] if is_zim_filename(path.name) else ["files"]
+    kinds = set()
+    budget = _Budget(1_000_000, 300)
+
+    def visit(relative: str) -> None:
+        for item in list_directory(path, relative):
+            budget.tick()
+            if is_hidden_name(item.name) or item.is_symlink():
+                continue
+            child = f"{relative}/{item.name}" if relative else item.name
+            if item.is_dir(follow_symlinks=False):
+                visit(child)
+            elif item.is_file(follow_symlinks=False):
+                kinds.add("zim" if is_zim_filename(item.name) else "files")
+
+    visit("")
+    return [kind for kind in ("zim", "files") if kind in kinds] or ["files"]
+
+
+def _persist_unmatched_paths(
     cfg: dict,
-    paths: list[Path],
+    paths: list[tuple[str, Path]],
     *,
     preview: bool = False,
 ) -> list:
-    """Append each unmatched positional root as an explicit ZIM collection.
+    """Append each unmatched positional root as an explicit local collection.
 
     With ``preview`` the names and paths are computed but nothing is written.
     The real update takes the target-based config lock, rereads the config, and
@@ -1005,7 +1068,7 @@ def _persist_unmatched_zim_paths(
     from types import SimpleNamespace
 
     from .config_writer import append_collection, config_target_path
-    from .providers.config import parse_collections
+    from .providers.config import get_provider_config_spec, parse_collections
 
     runtime_config = cfg.get("runtime_config")
     config_path = getattr(runtime_config, "config_path", None)
@@ -1015,54 +1078,64 @@ def _persist_unmatched_zim_paths(
     entries = list(cfg.get("collections") or ())
     used_names = {entry.name for entry in entries}
     appended: list = []
-    seen: set[Path] = set()
-    for raw in paths:
+    seen: set[tuple[str, Path]] = set()
+    for kind, raw in paths:
         candidate = Path(raw).expanduser()
         try:
             resolved = candidate.resolve()
         except OSError:
             resolved = candidate.absolute()
-        if resolved in seen:
+        identity = (kind, resolved)
+        if identity in seen:
             continue
-        seen.add(resolved)
-        if _covered_by_zim_collection(resolved, entries):
+        seen.add(identity)
+        if _matching_path_entries(resolved, [entry for entry in entries if entry.kind == kind]):
             continue
         if preview:
-            name = _unique_collection_name(resolved, used_names)
+            name = _unique_collection_name(resolved, used_names, kind=kind)
             used_names.add(name)
-            appended.append(
-                SimpleNamespace(
-                    name=name,
-                    path=str(resolved),
-                    saved=_config_relative_path(resolved, target.parent),
-                    entry=None,
+            parsed_entry = get_provider_config_spec(kind).parse(
+                {"type": kind, "name": name, "path": str(resolved)}, target.parent
+            )
+        else:
+            current_entries = []
+
+            def entry_factory(
+                data: dict,
+                _resolved: Path = resolved,
+                _kind: str = kind,
+            ):
+                nonlocal current_entries
+                parsed = parse_collections(
+                    data, config_dir=target.parent, warn=lambda _message: None
                 )
-            )
-            continue
+                current = list(parsed.collections)
+                current_entries = current
+                if _matching_path_entries(
+                    _resolved, [entry for entry in current if entry.kind == _kind]
+                ):
+                    return None
+                used = {entry.name for entry in current}
+                name = _unique_collection_name(_resolved, used, kind=_kind)
+                return {
+                    "type": _kind,
+                    "name": name,
+                    "path": _config_relative_path(_resolved, target.parent),
+                }
 
-        def entry_factory(
-            data: dict,
-            _resolved: Path = resolved,
-        ):
-            parsed = parse_collections(
-                data, config_dir=target.parent, warn=lambda _message: None
-            )
-            current = list(parsed.collections)
-            if _covered_by_zim_collection(_resolved, current):
-                return None
-            used = {entry.name for entry in current}
-            name = _unique_collection_name(_resolved, used)
-            return {
-                "type": "zim",
-                "name": name,
-                "path": _config_relative_path(_resolved, target.parent),
-            }
-
-        try:
-            parsed_entry = append_collection(config_path, entry_factory)
-        except Exception as error:
-            raise RuntimeError(str(error)) from error
+            try:
+                parsed_entry = append_collection(config_path, entry_factory)
+            except Exception as error:
+                raise RuntimeError(str(error)) from error
         if parsed_entry is None:
+            cfg["collections"] = tuple(current_entries)
+            cfg["runtime_config"] = replace(
+                cfg["runtime_config"],
+                settings={**cfg["runtime_config"].settings, "collections": cfg["collections"]},
+                collections=cfg["collections"],
+            )
+            entries = current_entries
+            used_names = {entry.name for entry in entries}
             continue
         cfg["collections"] = tuple(cfg.get("collections") or ()) + (parsed_entry,)
         cfg["runtime_config"] = replace(
@@ -1074,6 +1147,7 @@ def _persist_unmatched_zim_paths(
         used_names.add(parsed_entry.name)
         appended.append(
             SimpleNamespace(
+                kind=parsed_entry.kind,
                 name=parsed_entry.name,
                 path=str(resolved),
                 saved=_config_relative_path(resolved, target.parent),
@@ -1088,14 +1162,14 @@ def _warn_about_appended_collections(appended: list, cfg: dict) -> None:
         return
     config_path = getattr(cfg.get("runtime_config"), "config_path", None)
     logger.warning(
-        "zimantic: added %d ZIM collection entr%s to %s; restart a running "
+        "zimantic: added %d collection entr%s to %s; restart a running "
         "serve process to load the changed config (SIGHUP reload is not enough):",
         len(appended),
         "y" if len(appended) == 1 else "ies",
         config_path or "the active config",
     )
     for item in appended:
-        logger.warning("zimantic:   %s -> %s", item.name, item.saved)
+        logger.warning("zimantic:   %s:%s -> %s", item.kind, item.name, item.saved)
 
 
 def _log_build_report(report) -> None:
@@ -1133,6 +1207,8 @@ def _build_tasks(
     cfg: dict,
     args,
     parser: argparse.ArgumentParser,
+    *,
+    paths: list[Path] | None = None,
 ) -> None:
     """Build one or more already-discovered sources through the generic pipeline."""
     from .indexing.locator import IndexLocator
@@ -1188,6 +1264,16 @@ def _build_tasks(
 
     def run_task(label: str, runtime: object, source: object):
         producer = runtime.entry_producer(source, fast=args.fast)
+        if paths is not None:
+            from .indexing.scope import restrict_producer
+
+            try:
+                producer = restrict_producer(producer, paths, locator)
+            except BaseException:
+                producer.close()
+                raise
+            if producer is None:
+                return None
         return build_index(
             producer,
             locator,
@@ -1203,7 +1289,9 @@ def _build_tasks(
         if workers == 1 or len(tasks) == 1:
             for label, runtime, source in tasks:
                 try:
-                    _log_build_report(run_task(label, runtime, source))
+                    report = run_task(label, runtime, source)
+                    if report is not None:
+                        _log_build_report(report)
                 except Exception as error:
                     _log_build_failure(source, error, cfg)
                     logger.debug("build error for %s: %s", label, error)
@@ -1221,7 +1309,9 @@ def _build_tasks(
                 for future in as_completed(futures):
                     label, source = futures[future]
                     try:
-                        _log_build_report(future.result())
+                        report = future.result()
+                        if report is not None:
+                            _log_build_report(report)
                     except Exception as error:
                         _log_build_failure(source, error, cfg)
                         logger.debug("build error for %s: %s", label, error)
@@ -1257,16 +1347,20 @@ def _run_configured_build(
     cfg: dict,
     args,
     parser: argparse.ArgumentParser,
+    *,
+    entries: list | None = None,
+    paths: list[Path] | None = None,
 ) -> None:
     from .discovery import discover_collections
 
     explicit_scope = bool(args.provider or args.collection or args.source)
-    entries = _selected_configured_entries(
-        cfg,
-        provider_selectors=args.provider,
-        collection_selectors=args.collection,
-        source_selectors=args.source,
-    )
+    if entries is None:
+        entries = _selected_configured_entries(
+            cfg,
+            provider_selectors=args.provider,
+            collection_selectors=args.collection,
+            source_selectors=args.source,
+        )
     if not entries:
         if explicit_scope:
             parser.error("no configured collection matches the selected scope")
@@ -1294,10 +1388,28 @@ def _run_configured_build(
             cfg, entries=buildable, wait=True, persist_catalog=False
         ) as result:
             _log_discovery_diagnostics(result, cfg)
+            source_selectors = set(args.source)
+            if paths is not None:
+                from .indexing.locator import IndexLocator
+                from .indexing.scope import restrict_producer
+
+                locator = IndexLocator(cfg["index_dir"])
+                for discovered in result.collections:
+                    for source in discovered.runtime.library_sources():
+                        producer = discovered.runtime.entry_producer(source, fast=True)
+                        try:
+                            scoped = restrict_producer(producer, paths, locator)
+                            if scoped is not None:
+                                source_selectors.add(source.key)
+                        finally:
+                            producer.close()
+                if not source_selectors:
+                    print("No matching sources.")
+                    return
             _print_discovery_tree(
                 result,
                 collection_selectors=set(args.collection),
-                source_selectors=set(args.source),
+                source_selectors=source_selectors,
             )
         return
 
@@ -1328,7 +1440,7 @@ def _run_configured_build(
             if discovery_failed:
                 sys.exit(1)
             return
-        _build_tasks(tasks, cfg, args, parser)
+        _build_tasks(tasks, cfg, args, parser, paths=paths)
         if discovery_failed:
             sys.exit(1)
 
@@ -1342,12 +1454,6 @@ def _run_positional_zim_build(
     from .indexing.pipeline import build_index
 
     zims = _collect_zims([Path(path) for path in args.paths], ".")
-    try:
-        appended = _persist_unmatched_zim_paths(
-            cfg, [Path(path) for path in args.paths], preview=args.list
-        )
-    except Exception as error:
-        sys.exit(f"zimantic: could not persist the ad-hoc collection: {error}")
     if args.list:
         from .providers.config import ConfigValidationError
 
@@ -1356,17 +1462,10 @@ def _run_positional_zim_build(
                 _most_specific_zim_entry(zim, cfg.get("collections") or ())
         except ConfigValidationError as error:
             sys.exit(f"zimantic: {error}")
-        if appended:
-            print("would add these ZIM collections:")
-            for item in appended:
-                print(f"  {item.name} -> {item.saved}")
-        else:
-            print("all positional paths are already covered by configured ZIM collections")
         print(f"would index {len(zims)} ZIM file(s)")
         for zim in zims:
             print(f"  {zim}")
         return
-    _warn_about_appended_collections(appended, cfg)
     if not zims:
         logger.info("zimantic: no sources to index")
         return
@@ -1476,6 +1575,69 @@ def _run_positional_zim_build(
         sys.exit(1)
 
 
+def _run_positional_build(cfg: dict, args, parser: argparse.ArgumentParser) -> None:
+    from copy import copy
+
+    paths = list(dict.fromkeys(Path(path).expanduser().resolve() for path in args.paths))
+    for path in paths:
+        if not path.is_file() and not path.is_dir():
+            parser.error(f"path not found: {path}")
+    requests: list[tuple[str, Path]] = []
+    for path in paths:
+        if path.is_file() and path.suffix.casefold() == ".zim":
+            kinds = ["zim"]
+        else:
+            matches = _matching_path_entries(path, cfg.get("collections") or ())
+            kinds = list(dict.fromkeys(entry.kind for entry in matches))
+            if not kinds:
+                try:
+                    kinds = _infer_path_kinds(path)
+                except (OSError, RuntimeError) as error:
+                    parser.error(f"cannot inspect {path}: {error}")
+        requests.extend((kind, path) for kind in kinds)
+    roots = [
+        (kind, path.parent if kind == "files" and path.is_file() else path)
+        for kind, path in requests
+    ]
+    try:
+        appended = _persist_unmatched_paths(cfg, roots, preview=args.list)
+    except (RuntimeError, OSError, ValueError) as error:
+        sys.exit(f"zimantic: could not persist the ad-hoc collection: {error}")
+    if args.list and appended:
+        print("would add these collections:")
+        for item in appended:
+            print(f"  {item.kind}:{item.name} -> {item.saved}")
+    elif not args.list:
+        _warn_about_appended_collections(appended, cfg)
+    zim_paths = [path for kind, path in requests if kind == "zim"]
+    failed = False
+    if zim_paths:
+        zim_args = copy(args)
+        zim_args.paths = zim_paths
+        try:
+            _run_positional_zim_build(cfg, zim_args, parser)
+        except SystemExit as error:
+            if error.code != 1:
+                raise
+            failed = True
+    entries = []
+    for kind, path in requests:
+        if kind == "zim":
+            continue
+        for entry in _matching_path_entries(path, cfg.get("collections") or ()):
+            if entry.kind == kind and entry not in entries:
+                entries.append(entry)
+    if entries:
+        try:
+            _run_configured_build(cfg, args, parser, entries=entries, paths=paths)
+        except SystemExit as error:
+            if error.code != 1:
+                raise
+            failed = True
+    if failed:
+        sys.exit(1)
+
+
 def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     sigterm = getattr(signal, "SIGTERM", None)
     if sigterm is not None:
@@ -1496,7 +1658,7 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     try:
         try:
             if args.paths:
-                _run_positional_zim_build(cfg, args, parser)
+                _run_positional_build(cfg, args, parser)
             else:
                 _run_configured_build(cfg, args, parser)
         except Exception as error:

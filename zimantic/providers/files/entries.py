@@ -40,6 +40,7 @@ from .common import (
     detect_mimetype,
     extension_mimetype,
     is_hidden_name,
+    is_native_document_path,
     is_ocr_candidate,
     is_track_sidecar,
     list_directory,
@@ -354,6 +355,16 @@ class FilesEntryProducer:
 
     # -- manifest ----------------------------------------------------------
 
+    def _indexable_path(self, path: str, family: str | None) -> bool:
+        if self.index_include and not matches_any(self.index_include, path):
+            return False
+        if family is not None:
+            return True
+        return (
+            matches_any(self.include, path)
+            if self.include else is_native_document_path(path)
+        )
+
     def _build_snapshot(self, *, errors: list[str] | None = None) -> _Snapshot:
         sidecar_errors = errors if errors is not None else []
         items: list[_ManifestItem] = []
@@ -412,9 +423,7 @@ class FilesEntryProducer:
                 family = media_family_for_path(relative) or media_family_for_mimetype(
                     mimetype
                 )
-                if (self.index_include and not matches_any(self.index_include, relative)) or (
-                    family is None and not matches_any(self.include, relative)
-                ):
+                if not self._indexable_path(relative, family):
                     continue
                 if len(items) >= self.max_entries:
                     truncated = True
@@ -477,9 +486,7 @@ class FilesEntryProducer:
                 family = media_family_for_path(name) or media_family_for_mimetype(
                     mimetype
                 )
-                if (self.index_include and not matches_any(self.index_include, name)) or (
-                    family is None and not matches_any(self.include, name)
-                ):
+                if not self._indexable_path(name, family):
                     continue
                 if len(items) >= self.max_entries:
                     truncated = True
@@ -618,6 +625,18 @@ class FilesEntryProducer:
         return hashlib.sha256(encoded).hexdigest()
 
     # -- producer contract -------------------------------------------------
+
+    @property
+    def path_scope_root(self) -> Path:
+        return self.root
+
+    @property
+    def path_scope_membership(self) -> str:
+        return self.membership_root
+
+    def entry_paths(self, index: int) -> tuple[str, ...]:
+        item = self._items[index]
+        return (item.path, *(sidecar.path for sidecar in item.sidecars))
 
     def entry_at(self, index: int) -> EntryRecord | None:
         if not isinstance(index, int) or index < 0 or index >= self.count:

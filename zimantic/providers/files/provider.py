@@ -171,6 +171,12 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
                 last_refresh=self._last_refresh,
                 collapsed=self._was_collapsed,
                 index_count=len(indexes),
+                index_partial=any(
+                    source.info.indexed_count is None
+                    or source.info.index_partial is True
+                    or source.info.truncated is True
+                    for source in sources
+                ),
                 index_states=tuple(
                     str(getattr(index, "done", "") or "") for index in indexes
                 ),

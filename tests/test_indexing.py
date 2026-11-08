@@ -101,6 +101,33 @@ def test_meta_codec_is_type_stable():
         schema.decode_int(3)
 
 
+@pytest.mark.parametrize("coverage", [
+    {"paths": [{"path": "../private", "recursive": True}], "partial": True},
+    {"paths": [{"path": "/private", "recursive": True}], "partial": True},
+    {"paths": [{"path": "a\\b", "recursive": False}], "partial": True},
+    {"paths": [{"path": "a", "recursive": "yes"}], "partial": True},
+    {"paths": [], "partial": True},
+    {"paths": [{"path": "a", "recursive": True}], "partial": "yes"},
+])
+def test_unsafe_or_malformed_build_coverage_is_rejected(tmp_path, coverage):
+    locator = _build(tmp_path, [EntryRecord(1, "Alpha", "", "alpha")], fast=True)
+    lease = locator.paths(_source())
+    try:
+        with (
+            closing(sqlite3.connect(lease.sqlite_path)) as original,
+            sqlite3.connect(":memory:") as db,
+        ):
+            original.backup(db)
+            schema.write_meta(db, {
+                schema.BUILD_SCOPE: schema.encode_json(coverage),
+                schema.TRUNCATED: schema.encode_bool(True),
+            })
+            with pytest.raises(schema.SchemaError):
+                schema.read_index_meta(db, completed=True)
+    finally:
+        lease.close()
+
+
 def test_scoped_search_tuning_reaches_semantic_filter_and_ivf_probes(tmp_path):
     from zimantic.scoped_settings import search_limits
 

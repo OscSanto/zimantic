@@ -198,6 +198,86 @@ def test_interrupted_build_resumes_with_the_same_manifest(tmp_path):
     ]
 
 
+def test_scoped_interruption_resumes_and_preserves_canonical_row_ids(tmp_path, monkeypatch):
+    from zimantic.indexing.scope import restrict_producer
+
+    root = tmp_path / "modules"
+    root.mkdir()
+    for name in ("a.txt", "b.txt", "c.txt", "d.txt"):
+        (root / name).write_text(name, encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    source = _source(config, "files:modules:root")
+    locator = IndexLocator(tmp_path / "indexes")
+    paths = [root / "a.txt", root / "c.txt"]
+    original = _InterruptingProducer(
+        source.info, root, config=config, interrupt_at=2,
+        cfg={"max_entry_bytes": 1 << 20, "max_body_text_bytes": 1 << 20, "max_preview_chars": 1000},
+    )
+    with pytest.raises(KeyboardInterrupt):
+        build_index(
+            restrict_producer(original, paths, locator),
+            locator, None, {"batch_size": 1},
+        )
+    assert locator.paths(source.info) is None
+    resumed = _producer(root, config, source)
+    visited = []
+    entry_at = resumed.entry_at
+
+    def record(index):
+        visited.append(index)
+        return entry_at(index)
+
+    monkeypatch.setattr(resumed, "entry_at", record)
+    build_index(
+        restrict_producer(resumed, list(reversed(paths)), locator),
+        locator, None, {"batch_size": 1},
+    )
+    assert visited == [2]
+    assert [row[0] for row in _docs(locator, source.info)] == [1, 3]
+    assert _meta(locator, source.info)["truncated"] == "1"
+
+
+def test_scoped_semantic_vectors_use_original_row_ids(tmp_path):
+    import faiss
+    import numpy as np
+
+    from zimantic.indexing.scope import restrict_producer
+
+    class Embedder:
+        fingerprint = "scope-test-model"
+
+        def truncate(self, text, prefix=""):
+            return text
+
+        def embed(self, texts):
+            return np.tile(np.array([1.0, 0.0], dtype=np.float32), (len(texts), 1))
+
+        def encode(self, texts):
+            return [list(map(ord, text)) for text in texts]
+
+        def embed_encoded(self, inputs):
+            return self.embed(inputs)
+
+    root = tmp_path / "modules"
+    root.mkdir()
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (root / name).write_text(f"{name} zebra", encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    source = _source(config, "files:modules:root")
+    locator = IndexLocator(tmp_path / "indexes")
+    producer = restrict_producer(
+        _producer(root, config, source), [root / "a.txt", root / "c.txt"], locator
+    )
+    build_index(producer, locator, Embedder(), {"batch_size": 1})
+    lease = locator.paths(source.info)
+    try:
+        index = faiss.read_index(str(lease.faiss_path))
+        assert set(index.search(np.array([[1.0, 0.0]], dtype=np.float32), 2)[1][0]) == {1, 3}
+    finally:
+        lease.close()
+    assert [row[0] for row in _body_hits(locator, source.info, "zebra")] == [1, 3]
+
+
 def test_manifest_cap_is_deterministic_across_enumeration_orders(
     tmp_path, monkeypatch
 ):

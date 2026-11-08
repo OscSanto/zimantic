@@ -161,6 +161,10 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
                 snapshot_version=self._version,
                 last_refresh=self._last_refresh,
                 index_count=len(indexes),
+                index_partial=any(
+                    source.indexed_count is None or source.truncated is True
+                    for source in sources
+                ),
                 index_states=tuple(
                     str(getattr(index, "done", "") or "") for index in indexes
                 ),

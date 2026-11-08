@@ -912,6 +912,7 @@ def _finish_build(
                 MODEL_PROBE_SHAPE_KEY,
                 index_schema.FAISS_DIGEST,
                 index_schema.DERIVED_TEXT,
+                index_schema.BUILD_SCOPE,
                 _REUSED_VECTOR_SOURCE,
             ],
         )
@@ -963,6 +964,9 @@ def _finish_build(
             values[index_schema.DERIVED_TEXT] = index_schema.encode_json(
                 dict(derived_text)
             )
+        build_scope = _producer_attr(producer, "build_scope")
+        if build_scope is not None:
+            values[index_schema.BUILD_SCOPE] = index_schema.encode_json(build_scope)
         index_schema.write_meta(db, values)
     db.execute("VACUUM")
     db.commit()

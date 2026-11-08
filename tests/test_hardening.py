@@ -80,7 +80,7 @@ def test_runtime_config_redacts_all_provider_and_global_paths(tmp_path):
 
 
 def test_appended_collection_remains_redacted(tmp_path):
-    from zimantic.__main__ import _persist_unmatched_zim_paths, _sanitize_public_text
+    from zimantic.__main__ import _persist_unmatched_paths, _sanitize_public_text
     from zimantic.settings import load_config
 
     config_dir = tmp_path / "config"
@@ -90,7 +90,7 @@ def test_appended_collection_remains_redacted(tmp_path):
     archive = tmp_path / "private-source.zim"
     archive.write_bytes(b"source")
     cfg = load_config(config_file, warn=lambda _message: None)
-    _persist_unmatched_zim_paths(cfg, [archive])
+    _persist_unmatched_paths(cfg, [("zim", archive)])
     assert _sanitize_public_text(f"cannot read {archive}", cfg) == "cannot read <private>"
 
 

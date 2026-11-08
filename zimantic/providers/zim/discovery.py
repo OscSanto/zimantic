@@ -712,6 +712,7 @@ def _apply_index_metadata(source: Any, meta: dict[str, str]) -> None:
 
     try:
         if schema.INDEXED_COUNT in meta:
+            object.__setattr__(source, "index_partial", False)
             object.__setattr__(
                 source,
                 "indexed_count",

@@ -428,6 +428,30 @@ class KolibriEntryProducer:
 
     # -- native text -------------------------------------------------------
 
+    @property
+    def path_scope_root(self) -> Path:
+        return self.storage_root
+
+    @property
+    def path_scope_membership(self) -> str:
+        return ""
+
+    @property
+    def path_scope_aliases(self) -> tuple[Path, ...]:
+        if self.config is None:
+            return ()
+        home = Path(self.config.path).expanduser().resolve()
+        database = Path(self.config.database_path).expanduser().resolve() if self.config.database_path else home / "db.sqlite3"
+        return (home, database)
+
+    def entry_paths(self, index: int) -> tuple[str, ...]:
+        selection = self._items[index].selection
+        files = (
+            ([selection.primary] if selection.primary is not None else [])
+            + list(associated_captions(selection))
+        )
+        return tuple(storage_relative_path(file) for file in files)
+
     def _read_native_document(
         self, primary: FileRow | None
     ) -> tuple[str, str, bool]:
