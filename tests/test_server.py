@@ -113,12 +113,10 @@ class FakeSearch:
         offset,
         collection,
         debug,
-        display_source=None,
     ):
         self.search_page_calls.append(
-            (query, source, limit, offset, collection, debug, display_source)
+            (query, source, limit, offset, collection, debug)
         )
-        self.display_source = display_source
         result = {"id": "manual:page", "title": "Page"}
         if debug:
             result.update({"score": 1.0, "explain": "debug"})
@@ -141,10 +139,9 @@ class FakeSearch:
         offset=0,
         collection=None,
         debug=False,
-        display_source=None,
     ):
         self.stream_calls.append(
-            (query, source, limit, offset, collection, debug, display_source)
+            (query, source, limit, offset, collection, debug)
         )
         result = {"id": "manual:page", "title": "Page"}
         if debug:
@@ -934,7 +931,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("score", response.json()[0])
         self.assertEqual(
             self.search.search_page_calls[-1],
-            ("page", "manual", 5, 10, None, False, None),
+            ("page", "manual", 5, 10, None, False),
         )
 
     def test_search_accepts_multiple_source_filters(self):
@@ -942,28 +939,22 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.search.search_page_calls[-1][1], ["manual", "other"])
 
-    def test_search_display_source_filters_without_changing_the_scope(self):
-        response = self.client.get(
-            "/search?q=page&display_source=manual&display_source=other"
-        )
-        self.assertEqual(response.status_code, 200)
-        call = self.search.search_page_calls[-1]
-        self.assertIsNone(call[1])
-        self.assertEqual(call[-1], ["manual", "other"])
-
+    def test_stream_search_accepts_source_and_collection_filters(self):
         stream = self.client.get(
-            "/search/stream?q=page&display_source=manual"
+            "/search/stream?q=page&source=manual&source=other&collection=zim:library"
         )
         self.assertEqual(stream.status_code, 200)
-        self.assertIsNone(self.search.stream_calls[-1][1])
-        self.assertEqual(self.search.stream_calls[-1][-1], "manual")
+        self.assertEqual(
+            self.search.stream_calls[-1],
+            ("page", ["manual", "other"], None, 0, "zim:library", False),
+        )
 
     def test_search_accepts_a_collection_filter(self):
         response = self.client.get("/search?q=page&collection=zim:library")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             self.search.search_page_calls[-1],
-            ("page", None, None, 0, "zim:library", False, None),
+            ("page", None, None, 0, "zim:library", False),
         )
 
     def test_debug_mode_is_server_wide(self):

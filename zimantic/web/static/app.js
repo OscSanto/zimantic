@@ -3735,8 +3735,8 @@
                     );
                     dedupeParams(params, "source");
                     // An explicit source/collection selection defines the scope
-                    // directly; it is never promoted to a full search. Page size,
-                    // offset and the display filter are not cached keys.
+                    // directly; it is never promoted to a full search. Page size
+                    // and offset are not cached keys.
                     let busyRetries = 0;
                     while (true) {
                         const streamController = new AbortController();

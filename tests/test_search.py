@@ -2601,7 +2601,7 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual(page["total"], 2)
             search._executor.shutdown(wait=True)
 
-    def test_selective_search_retrieves_deeper_than_a_broad_display_filter(self):
+    def test_selective_search_retrieves_deeper_and_reuses_its_own_pool(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 21)]
@@ -2612,46 +2612,23 @@ class PaginationTests(unittest.TestCase):
             _attach_index_fixtures(search)
             search.refresh_sources()
 
-            broad = search.search_page("tire change", display_source="beta")
+            broad = search.search_page("tire change")
             with patch.object(search, "_search_source", wraps=search._search_source) as retrieve:
                 selected = search.search_page("tire change", source="beta")
             self.assertEqual(retrieve.call_count, 1)
-            self.assertGreater(selected["total"], broad["total"])
+            self.assertGreater(selected["total"], broad["counts"].get("beta", 0))
             self.assertEqual(selected["total"], 20)
             self.assertEqual(selected["scope"]["requested"], 1)
             self.assertEqual(set(selected["counts"]), {"beta"})
 
-    def test_display_source_narrows_the_page_without_changing_scope(self):
-        with _temp_dir(self) as tmp:
-            tmp = Path(tmp)
-            _write_index(tmp, "alpha", rows=[(1, "Tire Change Alpha", "a", None)])
-            _write_index(tmp, "beta", rows=[(1, "Tire Change Beta", "b", None)])
-            search = _bare_search(self._cfg(tmp))
-            self.addCleanup(search.close)
-            _attach_index_fixtures(search)
-            search.refresh_sources()
-
-            page = search.search_page(
-                "tire change", limit=10, display_source="beta"
-            )
-            beta = "beta"
-            alpha = "alpha"
-            self.assertEqual(
-                [doc["source_key"] for doc in page["results"]], [beta]
-            )
-            self.assertEqual(page["total"], 1)
-            self.assertEqual(page["counts"], {alpha: 1, beta: 1})
-            self.assertEqual(page["scope"]["requested"], 2)
-
-            page = search.search_page(
-                "tire change", limit=10, display_source=["alpha", "beta"]
-            )
-            self.assertEqual(
-                [doc["source_key"] for doc in page["results"]],
-                [alpha, beta],
-            )
-            self.assertEqual(page["total"], 2)
-            search._executor.shutdown(wait=True)
+            with patch.object(search, "_search_source", wraps=search._search_source) as retrieve:
+                cached = list(search.stream_search(
+                    "tire change", source="beta", limit=5, offset=5
+                ))[-1]
+            self.assertEqual(retrieve.call_count, 0)
+            self.assertEqual(cached["total"], 20)
+            self.assertEqual(cached["offset"], 5)
+            self.assertEqual({doc["source_key"] for doc in cached["results"]}, {"beta"})
 
     def test_concurrent_identical_searches_share_one_computation(self):
         with _temp_dir(self) as tmp:

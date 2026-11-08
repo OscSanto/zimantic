@@ -1607,8 +1607,8 @@ class Search:
     ) -> tuple:
         """Key by query, expanded source keys, and publication generation.
 
-        The ranked pool is independent of page size, offset, display filter and
-        debug flag, so none of those belong in the key: every page of a query
+        The ranked pool is independent of page size, offset and debug flag,
+        so none of those belong in the key: every page of a query
         reuses one cached pool instead of fragmenting the cache per `limit`.
         A ``None`` selection is the shared unscoped pool; an empty tuple is a
         deliberately empty source scope. Including the generation invalidates
@@ -1718,27 +1718,12 @@ class Search:
     def _page_state(
         self,
         pool: list[dict[str, Any]],
-        source: str | list[str] | None,
         offset: int,
         page_size: int,
         debug: bool,
     ) -> dict[str, Any]:
-        """Slice one display page out of the ranked pool.
-
-        `source` is a display-only filter: the pool was ranked over every
-        selected source, so narrowing here never changes what was searched.
-        """
-        selected = {source} if isinstance(source, str) else set(source or [])
-        if selected:
-            # A stale bookmark may name a source that no longer exists. Treat it
-            # like an absent display filter instead of returning an empty page.
-            with self._state_lock:
-                known = {item.key for item in self.sources.values()}
-            selected &= known
-        scoped = pool if not selected else [
-            doc for doc in pool if doc.get("source_key") in selected
-        ]
-        total = len(scoped)
+        """Slice one page out of the ranked pool."""
+        total = len(pool)
         # Clamp an out-of-range offset to the last real page here, where the
         # total is known. Callers can then show real results and report the
         # effective offset instead of fetching an empty page and correcting it
@@ -1747,7 +1732,7 @@ class Search:
             effective_offset = min(offset, ((total - 1) // page_size) * page_size)
         else:
             effective_offset = 0
-        page = scoped[effective_offset:effective_offset + page_size]
+        page = pool[effective_offset:effective_offset + page_size]
         return {
             "results": [self._public(doc, debug) for doc in page],
             "total": total,
@@ -1904,7 +1889,6 @@ class Search:
         offset: int = 0,
         collection: str | None = None,
         debug: bool = False,
-        display_source: str | list[str] | None = None,
     ) -> dict[str, Any]:
         """Return one page plus totals, using the streaming coordinator."""
         final: dict[str, Any] = {}
@@ -1915,7 +1899,6 @@ class Search:
             offset,
             collection,
             debug,
-            display_source=display_source,
         ):
             if event["type"] == "error":
                 if event.get("busy"):
@@ -1949,7 +1932,6 @@ class Search:
         cached: Any,
         query: str,
         sources: list[SourceInfo],
-        source: str | list[str] | None,
         offset: int,
         page_size: int,
         debug: bool,
@@ -1958,7 +1940,7 @@ class Search:
     ) -> Iterator[dict[str, Any]]:
         """Replay a cached pool as a finished stream (progress + one page)."""
         pool, cached_sources = self._unpack_cache(cached)
-        state = self._page_state(pool, source, offset, page_size, debug)
+        state = self._page_state(pool, offset, page_size, debug)
         self._hydrate_results(state["results"])
         total_sources = len(sources)
         yield {
@@ -2060,7 +2042,6 @@ class Search:
         offset: int = 0,
         collection: str | None = None,
         debug: bool = False,
-        display_source: str | list[str] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield source progress and one page of the ranked pool.
 
@@ -2069,14 +2050,11 @@ class Search:
         response. The pool is cached by query, expanded source keys, and the
         publication generation. An explicit source/collection selection defines
         the whole scope directly; it is never promoted to a broader search.
-        ``display_source`` narrows only the returned page, so the same ranked
-        pool can serve a source chip without changing what was searched.
         Concurrent identical queries share a single computation.
         """
         query = self._validate_query(query)
         page_size = self._page_size(limit)
         offset = max(0, int(offset))
-        display = source if display_source is None else display_source
         scope = self._search_scope(source, collection)
         sources = scope.sources
         generation = scope.generation
@@ -2091,7 +2069,6 @@ class Search:
                 cached,
                 query,
                 sources,
-                display,
                 offset,
                 page_size,
                 debug,
@@ -2112,7 +2089,6 @@ class Search:
             generation,
             pending,
             sources,
-            display,
             offset,
             page_size,
             debug,
@@ -2126,7 +2102,6 @@ class Search:
         self,
         query: str,
         source_results: list[SourceResult],
-        source: str | list[str] | None,
         offset: int,
         page_size: int,
         debug: bool,
@@ -2149,7 +2124,7 @@ class Search:
         if pool is None:
             pool = self._rank_results(source_results, query, pool_target)
         pool = self._enrich_pool(source_results, query, pool, pool_target)
-        state = self._page_state(pool, source, offset, page_size, debug)
+        state = self._page_state(pool, offset, page_size, debug)
         self._hydrate_results(state["results"])
         hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
         for doc in pool:
@@ -2190,7 +2165,6 @@ class Search:
         generation: int,
         pending: Future,
         sources: list[SourceInfo],
-        source: str | list[str] | None,
         offset: int,
         page_size: int,
         debug: bool,
@@ -2443,7 +2417,7 @@ class Search:
                             "total_sources": total_sources,
                         }
                         if should_rank:
-                            state = self._page_state(pool, source, offset, page_size, debug)
+                            state = self._page_state(pool, offset, page_size, debug)
                             signature = self._page_signature(state)
                             include_results = debug or signature != last_page_signature
                             last_page_signature = signature
@@ -2472,7 +2446,7 @@ class Search:
                     pool = self._rank_results(completed, query, pool_target)
                     last_rank_at = now
                     unranked = 0
-                    state = self._page_state(pool, source, offset, page_size, debug)
+                    state = self._page_state(pool, offset, page_size, debug)
                     signature = self._page_signature(state)
                     include_results = debug or signature != last_page_signature
                     last_page_signature = signature
@@ -2523,7 +2497,6 @@ class Search:
             state, cache_value = self._finalize_search(
                 query,
                 completed,
-                source,
                 offset,
                 page_size,
                 debug,

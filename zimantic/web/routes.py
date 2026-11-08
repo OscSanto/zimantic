@@ -1295,14 +1295,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         collection: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
-        display_source: list[str] | None = Query(None),
     ):
         source_filter = source[0] if source and len(source) == 1 else source
-        display_filter = (
-            display_source[0]
-            if display_source and len(display_source) == 1
-            else display_source
-        )
         try:
             page = search_class.search_page(
                 q,
@@ -1311,7 +1305,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 offset,
                 collection,
                 debug,
-                display_source=display_filter,
             )
         except SearchBusyError as error:
             raise HTTPException(
@@ -1349,7 +1342,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         collection: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
-        display_source: list[str] | None = Query(None),
     ):
         try:
             search_class._validate_query(q)
@@ -1359,12 +1351,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 validate_scope(source_filter, collection)
         except SearchQueryError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        display_filter = (
-            display_source[0]
-            if display_source and len(display_source) == 1
-            else display_source
-        )
-
         def events():
             stream = search_class.stream_search(
                 q,
@@ -1373,7 +1359,6 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 offset,
                 collection,
                 debug,
-                display_source=display_filter,
             )
             try:
                 for event in stream:
