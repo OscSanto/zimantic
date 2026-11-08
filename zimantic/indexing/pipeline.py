@@ -20,7 +20,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from threading import Thread
 from typing import Any, Mapping
 
@@ -173,10 +173,19 @@ class EmbeddingPipeline:
             self._requests.put(_EmbeddingRequest(ids, inputs, batch_future))
         return future
 
-    def close(self) -> None:
+    def close(self, *, wait: bool = True) -> None:
         if self._closed:
             return
         self._closed = True
+        if not wait:
+            while True:
+                try:
+                    request = self._requests.get_nowait()
+                except Empty:
+                    break
+                if request is not None and not request.future.done():
+                    request.future.set_exception(KeyboardInterrupt())
+            return
         for _ in self._threads:
             self._requests.put(None)
         for thread in self._threads:
@@ -623,6 +632,7 @@ def _index_entries(
     progress=None,
     token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
     reuse_vectors=None,
+    interrupt_event: threading.Event | None = None,
 ) -> None:
     pending_embeddings: list[tuple[Future, list[EntryRecord], int, int]] = []
     count = int(_producer_attr(producer, "count", 0) or 0)
@@ -677,6 +687,8 @@ def _index_entries(
 
     def drain_one() -> None:
         nonlocal truncated_rows
+        if interrupt_event is not None and interrupt_event.is_set():
+            raise KeyboardInterrupt
         future, pending_rows, pending_next, pending_reserved = pending_embeddings.pop(0)
         try:
             truncated_rows += _save_rows(
@@ -700,6 +712,8 @@ def _index_entries(
 
     for index in range(start, count):
         try:
+            if interrupt_event is not None and interrupt_event.is_set():
+                raise KeyboardInterrupt
             row = producer.entry_at(index)
             if row is not None and derived_stage is not None and not fast:
                 try:
@@ -1212,6 +1226,7 @@ def build_index(
                     cfg, "embedding_batch_tokens", DEFAULT_EMBEDDING_BATCH_TOKENS
                 )),
                 reuse_vectors=reuse_vectors,
+                interrupt_event=cfg.get("interrupt_event"),
             )
             progress.close()
             progress = None

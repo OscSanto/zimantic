@@ -285,6 +285,22 @@ class BuildWorkerTests(unittest.TestCase):
 
         self.assertEqual(set(built), {"first.zim", "second.zim"})
 
+    def test_build_interrupt_exits_with_standard_status(self):
+        import zimantic.__main__ as main_module
+        from zimantic import settings
+
+        with (
+            patch.object(main_module, "_configure_logging"),
+            patch.object(settings, "load_config", return_value={}),
+            patch.object(
+                main_module, "_run_build_locked", side_effect=KeyboardInterrupt
+            ),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            main_module.main(["build", "--fast"])
+
+        self.assertEqual(raised.exception.code, 130)
+
     def test_lazy_embedder_does_not_load_until_used(self):
         import zimantic.__main__ as main_module
 

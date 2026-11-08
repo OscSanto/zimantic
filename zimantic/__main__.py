@@ -13,6 +13,8 @@ from urllib.parse import quote as quote_path
 
 logger = logging.getLogger(__name__)
 
+_BUILD_STOP_EVENT: threading.Event | None = None
+
 
 class _LazyEmbedder:
     """Create the embedding model only when the first real batch needs it.
@@ -54,12 +56,13 @@ class _LazyEmbedder:
 def _graceful_interrupt(_signum: int, _frame) -> None:
     """Turn SIGTERM (a systemd stop) into KeyboardInterrupt.
 
-    Ctrl-C already interrupts the build; systemd stops a unit with SIGTERM, which
-    would otherwise kill the process without running its ``finally`` blocks. With
-    this handler, a stopped build closes its database and removes temp files
-    exactly like an interrupted batch, and stays resumable from the last
-    committed batch.
+    Mark an active build so worker threads stop at their next safe boundary.
+    Systemd stops a unit with SIGTERM, which would otherwise kill the process
+    without running its ``finally`` blocks. The raised ``KeyboardInterrupt``
+    follows the same cleanup path as Ctrl-C.
     """
+    if _BUILD_STOP_EVENT is not None:
+        _BUILD_STOP_EVENT.set()
     raise KeyboardInterrupt
 
 
@@ -1150,6 +1153,7 @@ def _build_tasks(
 
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
+    build_cfg["interrupt_event"] = _BUILD_STOP_EVENT
     locator = IndexLocator(cfg["index_dir"])
 
     def run_task(label: str, runtime: object, source: object):
@@ -1164,6 +1168,7 @@ def _build_tasks(
         )
 
     failures: list[tuple[str, BaseException]] = []
+    interrupted = False
     try:
         if workers == 1 or len(tasks) == 1:
             for label, runtime, source in tasks:
@@ -1191,11 +1196,18 @@ def _build_tasks(
                         _log_build_failure(source, error, cfg)
                         logger.debug("build error for %s: %s", label, error)
                         failures.append((label, error))
+            except KeyboardInterrupt:
+                interrupted = True
+                logger.warning("zimantic: cancelling pending builds")
+                raise
             finally:
-                pool.shutdown(wait=True, cancel_futures=True)
+                pool.shutdown(wait=not interrupted, cancel_futures=True)
+    except KeyboardInterrupt:
+        interrupted = True
+        raise
     finally:
         if embedding_pipeline is not None:
-            embedding_pipeline.close()
+            embedding_pipeline.close(wait=not interrupted)
     if failures:
         logger.error(
             "zimantic: %d source build(s) failed; see the errors above",
@@ -1366,8 +1378,10 @@ def _run_positional_zim_build(
             )
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
+    build_cfg["interrupt_event"] = _BUILD_STOP_EVENT
     locator = IndexLocator(cfg["index_dir"])
     failures: list[tuple[Path, BaseException]] = []
+    interrupted = False
 
     def run_build(zim: Path):
         producer = _build_producer_for_zim(zim, cfg, fast=args.fast)
@@ -1412,11 +1426,18 @@ def _run_positional_zim_build(
                         )
                         logger.debug("build error for %s: %s", zim, error)
                         failures.append((zim, error))
+            except KeyboardInterrupt:
+                interrupted = True
+                logger.warning("zimantic: cancelling pending builds")
+                raise
             finally:
-                pool.shutdown(wait=True, cancel_futures=True)
+                pool.shutdown(wait=not interrupted, cancel_futures=True)
+    except KeyboardInterrupt:
+        interrupted = True
+        raise
     finally:
         if embedding_pipeline is not None:
-            embedding_pipeline.close()
+            embedding_pipeline.close(wait=not interrupted)
     if failures:
         logger.error(
             "zimantic: %d source build(s) failed; see the errors above",
@@ -1439,17 +1460,23 @@ def _run_build(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             "positional paths cannot be combined with --provider, "
             "--collection, or --source"
         )
+    global _BUILD_STOP_EVENT
+    previous_stop_event = _BUILD_STOP_EVENT
+    _BUILD_STOP_EVENT = threading.Event()
     try:
-        if args.paths:
-            _run_positional_zim_build(cfg, args, parser)
-        else:
-            _run_configured_build(cfg, args, parser)
-    except Exception as error:
-        from .providers.config import ConfigValidationError
+        try:
+            if args.paths:
+                _run_positional_zim_build(cfg, args, parser)
+            else:
+                _run_configured_build(cfg, args, parser)
+        except Exception as error:
+            from .providers.config import ConfigValidationError
 
-        if isinstance(error, ConfigValidationError):
-            parser.error(str(error))
-        raise
+            if isinstance(error, ConfigValidationError):
+                parser.error(str(error))
+            raise
+    finally:
+        _BUILD_STOP_EVENT = previous_stop_event
 
 
 def _sanitize_public_text(text: Any, cfg: dict) -> Any:
@@ -2094,28 +2121,36 @@ def main(argv: list[str] | None = None) -> None:
     else:
         cfg = {}
 
-    if args.command == "build":
-        if args.lock_timeout is not None and args.lock_timeout < 0:
-            parser.error("--lock-timeout must not be negative")
-        if args.list:
-            # --list is a read-only preview: no build lock or index write.
-            _run_build(args, cfg, parser)
-        else:
-            _run_build_locked(args, cfg, parser)
-    elif args.command == "serve":
-        _run_serve(args, cfg)
-    elif args.command == "open":
-        _run_open(args, cfg, parser)
-    elif args.command == "sources":
-        _run_sources(args, cfg)
-    elif args.command == "catalog":
-        _run_catalog(args, cfg, parser)
-    elif args.command == "prune":
-        _run_prune(args, cfg, parser)
-    elif args.command == "model":
-        _run_model(args, cfg)
-    elif args.command == "reload":
-        _run_reload(args.pid)
+    try:
+        if args.command == "build":
+            if args.lock_timeout is not None and args.lock_timeout < 0:
+                parser.error("--lock-timeout must not be negative")
+            if args.list:
+                # --list is a read-only preview: no build lock or index write.
+                _run_build(args, cfg, parser)
+            else:
+                _run_build_locked(args, cfg, parser)
+        elif args.command == "serve":
+            _run_serve(args, cfg)
+        elif args.command == "open":
+            _run_open(args, cfg, parser)
+        elif args.command == "sources":
+            _run_sources(args, cfg)
+        elif args.command == "catalog":
+            _run_catalog(args, cfg, parser)
+        elif args.command == "prune":
+            _run_prune(args, cfg, parser)
+        elif args.command == "model":
+            _run_model(args, cfg)
+        elif args.command == "reload":
+            _run_reload(args.pid)
+    except KeyboardInterrupt:
+        if args.command == "build":
+            logger.warning(
+                "zimantic: build interrupted; incomplete work is resumable"
+            )
+            raise SystemExit(130)
+        raise
 
 
 if __name__ == "__main__":

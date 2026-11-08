@@ -335,6 +335,22 @@ class BuildPipelineTests(unittest.TestCase):
             self.assertEqual(_meta(locator, _source())[DONE], "full")
             self.assertEqual(len(_docs(locator, _source())), 8)
 
+    def test_interrupt_event_stops_before_reading_entries(self):
+        rows = [EntryRecord(i, f"T{i}", "e", f"p{i}", None, "body") for i in range(2)]
+        producer = Producer(rows)
+        stop_event = threading.Event()
+        stop_event.set()
+
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(KeyboardInterrupt):
+            _build(
+                producer,
+                tmp,
+                {"interrupt_event": stop_event},
+                fast=True,
+            )
+
+        self.assertTrue(producer.closed)
+
     def test_resume_requires_order_fingerprint_and_rejects_changed_order(self):
         rows = [EntryRecord(i, f"T{i}", "", f"p{i}") for i in range(4)]
 
