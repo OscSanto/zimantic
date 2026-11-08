@@ -22,6 +22,8 @@ from zimantic.indexing.schema import (
 )
 from zimantic.indexing.types import EntryRecord
 
+from index_helpers import body_hits as _body_hits, docs as _docs, meta as _meta
+
 
 def _source(key="files:test:manual-0123", provider="files", collection_key="files:test"):
     return SourceInfo(
@@ -77,47 +79,6 @@ def _build(producer, directory, cfg=None, **kwargs):
     config.update(cfg or {})
     build_module.build_index(producer, locator, kwargs.pop("embedder", None), config, **kwargs)
     return locator
-
-
-def _meta(locator, source):
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return dict(db.execute("SELECT key, value FROM meta"))
-        finally:
-            db.close()
-    finally:
-        lease.close()
-
-
-def _docs(locator, source):
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return db.execute("SELECT rowid, title, path FROM docs ORDER BY rowid").fetchall()
-        finally:
-            db.close()
-    finally:
-        lease.close()
-
-
-def _body_hits(locator, source, term):
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return db.execute(
-                "SELECT rowid FROM body WHERE body MATCH ?", (f'"{term}"',)
-            ).fetchall()
-        finally:
-            db.close()
-    finally:
-        lease.close()
 
 
 class _Embedder:

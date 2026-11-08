@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import logging
 import os
-import os
 import shutil
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from ..._fs import fsync_path
 from ...diagnostics import public_cause
 from ...indexing import schema
-from ...indexing.pipeline import _create_temp_path, _file_digest, _fsync_path, _load
+from ...indexing.pipeline import _create_temp_path, _file_digest, _load
 from ...model_meta import (
     MODEL_FINGERPRINT_KEY,
     MODEL_PROBE_SHAPE_KEY,
@@ -177,9 +177,9 @@ class LegacyVectors:
                     raise LegacyIndexError("legacy FAISS changed while copying")
             if not self.valid_files():
                 raise LegacyIndexError("legacy index changed during publication")
-            _fsync_path(temp_path)
+            fsync_path(temp_path)
             os.replace(temp_path, path)
-            _fsync_path(path.parent)
+            fsync_path(path.parent)
         finally:
             temp_path.unlink(missing_ok=True)
         return self.count + count

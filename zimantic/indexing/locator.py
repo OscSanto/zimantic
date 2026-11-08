@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from .._filelock import lock_file, unlock_file
+from .._fs import fsync_path
 
 MANIFEST_VERSION = 1
 _SAFE = re.compile(r"[^a-z0-9._-]+")
@@ -37,19 +38,6 @@ def _file_digest(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _fsync_path(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
 
 
 def _lock_shared(fd: int) -> bool:
@@ -259,7 +247,7 @@ class IndexLocator:
         staging.mkdir(parents=True)
         sqlite_path = staging / "index.sqlite"
         shutil.copyfile(sqlite_source, sqlite_path)
-        _fsync_path(sqlite_path)
+        fsync_path(sqlite_path)
         self._seal_sqlite(sqlite_path)
         sqlite_digest = _file_digest(sqlite_path)
         faiss_path = None
@@ -267,7 +255,7 @@ class IndexLocator:
         if faiss_source is not None and Path(faiss_source).is_file():
             faiss_path = staging / "index.faiss"
             shutil.copyfile(faiss_source, faiss_path)
-            _fsync_path(faiss_path)
+            fsync_path(faiss_path)
             faiss_digest = _file_digest(faiss_path)
         (staging / "lease").touch()
         if generation_dir.exists():
@@ -276,7 +264,7 @@ class IndexLocator:
                 "refusing to reuse an existing index generation identifier"
             )
         os.replace(staging, generation_dir)
-        _fsync_path(generation_dir.parent)
+        fsync_path(generation_dir.parent)
         manifest = {
             "version": MANIFEST_VERSION,
             "provider": provider,
@@ -295,9 +283,9 @@ class IndexLocator:
         temporary.write_text(
             json.dumps(manifest, sort_keys=True), encoding="utf-8"
         )
-        _fsync_path(temporary)
+        fsync_path(temporary)
         os.replace(temporary, manifest_path)
-        _fsync_path(directory)
+        fsync_path(directory)
         return self._acquire(directory, manifest)
 
     @staticmethod

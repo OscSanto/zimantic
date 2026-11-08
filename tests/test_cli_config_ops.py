@@ -30,9 +30,7 @@ from zimantic.settings import load_config
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cli_environment(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+def _isolated_cli_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
@@ -527,8 +525,6 @@ class TestSourcesAndPrune:
         assert config.exists()
 
     def _catalog_config(self, tmp_path, monkeypatch, collections):
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
         cwd = tmp_path / "working"
         cwd.mkdir()
         monkeypatch.chdir(cwd)
@@ -692,18 +688,16 @@ class TestSourcesAndPrune:
         assert capsys.readouterr().out == "No matching library entries.\n"
         assert not (tmp_path / "indexes").exists()
 
-    def test_build_list_does_not_take_the_build_lock(self, tmp_path, monkeypatch, capsys):
+    def test_build_list_does_not_take_the_build_lock(self, tmp_path, capsys):
         (tmp_path / "modules").mkdir()
         (tmp_path / "modules" / "a.html").write_text("hello", encoding="utf-8")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-        monkeypatch.chdir(tmp_path)
         config_path = default_config_path()
         config_path.parent.mkdir(parents=True, exist_ok=True)
         _write(
             config_path,
             f"index_dir = {json.dumps(str(tmp_path / 'indexes'))}\n"
             '[[collections]]\ntype = "files"\nname = "modules"\n'
-            'path = "../modules"\n',
+            f"path = {json.dumps(str(tmp_path / 'modules'))}\n",
         )
         main(["build", "--list"])
         assert not (tmp_path / ".build.lock").exists()

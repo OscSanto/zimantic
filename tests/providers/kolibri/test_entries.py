@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
 from zimantic.indexing.locator import IndexLocator
@@ -15,6 +13,8 @@ from zimantic.providers.kolibri.discovery import (
 )
 from zimantic.providers.kolibri.entries import row_id_for
 
+from index_helpers import body_hits as _body_hits, docs as _docs, meta as _meta
+
 from .helpers import (
     KolibriFixture,
     build_sources,
@@ -22,53 +22,6 @@ from .helpers import (
     make_two_channel_fixture,
     open_runtime,
 )
-
-
-def _docs(locator: IndexLocator, source) -> list[tuple[int, str, str]]:
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return db.execute(
-                "SELECT rowid, title, path FROM docs ORDER BY rowid"
-            ).fetchall()
-        finally:
-            db.close()
-    finally:
-        lease.close()
-
-
-def _meta(locator: IndexLocator, source) -> dict[str, str]:
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return dict(db.execute("SELECT key, value FROM meta"))
-        finally:
-            db.close()
-    finally:
-        lease.close()
-
-
-def _body_hits(locator: IndexLocator, source, term: str) -> list[int]:
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return [
-                int(row[0])
-                for row in db.execute(
-                    "SELECT rowid FROM body WHERE body MATCH ?",
-                    (f'"{term}"',),
-                )
-            ]
-        finally:
-            db.close()
-    finally:
-        lease.close()
 
 
 def test_topics_are_not_rows_and_extracted_text_is_searchable(tmp_path):

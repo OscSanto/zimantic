@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,8 @@ from zimantic.providers.files.discovery import (
 from zimantic.providers.files.entries import FilesEntryProducer
 
 from media_helpers import copy_sample
+
+from index_helpers import body_hits as _body_hits, docs as _docs, meta as _meta
 
 from .helpers import create_pdf, files_config
 
@@ -68,52 +69,6 @@ class _InterruptingProducer(FilesEntryProducer):
             self._interrupted = True
             raise KeyboardInterrupt
         return super().entry_at(index)
-
-
-def _meta(locator: IndexLocator, source) -> dict[str, str]:
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return dict(db.execute("SELECT key, value FROM meta"))
-        finally:
-            db.close()
-    finally:
-        lease.close()
-
-
-def _docs(locator: IndexLocator, source) -> list[tuple[int, str, str]]:
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return db.execute(
-                "SELECT rowid, title, path FROM docs ORDER BY rowid"
-            ).fetchall()
-        finally:
-            db.close()
-    finally:
-        lease.close()
-
-
-def _body_hits(locator: IndexLocator, source, term: str) -> list[int]:
-    lease = locator.paths(source)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return [
-                int(row[0])
-                for row in db.execute(
-                    "SELECT rowid FROM body WHERE body MATCH ?", (f'"{term}"',)
-                )
-            ]
-        finally:
-            db.close()
-    finally:
-        lease.close()
 
 
 def test_stable_ids_and_resume_fingerprint(tmp_path):

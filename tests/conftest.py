@@ -10,6 +10,21 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolate_xdg_directories(tmp_path, monkeypatch):
+    for variable, directory in (
+        ("XDG_CONFIG_HOME", "xdg-config"),
+        ("XDG_DATA_HOME", "xdg-data"),
+        ("XDG_CACHE_HOME", "xdg-cache"),
+        ("XDG_RUNTIME_DIR", "xdg-runtime"),
+    ):
+        path = tmp_path / directory
+        path.mkdir()
+        monkeypatch.setenv(variable, str(path))
+
 
 try:
     import httpx  # noqa: F401  # ty: ignore[unresolved-import]

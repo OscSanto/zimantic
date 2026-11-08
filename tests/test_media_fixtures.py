@@ -24,6 +24,8 @@ from zimantic.providers.files.entries import FilesEntryProducer
 from media_helpers import MEDIA_ROOT, copy_sample, manifest, sample
 from providers.files.helpers import build_sources, files_config, open_runtime
 
+from index_helpers import body_hits as _body_hits, meta as _meta
+
 
 def _source(config, key: str):
     for source in discover_sources(config).sources:
@@ -48,41 +50,6 @@ def _producer(root: Path, config, source, *, cfg: dict | None = None):
         fast=False,
         cfg=values,
     )
-
-
-def _body_hits(locator: IndexLocator, source, term: str) -> list[int]:
-    lease = locator.paths(source.info)
-    assert lease is not None
-    try:
-        import sqlite3
-
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return [
-                int(row[0])
-                for row in db.execute(
-                    "SELECT rowid FROM body WHERE body MATCH ?", (f'"{term}"',)
-                )
-            ]
-        finally:
-            db.close()
-    finally:
-        lease.close()
-
-
-def _meta(locator: IndexLocator, source) -> dict[str, str]:
-    import sqlite3
-
-    lease = locator.paths(source.info)
-    assert lease is not None
-    try:
-        db = sqlite3.connect(lease.sqlite_path)
-        try:
-            return dict(db.execute("SELECT key, value FROM meta"))
-        finally:
-            db.close()
-    finally:
-        lease.close()
 
 
 def _item_index(producer: FilesEntryProducer, path: str) -> int:
@@ -253,8 +220,8 @@ def test_committed_sidecar_text_reaches_the_body_index(tmp_path):
     )
 
     for term in ("sidecar", "unicorn", "hippopotamus", "algebra"):
-        assert _body_hits(locator, source, term), term
-    meta = _meta(locator, source)
+        assert _body_hits(locator, source.info, term), term
+    meta = _meta(locator, source.info)
     derived = json.loads(meta["derived_text"])
     assert derived["operations"]["captions"] == "ready"
     assert derived["contributors"] == ["captions"]

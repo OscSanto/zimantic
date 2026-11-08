@@ -26,6 +26,7 @@ from typing import Any, Mapping
 
 from tqdm import tqdm
 
+from .._fs import fsync_path
 from ..diagnostics import public_cause
 from ..model_meta import (
     MODEL_FINGERPRINT_KEY,
@@ -887,7 +888,7 @@ def _finish_build(
         faiss_digest = ""
     elif reuse_vectors is not None:
         vector_count = reuse_vectors.write(state.build_faiss_path)
-        _fsync_path(state.build_faiss_path)
+        fsync_path(state.build_faiss_path)
         faiss_digest = _file_digest(state.build_faiss_path)
     elif vector_count:
         _write_faiss(db, state.build_faiss_path)
@@ -1401,19 +1402,6 @@ def _create_temp_path(path: Path) -> Path:
     raise RuntimeError(f"could not create a temporary file beside {path}")
 
 
-def _fsync_path(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
-
-
 def _embedding_batches(embedder, rows: list[EntryRecord], token_budget: int):
     """Bound padded tokens per call; sort actual capped inputs, not characters."""
     if embedder is None:
@@ -1603,9 +1591,9 @@ def _write_faiss(db: sqlite3.Connection, path: Path) -> None:
     temp_path = _create_temp_path(path)
     try:
         faiss.write_index(index, str(temp_path))
-        _fsync_path(temp_path)
+        fsync_path(temp_path)
         os.replace(temp_path, path)
-        _fsync_path(path.parent)
+        fsync_path(path.parent)
     finally:
         temp_path.unlink(missing_ok=True)
 

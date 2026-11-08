@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from ._fs import fsync_path
 from .locking import BuildLockError, FileLease
 from .providers.config import (
     ConfigValidationError,
@@ -110,19 +111,6 @@ def _copy_metadata(source: Path, target: Path) -> None:
             raise ConfigWriteError(
                 f"could not preserve the access ACL {name!r} on {source}: {error}"
             ) from error
-
-
-def _fsync_path(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
 
 
 def _read_existing(target: Path) -> str:
@@ -228,7 +216,7 @@ def append_collection(
                 _copy_metadata(target, temporary)
             else:
                 os.chmod(temporary, 0o644)
-            _fsync_path(temporary)
+            fsync_path(temporary)
             if source_info is not None and target.stat().st_nlink > 1:
                 raise ConfigWriteError(
                     f"refusing to replace {target}: it gained a hard link "
@@ -236,7 +224,7 @@ def append_collection(
                 )
             os.replace(temporary, target)
             temporary = None
-            _fsync_path(target.parent)
+            fsync_path(target.parent)
         except ConfigWriteError:
             raise
         except OSError as error:
