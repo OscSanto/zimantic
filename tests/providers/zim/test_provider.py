@@ -290,6 +290,12 @@ def test_start_faiss_loads_after_core_binds_defer_false(tmp_path, caplog):
         def embed(self, texts):
             return np.ones((len(texts), 4), dtype=np.float32)
 
+        def encode(self, texts):
+            return [list(map(ord, text)) for text in texts]
+
+        def embed_encoded(self, inputs):
+            return self.embed(inputs)
+
     zims = tmp_path / "zims"
     zims.mkdir()
     archive = zims / "manual.zim"

@@ -253,6 +253,12 @@ def test_files_cross_model_probes_reuse_only_matching_vectors(tmp_path, monkeypa
         def embed(self, texts):
             return np.tile(np.array(self.vector, dtype=np.float32), (len(texts), 1))
 
+        def encode(self, texts):
+            return [list(map(ord, text)) for text in texts]
+
+        def embed_encoded(self, inputs):
+            return self.embed(inputs)
+
     monkeypatch.setattr(build_module, "_write_faiss", lambda db, path: path.write_bytes(b"vectors"))
     locator = _build(
         tmp_path, [EntryRecord(1, "Alpha", "excerpt", "alpha", None, "body")],

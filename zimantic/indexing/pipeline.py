@@ -105,8 +105,7 @@ class BuildReport:
 @dataclass(slots=True)
 class _EmbeddingRequest:
     ids: list[int]
-    inputs: list
-    encoded: bool
+    inputs: list[list[int]]
     future: Future
 
 
@@ -167,10 +166,10 @@ class EmbeddingPipeline:
                 if remaining == 0 and not future.done():
                     future.set_result(vectors)
 
-        for ids, inputs, encoded in batches:
+        for ids, inputs in batches:
             batch_future = Future()
             batch_future.add_done_callback(finished)
-            self._requests.put(_EmbeddingRequest(ids, inputs, encoded, batch_future))
+            self._requests.put(_EmbeddingRequest(ids, inputs, batch_future))
         return future
 
     def close(self) -> None:
@@ -188,11 +187,7 @@ class EmbeddingPipeline:
             if request is None:
                 return
             try:
-                vectors = (
-                    self._embedder.embed_encoded(request.inputs)
-                    if request.encoded
-                    else self._embedder.embed(request.inputs)
-                )
+                vectors = self._embedder.embed_encoded(request.inputs)
                 request.future.set_result(dict(zip(request.ids, vectors)))
             except BaseException as error:  # surface it to the build thread
                 logger.debug("embedding batch failed", exc_info=True)
@@ -1330,10 +1325,6 @@ def _embedding_batches(embedder, rows: list[EntryRecord], token_budget: int):
     for row in articles:
         prefix = f"passage: {row.title}\n"
         passages.append(prefix + embedder.truncate(row.excerpt, prefix=prefix))
-    if not callable(getattr(embedder, "encode", None)) or not callable(
-        getattr(embedder, "embed_encoded", None)
-    ):
-        return [([row.id for row in articles], passages, False)]
     encoded = embedder.encode(passages)
     ordered = sorted(zip(articles, encoded), key=lambda pair: len(pair[1]))
     batches = []
@@ -1341,12 +1332,12 @@ def _embedding_batches(embedder, rows: list[EntryRecord], token_budget: int):
     for row, tokens in ordered:
         # Padding, not just useful tokens, occupies the model workspace.
         if inputs and (len(inputs) + 1) * len(tokens) > token_budget:
-            batches.append((ids, inputs, True))
+            batches.append((ids, inputs))
             ids, inputs = [], []
         ids.append(row.id)
         inputs.append(tokens)
     if inputs:
-        batches.append((ids, inputs, True))
+        batches.append((ids, inputs))
     return batches
 
 
@@ -1356,10 +1347,10 @@ def _embed_rows(
 ) -> dict[int, Any]:
     """Embed article rows and return vectors keyed by canonical row id."""
     result = {}
-    for ids, inputs, encoded in _embedding_batches(
+    for ids, inputs in _embedding_batches(
         embedder, rows, token_budget
     ):
-        vectors = embedder.embed_encoded(inputs) if encoded else embedder.embed(inputs)
+        vectors = embedder.embed_encoded(inputs)
         result.update(zip(ids, vectors))
     return result
 

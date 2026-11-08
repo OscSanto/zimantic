@@ -130,6 +130,12 @@ class _Embedder:
     def embed(self, texts):
         return np.ones((len(texts), 4), dtype=np.float32)
 
+    def encode(self, texts):
+        return [list(map(ord, text)) for text in texts]
+
+    def embed_encoded(self, inputs):
+        return self.embed(["".join(map(chr, tokens)) for tokens in inputs])
+
 
 class _FingerprintEmbedder(_Embedder):
     fingerprint = "model-fingerprint-1"
@@ -618,7 +624,7 @@ class BuildBatchTests(unittest.TestCase):
         self.assertEqual(saved, [(2, 2), (2, 4), (1, 5)])
 
     def test_excerpt_is_transient_and_truncated_for_embedding(self):
-        class _FakeEmbedder:
+        class _FakeEmbedder(_Embedder):
             def __init__(self):
                 self.truncate_calls = []
                 self.embed_calls = []
@@ -660,6 +666,13 @@ class BuildBatchTests(unittest.TestCase):
 
 
 class EmbeddingPipelineTests(unittest.TestCase):
+    def test_build_requires_tokenized_embedder_api(self):
+        embedder = SimpleNamespace(truncate=lambda text, prefix: text)
+        embedder.embed = lambda texts: np.ones((len(texts), 4), dtype=np.float32)
+        rows = [EntryRecord(1, "Title", "Excerpt", "p")]
+        with self.assertRaisesRegex(AttributeError, "encode"):
+            build_module._embed_rows(embedder, rows)
+
     def test_short_windows_feed_all_workers_past_a_straggler(self):
         slow_started = threading.Event()
         release_slow = threading.Event()
@@ -811,7 +824,7 @@ class EmbeddingPipelineTests(unittest.TestCase):
         maximum = 0
         active_lock = threading.Lock()
 
-        class _FakeEmbedder:
+        class _FakeEmbedder(_Embedder):
             def truncate(self, text, prefix):
                 return text
 
