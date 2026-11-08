@@ -172,7 +172,6 @@ class LoadConfigTests(unittest.TestCase):
                 cfg = load_config(warn=lambda _message: None)
 
         data_dir = data_home / "zimantic"
-        self.assertEqual(cfg["zim_dir"], str(data_dir / "zims"))
         self.assertEqual(cfg["model_dir"], str(data_dir / "model/int8"))
         self.assertEqual(cfg["index_dir"], str(data_dir / "indexes"))
 
@@ -200,7 +199,6 @@ class LoadConfigTests(unittest.TestCase):
 
         data_dir = data_home / "zimantic"
         self.assertEqual(cfg["port"], PROFILES["desktop"]["port"])
-        self.assertEqual(cfg["zim_dir"], str(data_dir / "zims"))
         self.assertEqual(cfg["model_dir"], str(data_dir / "model/int8"))
         self.assertEqual(cfg["index_dir"], str(data_dir / "indexes"))
 
@@ -225,7 +223,7 @@ class LoadConfigTests(unittest.TestCase):
         self.assertTrue(warnings)
         self.assertIn("not found", warnings[0])
         # The returned config, not just the profile constants, must be complete.
-        for key in ("index_dir", "zim_dir", "model_dir", "port", "batch_size"):
+        for key in ("index_dir", "model_dir", "port", "batch_size"):
             self.assertIn(key, cfg)
             self.assertEqual(cfg[key], PROFILES["desktop"][key])
 
@@ -460,15 +458,16 @@ class LoadConfigTests(unittest.TestCase):
             "asr": "whisper",
         })
 
-    def test_unknown_keys_warn_but_known_keys_still_apply(self):
+    def test_unknown_global_keys_are_fatal(self):
+        from zimantic.providers.config import ConfigValidationError
+
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text('port = 9999\nbath_size = 8\n', encoding="utf-8")
-            warnings = []
-            cfg = load_config(path, warn=warnings.append)
-            self.assertEqual(cfg["port"], 9999)
-            self.assertTrue(any("bath_size" in message for message in warnings))
-            self.assertNotIn("bath_size", cfg)
+            with self.assertRaisesRegex(
+                ConfigValidationError, "unknown config key.*bath_size"
+            ):
+                load_config(path, warn=lambda _: None)
 
     def test_bad_value_types_warn_and_keep_profile_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

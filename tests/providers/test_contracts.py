@@ -181,15 +181,19 @@ def test_minimal_collections_parser_normalizes_and_resolves_paths(tmp_path):
     assert kiwix.max_remote_sources == 0
 
 
-def test_removed_flat_provider_keys_are_fatal(tmp_path):
+def test_unknown_global_keys_are_fatal(tmp_path):
     from zimantic.providers.config import ConfigValidationError, parse_collections
 
     for key, value in (
         ("zim_dir", "zims"),
         ("kiwix_server", "http://localhost:8085"),
+        ("kiwix_catalog_path", "catalog.xml"),
+        ("kiwix_catalog_limit", 10),
+        ("max_kiwix_response_bytes", 1000),
         ("max_remote_sources", 10),
+        ("bath_size", 8),
     ):
-        with pytest.raises(ConfigValidationError):
+        with pytest.raises(ConfigValidationError, match=f"unknown config key.*{key}"):
             parse_collections({key: value}, config_dir=tmp_path)
 
 
@@ -222,7 +226,6 @@ def test_files_and_kolibri_are_both_supported(tmp_path):
                     "path": "modules",
                     "granularity": "children",
                     "include": ["**/*.html"],
-                    "unknown_knob": True,
                 },
                 {"type": "kolibri", "name": "kolibri", "path": "kolibri"},
             ]
@@ -239,7 +242,6 @@ def test_files_and_kolibri_are_both_supported(tmp_path):
     assert isinstance(kolibri, KolibriConfig)
     assert kolibri.path == str(tmp_path / "kolibri")
     assert kolibri.granularity == "children"
-    assert any("unknown key" in message for message in parsed.diagnostics)
 
 
 def test_collection_derived_text_is_supported_only_by_local_content_providers(

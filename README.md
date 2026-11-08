@@ -397,6 +397,7 @@ CLI path operands resolve against the working directory. The resolved choice is
 kept when an ad-hoc ZIM build saves a collection entry, so it still points at the
 same files on the next invocation. Do not put global scalar keys after a table
 header; after `[[collections]]` or `[derived_text]` a key belongs to that table.
+Unknown global keys are fatal configuration errors.
 
 Provider limits default in the provider and can be overridden per entry
 (`max_sources`, `max_entries`, `max_file_bytes`, `traversal.max_visited_entries`,

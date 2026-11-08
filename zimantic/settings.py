@@ -36,7 +36,6 @@ EMBED_DEVICES = frozenset(
 # result-pool sizes). build_workers and embedding_workers are deliberately not
 # profile keys: load_config computes them from the host unless the user sets them.
 _COMMON = {
-    "zim_dir": "./zims",
     "model_dir": "./model/int8",
     "index_dir": "./indexes",
     "port": 8090,
@@ -184,8 +183,6 @@ def _typed_user_values(
         # parsers; never run flat scalar type coercion over them.
         if key in {"collections", "derived_text"}:
             continue
-        if key not in KNOWN_KEYS:
-            continue
         if key in SCOPED_KEYS:
             try:
                 values.update(parse_scoped_settings({key: value}))
@@ -306,8 +303,8 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
 
     Unix uses the XDG config path; Windows uses config.toml in the current
     directory. A missing or unreadable config is a warning, not an error.
-    Removed flat provider keys and malformed ``[[collections]]`` values are
-    fatal schema errors.
+    Unknown global keys and malformed ``[[collections]]`` values are fatal
+    schema errors.
     """
     if warn is None:
         def warn_to_stderr(message):
@@ -322,7 +319,6 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         if os.name != "nt":
             data_dir = xdg_data_dir()
             cfg.update(
-                zim_dir=str(data_dir / "zims"),
                 model_dir=str(data_dir / "model" / "int8"),
                 index_dir=str(data_dir / "indexes"),
             )
@@ -359,12 +355,9 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         if loaded
         else None
     )
-    provider_keys = {"collections", "derived_text"}
-    for key in sorted(set(user) - KNOWN_KEYS - provider_keys):
-        warn(f"zimantic: warning: unknown config key {key!r} in {config_path} (ignored)")
     cfg.update(_typed_user_values(user, cfg, config_path, warn))
     if data_dir is not None:
-        for key in ("zim_dir", "model_dir", "index_dir"):
+        for key in ("model_dir", "index_dir"):
             configured_path = Path(cfg[key]).expanduser()
             if not configured_path.is_absolute():
                 configured_path = data_dir / configured_path

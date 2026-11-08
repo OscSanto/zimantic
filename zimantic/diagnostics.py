@@ -57,7 +57,7 @@ def _add_path(values: set[str], value: Any) -> None:
 def private_locators(config: RuntimeConfig) -> tuple[str, ...]:
     """Return configured private paths for diagnostic string replacement."""
     values: set[str] = set()
-    for key in ("zim_dir", "model_dir", "index_dir"):
+    for key in ("model_dir", "index_dir"):
         _add_path(values, config.get(key))
     for entry in config.collections:
         for attribute in ("path", "database_path", "storage"):

@@ -318,7 +318,7 @@ class TestConfigSchema:
         assert any("typo_key" in message for message in warnings)
         assert {issue.namespace for issue in parsed.issues if issue.namespace}
 
-    def test_flat_provider_keys_are_fatal_with_a_migration_message(self, tmp_path):
+    def test_unknown_global_keys_are_fatal(self, tmp_path):
         config = _write(
             tmp_path / "config.toml",
             'zim_dir = "old"\n'
@@ -327,7 +327,7 @@ class TestConfigSchema:
             'name = "files"\n'
             'path = "files"\n',
         )
-        with pytest.raises(ConfigValidationError, match="zim_dir"):
+        with pytest.raises(ConfigValidationError, match="unknown config key.*zim_dir"):
             load_config(config, warn=lambda _message: None)
 
 

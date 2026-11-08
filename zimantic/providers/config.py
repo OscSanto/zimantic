@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from ..scoped_settings import FILTER_KEYS, SCOPED_KEYS, parse_scoped_settings
+from ..settings import KNOWN_KEYS
 
 ProviderKind = Literal["zim", "kiwix", "files", "kolibri"]
 Granularity = Literal["collection", "children"]
@@ -25,33 +26,6 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RESERVED_ZIM_NAMES = frozenset({"open"})
 
 BUILTIN_PROVIDERS: tuple[ProviderKind, ...] = ("zim", "kiwix", "files", "kolibri")
-
-# Flat provider keys from the pre-collections schema.  They are fatal so an old
-# configuration cannot silently start an empty library.
-REMOVED_KEYS: dict[str, str] = {
-    "zim_dir": (
-        "the flat zim_dir setting was removed; declare a [[collections]] "
-        'entry with type = "zim" and path = "..."'
-    ),
-    "kiwix_server": (
-        "the flat kiwix_server setting was removed; declare a [[collections]] "
-        'entry with type = "kiwix" and server = "..."'
-    ),
-    "kiwix_catalog_path": (
-        "kiwix_catalog_path is now catalog_path on a Kiwix [[collections]] entry"
-    ),
-    "kiwix_catalog_limit": (
-        "kiwix_catalog_limit is now catalog_limit on a Kiwix [[collections]] entry"
-    ),
-    "max_kiwix_response_bytes": (
-        "max_kiwix_response_bytes is now max_response_bytes on a Kiwix "
-        "[[collections]] entry"
-    ),
-    "max_remote_sources": (
-        "the global max_remote_sources setting was removed; set "
-        "max_remote_sources per Kiwix [[collections]] entry"
-    ),
-}
 
 # Keys that belong to the normalized settings envelope rather than a provider.
 ENVELOPE_KEYS = frozenset({"derived_text", "sources"})
@@ -801,9 +775,9 @@ def parse_collections(
     allow_disabled_providers: bool = True,
 ) -> ParsedCollections:
     base = Path(config_dir)
-    for key in REMOVED_KEYS:
-        if key in data:
-            raise ConfigValidationError(f"{key}: {REMOVED_KEYS[key]}")
+    unknown = sorted(set(data) - KNOWN_KEYS - {"collections", "derived_text"})
+    if unknown:
+        raise ConfigValidationError("unknown config key(s): " + ", ".join(unknown))
 
     raw = data.get("collections", [])
     if raw is None:
@@ -940,7 +914,6 @@ __all__ = [
     "BUILTIN_PROVIDERS",
     "PROVIDER_CONFIG_SPECS",
     "PROVIDER_DEFAULTS",
-    "REMOVED_KEYS",
     "SAFE_NAME",
     "ConfigIssue",
     "ConfigValidationError",
