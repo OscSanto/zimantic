@@ -50,6 +50,7 @@ DEFAULT_MAX_BODY_TEXT_BYTES = 1 << 20
 DEFAULT_BODY_BUFFER_BYTES = 16 << 20
 DEFAULT_STAGING_RESERVE_BYTES = 1 << 20
 DEFAULT_EMBEDDING_BATCH_TOKENS = 1000
+FAST_BUILD_BATCH_SIZE = 256
 _REUSED_VECTOR_SOURCE = "reused_vector_source"
 
 
@@ -1203,6 +1204,8 @@ def build_index(
                         index_schema.ENTRY_ORDER_FINGERPRINT: order_fingerprint,
                     })
             batch_size = max(1, _cfg_int(cfg, "batch_size", 32))
+            if fast:
+                batch_size = max(batch_size, FAST_BUILD_BATCH_SIZE)
             max_body_text_bytes = max(
                 1,
                 _cfg_int(

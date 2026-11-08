@@ -233,6 +233,11 @@ into model calls with at most **1,000 padded input tokens** by default
 needed for padding. One input that exceeds the batch budget runs alone and
 remains capped by the model's per-input limit.
 
+Fast builds commit at least 256 rows per window, independent of the selected
+profile's `batch_size`; these title/path-only rows need no embedding workspace,
+so larger windows reduce transaction overhead. An interruption can therefore
+redo up to 255 more rows than the configured full-build window.
+
 Workers share one model. Embedding runs concurrently with source reading. The
 default pending-window limit scales to workers + 1, with a minimum of two, so
 short-text windows can keep the worker pool busy. Commits preserve batch order;

@@ -607,10 +607,10 @@ class FaissTrainingTests(unittest.TestCase):
 
 
 class BuildBatchTests(unittest.TestCase):
-    def test_fast_build_flushes_rows_while_scanning(self):
+    def test_fast_build_uses_larger_commit_windows(self):
         rows = [
             EntryRecord(index, f"Title {index}", "", f"path-{index}", None, "")
-            for index in range(5)
+            for index in range(build_module.FAST_BUILD_BATCH_SIZE + 2)
         ]
         saved = []
 
@@ -621,9 +621,20 @@ class BuildBatchTests(unittest.TestCase):
             with (
                 patch.object(build_module, "_save", side_effect=save),
             ):
-                _build(Producer(rows), tmp, {"batch_size": 2}, fast=True)
+                _build(
+                    Producer(rows),
+                    tmp,
+                    {"batch_size": 2},
+                    fast=True,
+                )
 
-        self.assertEqual(saved, [(2, 2), (2, 4), (1, 5)])
+        self.assertEqual(
+            saved,
+            [
+                (build_module.FAST_BUILD_BATCH_SIZE, build_module.FAST_BUILD_BATCH_SIZE),
+                (2, build_module.FAST_BUILD_BATCH_SIZE + 2),
+            ],
+        )
 
     def test_excerpt_is_transient_and_truncated_for_embedding(self):
         class _FakeEmbedder(_Embedder):
