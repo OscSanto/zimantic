@@ -103,6 +103,8 @@ class ModelProbeTests(unittest.TestCase):
         meta = embed.serialize_model_probes(["one"], np.ones((1, 2), dtype=np.float32))
         meta["model_probe_shape"] = "2x2"
         self.assertIsNone(embed.load_model_probes(meta))
+        meta["model_probe_shape"] = 2
+        self.assertIsNone(embed.load_model_probes(meta))
 
     def test_match_accepts_close_models_and_rejects_distant_ones(self):
         stored = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)

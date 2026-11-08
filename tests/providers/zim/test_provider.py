@@ -282,6 +282,8 @@ def test_start_faiss_loads_after_core_binds_defer_false(tmp_path, caplog):
     from zimantic.providers.zim.entries import ArchiveEntryProducer
 
     class _Embedder:
+        fingerprint = "test-model"
+
         def truncate(self, text, prefix=""):
             return text
 

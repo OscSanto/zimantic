@@ -24,6 +24,7 @@ from urllib.parse import quote
 
 from ...contracts import SourceInfo
 from ...diagnostics import public_cause
+from ...indexing import schema
 from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
@@ -544,44 +545,22 @@ def _index_uri(db_path: Path) -> str:
     return db_path.resolve().as_uri() + "?mode=ro&immutable=1"
 
 
-def _read_meta(db: sqlite3.Connection) -> dict[str, str]:
-    try:
-        return dict(db.execute("SELECT key, value FROM meta").fetchall())
-    except sqlite3.Error:
-        return {}
-
-
 def apply_index_metadata(source: SourceInfo, meta: Mapping[str, str]) -> None:
-    """Populate published-index fields without inventing values."""
-    from ...indexing import schema
-
-    try:
-        if schema.INDEXED_COUNT in meta:
-            object.__setattr__(
-                source,
-                "indexed_count",
-                schema.decode_int(meta[schema.INDEXED_COUNT]),
-            )
-        if schema.TRUNCATED in meta:
-            object.__setattr__(
-                source,
-                "truncated",
-                schema.decode_bool(meta[schema.TRUNCATED]),
-            )
-        if schema.BODY_TRUNCATED_COUNT in meta:
-            object.__setattr__(
-                source,
-                "body_truncated_count",
-                schema.decode_int(meta[schema.BODY_TRUNCATED_COUNT]),
-            )
-        if schema.DERIVED_TEXT in meta:
-            value = schema.decode_json(meta[schema.DERIVED_TEXT])
-            if isinstance(value, dict):
-                object.__setattr__(source, "derived_text", value)
-        if meta:
-            object.__setattr__(source, "index_freshness", "unknown")
-    except (KeyError, TypeError, ValueError):
-        return
+    """Populate fields from already validated published-index metadata."""
+    object.__setattr__(
+        source, "indexed_count", schema.decode_int(meta[schema.INDEXED_COUNT])
+    )
+    object.__setattr__(
+        source, "truncated", schema.decode_bool(meta[schema.TRUNCATED])
+    )
+    if schema.BODY_TRUNCATED_COUNT in meta:
+        object.__setattr__(
+            source, "body_truncated_count",
+            schema.decode_int(meta[schema.BODY_TRUNCATED_COUNT]),
+        )
+    if schema.DERIVED_TEXT in meta:
+        object.__setattr__(source, "derived_text", schema.decode_json(meta[schema.DERIVED_TEXT]))
+    object.__setattr__(source, "index_freshness", "unknown")
 
 
 def open_files_index(
@@ -620,12 +599,14 @@ def open_files_index(
         lease.close()
         return None
     try:
-        meta = _read_meta(db)
-        done = str(meta.get("done", ""))
-        if done not in {"full", "fast"}:
-            db.close()
-            lease.close()
-            return None
+        meta = schema.read_index_meta(db, completed=True)
+        if (
+            meta[schema.PROVIDER] != source.provider
+            or meta[schema.COLLECTION_KEY] != source.collection_key
+            or meta[schema.SOURCE_KEY] != source.key
+        ):
+            raise schema.SchemaError("index metadata identity does not match the source")
+        done = meta[schema.DONE]
         faiss_index = None
         faiss_path = lease.faiss_path
         if (
@@ -696,7 +677,11 @@ def open_files_index(
             generation=lease.generation,
             index_meta=meta,
         )
-    except sqlite3.Error:
+    except (sqlite3.Error, schema.SchemaError) as error:
+        logger.warning(
+            "%s: index unavailable (%s); rebuild it",
+            source.key, public_cause(error),
+        )
         db.close()
         lease.close()
         return None

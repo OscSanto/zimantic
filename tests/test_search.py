@@ -76,13 +76,6 @@ def _probe_compatible(search, db, db_path):
     return ZimRuntime._probe_compatible(runtime, db, db_path)
 
 
-def _allow_binary_meta_values(db):
-    db.execute("ALTER TABLE meta RENAME TO meta_strict")
-    db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")
-    db.execute("INSERT INTO meta SELECT key, value FROM meta_strict")
-    db.execute("DROP TABLE meta_strict")
-
-
 def _bare_search(cfg):
     """A Search without __init__ (no model, no filesystem index scan)."""
     search = object.__new__(Search)
@@ -1823,6 +1816,7 @@ class UserPageRankingTests(unittest.TestCase):
 
 
 def _write_index(index_dir: Path, name: str, *, done: str = "full", rows=()):
+    rows = list(rows)
     db = sqlite3.connect(index_dir / f"{name}.sqlite")
     index_schema.ensure_schema(db)
     db.executemany(
@@ -1837,6 +1831,24 @@ def _write_index(index_dir: Path, name: str, *, done: str = "full", rows=()):
         {
             index_schema.DONE: done,
             index_schema.FILESIZE: index_schema.encode_int(zim.stat().st_size),
+            index_schema.SCHEMA_VERSION: str(index_schema.CURRENT_SCHEMA_VERSION),
+            index_schema.PROVIDER: "zim",
+            index_schema.COLLECTION_KEY: "",
+            index_schema.SOURCE_KEY: name,
+            index_schema.SOURCE_FINGERPRINT: "fixture-source",
+            index_schema.BUILD_GENERATION: "fixture-generation",
+            index_schema.INDEXED_COUNT: str(len(rows)),
+            index_schema.TRUNCATED: "0",
+            index_schema.INDEXED_CHANNELS: index_schema.encode_channels(
+                ["title"] if done == "fast" else ["title", "body", "semantic"]
+            ),
+            **(
+                {
+                    index_schema.BODY_TRUNCATED_COUNT: "0",
+                    index_schema.SEMANTIC_VECTOR_COUNT: "0",
+                }
+                if done == "full" else {}
+            ),
         },
     )
     db.commit()
@@ -1990,7 +2002,6 @@ class GracefulDegradationTests(unittest.TestCase):
             probes = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
             source = _zim_source("manual", "Manual")
             db = sqlite3.connect(db_path)
-            _allow_binary_meta_values(db)
             index_schema.write_meta(
                 db, {index_schema.MODEL_FINGERPRINT: "old-model"}
             )
@@ -2049,7 +2060,7 @@ class GracefulDegradationTests(unittest.TestCase):
         from zimantic.embed import serialize_model_probes
 
         db = sqlite3.connect(":memory:", check_same_thread=False)
-        db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")
+        index_schema.ensure_schema(db)
         probes = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
         for key, value in serialize_model_probes(
             ["first probe", "second probe"], probes
@@ -2125,7 +2136,6 @@ class GracefulDegradationTests(unittest.TestCase):
             current = np.array([[1, 0, 0, 0], [1, 0, 0, 0]], dtype=np.float32)
             source = _zim_source("manual", "Manual")
             db = sqlite3.connect(db_path)
-            _allow_binary_meta_values(db)
             index_schema.write_meta(
                 db, {index_schema.MODEL_FINGERPRINT: "old-model"}
             )

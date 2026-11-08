@@ -333,9 +333,17 @@ def _check_staging_space(
 
 
 def _open_database(path: Path) -> sqlite3.Connection:
+    existing = path.is_file() and path.stat().st_size > 0
     db = sqlite3.connect(path)
-    index_schema.ensure_schema(db)
-    index_schema.validate_schema(db)
+    try:
+        if existing:
+            index_schema.read_index_meta(db)
+        else:
+            index_schema.ensure_schema(db)
+            index_schema.validate_schema(db)
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -366,8 +374,14 @@ def _read_published_state(locator: Any, source: Any) -> tuple[dict[str, str], An
     try:
         db = sqlite3.connect(lease.sqlite_path)
         try:
-            index_schema.validate_schema(db)
-            return index_schema.read_meta(db), lease
+            meta = index_schema.read_index_meta(db, completed=True)
+            if (
+                meta[index_schema.PROVIDER],
+                meta[index_schema.COLLECTION_KEY],
+                meta[index_schema.SOURCE_KEY],
+            ) != (source.provider, source.collection_key, source.key):
+                raise index_schema.SchemaError("index identity does not match the source")
+            return meta, lease
         finally:
             db.close()
     except Exception:
@@ -413,27 +427,13 @@ def _prepare_build_state(
         current_meta, lease = current
         lease.close()
         done = str(current_meta.get(index_schema.DONE, ""))
-        partial_enrichment = False
-        try:
-            raw_derived = current_meta.get(index_schema.DERIVED_TEXT)
-            if raw_derived:
-                decoded = index_schema.decode_json(raw_derived)
-                partial_enrichment = bool(
-                    isinstance(decoded, dict) and decoded.get("partial")
-                )
-        except (TypeError, ValueError):
-            partial_enrichment = False
-        current_fingerprint = str(
-            current_meta.get(index_schema.SOURCE_FINGERPRINT, "") or ""
+        raw_derived = current_meta.get(index_schema.DERIVED_TEXT)
+        partial_enrichment = bool(
+            raw_derived and index_schema.decode_json(raw_derived).get("partial")
         )
-        producer_fingerprint = str(
-            _producer_attr(producer, "fingerprint", "") or ""
-        )
-        fingerprint_matches = (
-            not current_fingerprint
-            or not producer_fingerprint
-            or current_fingerprint == producer_fingerprint
-        )
+        current_fingerprint = current_meta[index_schema.SOURCE_FINGERPRINT]
+        producer_fingerprint = producer.fingerprint
+        fingerprint_matches = current_fingerprint == producer_fingerprint
         if (
             done == index_schema.DONE_FULL
             and not partial_enrichment
@@ -469,17 +469,28 @@ def _prepare_build_state(
         reserve=_cfg_int(cfg, "staging_reserve_bytes", DEFAULT_STAGING_RESERVE_BYTES),
     )
 
-    fingerprint = str(_producer_attr(producer, "fingerprint", "") or "")
+    fingerprint = producer.fingerprint
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise BuildError("producer fingerprint must be non-empty text")
     publish_upgrade = force or (current is not None)
     db = _open_or_reset(build_db_path)
     try:
         meta = index_schema.read_meta(db)
+        if meta and (
+            meta[index_schema.PROVIDER],
+            meta[index_schema.COLLECTION_KEY],
+            meta[index_schema.SOURCE_KEY],
+        ) != (source.provider, source.collection_key, source.key):
+            logger.warning("%s: staged index identity changed; restarting", source.key)
+            db.close()
+            db = _reset_staging(build_db_path, build_faiss_path)
+            meta = {}
         done = str(meta.get(index_schema.DONE, ""))
         if done in index_schema.DONE_VALUES:
             if done == mode and not force:
                 # An earlier run completed staging but publication did not
                 # happen.  Reuse it only if its identity still matches.
-                if str(meta.get(index_schema.SOURCE_FINGERPRINT, "")) == fingerprint:
+                if meta[index_schema.SOURCE_FINGERPRINT] == fingerprint:
                     return _BuildState(
                         db=db,
                         build_db_path=build_db_path,
@@ -489,10 +500,7 @@ def _prepare_build_state(
                         meta=meta,
                         source_fingerprint=fingerprint,
                         build_mode=mode,
-                        generation=str(
-                            meta.get(index_schema.BUILD_GENERATION, "")
-                            or uuid.uuid4()
-                        ),
+                        generation=meta[index_schema.BUILD_GENERATION],
                     )
             db.close()
             db = _reset_staging(build_db_path, build_faiss_path)
@@ -500,7 +508,6 @@ def _prepare_build_state(
         recorded_fingerprint = meta.get(index_schema.SOURCE_FINGERPRINT)
         if (
             recorded_fingerprint is not None
-            and fingerprint
             and recorded_fingerprint != fingerprint
         ):
             logger.warning(
@@ -523,10 +530,7 @@ def _prepare_build_state(
             db.close()
             db = _reset_staging(build_db_path, build_faiss_path)
             meta = {}
-        try:
-            next_ordinal = int(meta.get(index_schema.NEXT, "0"))
-        except (TypeError, ValueError):
-            next_ordinal = 0
+        next_ordinal = index_schema.decode_int(meta.get(index_schema.NEXT, "0"))
         if next_ordinal < 0 or next_ordinal > int(
             _producer_attr(producer, "count", 0) or 0
         ):
@@ -833,7 +837,7 @@ def _finish_build(
     producer: EntryProducer,
     fast: bool,
     model_fingerprint: str = "",
-    model_probes: dict[str, object] | None = None,
+    model_probes: dict[str, str] | None = None,
     derived_text: Mapping[str, Any] | None = None,
 ) -> None:
     db = state.db
@@ -919,9 +923,7 @@ def _finish_build(
         if model_fingerprint:
             values[MODEL_FINGERPRINT_KEY] = model_fingerprint
         if model_probes:
-            values.update(
-                {str(key): str(value) for key, value in model_probes.items()}
-            )
+            values.update(model_probes)
         if derived_text:
             values[index_schema.DERIVED_TEXT] = index_schema.encode_json(
                 dict(derived_text)
@@ -929,6 +931,7 @@ def _finish_build(
         index_schema.write_meta(db, values)
     db.execute("VACUUM")
     db.commit()
+    index_schema.read_index_meta(db, completed=True)
 
 
 def _derived_baseline(
@@ -1011,8 +1014,7 @@ def build_index(
 
     The producer supplies the only provider-specific behaviour.  The core owns
     staging, resume, embedding, vector publication, metadata, and publication.
-    The returned :class:`BuildReport` describes what that source contributed
-    without changing any existing caller contract.
+    The returned :class:`BuildReport` describes what that source contributed.
     """
     started = time.monotonic()
     from ..scoped_settings import resolve_settings

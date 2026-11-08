@@ -122,6 +122,7 @@ def _body_hits(locator, source, term):
 
 class _Embedder:
     genome = "embedder"
+    fingerprint = "test-model"
 
     def truncate(self, text, prefix=""):
         return text
@@ -270,6 +271,13 @@ class BuildPipelineTests(unittest.TestCase):
             self.assertIn("model_probe_texts", meta)
             self.assertIn("model_probe_vectors", meta)
             self.assertIn("model_probe_shape", meta)
+            from zimantic.embed import load_model_probes
+
+            probes = load_model_probes(meta)
+            self.assertIsNotNone(probes)
+            np.testing.assert_array_equal(
+                probes[1], np.ones((len(probes[0]), 4), dtype=np.float32)
+            )
 
             locator = _build(
                 Producer(rows, fingerprint="fast"), tmp, fast=True, force=True
@@ -604,7 +612,6 @@ class BuildBatchTests(unittest.TestCase):
 
             with (
                 patch.object(build_module, "_save", side_effect=save),
-                patch.object(build_module, "_finish_build"),
             ):
                 _build(Producer(rows), tmp, {"batch_size": 2}, fast=True)
 

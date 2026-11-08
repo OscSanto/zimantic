@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import sqlite3
 from typing import Any, Iterable, Mapping
 
@@ -46,7 +47,7 @@ FAISS_DIGEST = "faiss_digest"
 BUILD_GENERATION = "build_generation"
 DERIVED_TEXT = "derived_text"
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 META_KEYS = frozenset(
     {
@@ -145,7 +146,10 @@ def decode_int(value: Any) -> int:
     """Decode a canonical decimal integer, rejecting other storage classes."""
     if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
         raise ValueError(f"not a canonical integer: {value!r}")
-    return int(value)
+    number = int(value)
+    if str(number) != value:
+        raise ValueError(f"not a canonical integer: {value!r}")
+    return number
 
 
 def encode_bool(value: bool) -> str:
@@ -186,6 +190,8 @@ def decode_channels(value: Any) -> tuple[str, ...]:
         raise ValueError("indexed_channels must be a JSON string array")
     if any(item not in INDEXED_CHANNELS_ORDER for item in data):
         raise ValueError("indexed_channels contains an unknown channel")
+    if encode_channels(data) != value:
+        raise ValueError("indexed_channels is not canonical")
     return tuple(data)
 
 
@@ -257,18 +263,22 @@ def validate_schema(connection: sqlite3.Connection) -> None:
         raise SchemaError(
             f"index is missing required table(s): {', '.join(sorted(missing))}"
         )
-    columns = {
-        str(row[1])
-        for row in connection.execute("PRAGMA table_info(meta)")
-    }
-    if columns != {"key", "value"}:
-        raise SchemaError("index metadata table has an unrecognized shape")
-    vec_columns = {
-        str(row[1])
-        for row in connection.execute("PRAGMA table_info(vecs)")
-    }
-    if vec_columns != {"id", "v"}:
-        raise SchemaError("index vector table has an unrecognized shape")
+    definitions = dict(connection.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table'"
+    ))
+
+    def normalize(sql: str) -> str:
+        return re.sub(r"\s+", "", sql).casefold().replace("ifnotexists", "")
+
+    for statement in SCHEMA.split(";"):
+        match = re.search(r"CREATE (?:VIRTUAL )?TABLE IF NOT EXISTS (\w+)", statement)
+        if match is None:
+            continue
+        name = match[1]
+        expected = statement[match.start():]
+        actual = definitions.get(name, "")
+        if normalize(actual) != normalize(expected):
+            raise SchemaError(f"index table {name!r} has an unrecognized layout")
 
 
 def read_meta(connection: sqlite3.Connection) -> dict[str, str]:
@@ -282,10 +292,90 @@ def read_meta(connection: sqlite3.Connection) -> dict[str, str]:
 
 
 def write_meta(connection: sqlite3.Connection, values: Mapping[str, str]) -> None:
+    if any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in values.items()
+    ):
+        raise SchemaError("index metadata keys and values must be text")
     connection.executemany(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-        [(str(key), str(value)) for key, value in values.items()],
+        list(values.items()),
     )
+
+
+def read_index_meta(
+    connection: sqlite3.Connection, *, completed: bool = False
+) -> dict[str, str]:
+    """Read only the current layout and canonical build/publication metadata."""
+    validate_schema(connection)
+    meta = read_meta(connection)
+    try:
+        if decode_int(meta[SCHEMA_VERSION]) != CURRENT_SCHEMA_VERSION:
+            raise SchemaError("index schema version is unsupported; rebuild it")
+        required = {
+            PROVIDER, COLLECTION_KEY, SOURCE_KEY, SOURCE_FINGERPRINT,
+            BUILD_GENERATION,
+        }
+        if completed or DONE in meta:
+            required.update({DONE, FILESIZE, INDEXED_COUNT, TRUNCATED, INDEXED_CHANNELS})
+            if meta.get(DONE) not in DONE_VALUES:
+                raise SchemaError("index is not complete")
+        else:
+            required.update({BUILD_MODE, BUILD_FILESIZE})
+            if meta.get(BUILD_MODE) not in DONE_VALUES:
+                raise SchemaError("index build mode is unrecognized")
+        missing = required - meta.keys()
+        if missing:
+            raise SchemaError(
+                f"index is missing required metadata: {', '.join(sorted(missing))}"
+            )
+        if any(not meta[key] for key in (
+            PROVIDER, SOURCE_KEY, SOURCE_FINGERPRINT, BUILD_GENERATION
+        )):
+            raise SchemaError("index identity and fingerprint must not be empty")
+        for key in (
+            SCHEMA_VERSION, FILESIZE, BUILD_FILESIZE, INDEXED_COUNT, NEXT,
+            BODY_TRUNCATED_COUNT, SEMANTIC_VECTOR_COUNT,
+        ):
+            if key in meta:
+                decode_int(meta[key])
+        if TRUNCATED in meta:
+            decode_bool(meta[TRUNCATED])
+        if INDEXED_CHANNELS in meta:
+            channels = decode_channels(meta[INDEXED_CHANNELS])
+            if DONE in meta and CHANNEL_SEMANTIC in channels:
+                decode_int(meta[SEMANTIC_VECTOR_COUNT])
+            if DONE in meta and CHANNEL_BODY in channels:
+                decode_int(meta[BODY_TRUNCATED_COUNT])
+        if DERIVED_TEXT in meta:
+            derived = decode_json(meta[DERIVED_TEXT])
+            if not isinstance(derived, dict) or encode_json(derived) != meta[DERIVED_TEXT]:
+                raise SchemaError("derived metadata must be a canonical JSON object")
+        if MODEL_FINGERPRINT in meta and not meta[MODEL_FINGERPRINT]:
+            raise SchemaError("model fingerprint must not be empty")
+        if decode_int(meta.get(SEMANTIC_VECTOR_COUNT, "0")) and (
+            not meta.get(MODEL_FINGERPRINT) or not meta.get(FAISS_DIGEST)
+        ):
+            raise SchemaError("semantic vectors require a model fingerprint and digest")
+        if FAISS_DIGEST in meta:
+            encode_fingerprint(meta[FAISS_DIGEST])
+        probe_keys = {MODEL_PROBE_TEXTS, MODEL_PROBE_SHAPE, MODEL_PROBE_VECTORS}
+        if probe_keys & meta.keys():
+            texts = decode_json(meta[MODEL_PROBE_TEXTS])
+            shape = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", meta[MODEL_PROBE_SHAPE])
+            vectors = decode_bytes(meta[MODEL_PROBE_VECTORS])
+            if (
+                not isinstance(texts, list)
+                or any(not isinstance(text, str) for text in texts)
+                or encode_json(texts) != meta[MODEL_PROBE_TEXTS]
+                or shape is None
+                or len(texts) != int(shape[1])
+                or len(vectors) != int(shape[1]) * int(shape[2]) * 4
+            ):
+                raise SchemaError("invalid model probe metadata")
+    except (KeyError, TypeError, ValueError) as error:
+        raise SchemaError(f"invalid index metadata: {error}") from error
+    return meta
 
 
 def delete_meta(connection: sqlite3.Connection, keys: Iterable[str]) -> None:
@@ -368,6 +458,7 @@ __all__ = [
     "ensure_fts5",
     "ensure_schema",
     "read_meta",
+    "read_index_meta",
     "schema_version",
     "table_names",
     "validate_schema",

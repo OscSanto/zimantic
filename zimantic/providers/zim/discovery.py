@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterator
 
 from ...catalog import SourceCatalog, SourceRecord, absolute_path
 from ...diagnostics import public_cause
+from ...indexing import schema
 from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...model_meta import (
     MODEL_PROBE_SHAPE_KEY,
@@ -481,45 +482,6 @@ def _index_uri(db_path: Path) -> str:
     return db_path.resolve().as_uri() + "?mode=ro&immutable=1"
 
 
-def _read_index_meta(
-    db: sqlite3.Connection,
-) -> tuple[bool, str, int | None, str]:
-    rows = dict(
-        db.execute(
-            "SELECT key, value FROM meta WHERE key IN "
-            "('done', 'filesize', 'model_fingerprint')"
-        ).fetchall()
-    )
-    done_raw = rows.get("done")
-    done_value = str(done_raw) if done_raw is not None else ""
-    finished = done_value in {"full", "fast"}
-    size_raw = rows.get("filesize")
-    try:
-        source_size = int(size_raw) if size_raw is not None else None
-    except (TypeError, ValueError):
-        source_size = None
-    fingerprint_raw = rows.get("model_fingerprint")
-    stored_fingerprint = (
-        str(fingerprint_raw) if fingerprint_raw is not None else ""
-    )
-    return finished, done_value, source_size, stored_fingerprint
-
-
-def read_index_state(db_path: Path) -> tuple[bool, int | None]:
-    """Return ``(finished, recorded_source_size)`` for one SQLite index."""
-    try:
-        db = sqlite3.connect(_index_uri(db_path), uri=True, check_same_thread=False)
-    except sqlite3.Error:
-        return False, None
-    try:
-        finished, _done_value, source_size, _fp = _read_index_meta(db)
-    except sqlite3.Error:
-        return False, None
-    finally:
-        db.close()
-    return finished, source_size
-
-
 @dataclass
 class ZimIndexOptions:
     semantic: bool = False
@@ -573,35 +535,18 @@ def open_generation_index(
             lease.close()
             return None
     manifest_meta = (lease.manifest.get("metadata") or {}) if lease.manifest else {}
-    try:
-        recorded_size = manifest_meta.get("source_size")
-        if (
-            expected_source_size is not None
-            and recorded_size is not None
-            and int(recorded_size) != int(expected_source_size)
-        ):
-            logger.warning(
-                "%s: index was built from a source of a different size; "
-                "using native full-text until it is rebuilt",
-                source.key,
-            )
-            lease.close()
-            return None
-        recorded_mtime = manifest_meta.get("source_mtime")
-        if (
-            expected_source_mtime is not None
-            and recorded_mtime is not None
-            and int(recorded_mtime) != int(expected_source_mtime)
-        ):
-            logger.warning(
-                "%s: source archive changed since this index was built; "
-                "using native full-text until it is rebuilt",
-                source.key,
-            )
-            lease.close()
-            return None
-    except (TypeError, ValueError):
-        pass
+    recorded_mtime = manifest_meta.get("source_mtime")
+    if expected_source_mtime is not None and (
+        type(recorded_mtime) is not int
+        or recorded_mtime != expected_source_mtime
+    ):
+        logger.warning(
+            "%s: source archive changed or its index has no valid timestamp; "
+            "using native full-text until it is rebuilt",
+            source.key,
+        )
+        lease.close()
+        return None
     try:
         db = sqlite3.connect(
             _index_uri(db_path), uri=True, check_same_thread=False
@@ -610,18 +555,18 @@ def open_generation_index(
         lease.close()
         return None
     try:
-        finished, done_value, source_size, stored_fingerprint = _read_index_meta(db)
-        try:
-            index_meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
-        except sqlite3.Error:
-            index_meta = {}
-        if not finished:
-            db.close()
-            lease.close()
-            return None
+        index_meta = schema.read_index_meta(db, completed=True)
+        if (
+            index_meta[schema.PROVIDER] != source.provider
+            or index_meta[schema.COLLECTION_KEY] != source.collection_key
+            or index_meta[schema.SOURCE_KEY] != source.key
+        ):
+            raise schema.SchemaError("index metadata identity does not match the source")
+        done_value = index_meta[schema.DONE]
+        source_size = schema.decode_int(index_meta[schema.FILESIZE])
+        stored_fingerprint = index_meta.get(schema.MODEL_FINGERPRINT, "")
         if (
             expected_source_size is not None
-            and source_size is not None
             and source_size != expected_source_size
         ):
             logger.warning(
@@ -710,7 +655,11 @@ def open_generation_index(
             index_meta=index_meta,
             read_only=options.read_only,
         )
-    except sqlite3.Error:
+    except (sqlite3.Error, schema.SchemaError) as error:
+        logger.warning(
+            "%s: index unavailable (%s); using native full-text until it is rebuilt",
+            source.key, public_cause(error),
+        )
         db.close()
         lease.close()
         return None
@@ -905,7 +854,6 @@ __all__ = [
     "largest_zims_by_stem",
     "open_generation_index",
     "open_native_index",
-    "read_index_state",
     "relative_archive",
     "scan_collection",
     "scan_scope_collection",

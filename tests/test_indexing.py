@@ -131,18 +131,10 @@ def test_scoped_search_tuning_reaches_semantic_filter_and_ivf_probes(tmp_path):
         schema.decode_bool("true")
 
 
-@pytest.mark.parametrize("positional", [False, True])
-def test_body_search_preserves_matching_with_compact_and_existing_indexes(positional):
+def test_body_search_matches_compact_index():
     with sqlite3.connect(":memory:") as db:
         schema.ensure_schema(db)
-        if positional:
-            db.execute("DROP TABLE body")
-            db.execute(
-                "CREATE VIRTUAL TABLE body USING fts5("
-                "text, content='', tokenize='unicode61 remove_diacritics 2')"
-            )
-        else:
-            assert "body_docsize" not in schema.table_names(db)
+        assert "body_docsize" not in schema.table_names(db)
         db.executemany("INSERT INTO body(rowid, text) VALUES (?, ?)", [
             (9, "CAFÉ \u1ed9 zebra"),
             (2, "cafe o unrelated"),
@@ -153,6 +145,138 @@ def test_body_search_preserves_matching_with_compact_and_existing_indexes(positi
         assert body_search(db, "zebra", 1) == [(1, 1.0)]
         assert body_search(db, "cafe missing", 16) == []
         assert body_search(db, "", 16) == []
+
+
+@pytest.mark.parametrize("invalid", ["version", "fingerprint", "size", "positional", "identity"])
+def test_invalid_published_indexes_are_rejected_and_rebuilt(tmp_path, invalid):
+    from zimantic.providers.files.discovery import FilesIndexOptions, open_files_index
+
+    rows = [EntryRecord(1, "Alpha", "", "alpha")]
+    locator = _build(tmp_path, rows, fast=True)
+    source = _source()
+    lease = locator.paths(source)
+    original_generation = lease.generation
+    replacement = tmp_path / "replacement.sqlite"
+    try:
+        with sqlite3.connect(lease.sqlite_path) as old, sqlite3.connect(replacement) as db:
+            old.backup(db)
+            if invalid == "version":
+                schema.write_meta(db, {schema.SCHEMA_VERSION: str(schema.CURRENT_SCHEMA_VERSION - 1)})
+            elif invalid == "fingerprint":
+                schema.delete_meta(db, [schema.SOURCE_FINGERPRINT])
+            elif invalid == "size":
+                schema.write_meta(db, {schema.FILESIZE: "unknown"})
+            elif invalid == "identity":
+                schema.write_meta(db, {schema.SOURCE_KEY: "files:other:source"})
+            else:
+                db.execute("DROP TABLE body")
+                db.execute(
+                    "CREATE VIRTUAL TABLE body USING fts5("
+                    "text, content='', tokenize='unicode61 remove_diacritics 2')"
+                )
+    finally:
+        lease.close()
+    locator.publish(source, replacement).close()
+
+    assert open_files_index(
+        source, index_dir=tmp_path, options=FilesIndexOptions()
+    ) is None
+    report = build_index(Producer(rows), locator, None, {}, fast=True)
+    assert report.status == "published"
+    handle = open_files_index(
+        source, index_dir=tmp_path, options=FilesIndexOptions()
+    )
+    assert handle is not None
+    try:
+        assert handle.generation != original_generation
+    finally:
+        handle.close()
+
+
+@pytest.mark.parametrize("invalid", ["version", "missing-version", "resume-position", "identity"])
+def test_obsolete_or_invalid_staging_restarts_without_resuming(tmp_path, invalid):
+    rows = [EntryRecord(i, f"Title {i}", "", f"path-{i}") for i in range(4)]
+
+    class RecordingProducer(Producer):
+        def __init__(self, *, interrupt=False):
+            super().__init__(rows)
+            self.interrupt = interrupt
+            self.visited = []
+
+        def entry_at(self, index):
+            self.visited.append(index)
+            if self.interrupt and index == 2:
+                raise KeyboardInterrupt
+            return super().entry_at(index)
+
+    locator = IndexLocator(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        build_index(RecordingProducer(interrupt=True), locator, None, {"batch_size": 1}, fast=True)
+    source = _source()
+    staging = locator.source_directory(
+        source.provider, source.collection_key, source.key
+    ) / "staging-fast.sqlite"
+    with sqlite3.connect(staging) as db:
+        if invalid == "version":
+            schema.write_meta(db, {schema.SCHEMA_VERSION: str(schema.CURRENT_SCHEMA_VERSION - 1)})
+        elif invalid == "missing-version":
+            schema.delete_meta(db, [schema.SCHEMA_VERSION])
+        elif invalid == "identity":
+            schema.write_meta(db, {schema.SOURCE_KEY: "files:other:source"})
+        else:
+            schema.write_meta(db, {schema.NEXT: "02"})
+
+    producer = RecordingProducer()
+    build_index(producer, locator, None, {"batch_size": 1}, fast=True)
+    assert producer.visited == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_files_cross_model_probes_reuse_only_matching_vectors(tmp_path, monkeypatch, matching):
+    import threading
+
+    import faiss
+    import numpy as np
+
+    from zimantic.providers.files.discovery import FilesIndexOptions, open_files_index
+    from zimantic.providers.files.provider import FilesRuntime
+
+    class Embedder:
+        fingerprint = "old-model"
+
+        def __init__(self, vector):
+            self.vector = vector
+
+        def truncate(self, text, prefix=""):
+            return text
+
+        def embed(self, texts):
+            return np.tile(np.array(self.vector, dtype=np.float32), (len(texts), 1))
+
+    monkeypatch.setattr(build_module, "_write_faiss", lambda db, path: path.write_bytes(b"vectors"))
+    locator = _build(
+        tmp_path, [EntryRecord(1, "Alpha", "excerpt", "alpha", None, "body")],
+        embedder=Embedder([1, 0, 0, 0]),
+    )
+    runtime = object.__new__(FilesRuntime)
+    runtime._embedder_ready_getter = None
+    runtime._embedder_getter = lambda: Embedder([1, 0, 0, 0] if matching else [0, 1, 0, 0])
+    runtime._probe_cache = {}
+    runtime._probe_cache_lock = threading.Lock()
+    vectors = object()
+    monkeypatch.setattr(faiss, "read_index", lambda *args: vectors)
+    handle = open_files_index(
+        _source(), index_dir=locator.index_dir,
+        options=FilesIndexOptions(
+            semantic=True, model_fingerprint="new-model",
+            probe_compatible=runtime._probe_compatible,
+        ),
+    )
+    assert handle is not None
+    try:
+        assert (handle.faiss_index is vectors) is matching
+    finally:
+        handle.close()
 
 
 def test_generic_search_finds_title_and_body_without_embeddings_or_native():

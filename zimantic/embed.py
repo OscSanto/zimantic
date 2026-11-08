@@ -336,34 +336,40 @@ def embed_model_probes(embedder, texts=MODEL_PROBE_TEXTS):
     return probe_texts, embed_probe_texts(embedder, probe_texts)
 
 
-def serialize_model_probes(texts, vectors) -> dict[str, object]:
+def serialize_model_probes(texts, vectors) -> dict[str, str]:
     """Serialize probe texts and vectors into ``meta`` key/value pairs."""
+    from .indexing.schema import encode_bytes, encode_json
+
     probe_texts = list(texts)
     array = np.asarray(vectors, dtype="<f4")
     if array.ndim != 2 or array.shape[0] != len(probe_texts):
         raise ValueError("model probes must be a 2-D array with one row per text")
     return {
-        MODEL_PROBE_TEXTS_KEY: json.dumps(probe_texts, ensure_ascii=False),
-        MODEL_PROBE_VECTORS_KEY: array.tobytes(order="C"),
+        MODEL_PROBE_TEXTS_KEY: encode_json(probe_texts),
+        MODEL_PROBE_VECTORS_KEY: encode_bytes(array.tobytes(order="C")),
         MODEL_PROBE_SHAPE_KEY: f"{array.shape[0]}x{array.shape[1]}",
     }
 
 
 def load_model_probes(meta) -> tuple[list[str], np.ndarray] | None:
     """Decode probe metadata, returning ``None`` when it is absent or invalid."""
+    from .indexing.schema import decode_bytes, decode_json
+
     texts_raw = meta.get(MODEL_PROBE_TEXTS_KEY)
     vectors_raw = meta.get(MODEL_PROBE_VECTORS_KEY)
     shape_raw = meta.get(MODEL_PROBE_SHAPE_KEY)
     if not texts_raw or not vectors_raw or not shape_raw:
         return None
-    if not isinstance(vectors_raw, (bytes, bytearray, memoryview)):
+    if not all(isinstance(value, str) for value in (texts_raw, vectors_raw, shape_raw)):
         return None
     try:
-        texts = json.loads(str(texts_raw))
+        texts = decode_json(texts_raw)
         if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
             return None
-        rows, dim = (int(part) for part in str(shape_raw).lower().split("x", 1))
-        array = np.frombuffer(vectors_raw, dtype="<f4")
+        rows, dim = (int(part) for part in shape_raw.split("x", 1))
+        if rows < 1 or dim < 1 or shape_raw != f"{rows}x{dim}":
+            return None
+        array = np.frombuffer(decode_bytes(vectors_raw), dtype="<f4")
         if rows != len(texts) or array.size != rows * dim:
             return None
         return texts, array.reshape(rows, dim).astype(np.float32, copy=False)
