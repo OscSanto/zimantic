@@ -1443,14 +1443,17 @@
                 };
             }
 
-            function nextSearchScope(selectedSources, collectionKey, search) {
-                if (collectionKey) return [];
-                const selected = selectionValues(selectedSources);
-                if (!selected.length) return [];
-                if (!search || !search.question) return selected;
-                if (search.searchCollection || search.searchAll) return [];
-                const previous = new Set(search.searchKeys || []);
-                return [...new Set([...previous, ...selected])];
+            function nextSearchScope(selectedSources) {
+                return [...new Set(selectionValues(selectedSources))];
+            }
+
+            function sourceDiscovery(question, search) {
+                if (!search || search.question !== question) return null;
+                if (!search.searchAll) return search.discovery || null;
+                return {
+                    outcomes: new Map(search.outcomes),
+                    counts: { ...search.counts },
+                };
             }
 
             function setSelectedSources(values) {
@@ -1462,15 +1465,20 @@
                 keys.forEach((key) => params.append("source", key));
             }
 
-            function sourceFilterParams(params) {
-                selectedSourceKeys.forEach((source) =>
-                    params.append("display_source", source),
-                );
-            }
-
             function sourceFilterLayout() {
-                const outcomes = [...current.outcomes.values()];
-                const outcomeCount = (outcome) => current.counts[outcome.source.key] || 0;
+                // Only an earlier unscoped search of this query supplies extra
+                // chips. Its counts are discovery hints, not current progress.
+                const outcomes = [...new Map([
+                    ...(current.discovery?.outcomes || []),
+                    ...current.outcomes,
+                ]).values()];
+                const searched = new Set(current.searchKeys || []);
+                const outcomeCount = (outcome) => {
+                    const key = outcome.source.key;
+                    return searched.has(key) || current.outcomes.has(key)
+                        ? current.counts[key] || 0
+                        : current.discovery?.counts[key] || 0;
+                };
                 // A source is a hard failure only when it reported status
                 // "error". A "partial" source returned results, so it must stay
                 // selectable and show its count rather than an error label.
@@ -1601,8 +1609,8 @@
             }
 
             function sourceFilterButton(outcome, layout) {
-                // Counts come from the ranked pool (server-reported), not per-source
-                // candidate lists, so they match what the filtered view actually shows.
+                // Unselected discovery chips retain their earlier broad-pool
+                // counts; selected sources show counts from the deeper search.
                 const count = layout.outcomeCount(outcome);
                 const isFailed = layout.failed(outcome);
                 const button = document.createElement("button");
@@ -3673,9 +3681,13 @@
                 ];
                 setSelectedSources(requested);
                 selectedCollectionKey = collectionKey || null;
+                const discovery = scopeKeys.length || selectedCollectionKey
+                    ? sourceDiscovery(question, current)
+                    : null;
                 current = {
                     question,
                     terms: queryTerms(question),
+                    discovery,
                     outcomes: new Map(),
                     counts: {},
                     pageItems: [],
@@ -3686,6 +3698,7 @@
                     streaming: true,
                     page: pageIndex,
                     searchKeys: scopeKeys,
+                    scopeKeys,
                     searchCollection: selectedCollectionKey,
                     searchAll: !selectedCollectionKey && scopeKeys.length === 0,
                 };
@@ -3699,6 +3712,7 @@
                 $("notice").textContent = "";
                 $("pager").innerHTML = "";
                 renderScopeLine();
+                renderSourceFilters();
                 renderResults([]);
                 try {
                     const selected = activeSources();
@@ -3714,14 +3728,12 @@
                         limit: String(PAGE_SIZE),
                         offset: String(pageIndex * PAGE_SIZE),
                     });
-                    sourceFilterParams(params);
                     searchScopeParams(
                         params,
-                        selectedCollectionKey ? [] : scopeKeys,
+                        scopeKeys,
                         selectedCollectionKey,
                     );
                     dedupeParams(params, "source");
-                    dedupeParams(params, "display_source");
                     // An explicit source/collection selection defines the scope
                     // directly; it is never promoted to a full search. Page size,
                     // offset and the display filter are not cached keys.
@@ -3809,9 +3821,8 @@
             }
 
             async function loadPage(page) {
-                // Paging and display filtering reuse the server's cached pool for
-                // the current search scope and return a single page. No document
-                // reload, no re-stream.
+                // Paging reuses the server's cached pool for the current search
+                // scope and returns a single page. No reload, no re-stream.
                 if (!current) return;
                 const sequence = searchSequence;
                 const pageIndex = Number.isInteger(page) && page >= 0 ? page : 0;
@@ -3829,16 +3840,16 @@
                     limit: String(PAGE_SIZE),
                     offset: String(pageIndex * PAGE_SIZE),
                 });
-                sourceFilterParams(params);
                 searchScopeParams(
                     params,
-                    current.searchAll || current.searchCollection
+                    current.searchAll
                         ? []
-                        : current.searchKeys || [],
+                        : current.searchCollection
+                          ? current.scopeKeys || []
+                          : current.searchKeys || [],
                     current.searchCollection,
                 );
                 dedupeParams(params, "source");
-                dedupeParams(params, "display_source");
                 $("status").textContent = "Loading page…";
                 try {
                     let response;
@@ -3928,34 +3939,23 @@
                 scopeSources,
                 collectionKey = null,
             ) {
-                // The running search already knows its real scope. A full pool
-                // can serve any selected source that it actually searched, so
-                // narrowing is display-only. A source outside that pool (for
-                // example a remote source beyond max_remote_sources) must be
-                // searched explicitly instead of filtering to an empty page.
                 const requested = [...new Set(selectionValues(selectedSources))];
-                if (!requested.length && !collectionKey) {
-                    if (current && current.question === question && current.searchAll) {
-                        setSelectedSources(requested);
-                        loadPage(page);
-                        return;
-                    }
-                    runSearch(question, requested, page);
-                    return;
-                }
+                const scopeKeys = [...new Set(selectionValues(
+                    scopeSources === undefined ? requested : scopeSources,
+                ))];
                 if (
                     current &&
                     current.question === question &&
                     (current.searchCollection || null) === (collectionKey || null)
                 ) {
-                    const scope = new Set(
-                        current.searchAll
-                            ? [...current.outcomes.keys()]
-                            : current.searchKeys || [],
-                    );
+                    const previous = current.searchAll
+                        ? []
+                        : collectionKey
+                          ? current.scopeKeys || []
+                          : current.searchKeys || [];
                     if (
-                        !collectionKey &&
-                        requested.every((key) => scope.has(key))
+                        previous.length === scopeKeys.length &&
+                        previous.every((key) => scopeKeys.includes(key))
                     ) {
                         setSelectedSources(requested);
                         loadPage(page);
@@ -3966,7 +3966,7 @@
                     question,
                     requested,
                     page,
-                    scopeSources === undefined ? requested : scopeSources,
+                    scopeKeys,
                     collectionKey,
                 );
             }
@@ -3985,62 +3985,24 @@
                 url.hash = "";
                 url.search = "";
                 if (question) url.searchParams.set("q", question);
-                const sourceValues =
-                    selectedSources instanceof Set
-                        ? [...selectedSources]
-                        : Array.isArray(selectedSources)
-                          ? selectedSources
-                          : selectedSources
-                            ? [selectedSources]
-                            : [];
-                const displayValues = [...new Set(selectionValues(sourceValues))];
+                const sourceValues = [...new Set(selectionValues(selectedSources))];
                 const hasCollectionArg = collectionKey !== undefined;
                 const explicitScope = scopeSources !== undefined || hasCollectionArg;
                 const sameSearch =
                     explicitScope || (current && current.question === question);
-                const scopeValues = scopeSources !== undefined
-                    ? [...new Set(selectionValues(scopeSources))]
-                    : sameSearch && current
-                      ? [...new Set(current.searchKeys || [])]
-                      : displayValues;
                 const resolvedCollection = hasCollectionArg
                     ? collectionKey
                     : sameSearch && current
                       ? current.searchCollection || null
                       : null;
-                const fullSearch =
-                    sameSearch &&
-                    !resolvedCollection &&
-                    (scopeSources !== undefined
-                        ? scopeValues.length === 0
-                        : Boolean(current?.searchAll));
                 if (resolvedCollection) {
                     // A collection is one canonical scope selector, never a
                     // list of hundreds of source keys.
                     url.searchParams.set("collection", resolvedCollection);
-                    displayValues.forEach((source) =>
-                        url.searchParams.append("display_source", source),
-                    );
-                } else if (fullSearch) {
-                    // A full-search pool is already cached; these keys narrow
-                    // only the displayed page and must not become an explicit
-                    // source scope after a reload.
-                    displayValues.forEach((source) =>
-                        url.searchParams.append("display_source", source),
-                    );
-                } else {
-                    scopeValues.forEach((source) =>
-                        url.searchParams.append("source", source),
-                    );
-                    if (sameSearch) {
-                        const scopeSet = new Set(scopeValues);
-                        displayValues
-                            .filter((source) => !scopeSet.has(source))
-                            .forEach((source) =>
-                                url.searchParams.append("display_source", source),
-                            );
-                    }
                 }
+                sourceValues.forEach((source) =>
+                    url.searchParams.append("source", source),
+                );
                 if (page > 0) url.searchParams.set("page", String(page + 1));
                 if (modal) url.searchParams.set("modal", modal);
                 // Search state owns q/source/collection/page/modal, but a
@@ -4097,24 +4059,22 @@
             function readLocationState() {
                 const params = new URLSearchParams(location.search);
                 const pageNumber = Number.parseInt(params.get("page") || "1", 10);
-                const scopeSources = [
+                const sourceValues = [
                     ...new Set(params.getAll("source").filter(Boolean)),
                 ];
                 const displaySources = [
                     ...new Set(params.getAll("display_source").filter(Boolean)),
                 ];
                 const collection = params.get("collection") || null;
+                // Older UI links used display_source for shallow filtering.
+                // Restore their selection as a real, deeply searched scope.
+                const scopeSources = displaySources.length ? displaySources : sourceValues;
                 return {
                     question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
-                    // `source` defines the ranked scope; `display_source`
-                    // narrows only the visible page. A URL with only
-                    // display_source keeps a full search behind the filter.
-                    selectedSources: displaySources.length
-                        ? displaySources
-                        : scopeSources,
+                    selectedSources: scopeSources,
                     scopeSources,
                     collection,
-                    hasScope: params.has("source") || Boolean(collection),
+                    hasScope: scopeSources.length > 0 || Boolean(collection),
                     page: Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : 0,
                     modal: params.get("modal") || null,
                 };
@@ -4260,24 +4220,7 @@
                 }
                 const selected = [...selectedSourceKeys];
                 commitAutoSearchHistory();
-                const scopeKeys = [...new Set(current.searchKeys || [])];
-                const knownScope = current.searchAll
-                    ? new Set(current.outcomes.keys())
-                    : new Set(scopeKeys);
-                const addsOutside = selected.some(
-                    (source) => !knownScope.has(source),
-                );
-                const nextScope = !selected.length
-                    ? []
-                    : current.searchCollection
-                      ? selected
-                      : current.searchAll
-                        ? addsOutside
-                          ? selected
-                          : []
-                        : addsOutside
-                          ? selected
-                          : scopeKeys;
+                const nextScope = nextSearchScope(selected);
                 history.pushState(
                     null,
                     "",
@@ -4505,9 +4448,11 @@
                         question: current.question,
                         selectedSources: [...selectedSourceKeys],
                         scopeSources:
-                            current.searchAll || current.searchCollection
+                            current.searchAll
                                 ? []
-                                : [...new Set(current.searchKeys || [])],
+                                : current.searchCollection
+                                  ? current.scopeKeys || []
+                                  : [...new Set(current.searchKeys || [])],
                         collection: current.searchCollection || null,
                         page: current.page,
                     };
@@ -4673,16 +4618,11 @@
                 }
                 // Keep the current source or collection filter when the query
                 // changes, so a search started from a library card stays scoped.
-                // A source chip selected from a full search is a display filter:
-                // keep the previous broad scope so the other sources stay
-                // selectable for the next query.
+                // Discovery chips belong to the old query; a new query searches
+                // only the selected sources instead of repeating broad fan-out.
                 const selectedSources = [...selectedSourceKeys];
                 const hasCollection = Boolean(selectedCollectionKey);
-                const scopeSources = nextSearchScope(
-                    selectedSources,
-                    hasCollection ? selectedCollectionKey : null,
-                    current,
-                );
+                const scopeSources = nextSearchScope(selectedSources);
                 const url = makeStateUrl(
                     question,
                     selectedSources,
@@ -4784,7 +4724,11 @@
                 }
                 $("question").value = state.question;
                 const currentScope = current && !current.searchAll
-                    ? [...new Set(current.searchKeys || [])]
+                    ? [...new Set(
+                          current.searchCollection
+                              ? current.scopeKeys || []
+                              : current.searchKeys || [],
+                      )]
                     : [];
                 const stateScope = state.hasScope ? state.scopeSources : [];
                 const sameScope =

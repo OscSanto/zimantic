@@ -36,6 +36,10 @@ const state = readLocationState();
 location.href = "http://example.test/?q=q&source=a";
 location.search = "?q=q&source=a";
 const explicit = readLocationState();
+location.href = "http://example.test/?q=q&display_source=a&display_source=b";
+const legacy = readLocationState();
+current = {{question: "q", searchAll: false, searchKeys: ["a", "b"], searchCollection: "zim:library"}};
+const expandedCollection = makeStateUrl("q", [], 0);
 console.log(JSON.stringify({{
   full,
   selective,
@@ -47,6 +51,9 @@ console.log(JSON.stringify({{
   explicitSources: explicit.selectedSources,
   explicitCollection: explicit.collection,
   explicitHasScope: explicit.hasScope,
+  legacySources: legacy.scopeSources,
+  legacyHasScope: legacy.hasScope,
+  expandedCollection,
 }}));
 """
         result = subprocess.run(
@@ -56,8 +63,8 @@ console.log(JSON.stringify({{
             capture_output=True,
         )
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["full"], "/?q=q&display_source=a")
-        self.assertEqual(payload["selective"], "/?q=q&source=a&source=b")
+        self.assertEqual(payload["full"], "/?q=q&source=a")
+        self.assertEqual(payload["selective"], "/?q=q&source=a")
         self.assertEqual(payload["grouped"], "/?q=q&collection=zim%3Alibrary")
         self.assertEqual(payload["selected"], ["a"])
         self.assertEqual(payload["scope"], ["a"])
@@ -66,8 +73,111 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["explicitSources"], ["a"])
         self.assertIsNone(payload["explicitCollection"])
         self.assertTrue(payload["explicitHasScope"])
+        self.assertEqual(payload["legacySources"], ["a", "b"])
+        self.assertTrue(payload["legacyHasScope"])
+        self.assertEqual(payload["expandedCollection"], "/?q=q&collection=zim%3Alibrary")
 
-    def test_scope_helpers_preserve_the_broad_source_list(self):
+    def test_deep_search_retains_discovery_only_for_the_same_broadly_searched_query(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+let selectedSourceKeys = new Set();
+let selectedCollectionKey = null;
+let sourceFilterShowAll = false, sourceFilterShowOther = false;
+let requestController = null, pageController = null;
+let lastStreamRenderAt = 0, searchSequence = 0, activeSearchResult = null;
+const thumbnailCache = new Map();
+const PAGE_SIZE = 10, SOURCE_FILTER_LIMIT = 10, SOURCE_FILTER_QUERY_LIMIT = 30;
+const STREAM_FIRST_BYTE_TIMEOUT = 1000, STREAM_TOTAL_TIMEOUT = 1000;
+const STREAM_IDLE_TIMEOUT = 1000, BUSY_RETRY_LIMIT = 0;
+const window = {{scrollTo() {{}}}};
+const document = {{body: {{classList: {{add() {{}}}}}}}};
+const $ = () => ({{value: "", hidden: false, disabled: false}});
+const setSettingsOpen = () => {{}};
+const cancelStreamRender = () => {{}};
+const cancelThumbnails = () => {{}};
+const queryTerms = (question) => [question];
+const announceSearchStatus = () => {{}};
+const renderScopeLine = () => {{}};
+const renderSourceFilters = () => {{}};
+const renderResults = () => {{}};
+const renderView = () => {{}};
+const searchStatusText = () => "";
+const debugMode = false;
+const syncPage = () => {{}};
+const escapeHtml = (text) => text;
+const activeSources = () => [{{key: "a"}}, {{key: "b"}}, {{key: "c"}}];
+const appPath = (path) => path;
+const sourceDisplayName = (source) => source.key;
+const outcome = (key) => ({{source: {{key, provider: "zim"}}, status: "ok"}});
+const requests = [];
+const fetch = async (url) => {{
+    requests.push(new URL(url, "http://example.test").searchParams.getAll("source"));
+    return {{ok: true, json: async () => [], headers: new Map()}};
+}};
+const consumeStream = async () => {{
+    current.outcomes = new Map([...selectedSourceKeys].map((key) => [key, outcome(key)]));
+    current.counts = Object.fromEntries([...selectedSourceKeys].map((key) => [key, 20]));
+    current.completed = current.sourcesTotal = selectedSourceKeys.size;
+    return false;
+}};
+{_function_source(source, "function selectionValues(", "function sourceFilterLayout(")}
+{_function_source(source, "function sourceFilterLayout(", "function sourceFilterControlKey(")}
+{_function_source(source, "async function runSearch(", "async function loadPage(")}
+{_function_source(source, "async function loadPage(", "function applySourceSelection(")}
+const broad = {{
+    question: "q", searchAll: true,
+    outcomes: new Map(["a", "b", "c"].map((key) => [key, outcome(key)])),
+    counts: {{a: 5, b: 4, c: 3}},
+}};
+let current = broad;
+const summarize = () => {{
+    const layout = sourceFilterLayout();
+    return {{
+        counts: Object.fromEntries(layout.outcomes.map((item) => [item.source.key, layout.outcomeCount(item)])),
+        progress: effectiveSourceProgress(),
+        discovery: Boolean(current.discovery),
+    }};
+}};
+(async () => {{
+    await runSearch("q", ["a"]);
+    const first = summarize();
+    await runSearch("q", ["a", "b"]);
+    const expanded = summarize();
+    await runSearch("q", ["b"]);
+    const narrowed = summarize();
+    await runSearch("other query", ["b"]);
+    const changed = summarize();
+    await runSearch("other query", ["a", "b"]);
+    const direct = summarize();
+    await runSearch("other query", [], 0, [], "zim:library");
+    current.searchKeys = ["a", "b", "c"];
+    await loadPage(1);
+    await runSearch("other query", ["b"], 0, ["b"], "zim:library");
+    await loadPage(1);
+    console.log(JSON.stringify({{first, expanded, narrowed, changed, direct, requests, broadCounts: broad.counts}}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["first"]["counts"], {"a": 20, "b": 4, "c": 3})
+        self.assertEqual(payload["first"]["progress"], {"completed": 1, "total": 1, "selected": True})
+        self.assertEqual(payload["expanded"]["counts"], {"a": 20, "b": 20, "c": 3})
+        self.assertEqual(payload["narrowed"]["counts"], {"a": 5, "b": 20, "c": 3})
+        self.assertTrue(payload["narrowed"]["discovery"])
+        self.assertEqual(payload["changed"]["counts"], {"b": 20})
+        self.assertFalse(payload["changed"]["discovery"])
+        self.assertEqual(payload["direct"]["counts"], {"a": 20, "b": 20})
+        self.assertFalse(payload["direct"]["discovery"])
+        self.assertEqual(
+            payload["requests"],
+            [["a"], ["a", "b"], ["b"], ["b"], ["a", "b"], [], [], ["b"], ["b"]],
+        )
+        self.assertEqual(payload["broadCounts"], {"a": 5, "b": 4, "c": 3})
+
+    def test_scope_helpers_search_only_selected_sources(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 let current = null;
@@ -114,12 +224,12 @@ console.log(JSON.stringify({{
             {"selected": ["a"], "collection": "files:media"},
         )
         self.assertEqual(payload["dedupe"], ["a", "b"])
-        self.assertEqual(payload["fullNext"], [])
+        self.assertEqual(payload["fullNext"], ["a"])
         self.assertEqual(
             payload["fullProgress"],
             {"completed": 1, "total": 1, "selected": True},
         )
-        self.assertEqual(payload["explicitNext"], ["a", "b"])
+        self.assertEqual(payload["explicitNext"], ["a"])
         self.assertEqual(
             payload["explicitProgress"],
             {"completed": 2, "total": 2, "selected": False},
@@ -146,7 +256,7 @@ console.log(JSON.stringify({{full, display, collection}}));
         )
         payload = json.loads(result.stdout)
         self.assertEqual(payload["full"], "/?q=q")
-        self.assertEqual(payload["display"], "/?q=q&display_source=a")
+        self.assertEqual(payload["display"], "/?q=q&source=a")
         self.assertEqual(payload["collection"], "/?q=q&collection=files%3Amedia")
 
     def test_source_filter_layout_is_bounded_per_collection_group(self):
@@ -249,7 +359,7 @@ console.log(JSON.stringify({{zero, one, decimal, high}}));
         self.assertEqual(payload["decimal"], "/?q=q&page=2")
         self.assertIsNone(payload["high"])
 
-    def test_source_outside_a_full_search_pool_is_searched_explicitly(self):
+    def test_source_selections_search_deeply_and_reuse_only_identical_scopes(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 let current = {{question: "q", searchAll: true, searchKeys: ["inside"], outcomes: new Map([["inside", {{source: {{key: "inside"}}}}]])}};
@@ -265,11 +375,19 @@ function runSearch(question, sources, page, scope) {{
   calls.push(["run", question, sources, page, scope]);
 }}
 {_function_source(source, "function applySourceSelection(", "function makeStateUrl(")}
-applySourceSelection("q", ["inside"], 0, []);
+applySourceSelection("q", ["inside"], 0);
 const inside = calls.at(-1);
 applySourceSelection("q", ["outside"], 0, ["outside"]);
 const outside = calls.at(-1);
-console.log(JSON.stringify({{inside, outside}}));
+current = {{question: "q", searchAll: false, searchKeys: ["inside", "outside"]}};
+applySourceSelection("q", ["inside"], 0);
+const narrowed = calls.at(-1);
+current = {{question: "q", searchAll: false, searchKeys: ["inside"]}};
+applySourceSelection("q", ["inside"], 1);
+const same = calls.at(-1);
+applySourceSelection("q", [], 0);
+const cleared = calls.at(-1);
+console.log(JSON.stringify({{inside, outside, narrowed, same, cleared}}));
 """
         result = subprocess.run(
             [NODE, "-e", script],
@@ -278,11 +396,14 @@ console.log(JSON.stringify({{inside, outside}}));
             capture_output=True,
         )
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["inside"], ["load", 0])
+        self.assertEqual(payload["inside"], ["run", "q", ["inside"], 0, ["inside"]])
         self.assertEqual(
             payload["outside"],
             ["run", "q", ["outside"], 0, ["outside"]],
         )
+        self.assertEqual(payload["narrowed"], ["run", "q", ["inside"], 0, ["inside"]])
+        self.assertEqual(payload["same"], ["load", 1])
+        self.assertEqual(payload["cleared"], ["run", "q", [], 0, []])
 
 
 if __name__ == "__main__":

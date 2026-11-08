@@ -2506,6 +2506,26 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual(page["total"], 2)
             search._executor.shutdown(wait=True)
 
+    def test_selective_search_retrieves_deeper_than_a_broad_display_filter(self):
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 21)]
+            for name in ("alpha", "beta", "gamma", "delta"):
+                _write_index(tmp, name, rows=rows)
+            search = _bare_search({**self._cfg(tmp), "candidate_count": 2, "max_results": 20})
+            self.addCleanup(search.close)
+            search._load_indexes()
+            search.refresh_sources()
+
+            broad = search.search_page("tire change", display_source="beta")
+            with patch.object(search, "_search_source", wraps=search._search_source) as retrieve:
+                selected = search.search_page("tire change", source="beta")
+            self.assertEqual(retrieve.call_count, 1)
+            self.assertGreater(selected["total"], broad["total"])
+            self.assertEqual(selected["total"], 20)
+            self.assertEqual(selected["scope"]["requested"], 1)
+            self.assertEqual(set(selected["counts"]), {search._zim_source_key("beta")})
+
     def test_display_source_narrows_the_page_without_changing_scope(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
