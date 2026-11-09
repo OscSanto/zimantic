@@ -594,6 +594,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn('<form class="zimantic-toolbar-zim-search"', shell.text)
         self.assertNotIn('data-zimantic-zim="manual"', shell.text)
         self.assertNotIn("id=\"zimanticZimSuggestions\"", shell.text)
+        self.assertIn('<a class="zimantic-toolbar-search"', shell.text)
 
     def test_content_shell_shows_zim_search_for_resolvable_key(self):
         body = b"<html><head></head><body>Page</body></html>"
@@ -622,6 +623,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(shell.status_code, 200)
         self.assertIn('<form class="zimantic-toolbar-zim-search"', shell.text)
         self.assertIn('data-zimantic-zim="manual"', shell.text)
+        self.assertNotIn('<a class="zimantic-toolbar-search"', shell.text)
 
     def test_content_shell_preserves_trailing_article_paths(self):
         self.search.read_article = lambda zim, path: {

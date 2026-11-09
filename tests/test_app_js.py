@@ -16,6 +16,225 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
+    def test_both_all_sources_controls_clear_empty_search_scope_and_url(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+class Node {{
+  constructor() {{
+    this.children = []; this.dataset = {{}}; this.hidden = true;
+    this.handlers = {{}};
+    this.classList = {{add() {{}}, remove() {{}}}};
+  }}
+  replaceChildren(...children) {{ this.children = children; }}
+  setAttribute() {{}}
+  querySelectorAll() {{ return this.children; }}
+  addEventListener(name, handler) {{ this.handlers[name] = handler; }}
+  focus() {{}}
+}}
+const elements = new Map();
+const $ = (id) => {{
+  if (!elements.has(id)) elements.set(id, new Node());
+  return elements.get(id);
+}};
+const document = {{createElement: () => new Node()}};
+const location = new URL("http://example.test/?collection=files%3Amodules");
+const history = {{
+  state: null,
+  replaceState(state, _title, url) {{ location.href = new URL(url, location.href).href; }},
+}};
+const t = (text) => text;
+const selectionValues = (values) => [...values];
+let current = null, selectedSourceKeys = new Set(), selectedCollectionKey = null;
+let sourceFilterShowAll = true, sourceFilterShowOther = true;
+const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); }};
+const sourceDisplayName = (key) => key;
+const sourceStemName = () => "";
+const collectionDisplayName = (key) => key;
+{_function_source(source, "function renderSourceSelectionSummary()", "function renderFilterLine(")}
+{_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
+{_function_source(source, '$("sourceFilterOptions").addEventListener("click"', '$("results").addEventListener("click"')}
+{_function_source(source, '$("scopeLineReset").addEventListener("click"', '$("articleModal").addEventListener("click"')}
+const results = [];
+for (const control of ["scopeLineReset", "sourceFilterOptions"]) {{
+  for (const scope of ["collection", "source", "both"]) {{
+    selectedCollectionKey = scope === "source" ? null : "files:modules";
+    selectedSourceKeys = new Set(scope === "collection" ? [] : ["files:a"]);
+    sourceFilterShowAll = true;
+    sourceFilterShowOther = true;
+    location.href = "http://example.test/?collection=files%3Amodules&source=files%3Aa";
+    renderSourceSelectionSummary();
+    renderScopeLine();
+    const visibleBefore = !$("scopeLine").hidden && !$("sourceFilters").hidden;
+    const button = {{dataset: {{sourceAction: "all"}}, disabled: false}};
+    $(control).handlers.click({{target: {{closest: () => button}}}});
+    results.push({{
+      control, scope, visibleBefore,
+      selected: [...selectedSourceKeys], collection: selectedCollectionKey,
+      url: location.pathname + location.search,
+      scopeHidden: $("scopeLine").hidden, scopeText: $("scopeLineText").textContent,
+      selectionHidden: $("sourceFilters").hidden,
+      showAll: sourceFilterShowAll, showOther: sourceFilterShowOther,
+    }});
+  }}
+}}
+console.log(JSON.stringify(results));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        for payload in json.loads(result.stdout):
+            with self.subTest(control=payload["control"], scope=payload["scope"]):
+                self.assertTrue(payload["visibleBefore"])
+                self.assertEqual(payload["selected"], [])
+                self.assertIsNone(payload["collection"])
+                self.assertEqual(payload["url"], "/")
+                self.assertTrue(payload["scopeHidden"])
+                self.assertEqual(payload["scopeText"], "")
+                self.assertTrue(payload["selectionHidden"])
+                self.assertFalse(payload["showAll"])
+                self.assertFalse(payload["showOther"])
+
+    def _initialize_search_page(self, mode="empty"):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+class Node {{
+  constructor() {{
+    this.children = []; this.dataset = {{}}; this.hidden = true; this.value = "";
+    this.classList = {{add() {{}}, remove() {{}}}};
+  }}
+  replaceChildren(...children) {{ this.children = children; }}
+  setAttribute() {{}}
+  focus() {{}}
+}}
+const elements = new Map();
+const $ = (id) => {{
+  if (!elements.has(id)) elements.set(id, new Node());
+  return elements.get(id);
+}};
+const document = {{
+  createElement: () => new Node(),
+  querySelectorAll: () => [],
+  body: {{classList: {{toggle() {{}}}}}},
+}};
+const location = new URL("http://example.test/?collection=files%3Amodules");
+const t = (text) => text;
+const appPath = (path) => path;
+const mode = {json.dumps(mode)};
+const state = {{
+  question: mode === "empty" || mode === "failure" ? "" : "original",
+  selectedSources: [], scopeSources: [], collection: "files:modules", page: 0, modal: null,
+}};
+const normalizePageParam = () => {{}};
+const readLocationState = () => state;
+const applyLocationScope = (state) => {{ selectedCollectionKey = state.collection; }};
+const setSettingsOpen = () => {{}};
+const syncArticleModal = () => {{}};
+const readCollectionCache = () => null;
+const readCanonicalCache = () => null;
+const writeJsonCache = () => {{}};
+const isCanonicalCollectionRecord = () => true;
+const SOURCE_CACHE_KEY = "sources";
+const COLLECTION_CACHE_KEY = "collections";
+let sources = [], collections = [], current = null, selectedCollectionKey = null;
+let selectedSourceKeys = new Set(), searchSequence = 0;
+const searches = [], requests = [];
+const runSearch = (...args) => {{ searches.push(args); searchSequence++; }};
+const collectionDisplayName = (key) =>
+  collections.find((record) => record.key === key)?.label || key;
+const sourceDisplayName = (key) => key;
+const sourceStemName = () => "";
+const deferred = () => {{
+  let resolve, reject;
+  const promise = new Promise((yes, no) => {{ resolve = yes; reject = no; }});
+  return {{promise, resolve, reject}};
+}};
+const config = deferred(), discovery = deferred(), metadata = deferred();
+const loadConfig = () => {{ requests.push("config"); return config.promise; }};
+const fetchCachedJson = (path, key, options) => {{
+  requests.push([path, options.limit]); return discovery.promise;
+}};
+const fetchPagedJson = (path, options) => {{
+  requests.push([path, options.limit]); return metadata.promise;
+}};
+const applyDiscoveryData = (payload) => {{
+  sources = payload; renderSourceSelectionSummary();
+}};
+{_function_source(source, "function renderSourceSelectionSummary()", "function renderFilterLine(")}
+{_function_source(source, "async function loadSearchData()", "async function loadConfig()")}
+{_function_source(source, "async function initialize()", '$("localePicker")?.addEventListener')}
+const snapshot = () => ({{
+  scope: $("scopeLineText").textContent, scopeHidden: $("scopeLine").hidden,
+  selectionHidden: $("sourceFilters").hidden,
+  labels: $("sourceFilterOptions").children.map((button) => button.textContent),
+  selectionStatus: $("sourceFilterStatus").textContent,
+  loading: !$("startupStatus").hidden, question: $("question").value,
+}});
+(async () => {{
+  const ready = initialize();
+  const early = snapshot();
+  const earlyRequests = [...requests];
+  metadata.resolve([{{key: "files:modules", provider: "files", label: "Modules"}}]);
+  await new Promise((resolve) => setImmediate(resolve));
+  const labeled = snapshot();
+  if (mode === "edited") $("question").value = "new query";
+  if (mode === "searched") runSearch("new query", [], 0, [], "files:modules");
+  config.resolve();
+  if (mode === "failure") discovery.reject(new Error("offline"));
+  else discovery.resolve({{payload: [], stale: false}});
+  await ready;
+  console.log(JSON.stringify({{
+    early, earlyRequests, labeled, final: snapshot(), searches, status: $("status").textContent,
+  }}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        return json.loads(result.stdout)
+
+    def test_collection_scope_is_visible_before_parallel_startup_requests_finish(self):
+        payload = self._initialize_search_page()
+        self.assertEqual(payload["early"]["scope"], "Searching collection: files:modules")
+        self.assertFalse(payload["early"]["scopeHidden"])
+        self.assertFalse(payload["early"]["selectionHidden"])
+        self.assertTrue(payload["early"]["loading"])
+        self.assertEqual(
+            payload["earlyRequests"],
+            ["config", ["/sources", 200], ["/collections.json", 200]],
+        )
+        self.assertEqual(payload["labeled"]["scope"], "Searching collection: Modules")
+        self.assertEqual(payload["labeled"]["labels"], ["All Sources", "Modules"])
+        self.assertEqual(
+            payload["labeled"]["selectionStatus"],
+            "1 selected collection. Type a query to search it.",
+        )
+        self.assertTrue(payload["labeled"]["loading"])
+        self.assertFalse(payload["final"]["loading"])
+
+    def test_startup_loading_clears_on_failure_without_losing_collection_scope(self):
+        payload = self._initialize_search_page("failure")
+        self.assertFalse(payload["final"]["loading"])
+        self.assertFalse(payload["final"]["scopeHidden"])
+        self.assertEqual(payload["final"]["scope"], "Searching collection: Modules")
+        self.assertEqual(payload["status"], "Could not load sources: offline")
+
+    def test_startup_query_is_visible_early_and_not_replayed_over_user_edits(self):
+        for mode in ("query", "edited", "searched"):
+            with self.subTest(mode=mode):
+                payload = self._initialize_search_page(mode)
+                self.assertEqual(payload["early"]["question"], "original")
+                if mode == "query":
+                    self.assertEqual(
+                        payload["searches"], [["original", [], 0, [], "files:modules"]]
+                    )
+                elif mode == "edited":
+                    self.assertEqual(payload["final"]["question"], "new query")
+                    self.assertEqual(payload["searches"], [])
+                else:
+                    self.assertEqual(
+                        payload["searches"], [["new query", [], 0, [], "files:modules"]]
+                    )
+
     def test_library_filter_matches_word_prefixes_not_interior_substrings(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""

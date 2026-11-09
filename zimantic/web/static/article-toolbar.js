@@ -523,7 +523,7 @@
       if (!query || !zim) return false;
       const target = new URL(`${appBasePath}/`, location.href);
       target.searchParams.set("q", query);
-      target.searchParams.set("zim", zim);
+      target.searchParams.set("source", zim);
       closeZimSuggestions();
       if (window.parent !== window) {
         window.parent.postMessage({

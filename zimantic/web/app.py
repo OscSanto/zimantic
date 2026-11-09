@@ -542,6 +542,10 @@ def _article_toolbar(
                 'data-zimantic-zim-suggestions hidden></div>'
                 "</form>"
             )
+    library_search_html = "" if zim_search_html else (
+        f'<a class="zimantic-toolbar-search" href="{base_path}/" data-zimantic-action="home" '
+        'title="Search your library" data-i18n-title="Search your library">Zimantic</a>'
+    )
     source_nav_html = ""
     if source_previous is not None and source_next is not None:
         def source_button(
@@ -624,8 +628,7 @@ def _article_toolbar(
         title="Open the next link in the parent page"
         data-i18n-title="Open the next link in the parent page">↓</button>
     </span>
-    <a class="zimantic-toolbar-search" href="{base_path}/" data-zimantic-action="home"
-      title="Search your library" data-i18n-title="Search your library">Zimantic</a>
+    {library_search_html}
     {zim_search_html}
   </div>
   <span class="zimantic-toolbar-status" data-zimantic-toolbar-status aria-live="polite"></span>

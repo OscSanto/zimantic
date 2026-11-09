@@ -1908,7 +1908,7 @@
                 const toolbar = $("sourceFilterToolbar");
                 const options = $("sourceFilterOptions");
                 const status = $("sourceFilterStatus");
-                if (current || !selectedSourceKeys.size) {
+                if (current || (!selectedSourceKeys.size && !selectedCollectionKey)) {
                     if (!current) {
                         panel.hidden = true;
                         panel.classList.remove("empty-selection");
@@ -4309,6 +4309,7 @@
                         ),
                     );
                     renderSourceSelectionSummary();
+                    renderScopeLine();
                     focusButton(
                         collectionKey
                             ? `collection:${collectionKey}`
@@ -4462,7 +4463,22 @@
             });
 
             $("scopeLineReset").addEventListener("click", () => {
-                if (!current || current.searchAll) return;
+                if (!current) {
+                    setSelectedSources([]);
+                    selectedCollectionKey = null;
+                    sourceFilterShowAll = false;
+                    sourceFilterShowOther = false;
+                    history.replaceState(
+                        history.state,
+                        "",
+                        makeStateUrl("", [], 0, null, [], null),
+                    );
+                    renderSourceSelectionSummary();
+                    renderScopeLine();
+                    $("question").focus();
+                    return;
+                }
+                if (current.searchAll) return;
                 commitAutoSearchHistory();
                 setSelectedSources([]);
                 selectedCollectionKey = null;
@@ -5149,9 +5165,78 @@
                 }
             }
 
+            async function loadSearchData() {
+                collections = readCollectionCache() || [];
+                const cached = readCanonicalCache(SOURCE_CACHE_KEY);
+                if (cached) applyDiscoveryData(cached, false);
+                renderSourceSelectionSummary();
+                renderScopeLine();
+                await Promise.all([
+                    fetchCachedJson(appPath("/sources"), SOURCE_CACHE_KEY, {
+                        limit: 200,
+                    }).then((data) => {
+                        applyDiscoveryData(data.payload, false);
+                        renderScopeLine();
+                        if (data.stale) {
+                            $("status").textContent =
+                                `${t("Using cached source data; refresh failed")}: ${data.error.message}`;
+                        }
+                    }),
+                    fetchPagedJson(appPath("/collections.json"), { limit: 200 })
+                        .then((records) => {
+                            if (!records.every(isCanonicalCollectionRecord)) return;
+                            collections = records;
+                            writeJsonCache(COLLECTION_CACHE_KEY, records);
+                            renderSourceSelectionSummary();
+                            renderScopeLine();
+                        })
+                        .catch(() => {
+                            // Collection labels are optional; cached labels or
+                            // canonical keys still identify the search scope.
+                        }),
+                ]);
+            }
+
+            async function loadConfig() {
+                const configResponse = await fetch(appPath("/config"), {
+                    cache: "no-cache",
+                });
+                if (!configResponse.ok) return;
+                const config = await configResponse.json();
+                debugMode = Boolean(config.debug);
+                if (Number.isInteger(config.page_size) && config.page_size > 0) {
+                    PAGE_SIZE = config.page_size;
+                }
+                if (Array.isArray(config.stopwords)) {
+                    HIGHLIGHT_STOPWORDS = new Set(
+                        config.stopwords.map((word) => String(word)),
+                    );
+                }
+                if (
+                    Number.isInteger(config.source_filter_limit) &&
+                    config.source_filter_limit > 0
+                ) {
+                    SOURCE_FILTER_LIMIT = config.source_filter_limit;
+                }
+                if (
+                    Number.isInteger(config.collection_source_limit) &&
+                    config.collection_source_limit > 0
+                ) {
+                    COLLECTION_SOURCE_LIMIT = config.collection_source_limit;
+                }
+                if (
+                    Number.isInteger(config.max_query_length) &&
+                    config.max_query_length > 0
+                ) {
+                    MAX_QUERY_LENGTH = config.max_query_length;
+                    $("question").maxLength = MAX_QUERY_LENGTH;
+                }
+            }
+
             async function initialize() {
                 normalizePageParam();
                 const libraryView = location.pathname === appPath("/library");
+                const startupStatus = $("startupStatus");
                 if (libraryView) {
                     $("libraryFilter").value = readLibraryFilter();
                     const libraryParams = new URLSearchParams(location.search);
@@ -5166,6 +5251,8 @@
                 // Apply the URL state before the discovery fetches below: a query typed
                 // while they are in flight must keep the URL's source selection.
                 applyLocationScope(state);
+                $("question").value = state.question || "";
+                const initialSearchSequence = searchSequence;
                 $("homeHeading").setAttribute(
                     "aria-label",
                     libraryView
@@ -5190,6 +5277,11 @@
                 if (!libraryView && !state.question && !state.modal) {
                     $("question").focus();
                 }
+                if (!libraryView) {
+                    renderSourceSelectionSummary();
+                    renderScopeLine();
+                    if (startupStatus) startupStatus.hidden = false;
+                }
                 if (libraryView) {
                     const filters = currentLibraryFilters();
                     if (
@@ -5204,57 +5296,18 @@
                 // Source discovery is read-only; refreshing the index/catalog set is an
                 // admin action done only via `zimantic reload` or SIGHUP.
                 try {
-                    const configResponse = await fetch(appPath("/config"), {
-                        cache: "no-cache",
-                    });
-                    if (configResponse.ok) {
-                        const config = await configResponse.json();
-                        debugMode = Boolean(config.debug);
-                        if (Number.isInteger(config.page_size) && config.page_size > 0) {
-                            PAGE_SIZE = config.page_size;
-                        }
-                        if (Array.isArray(config.stopwords)) {
-                            HIGHLIGHT_STOPWORDS = new Set(
-                                config.stopwords.map((word) => String(word)),
-                            );
-                        }
-                        if (
-                            Number.isInteger(config.source_filter_limit) &&
-                            config.source_filter_limit > 0
-                        ) {
-                            SOURCE_FILTER_LIMIT = config.source_filter_limit;
-                        }
-                        if (
-                            Number.isInteger(config.collection_source_limit) &&
-                            config.collection_source_limit > 0
-                        ) {
-                            COLLECTION_SOURCE_LIMIT = config.collection_source_limit;
-                        }
-                        if (
-                            Number.isInteger(config.max_query_length) &&
-                            config.max_query_length > 0
-                        ) {
-                            MAX_QUERY_LENGTH = config.max_query_length;
-                            $("question").maxLength = MAX_QUERY_LENGTH;
-                        }
-                    }
                     if (libraryView) {
+                        await loadConfig();
                         await loadLibraryData({ reset: false });
                     } else {
-                        const data = await fetchCachedJson(
-                            appPath("/sources"),
-                            SOURCE_CACHE_KEY,
-                        );
-                        applyDiscoveryData(data.payload, false);
-                        if (data.stale) {
-                            $("status").textContent =
-                                `${t("Using cached source data; refresh failed")}: ${data.error.message}`;
-                        }
+                        await Promise.all([loadConfig(), loadSearchData()]);
                     }
                 } catch (error) {
                     const target = libraryView ? $("libraryStatus") : $("status");
                     target.textContent =
                         `${t("Could not load")} ${libraryView ? t("library") : t("sources")}: ${error.message}`;
+                } finally {
+                    if (startupStatus) startupStatus.hidden = true;
                 }
                 if (!libraryView && sources.length) {
                     const known = new Set(sources.map((source) => source.key));
@@ -5293,8 +5346,11 @@
                 } else if (libraryView) {
                     syncLibraryInfo(history.state?.zimanticLibraryInfo || null);
                 }
-                if (state.question) {
-                    $("question").value = state.question;
+                if (
+                    state.question &&
+                    searchSequence === initialSearchSequence &&
+                    $("question").value === state.question
+                ) {
                     if (!invalidScope) {
                         const knownNow = new Set(
                             (libraryView ? [] : sources).map((source) => source.key),

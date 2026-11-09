@@ -101,6 +101,37 @@ console.log(JSON.stringify(calls));
             [],
         )
 
+    def test_toolbar_search_navigates_with_canonical_source_scope(self):
+        toolbar = _inline_script(web_app.ARTICLE_TOOLBAR_SCRIPT)
+        search_source = _section(
+            toolbar, "const openZimSearchPage = () =>", "const requestZimSuggestions"
+        )
+        key = "zim:library:rus.stackexchange.com_mul_all_2024-11-6984002a4812c270"
+        for framed in (False, True):
+            with self.subTest(framed=framed):
+                script = f"""
+const location = new URL("http://example.test/zimantic/content/manual/questions");
+const appBasePath = "/zimantic";
+const messages = [];
+const window = {{}};
+window.parent = {(" {postMessage: data => messages.push(data)}" if framed else "window")};
+const zimSearchInput = {{value: " tel "}};
+const zimSearchForm = {{dataset: {{zimanticZim: {json.dumps(key)}}}}};
+const closeZimSuggestions = () => {{}};
+{search_source}
+const opened = openZimSearchPage();
+console.log(JSON.stringify({{opened, url: messages[0]?.url || location.href, messages}}));
+"""
+                payload = _run_node(script)
+                self.assertTrue(payload["opened"])
+                self.assertEqual(
+                    payload["url"],
+                    "http://example.test/zimantic/?q=tel&source="
+                    "zim%3Alibrary%3Arus.stackexchange.com_mul_all_2024-11-6984002a4812c270",
+                )
+                if framed:
+                    self.assertEqual(payload["messages"][0]["type"], "zimantic-app-navigate")
+
     def _bridge_clicks(self):
         script = f"""
 const calls = [];
