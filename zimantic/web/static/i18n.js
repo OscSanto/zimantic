@@ -60,6 +60,8 @@
             "Provider": "Proveedor",
             "Filter by provider": "Filtrar por proveedor",
             "All providers": "Todos los proveedores",
+            "Filter by language": "Filtrar por idioma",
+            "All languages": "Todos los idiomas",
             "Content type": "Tipo de contenido",
             "Filter by content type": "Filtrar por tipo de contenido",
             "All content": "Todo el contenido",

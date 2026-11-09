@@ -28,6 +28,7 @@ from .listing import (
     filter_collections,
     filter_sources,
     validate_collection,
+    validate_language,
     validate_media_type,
     validate_provider,
 )
@@ -497,12 +498,14 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         snapshot: dict,
         provider: str | None,
         media_type: str | None,
+        language: str | None,
         collection: str | None,
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         try:
             return (
                 validate_provider(provider),
                 validate_media_type(media_type),
+                validate_language(language),
                 validate_collection(collection, _known_collections(snapshot)),
             )
         except ValueError as error:
@@ -515,6 +518,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         *,
         providers_filter: str | None,
         media_type: str | None,
+        language: str | None,
         collection: str | None,
         query: str | None,
         limit: int | None,
@@ -533,13 +537,14 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             records,
             provider=providers_filter,
             media_type=media_type,
+            language=language,
             collection=collection,
             query=query,
             collections=snapshot.get("collections") or (),
             order=source_order,
         )
         cacheable = not any(
-            (providers_filter, media_type, collection, query)
+            (providers_filter, media_type, language, collection, query)
         )
         default_page = int(getattr(search_class, "page_size", 10) or 10)
         return paged_json_response(
@@ -559,13 +564,14 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         request: Request,
         provider: str | None = Query(default=None),
         media_type: str | None = Query(default=None),
+        language: str | None = Query(default=None, max_length=64),
         q: str | None = Query(default=None, max_length=4096),
         limit: int | None = Query(default=None, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ):
         snapshot = _capture_listing()
-        provider_filter, media_filter, _collection = _validate_listing_filters(
-            snapshot, provider, media_type, None
+        provider_filter, media_filter, language_filter, _collection = (
+            _validate_listing_filters(snapshot, provider, media_type, language, None)
         )
         members = snapshot.get("library") or snapshot.get("sources") or []
         snapshot_token = _token_string(
@@ -576,9 +582,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             members,
             provider=provider_filter,
             media_type=media_filter,
+            language=language_filter,
             query=q or None,
         )
-        cacheable = not any((provider_filter, media_filter, q))
+        cacheable = not any((provider_filter, media_filter, language_filter, q))
         default_page = int(getattr(search_class, "page_size", 10) or 10)
         return paged_json_response(
             request,
@@ -597,14 +604,15 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         request: Request,
         provider: str | None = Query(default=None),
         media_type: str | None = Query(default=None),
+        language: str | None = Query(default=None, max_length=64),
         collection: str | None = Query(default=None),
         q: str | None = Query(default=None, max_length=4096),
         limit: int | None = Query(default=None, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ):
         snapshot = _capture_listing()
-        provider_filter, media_filter, collection_filter = _validate_listing_filters(
-            snapshot, provider, media_type, collection
+        provider_filter, media_filter, language_filter, collection_filter = (
+            _validate_listing_filters(snapshot, provider, media_type, language, collection)
         )
         version_of = getattr(search_class, "source_version", None)
         version = version_of() if callable(version_of) else 0
@@ -614,6 +622,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             snapshot.get("sources") or [],
             providers_filter=provider_filter,
             media_type=media_filter,
+            language=language_filter,
             collection=collection_filter,
             query=q or None,
             limit=limit,
@@ -628,14 +637,15 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         request: Request,
         provider: str | None = Query(default=None),
         media_type: str | None = Query(default=None),
+        language: str | None = Query(default=None, max_length=64),
         collection: str | None = Query(default=None),
         q: str | None = Query(default=None, max_length=4096),
         limit: int | None = Query(default=None, ge=1, le=1000),
         offset: int = Query(default=0, ge=0),
     ):
         snapshot = _capture_listing()
-        provider_filter, media_filter, collection_filter = _validate_listing_filters(
-            snapshot, provider, media_type, collection
+        provider_filter, media_filter, language_filter, collection_filter = (
+            _validate_listing_filters(snapshot, provider, media_type, language, collection)
         )
         version_of = getattr(search_class, "library_version", None)
         version = version_of() if callable(version_of) else 0
@@ -645,6 +655,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             snapshot.get("library") or [],
             providers_filter=provider_filter,
             media_type=media_filter,
+            language=language_filter,
             collection=collection_filter,
             query=q or None,
             limit=limit,

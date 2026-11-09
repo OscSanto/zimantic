@@ -16,6 +16,44 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
+    def test_library_language_options_use_discovered_codes_and_preserve_selection(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+class Node {{
+  constructor() {{ this.children = []; this.dataset = {{}}; this.value = ""; }}
+  appendChild(child) {{ this.children.push(child); }}
+  replaceChildren() {{ this.children = []; }}
+}}
+const document = {{createElement: () => new Node()}};
+const elements = {{libraryLanguageFilter: new Node()}};
+const $ = (id) => elements[id];
+const t = (text) => text;
+const libraryLanguageOptions = new Set();
+let librarySources = [{{language: "eng,spa"}}, {{language: "fra"}}];
+const sortLibrarySources = (records) => records;
+{_function_source(source, "function libraryLanguageCodes(", "function infoUrl(")}
+{_function_source(source, "function renderLibraryLanguageOptions()", "function renderLibrary()")}
+{_function_source(source, "function refreshLibraryLanguageOptions()", "function restoreLibraryCache()")}
+setLibraryLanguageFilter("eng");
+refreshLibraryLanguageOptions();
+const initial = {{
+  selected: elements.libraryLanguageFilter.value,
+  options: elements.libraryLanguageFilter.children.map((option) => [option.value, option.textContent]),
+}};
+setLibraryLanguageFilter("fra");
+console.log(JSON.stringify({{initial, selected: elements.libraryLanguageFilter.value}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["initial"]["selected"], "eng")
+        self.assertEqual(
+            payload["initial"]["options"],
+            [["", "All languages"], ["eng", "ENG"], ["fra", "FRA"], ["spa", "SPA"]],
+        )
+        self.assertEqual(payload["selected"], "fra")
+
     def test_library_renders_all_loaded_sources_and_filters_source_media(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -31,7 +69,8 @@ const document = {{createElement: () => new Node()}};
 const elements = {{
   libraryGrid: new Node(), libraryStatus: new Node(),
   libraryScopeLine: new Node(), libraryScopeLineText: new Node(),
-  libraryFilter: {{value: ""}}, libraryProviderFilter: {{value: ""}}, libraryMediaFilter: {{value: ""}},
+  libraryFilter: {{value: ""}}, libraryProviderFilter: {{value: ""}},
+  libraryMediaFilter: {{value: ""}}, libraryLanguageFilter: {{value: ""}},
 }};
 const $ = (id) => elements[id];
 const t = (text) => text;
@@ -43,6 +82,8 @@ const formatLibrarySize = (bytes) => `${{Math.round(Number(bytes) / 1024 / 1024)
 const libraryLanguage = (source) => String(source.language || "").toUpperCase();
 const librarySearchText = (source) => source.key;
 const collectionDisplayName = (collection) => collection.title;
+const libraryLanguageCodes = (source) =>
+  String(source?.language || "").split(",").map((part) => part.trim().toLowerCase()).filter(Boolean);
 const collections = [
   {{key: "small", title: "Small", provider: "files", source_count: 766}},
   {{key: "large", title: "Large", provider: "files", source_count: 1001, media_types: ["other"]}},
@@ -51,7 +92,8 @@ const libraryCollections = collections;
 const makeSources = (count, media) => Array.from({{length: count}}, (_, i) => ({{
   key: `${{media}}-${{i}}`, provider: "files", media_types: [media],
   collection: {{label: `${{media}} collection`}},
-  language: "eng", date: "2025-08-27", size: 109 * 1024 * 1024, item_count: 34448,
+  language: i === 1 ? "fra" : "eng", date: "2025-08-27",
+  size: 109 * 1024 * 1024, item_count: 34448,
 }}));
 const small = makeSources(766, "text"), large = makeSources(1001, "video");
 const libraryCollectionPages = new Map([
@@ -85,7 +127,8 @@ libraryCollectionPages.set("large", {{sources: large, total: 1001, hasMore: fals
 renderLibrary();
 const appended = summarize();
 elements.libraryMediaFilter.value = "video";
-libraryCollectionPages.set("large", {{sources: large.slice(0, 1), total: 11, hasMore: true}});
+elements.libraryLanguageFilter.value = "eng";
+libraryCollectionPages.set("large", {{sources: large.slice(0, 2), total: 11, hasMore: true}});
 renderLibrary();
 console.log(JSON.stringify({{
   initial, initiallyHidden, reusedCard, loadingDisabled, appended, filtered: summarize(),
@@ -105,12 +148,16 @@ console.log(JSON.stringify({{
             payload["initial"][1]["buttons"], ["Search collection", "Load more sources"]
         )
         self.assertEqual(payload["initial"][1]["meta"], "Files · 1,001 sources")
-        self.assertEqual(payload["initial"][1]["collection"], "Files · video collection")
+        self.assertEqual(
+            payload["initial"][1]["collection"], "Files · video collection"
+        )
         self.assertEqual(
             payload["initial"][1]["details"],
             "ENG · 2025-08-27\n34,448 items · 109 MB",
         )
-        self.assertEqual(payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources.")
+        self.assertEqual(
+            payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources."
+        )
         self.assertTrue(payload["loadingDisabled"])
         self.assertTrue(payload["reusedCard"])
         self.assertEqual(payload["appended"][1]["count"], 1001)
@@ -120,18 +167,22 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["filtered"][0]["meta"], "Files · 11 sources")
         self.assertTrue(payload["initiallyHidden"])
         self.assertFalse(payload["scopeHidden"])
-        self.assertEqual(payload["scopeText"], "Filtered by: Content type: Video")
+        self.assertEqual(payload["filtered"][0]["count"], 1)
+        self.assertEqual(
+            payload["scopeText"],
+            "Filtered by: Content type: Video · Language: ENG",
+        )
         self.assertEqual(payload["status"], "1 collection · 1 loaded source")
         self.assertEqual(payload["placeholder"], "Filter 1 source")
 
     def test_library_scope_reset_clears_all_filters_and_pending_reload(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
-const location = new URL("http://example.test/library?keep=1&filter=old&provider=zim&media=audio");
+const location = new URL("http://example.test/library?keep=1&filter=old&provider=zim&media=audio&language=fra");
 const elements = {{
   libraryScopeLine: {{hidden: true}}, libraryScopeLineText: {{textContent: ""}},
   libraryFilter: {{value: " Trees "}}, libraryProviderFilter: {{value: "files"}},
-  libraryMediaFilter: {{value: "video"}},
+  libraryMediaFilter: {{value: "video"}}, libraryLanguageFilter: {{value: "fra"}},
 }};
 const $ = (id) => elements[id];
 const appPath = (path) => path;
@@ -157,7 +208,9 @@ resetLibraryFilters();
 console.log(JSON.stringify({{
   active, reset: {{
     hidden: elements.libraryScopeLine.hidden, text: elements.libraryScopeLineText.textContent,
-    values: ["libraryFilter", "libraryProviderFilter", "libraryMediaFilter"].map((id) => elements[id].value),
+    values: [
+      "libraryFilter", "libraryProviderFilter", "libraryMediaFilter", "libraryLanguageFilter",
+    ].map((id) => elements[id].value),
     params: Object.fromEntries(location.searchParams), reloads, timers: timers.size, libraryFilterTimer,
   }},
 }}));
@@ -169,11 +222,17 @@ console.log(JSON.stringify({{
         self.assertFalse(payload["active"]["hidden"])
         self.assertEqual(
             payload["active"]["text"],
-            "Filtered by: Provider: Files · Content type: Video · Filter: Trees",
+            "Filtered by: Provider: Files · Content type: Video · Language: FRA · Filter: Trees",
         )
         self.assertEqual(
             payload["active"]["params"],
-            {"keep": "1", "filter": "Trees", "provider": "files", "media": "video"},
+            {
+                "keep": "1",
+                "filter": "Trees",
+                "provider": "files",
+                "media": "video",
+                "language": "fra",
+            },
         )
         self.assertEqual(payload["active"]["reloads"], 0)
         self.assertEqual(payload["active"]["timers"], 1)
@@ -182,7 +241,7 @@ console.log(JSON.stringify({{
             {
                 "hidden": True,
                 "text": "",
-                "values": ["", "", ""],
+                "values": ["", "", "", ""],
                 "params": {"keep": "1"},
                 "reloads": 1,
                 "timers": 0,
@@ -197,7 +256,7 @@ const location = new URL("http://example.test/library");
 const PAGE_SIZE = 10, COLLECTION_SOURCE_LIMIT = 1000;
 const libraryCollectionPages = new Map();
 const collectionByKey = (key) => ({{key}});
-const currentLibraryFilters = () => ({{media: "text"}});
+const currentLibraryFilters = () => ({{media: "text", language: "eng"}});
 const renderLibrary = () => {{}};
 const refreshLibrarySourceList = () => {{}};
 const isCanonicalSourceRecord = (record) => Boolean(record.key);
@@ -208,7 +267,7 @@ const requests = [];
 const fetch = async (url) => {{
   const limit = Number(url.searchParams.get("limit"));
   const offset = Number(url.searchParams.get("offset"));
-  requests.push({{limit, offset, media: url.searchParams.get("media_type")}});
+  requests.push({{limit, offset, media: url.searchParams.get("media_type"), language: url.searchParams.get("language")}});
   const items = records.slice(offset, offset + limit);
   return {{
     ok: true, json: async () => items,
@@ -244,7 +303,12 @@ const fetch = async (url) => {{
         self.assertFalse(payload["hasMore"])
         self.assertEqual([item["offset"] for item in payload["requests"]], [0, 1000, 0, 1000])
         self.assertTrue(
-            all(item["limit"] == 1000 and item["media"] == "text" for item in payload["requests"])
+            all(
+                item["limit"] == 1000
+                and item["media"] == "text"
+                and item["language"] == "eng"
+                for item in payload["requests"]
+            )
         )
 
     def test_library_cache_renders_before_fetch_and_revalidates_without_clearing_cards(self):
@@ -254,13 +318,18 @@ const PAGE_SIZE = 10, COLLECTION_SOURCE_LIMIT = 1000;
 const COLLECTION_CACHE_KEY = "collections", LIBRARY_PAGE_CACHE_KEY = "pages";
 const libraryCollectionPages = new Map();
 let collections = [], libraryCollections = [], librarySources = [], libraryLoadSequence = 0;
-let filters = {{provider: "", media: "", q: ""}};
+let filters = {{provider: "", media: "", language: "", q: ""}};
+const libraryLanguageOptions = new Set();
 const elements = {{
   libraryProviderFilter: {{value: ""}}, libraryMediaFilter: {{value: ""}},
+  libraryLanguageFilter: {{value: ""}},
   libraryStatus: {{textContent: ""}},
 }};
 const $ = (id) => elements[id];
 const t = (text) => text;
+const libraryLanguageCodes = (source) =>
+  String(source?.language || "").split(",").map((part) => part.trim().toLowerCase()).filter(Boolean);
+const renderLibraryLanguageOptions = () => {{}};
 const libraryFilterTerms = () => filters.q;
 const appPath = (path) => path;
 const sortLibrarySources = (records) => records;
@@ -380,6 +449,7 @@ const elements = {{
   libraryFilter: {{value: "", placeholder: ""}},
   libraryProviderFilter: {{value: ""}},
   libraryMediaFilter: {{value: ""}},
+  libraryLanguageFilter: {{value: ""}},
 }};
 const $ = (id) => elements[id] || null;
 const document = {{createElement: () => ({{}})}};

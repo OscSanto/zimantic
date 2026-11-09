@@ -111,6 +111,7 @@
             let collections = [];
             let libraryCollections = [];
             const libraryCollectionPages = new Map();
+            const libraryLanguageOptions = new Set();
             let libraryCardCache = new WeakMap();
             const libraryCollectionRefreshes = new Map();
             let libraryLoadSequence = 0;
@@ -390,6 +391,13 @@
                 if (!parts.length) return "";
                 if (join) return parts.join(", ");
                 return parts.length > 1 ? "MUL" : parts[0].toUpperCase();
+            }
+
+            function libraryLanguageCodes(source) {
+                return String(source?.language || "")
+                    .split(",")
+                    .map((part) => part.trim().toLocaleLowerCase())
+                    .filter(Boolean);
             }
 
             function infoUrl(value) {
@@ -770,10 +778,17 @@
                 return cached;
             }
 
-            function listingParams({ provider = "", media = "", q = "", collection = "" } = {}) {
+            function listingParams({
+                provider = "",
+                media = "",
+                language = "",
+                q = "",
+                collection = "",
+            } = {}) {
                 const params = new URLSearchParams();
                 if (provider) params.set("provider", provider);
                 if (media) params.set("media_type", media);
+                if (language) params.set("language", language);
                 if (q) params.set("q", q);
                 if (collection) params.set("collection", collection);
                 return params;
@@ -786,6 +801,7 @@
                     offset = 0,
                     provider = "",
                     media = "",
+                    language = "",
                     q = "",
                     collection = "",
                 } = {},
@@ -796,6 +812,7 @@
                 for (const [key, value] of listingParams({
                     provider,
                     media,
+                    language,
                     q,
                     collection,
                 })) {
@@ -876,6 +893,7 @@
                     $("libraryProviderFilter")?.value || null,
                 );
                 replaceQueryParam("media", $("libraryMediaFilter")?.value || null);
+                replaceQueryParam("language", $("libraryLanguageFilter")?.value || null);
             }
 
             function scheduleLibraryReload() {
@@ -892,6 +910,7 @@
                 $("libraryFilter").value = "";
                 $("libraryProviderFilter").value = "";
                 $("libraryMediaFilter").value = "";
+                $("libraryLanguageFilter").value = "";
                 clearTimeout(libraryFilterTimer);
                 libraryFilterTimer = null;
                 updateLibraryFilterUrl();
@@ -1074,6 +1093,7 @@
                 const query = libraryFilterTerms();
                 const provider = $("libraryProviderFilter")?.value || "";
                 const media = $("libraryMediaFilter")?.value || "";
+                const language = $("libraryLanguageFilter")?.value || "";
                 const orderedCollections =
                     libraryCollections.length || collections.length
                         ? libraryCollections.length
@@ -1099,6 +1119,12 @@
                                 ? source.media_types
                                 : []
                             ).includes(media)
+                        ) {
+                            return false;
+                        }
+                        if (
+                            language &&
+                            !libraryLanguageCodes(source).includes(language)
                         ) {
                             return false;
                         }
@@ -1129,14 +1155,18 @@
                         key,
                         collection,
                         state,
-                        members: state.sources,
+                        members: state.sources.filter(
+                            (source) =>
+                                !language ||
+                                libraryLanguageCodes(source).includes(language),
+                        ),
                         collectionMatches: true,
                     });
                 }
                 return views.filter((view) => {
-                    if (!query && !provider && !media) return true;
+                    if (!query && !provider && !media && !language) return true;
                     if (view.collectionMatches) {
-                        if (!provider && !media) return true;
+                        if (!provider && !media && !language) return true;
                         if (
                             provider &&
                             view.collection?.provider &&
@@ -1144,7 +1174,7 @@
                         ) {
                             return false;
                         }
-                        if (media) {
+                        if (media || language) {
                             return view.members.length > 0 || !view.state || view.state.loading;
                         }
                         return true;
@@ -1184,12 +1214,16 @@
                 const filters = [];
                 const provider = $("libraryProviderFilter")?.value || "";
                 const media = $("libraryMediaFilter")?.value || "";
+                const language = $("libraryLanguageFilter")?.value || "";
                 const query = $("libraryFilter")?.value.trim() || "";
                 if (provider) {
                     filters.push(`${t("Provider")}: ${providerLabel(provider)}`);
                 }
                 if (media) {
                     filters.push(`${t("Content type")}: ${mediaTypeLabels([media]).join("")}`);
+                }
+                if (language) {
+                    filters.push(`${t("Language")}: ${language.toUpperCase()}`);
                 }
                 if (query) {
                     filters.push(`${t("Filter")}: ${query}`);
@@ -1198,6 +1232,33 @@
                 text.textContent = filters.length
                     ? `${t("Filtered by")}: ${filters.join(" · ")}`
                     : "";
+            }
+
+            function renderLibraryLanguageOptions() {
+                const select = $("libraryLanguageFilter");
+                if (!select) return;
+                const selected = select.value || "";
+                select.replaceChildren();
+                const allLanguages = document.createElement("option");
+                allLanguages.value = "";
+                allLanguages.textContent = t("All languages");
+                allLanguages.dataset.i18n = "All languages";
+                select.appendChild(allLanguages);
+                for (const language of [...libraryLanguageOptions].sort()) {
+                    const option = document.createElement("option");
+                    option.value = language;
+                    option.textContent = language.toUpperCase();
+                    select.appendChild(option);
+                }
+                select.value = selected;
+            }
+
+            function setLibraryLanguageFilter(value) {
+                const language = String(value || "").trim().toLocaleLowerCase();
+                if (language) libraryLanguageOptions.add(language);
+                renderLibraryLanguageOptions();
+                const select = $("libraryLanguageFilter");
+                if (select) select.value = language;
             }
 
             function renderLibrary() {
@@ -1218,7 +1279,8 @@
                 const hasFilters = Boolean(
                     libraryFilterTerms() ||
                         $("libraryProviderFilter")?.value ||
-                        $("libraryMediaFilter")?.value,
+                        $("libraryMediaFilter")?.value ||
+                        $("libraryLanguageFilter")?.value,
                 );
                 if (!views.length) {
                     status.textContent = hasFilters
@@ -4051,8 +4113,10 @@
                     if (filter) url.searchParams.set("filter", filter);
                     const provider = $("libraryProviderFilter")?.value || "";
                     const media = $("libraryMediaFilter")?.value || "";
+                    const language = $("libraryLanguageFilter")?.value || "";
                     if (provider) url.searchParams.set("provider", provider);
                     if (media) url.searchParams.set("media", media);
+                    if (language) url.searchParams.set("language", language);
                 }
                 return url.pathname + url.search;
             }
@@ -4330,6 +4394,7 @@
             $("libraryFilter").addEventListener("input", scheduleLibraryReload);
             $("libraryProviderFilter").addEventListener("change", scheduleLibraryReload);
             $("libraryMediaFilter").addEventListener("change", scheduleLibraryReload);
+            $("libraryLanguageFilter").addEventListener("change", scheduleLibraryReload);
             $("libraryScopeLineReset").addEventListener("click", resetLibraryFilters);
             $("libraryShuffle").addEventListener("click", shuffleLibrary);
 
@@ -4717,13 +4782,16 @@
                     const filter = readLibraryFilter();
                     const provider = params.get("provider") || "";
                     const media = params.get("media") || "";
+                    const language = params.get("language") || "";
                     const changed =
                         $("libraryFilter").value !== filter ||
                         $("libraryProviderFilter").value !== provider ||
-                        $("libraryMediaFilter").value !== media;
+                        $("libraryMediaFilter").value !== media ||
+                        $("libraryLanguageFilter").value !== language;
                     $("libraryFilter").value = filter;
                     $("libraryProviderFilter").value = provider;
                     $("libraryMediaFilter").value = media;
+                    setLibraryLanguageFilter(language);
                     if (changed) loadLibraryData();
                 }
                 const state = readLocationState();
@@ -4788,6 +4856,7 @@
                     // homepage are also kept; the card can offer a random
                     // article when the source is searchable.
                     librarySources = sortLibrarySources(payload);
+                    refreshLibraryLanguageOptions();
                     renderLibrary();
                 } else {
                     sources = payload;
@@ -4813,8 +4882,18 @@
                 return {
                     provider: $("libraryProviderFilter")?.value || "",
                     media: $("libraryMediaFilter")?.value || "",
+                    language: $("libraryLanguageFilter")?.value || "",
                     q: libraryFilterTerms(),
                 };
+            }
+
+            function refreshLibraryLanguageOptions() {
+                for (const source of librarySources) {
+                    for (const language of libraryLanguageCodes(source)) {
+                        libraryLanguageOptions.add(language);
+                    }
+                }
+                renderLibraryLanguageOptions();
             }
 
             function refreshLibrarySourceList() {
@@ -4823,6 +4902,7 @@
                         (state) => state.sources,
                     ),
                 );
+                refreshLibraryLanguageOptions();
             }
 
             function restoreLibraryCache() {
@@ -4944,7 +5024,9 @@
             async function loadLibraryData({ reset = true } = {}) {
                 const sequence = ++libraryLoadSequence;
                 const filters = currentLibraryFilters();
-                const filtered = Boolean(filters.provider || filters.media || filters.q);
+                const filtered = Boolean(
+                    filters.provider || filters.media || filters.language || filters.q,
+                );
                 if (reset) {
                     libraryCollectionPages.clear();
                     librarySources = [];
@@ -4989,6 +5071,7 @@
                         }
                         if (!filtered) writeJsonCache(LIBRARY_CACHE_KEY, fallback);
                         librarySources = sortLibrarySources(fallback);
+                        refreshLibraryLanguageOptions();
                         renderLibrary();
                     }
                     if (sequence === libraryLoadSequence && !filtered) {
@@ -5023,6 +5106,7 @@
                         libraryParams.get("provider") || "";
                     $("libraryMediaFilter").value =
                         libraryParams.get("media") || "";
+                    setLibraryLanguageFilter(libraryParams.get("language") || "");
                 }
                 const state = readLocationState();
                 let invalidScope = false;
@@ -5055,7 +5139,12 @@
                 }
                 if (libraryView) {
                     const filters = currentLibraryFilters();
-                    if (!filters.provider && !filters.media && !filters.q) {
+                    if (
+                        !filters.provider &&
+                        !filters.media &&
+                        !filters.language &&
+                        !filters.q
+                    ) {
                         restoreLibraryCache();
                     }
                 }

@@ -30,6 +30,13 @@ def validate_media_type(value: str | None) -> str | None:
     return value
 
 
+def validate_language(value: str | None) -> str | None:
+    if value is None:
+        return None
+    language = value.strip().casefold()
+    return language or None
+
+
 def validate_collection(
     value: str | None, known_collections: Iterable[str]
 ) -> str | None:
@@ -76,6 +83,7 @@ def _matches_source(
     *,
     provider: str | None,
     media_type: str | None,
+    language: str | None,
     collection_key: str | None,
     query: str | None,
     collection_record: Mapping[str, Any] | None = None,
@@ -85,6 +93,14 @@ def _matches_source(
     if media_type is not None:
         families = source.get("media_types")
         if not isinstance(families, (list, tuple)) or media_type not in families:
+            return False
+    if language is not None:
+        languages = {
+            part.strip().casefold()
+            for part in str(source.get("language") or "").split(",")
+            if part.strip()
+        }
+        if language not in languages:
             return False
     if collection_key is not None:
         record = source.get("collection")
@@ -111,6 +127,7 @@ def filter_sources(
     *,
     provider: str | None = None,
     media_type: str | None = None,
+    language: str | None = None,
     collection: str | None = None,
     query: str | None = None,
     collections: Iterable[Mapping[str, Any]] = (),
@@ -133,6 +150,7 @@ def filter_sources(
             source,
             provider=provider,
             media_type=media_type,
+            language=language,
             collection_key=collection,
             query=query,
             collection_record=descriptors.get(collection_key or ""),
@@ -156,6 +174,7 @@ def filter_collections(
     *,
     provider: str | None = None,
     media_type: str | None = None,
+    language: str | None = None,
     query: str | None = None,
 ) -> list[dict[str, Any]]:
     """Filter collections using their full discovered member set.
@@ -184,6 +203,7 @@ def filter_collections(
                     member,
                     provider=provider,
                     media_type=media_type,
+                    language=language,
                     collection_key=None,
                     query=query,
                     collection_record=record,
@@ -194,6 +214,7 @@ def filter_collections(
             matched = (
                 (provider is None or record.get("provider") == provider)
                 and media_type is None
+                and language is None
                 and _matches_text(record, query)
             )
         if matched:
@@ -205,6 +226,7 @@ __all__ = [
     "filter_collections",
     "filter_sources",
     "validate_collection",
+    "validate_language",
     "validate_media_type",
     "validate_provider",
 ]

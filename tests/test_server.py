@@ -50,6 +50,7 @@ class FakeSearch:
             "homepage": "Main_Page",
             "description": "Manual description",
             "media_types": ["text"],
+            "language": "eng",
             "provider_id": "00000000-0000-0000-0000-000000000001",
         }]
 
@@ -267,6 +268,7 @@ class ServerTests(unittest.TestCase):
             params={
                 "provider": "zim",
                 "media_type": "text",
+                "language": "ENG",
                 "collection": "zim:library",
                 "q": "manual",
             },
@@ -276,10 +278,18 @@ class ServerTests(unittest.TestCase):
 
         collections = self.client.get(
             "/collections.json",
-            params={"provider": "zim", "media_type": "text", "q": "library"},
+            params={
+                "provider": "zim",
+                "media_type": "text",
+                "language": "eng",
+                "q": "library",
+            },
         )
         self.assertEqual(collections.status_code, 200)
         self.assertEqual([item["key"] for item in collections.json()], ["zim:library"])
+        unmatched = self.client.get("/library.json", params={"language": "fra"})
+        self.assertEqual(unmatched.status_code, 200)
+        self.assertEqual(unmatched.json(), [])
 
     def test_listing_filters_reject_unknown_values(self):
         for path, params in (
