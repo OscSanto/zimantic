@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 from libzim.reader import Archive
@@ -50,12 +51,48 @@ class _Page(Item):
 
 
 def _create_zim(path: Path, *, main_path: str = "Alpha") -> None:
-    creator = Creator(path)
-    creator.config_indexing(True, "eng")
-    creator.set_mainpath(main_path)
-    with creator:
-        creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
-        creator.add_item(_Page("Beta", "Beta", ALPHA_HTML))
+    # libzim can leave temporary Xapian indexes behind on Windows.
+    with TemporaryDirectory(dir=path.parent) as tmp:
+        archive = Path(tmp) / path.name
+        creator = Creator(archive)
+        creator.config_indexing(True, "eng")
+        creator.set_mainpath(main_path)
+        with creator:
+            creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+            creator.add_item(_Page("Beta", "Beta", ALPHA_HTML))
+        del creator
+        archive.replace(path)
+
+
+def test_create_zim_cleans_up_writer_artifacts(tmp_path, monkeypatch):
+    real_creator = Creator
+
+    class CreatorWithArtifacts:
+        def __init__(self, path):
+            self.path = path
+            self.creator = real_creator(path)
+
+        def __getattr__(self, name):
+            return getattr(self.creator, name)
+
+        def __enter__(self):
+            return self.creator.__enter__()
+
+        def __exit__(self, *args):
+            result = self.creator.__exit__(*args)
+            for suffix in ("_fulltext.idx.tmp", "_title.idx.tmp"):
+                directory = Path(str(self.path) + suffix)
+                directory.mkdir(exist_ok=True)
+                (directory / "docdata.glass").write_bytes(b"temporary index")
+            return result
+
+    monkeypatch.setattr(__name__ + ".Creator", CreatorWithArtifacts)
+    root = tmp_path / "archives"
+    root.mkdir()
+    path = root / "book.zim"
+    _create_zim(path)
+    assert list(root.iterdir()) == [path]
+    assert Archive(path).has_fulltext_index
 
 
 @pytest.mark.skipif(not hasattr(Archive, "iter_efficient"), reason="requires libzim 4.1")
@@ -505,7 +542,17 @@ def test_catalog_schema_has_no_zim_specific_tables(tmp_path):
     assert not any(name.startswith("zims_") for name in indexes)
 
 
-def test_source_media_types_come_from_the_mime_counter():
+@pytest.mark.parametrize(
+    ("counter", "expected"),
+    [
+        ("text/html=3;image/png=2;video/mp4=1", ("text", "video", "image")),
+        (
+            "text/html=25;video/webm=24;text/vtt=544;image/webp=42",
+            ("video", "image"),
+        ),
+    ],
+)
+def test_source_media_types_come_from_the_mime_counter(counter, expected):
     from zimantic.catalog import SourceRecord
     from zimantic.providers.zim.metadata import source_info_from_record
 
@@ -532,7 +579,7 @@ def test_source_media_types_come_from_the_mime_counter():
         origin="",
         attribution="",
         relation="",
-        mime_counts="text/html=3;image/png=2;video/mp4=1",
+        mime_counts=counter,
         homepage="Alpha",
         native_fulltext_available=1,
         icon_data=None,
@@ -548,10 +595,29 @@ def test_source_media_types_come_from_the_mime_counter():
         icon_url=None,
         searchable=True,
     )
-    assert source.media_types == ("text", "video", "image")
+    assert source.media_types == expected
     payload = source.to_dict(include_metadata=True)
-    assert payload["media_types"] == ["text", "video", "image"]
+    assert payload["media_types"] == list(expected)
     assert "path" not in payload
+
+
+@pytest.mark.parametrize(
+    ("counter", "expected"),
+    [
+        ("text/html=4;video/mp4=1;audio/mpeg=1", ("video", "audio")),
+        ("text/html=5;video/mp4=1;audio/mpeg=1", ("text", "video", "audio")),
+        ("application/xhtml+xml=2;application/pdf=2;video/mp4=2", ("video",)),
+        ("text/plain=100;text/markdown=2;video/mp4=1", ("text", "video")),
+        ("text/vtt=500;text/css=2;video/mp4=5", ("video",)),
+        ("text/html=unknown;video/mp4=5", ("text", "video")),
+        ("text/html=1;video/mp4=unknown", ("text", "video")),
+        ("text/html=1;video/mp4=0", ("text", "video")),
+    ],
+)
+def test_zim_media_types_use_document_and_audiovisual_counts(counter, expected):
+    from zimantic.media_types import classify_mime_counts
+
+    assert classify_mime_counts(counter) == expected
 
 
 def test_key_collision_warns_with_relative_paths_only(tmp_path, monkeypatch, caplog):

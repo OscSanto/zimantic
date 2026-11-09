@@ -112,6 +112,7 @@
             let libraryCollections = [];
             const libraryCollectionPages = new Map();
             const libraryLanguageOptions = new Set();
+            const libraryLanguageDisplayNames = new Map();
             let libraryCardCache = new WeakMap();
             const libraryCollectionRefreshes = new Map();
             let libraryLoadSequence = 0;
@@ -1048,7 +1049,7 @@
                     const details = document.createElement("p");
                     details.className = "library-card-details";
                     const descriptiveDetails = [
-                        libraryLanguage(source),
+                        libraryLanguageLabel(libraryLanguage(source)),
                         source.date || "",
                     ].filter(Boolean);
                     const inventoryDetails = [
@@ -1223,7 +1224,7 @@
                     filters.push(`${t("Content type")}: ${mediaTypeLabels([media]).join("")}`);
                 }
                 if (language) {
-                    filters.push(`${t("Language")}: ${language.toUpperCase()}`);
+                    filters.push(`${t("Language")}: ${libraryLanguageLabel(language)}`);
                 }
                 if (query) {
                     filters.push(`${t("Filter")}: ${query}`);
@@ -1247,10 +1248,42 @@
                 for (const language of [...libraryLanguageOptions].sort()) {
                     const option = document.createElement("option");
                     option.value = language;
-                    option.textContent = language.toUpperCase();
+                    option.textContent = libraryLanguageLabel(language);
                     select.appendChild(option);
                 }
                 select.value = selected;
+            }
+
+            function libraryLanguageName(language) {
+                if (typeof Intl.DisplayNames !== "function") {
+                    return language.toUpperCase();
+                }
+                const locale = $("localePicker")?.value || "en";
+                let displayNames = libraryLanguageDisplayNames.get(locale);
+                if (!displayNames) {
+                    try {
+                        displayNames = new Intl.DisplayNames([locale], {
+                            type: "language",
+                        });
+                        libraryLanguageDisplayNames.set(locale, displayNames);
+                    } catch (_) {
+                        return language.toUpperCase();
+                    }
+                }
+                try {
+                    return displayNames.of(language) || language.toUpperCase();
+                } catch (_) {
+                    return language.toUpperCase();
+                }
+            }
+
+            function libraryLanguageLabel(code) {
+                const language = String(code || "").trim().toLocaleLowerCase();
+                if (!language) return "";
+                const name = libraryLanguageName(language);
+                return name.toLocaleLowerCase() === language
+                    ? language.toUpperCase()
+                    : `${language.toUpperCase()} - ${name}`;
             }
 
             function setLibraryLanguageFilter(value) {
@@ -5269,6 +5302,7 @@
 
             $("localePicker")?.addEventListener("change", () => {
                 libraryCardCache = new WeakMap();
+                refreshLibraryLanguageOptions();
                 if (!$("libraryView").hidden) renderLibrary();
                 if (current) {
                     renderView();

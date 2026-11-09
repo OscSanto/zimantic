@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import time
@@ -36,6 +37,31 @@ class ModelChecksumTests(unittest.TestCase):
 
 
 class ModelFingerprintTests(unittest.TestCase):
+    def test_fingerprint_changes_with_recent_same_timestamp_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "model.onnx"
+            tokenizer = Path(tmp) / "sentencepiece.bpe.model"
+            timestamp = time.time_ns()
+            model.write_bytes(b"model-v1")
+            tokenizer.write_bytes(b"vocab-v1")
+            for path in (model, tokenizer):
+                os.utime(path, ns=(timestamp, timestamp))
+            with patch.object(embed.time, "time_ns", return_value=timestamp) as clock:
+                first = embed.model_fingerprint(tmp)
+                tokenizer.write_bytes(b"vocab-v2")
+                os.utime(tokenizer, ns=(timestamp, timestamp))
+                second = embed.model_fingerprint(tmp)
+                model.write_bytes(b"model-v2")
+                os.utime(model, ns=(timestamp, timestamp))
+                third = embed.model_fingerprint(tmp)
+                clock.return_value = timestamp + 10_000_000_000
+                fourth = embed.model_fingerprint(tmp)
+
+        self.assertTrue(first)
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(second, third)
+        self.assertEqual(third, fourth)
+
     def test_fingerprint_changes_with_model_or_tokenizer_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "model.onnx"
@@ -100,6 +126,9 @@ class ModelFingerprintTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "model.onnx").write_bytes(b"model-bytes")
             (Path(tmp) / "sentencepiece.bpe.model").write_bytes(b"vocab-bytes")
+            timestamp = time.time_ns() - 10_000_000_000
+            for path in Path(tmp).iterdir():
+                os.utime(path, ns=(timestamp, timestamp))
             with patch.object(embed, "_sha256", wraps=embed._sha256) as sha256:
                 embed.verify_model_files(tmp, warn=lambda _msg: None)
                 first = embed.model_fingerprint(tmp)

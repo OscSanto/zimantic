@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -212,12 +213,16 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
 
 _FILE_SHA256_CACHE: dict[tuple[str, int, int, int], str] = {}
 _FILE_SHA256_LOCK = threading.Lock()
+_FILE_SHA256_MIN_AGE_NS = 2_000_000_000
 
 
 def _cached_sha256(path: Path) -> str:
     """Return the SHA-256 of ``path``, memoized by file stat signature."""
     resolved = path.resolve()
     stat = resolved.stat()
+    # Rapid same-size writes can share an mtime on Windows/coarse filesystems.
+    if time.time_ns() - stat.st_mtime_ns < _FILE_SHA256_MIN_AGE_NS:
+        return _sha256(resolved)
     key = (str(resolved), stat.st_ino, stat.st_mtime_ns, stat.st_size)
     with _FILE_SHA256_LOCK:
         cached = _FILE_SHA256_CACHE.get(key)

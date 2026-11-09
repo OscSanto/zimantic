@@ -244,6 +244,48 @@ class ServerTests(unittest.TestCase):
                 client.get("/library.json", params={"limit": 1001}).status_code, 422
             )
 
+    def test_library_filters_zim_sources_by_count_based_media_types(self):
+        from types import SimpleNamespace
+
+        from zimantic.providers.zim.metadata import source_info_from_record
+
+        class MediaLibrarySearch(FakeSearch):
+            def source_dicts(self):
+                sources = []
+                for title, counter in (
+                    ("Manual", "text/html=322;video/mp4=2"),
+                    ("TED", "text/html=25;video/webm=24;text/vtt=544"),
+                ):
+                    record = SimpleNamespace(
+                        key=title,
+                        provider_metadata="{}",
+                        icon_data=None,
+                        icon_path="",
+                        to_source_metadata=lambda title=title, counter=counter: {
+                            "title": title,
+                            "mime_counts": counter,
+                        },
+                    )
+                    source = source_info_from_record(
+                        record,
+                        collection_key="zim:library",
+                        collection_label="Library",
+                        icon_url=None,
+                        searchable=True,
+                    )
+                    sources.append(source.to_dict(include_metadata=True))
+                return sources
+
+        with TestClient(create_app(MediaLibrarySearch())) as client:
+            text = client.get("/library.json", params={"media_type": "text"})
+            video = client.get("/library.json", params={"media_type": "video"})
+            self.assertEqual([source["title"] for source in text.json()], ["Manual"])
+            self.assertEqual(
+                [source["title"] for source in video.json()], ["Manual", "TED"]
+            )
+            self.assertEqual(text.headers["x-total-count"], "1")
+            self.assertEqual(video.headers["x-total-count"], "2")
+
     def test_collections_endpoint_is_paged_and_reports_snapshot(self):
         response = self.client.get("/collections.json", params={"limit": 1})
         self.assertEqual(response.status_code, 200)

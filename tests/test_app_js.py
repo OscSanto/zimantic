@@ -25,10 +25,13 @@ class Node {{
   replaceChildren() {{ this.children = []; }}
 }}
 const document = {{createElement: () => new Node()}};
-const elements = {{libraryLanguageFilter: new Node()}};
+const elements = {{
+  libraryLanguageFilter: new Node(), localePicker: {{value: "en"}},
+}};
 const $ = (id) => elements[id];
 const t = (text) => text;
 const libraryLanguageOptions = new Set();
+const libraryLanguageDisplayNames = new Map();
 let librarySources = [{{language: "eng,spa"}}, {{language: "fra"}}];
 const sortLibrarySources = (records) => records;
 {_function_source(source, "function libraryLanguageCodes(", "function infoUrl(")}
@@ -38,10 +41,19 @@ setLibraryLanguageFilter("eng");
 refreshLibraryLanguageOptions();
 const initial = {{
   selected: elements.libraryLanguageFilter.value,
-  options: elements.libraryLanguageFilter.children.map((option) => [option.value, option.textContent]),
+  options: elements.libraryLanguageFilter.children.map((option) => [
+    option.value, option.textContent,
+  ]),
+}};
+elements.localePicker.value = "es";
+refreshLibraryLanguageOptions();
+const spanish = {{
+  options: elements.libraryLanguageFilter.children.map((option) => option.textContent),
 }};
 setLibraryLanguageFilter("fra");
-console.log(JSON.stringify({{initial, selected: elements.libraryLanguageFilter.value}}));
+console.log(JSON.stringify({{
+  initial, spanish, selected: elements.libraryLanguageFilter.value,
+}}));
 """
         result = subprocess.run(
             [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
@@ -50,7 +62,16 @@ console.log(JSON.stringify({{initial, selected: elements.libraryLanguageFilter.v
         self.assertEqual(payload["initial"]["selected"], "eng")
         self.assertEqual(
             payload["initial"]["options"],
-            [["", "All languages"], ["eng", "ENG"], ["fra", "FRA"], ["spa", "SPA"]],
+            [
+                ["", "All languages"],
+                ["eng", "ENG - English"],
+                ["fra", "FRA - French"],
+                ["spa", "SPA - Spanish"],
+            ],
+        )
+        self.assertEqual(
+            payload["spanish"]["options"],
+            ["All languages", "ENG - inglés", "FRA - francés", "SPA - español"],
         )
         self.assertEqual(payload["selected"], "fra")
 
@@ -71,9 +92,11 @@ const elements = {{
   libraryScopeLine: new Node(), libraryScopeLineText: new Node(),
   libraryFilter: {{value: ""}}, libraryProviderFilter: {{value: ""}},
   libraryMediaFilter: {{value: ""}}, libraryLanguageFilter: {{value: ""}},
+  localePicker: {{value: "en"}},
 }};
 const $ = (id) => elements[id];
 const t = (text) => text;
+const libraryLanguageDisplayNames = new Map();
 const libraryTitle = (source) => source.key;
 const libraryHomepageUrl = () => "";
 const sourceStemName = () => "";
@@ -153,7 +176,7 @@ console.log(JSON.stringify({{
         )
         self.assertEqual(
             payload["initial"][1]["details"],
-            "ENG · 2025-08-27\n34,448 items · 109 MB",
+            "ENG - English · 2025-08-27\n34,448 items · 109 MB",
         )
         self.assertEqual(
             payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources."
@@ -170,7 +193,7 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["filtered"][0]["count"], 1)
         self.assertEqual(
             payload["scopeText"],
-            "Filtered by: Content type: Video · Language: ENG",
+            "Filtered by: Content type: Video · Language: ENG - English",
         )
         self.assertEqual(payload["status"], "1 collection · 1 loaded source")
         self.assertEqual(payload["placeholder"], "Filter 1 source")
@@ -183,10 +206,12 @@ const elements = {{
   libraryScopeLine: {{hidden: true}}, libraryScopeLineText: {{textContent: ""}},
   libraryFilter: {{value: " Trees "}}, libraryProviderFilter: {{value: "files"}},
   libraryMediaFilter: {{value: "video"}}, libraryLanguageFilter: {{value: "fra"}},
+  localePicker: {{value: "en"}},
 }};
 const $ = (id) => elements[id];
 const appPath = (path) => path;
 const t = (text) => text;
+const libraryLanguageDisplayNames = new Map();
 const replaceQueryParam = (key, value) => {{
   if (value) location.searchParams.set(key, value);
   else location.searchParams.delete(key);
@@ -222,7 +247,7 @@ console.log(JSON.stringify({{
         self.assertFalse(payload["active"]["hidden"])
         self.assertEqual(
             payload["active"]["text"],
-            "Filtered by: Provider: Files · Content type: Video · Language: FRA · Filter: Trees",
+            "Filtered by: Provider: Files · Content type: Video · Language: FRA - French · Filter: Trees",
         )
         self.assertEqual(
             payload["active"]["params"],
