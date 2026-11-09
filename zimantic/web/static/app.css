@@ -48,7 +48,7 @@ body {
     background: var(--bg);
     color: var(--text);
     display: flex;
-    align-items: flex-start;
+    align-items: stretch;
     font:
         16px/1.5 system-ui,
         sans-serif;
@@ -57,16 +57,20 @@ body {
     min-height: 100dvh;
     padding: 24px 16px 60px;
 }
-body:not(.search-active) {
-    align-items: center;
-}
-body.library-active {
-    align-items: flex-start;
-}
 .wrap {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
     width: 100%;
     max-width: 870px;
     margin: 0 auto;
+}
+#searchView,
+#libraryView {
+    align-self: start;
+    min-width: 0;
+}
+body:not(.search-active):not(.library-active) #searchView {
+    align-self: center;
 }
 .site-header {
     align-items: center;
