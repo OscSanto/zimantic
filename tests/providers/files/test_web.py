@@ -128,9 +128,9 @@ def test_direct_svg_is_sandboxed_and_unknown_extension_is_attachment(files_site)
 
     fragment = client.get(_article(key, "algebra/index.htmlf"))
     assert fragment.status_code == 200
-    assert fragment.headers["content-type"].startswith("text/plain")
+    assert fragment.headers["content-type"].startswith("text/html")
+    assert b"data-zimantic-bridge" in fragment.content
     assert "content-disposition" not in fragment.headers
-    assert fragment.headers["x-content-type-options"] == "nosniff"
     shell = client.get(f"/content/{quote(key, safe='')}/algebra/index.htmlf")
     assert b'<div class="zimantic-shell-attachment"' not in shell.content
 

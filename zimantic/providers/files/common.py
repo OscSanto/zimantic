@@ -453,12 +453,19 @@ def detect_mimetype(
     return pure or sniffed
 
 
-def mimetype_for(path: str, prefix: bytes = b"", size: int | None = None) -> str:
+def mimetype_for(
+    path: str,
+    prefix: bytes = b"",
+    size: int | None = None,
+    *,
+    render_sniffed_html: bool = False,
+) -> str:
     """The single serving decision for a file: render, show as text, or download.
 
     Detection reports what the bytes look like; this decides how to serve
     them. Known inline types keep their MIME. Unknown extensions may keep a
-    sniffed binary media type, but guessed markup is never rendered: any file
+    sniffed binary media type. Sniffed HTML renders only with
+    ``render_sniffed_html`` (off under secure browsing); otherwise any file
     whose prefix reads as text (and is at most ``TEXT_PREVIEW_MAX_BYTES``) is
     served as inert ``text/plain``. Everything else is an attachment.
     """
@@ -474,6 +481,12 @@ def mimetype_for(path: str, prefix: bytes = b"", size: int | None = None) -> str
         and not _is_textual_mimetype(detected)
     ):
         return detected
+    if (
+        render_sniffed_html
+        and not mapped
+        and _normalize_mimetype(detected) in {"text/html", "application/xhtml+xml"}
+    ):
+        return _normalize_mimetype(detected)
     encoding = text_encoding(prefix)
     if encoding is not None and (size is None or size <= TEXT_PREVIEW_MAX_BYTES):
         return "text/plain; charset=utf-8" if encoding == "utf-8" else "text/plain"

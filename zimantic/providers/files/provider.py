@@ -134,6 +134,7 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
         self._max_article_bytes = _int_setting(
             settings, "max_article_bytes", 1 << 30
         )
+        self._secure_browsing = bool(settings.get("secure_browsing", False))
         self._min_cosine_similarity = _float_setting(
             settings, "min_cosine_similarity", generic_search.DEFAULT_MIN_COSINE_SIMILARITY
         )
@@ -425,6 +426,7 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
             max_article_bytes=self._max_article_bytes,
             index=index,
             web_base_path=self.web_base_path,
+            secure_browsing=self._secure_browsing,
         )
 
     def max_sources_per_search(self) -> int | None:

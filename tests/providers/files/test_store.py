@@ -217,13 +217,19 @@ def test_unknown_extension_and_svg_mime(tmp_path):
     config = files_config(root, granularity="collection")
     store = _store(root, config, "files:modules:root")
     try:
-        assert store.resolve("mystery").mimetype == "text/plain; charset=utf-8"
+        assert store.resolve("mystery").mimetype == "text/html"
         assert store.resolve("blob").mimetype == "application/octet-stream"
         assert store.resolve("huge").mimetype == "application/octet-stream"
         assert store.resolve("utf16").mimetype == "text/plain"
         assert store.resolve("image.svg").mimetype == "image/svg+xml"
     finally:
         store.close()
+    secure = _store(root, config, "files:modules:root")
+    secure.secure_browsing = True
+    try:
+        assert secure.resolve("mystery").mimetype == "text/plain; charset=utf-8"
+    finally:
+        secure.close()
 
 
 def test_icons_and_random(tmp_path):

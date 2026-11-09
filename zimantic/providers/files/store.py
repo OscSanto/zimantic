@@ -75,6 +75,7 @@ class FilesContentStore:
         max_icon_bytes: int = MAX_ICON_BYTES,
         index: Any | None = None,
         web_base_path: str = "",
+        secure_browsing: bool = False,
     ) -> None:
         self.source = source
         self.root = Path(os.path.realpath(Path(root)))
@@ -87,6 +88,7 @@ class FilesContentStore:
         self.max_icon_bytes = max(0, int(max_icon_bytes))
         self.index = index
         self.web_base_path = web_base_path
+        self.secure_browsing = bool(secure_browsing)
         traversal = getattr(config, "traversal", None)
         self._max_visited_entries = getattr(traversal, "max_visited_entries", 1_000_000)
         self._traversal_timeout = getattr(traversal, "traversal_timeout_seconds", 300)
@@ -167,7 +169,9 @@ class FilesContentStore:
         if mapped and is_inline_mimetype(mapped):
             return mapped
         if prefix:
-            return mimetype_for(path, prefix, size)
+            return mimetype_for(
+            path, prefix, size, render_sniffed_html=not self.secure_browsing
+        )
         try:
             opened = open_confined(self.root, path)
         except FilesConfinedError:
@@ -180,7 +184,9 @@ class FilesContentStore:
             close = getattr(opened.handle, "close", None)
             if callable(close):
                 close()
-        return mimetype_for(path, prefix, size)
+        return mimetype_for(
+            path, prefix, size, render_sniffed_html=not self.secure_browsing
+        )
 
     # -- contract ----------------------------------------------------------
 
