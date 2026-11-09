@@ -208,13 +208,19 @@ def test_unknown_extension_and_svg_mime(tmp_path):
     root.mkdir()
     (root / "index.html").write_text("<html><body>home</body></html>", encoding="utf-8")
     (root / "mystery").write_bytes(b"<html><body>looks like html</body></html>")
+    (root / "blob").write_bytes(b"\x00\x01\x02binary\xff")
+    (root / "huge").write_bytes(b"a" * (5 * 1024 * 1024 + 1))
+    (root / "utf16").write_bytes("plain words".encode("utf-16"))
     (root / "image.svg").write_text(
         "<svg xmlns='http://www.w3.org/2000/svg'></svg>", encoding="utf-8"
     )
     config = files_config(root, granularity="collection")
     store = _store(root, config, "files:modules:root")
     try:
-        assert store.resolve("mystery").mimetype == "application/octet-stream"
+        assert store.resolve("mystery").mimetype == "text/plain; charset=utf-8"
+        assert store.resolve("blob").mimetype == "application/octet-stream"
+        assert store.resolve("huge").mimetype == "application/octet-stream"
+        assert store.resolve("utf16").mimetype == "text/plain"
         assert store.resolve("image.svg").mimetype == "image/svg+xml"
     finally:
         store.close()

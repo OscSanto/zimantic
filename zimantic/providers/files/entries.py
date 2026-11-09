@@ -34,10 +34,10 @@ from ...content.reader import (
     truncate_at_word_boundary,
     truncate_utf8,
 )
+from ...content.serving import is_inline_mimetype
 from ...indexing.types import EntryRecord
 from .common import (
     FilesConfinedError,
-    detect_mimetype,
     extension_mimetype,
     is_hidden_name,
     is_native_document_path,
@@ -47,6 +47,7 @@ from .common import (
     matches_any,
     media_family_for_mimetype,
     media_family_for_path,
+    mimetype_for,
     normalize_relative_path,
     open_confined,
     relative_join,
@@ -103,11 +104,11 @@ class _Snapshot:
 _PREFIX_PROBE_BYTES = 4096
 
 
-def _item_mimetype(root: Path, relative: str) -> str:
-    """Extension-first MIME for one manifest item, probing unknown suffixes."""
+def _item_mimetype(root: Path, relative: str, size: int | None = None) -> str:
+    """Serving MIME for one manifest item, probing unknown suffixes."""
 
     mapped = extension_mimetype(relative)
-    if mapped:
+    if mapped and is_inline_mimetype(mapped):
         return mapped
     prefix = b""
     try:
@@ -123,7 +124,7 @@ def _item_mimetype(root: Path, relative: str) -> str:
             close = getattr(opened.handle, "close", None)
             if callable(close):
                 close()
-    return detect_mimetype(relative, prefix) or "application/octet-stream"
+    return mimetype_for(relative, prefix, size)
 
 
 def _int_setting(cfg: Mapping[str, Any] | None, key: str, default: int) -> int:

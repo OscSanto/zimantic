@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from ...content.serving import HEAD_READ_BYTES, MAX_ICON_BYTES
+from ...content.serving import HEAD_READ_BYTES, MAX_ICON_BYTES, is_inline_mimetype
 from ...content.store import (
     ArticleData,
     ArticleNotFoundError,
@@ -160,12 +160,14 @@ class FilesContentStore:
             raise ArticleNotFoundError("article not found")
         return candidate
 
-    def _mimetype(self, path: str, prefix: bytes = b"") -> str:
+    def _mimetype(
+        self, path: str, prefix: bytes = b"", size: int | None = None
+    ) -> str:
         mapped = extension_mimetype(path)
-        if mapped:
+        if mapped and is_inline_mimetype(mapped):
             return mapped
         if prefix:
-            return mimetype_for(path, prefix)
+            return mimetype_for(path, prefix, size)
         try:
             opened = open_confined(self.root, path)
         except FilesConfinedError:
@@ -178,7 +180,7 @@ class FilesContentStore:
             close = getattr(opened.handle, "close", None)
             if callable(close):
                 close()
-        return mimetype_for(path, prefix)
+        return mimetype_for(path, prefix, size)
 
     # -- contract ----------------------------------------------------------
 
@@ -203,7 +205,7 @@ class FilesContentStore:
         return ContentEntry(
             path=final,
             title=_title(final),
-            mimetype=self._mimetype(final),
+            mimetype=self._mimetype(final, size=int(info.st_size)),
             size=int(info.st_size),
             redirect_path=(
                 requested if requested is not None and requested != final else None
@@ -287,7 +289,7 @@ class FilesContentStore:
             source_key=self.source.key,
             path=final,
             title=_title(final),
-            mimetype=self._mimetype(final, content[:4096]),
+            mimetype=self._mimetype(final, content[:4096], total),
             content=content,
             total=total,
             truncated=truncated,
@@ -393,7 +395,7 @@ class FilesContentStore:
             source_key=self.source.key,
             path=final,
             title=_title(final),
-            mimetype=self._mimetype(final, content[:4096]),
+            mimetype=self._mimetype(final, size=total),
             content=content,
             start=start,
             end=actual_end,

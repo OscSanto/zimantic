@@ -7,6 +7,7 @@ way and served another.
 
 from __future__ import annotations
 
+import codecs
 import json
 import mimetypes
 import os
@@ -19,6 +20,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...content.serving import is_inline_mimetype
 from ...media_types import MEDIA_TYPE_ORDER
 
 # ---------------------------------------------------------------------------
@@ -311,13 +313,52 @@ def sniff_mimetype(prefix: bytes) -> str | None:
                 if prefix[8:12] == b"AVI ":
                     return "video/x-msvideo"
             return mimetype
-    if b"\x00" not in prefix[:4096]:
-        try:
-            prefix.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
+    if text_encoding(prefix) is not None:
         return "text/plain"
     return None
+
+
+# Unknown files up to this size are shown as plain text when their bytes are
+# text; larger ones remain downloads so a mislabeled dump cannot flood a tab.
+TEXT_PREVIEW_MAX_BYTES = 5 << 20
+_TEXT_BOMS = (
+    (b"\xef\xbb\xbf", "utf-8"),
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+)
+_TEXT_CONTROLS = frozenset("\t\n\v\f\r\x1b")
+
+
+def text_encoding(prefix: bytes) -> str | None:
+    """Encoding of a byte prefix that reads as text, or ``None`` for binary.
+
+    BOM-marked UTF-16/32 is accepted; otherwise the prefix must be NUL-free
+    UTF-8 (a multibyte sequence cut at the prefix end is fine) with almost no
+    control characters.
+    """
+    for bom, encoding in _TEXT_BOMS:
+        if prefix.startswith(bom):
+            data = prefix[len(bom):]
+            break
+    else:
+        if b"\x00" in prefix:
+            return None
+        encoding, data = "utf-8", prefix
+    try:
+        text = codecs.getincrementaldecoder(encoding)().decode(data, final=False)
+    except UnicodeDecodeError:
+        return None
+    controls = sum(
+        1 for char in text if ord(char) < 32 and char not in _TEXT_CONTROLS
+    )
+    return None if controls * 100 > len(text) else encoding
+
+
+def _is_textual_mimetype(mimetype: str) -> bool:
+    value = _normalize_mimetype(mimetype) or ""
+    return value.startswith("text/") or value.endswith(("xml", "json", "javascript"))
 
 
 _LSAR_MIME_BY_FORMAT = {
@@ -352,10 +393,6 @@ def _puremagic_mimetype(prefix: bytes) -> str | None:
     try:
         value = _normalize_mimetype(puremagic.from_string(prefix, mime=True))
     except puremagic.PureError:
-        return None
-    # An unknown extension whose bytes look like HTML must remain an
-    # attachment, matching the built-in sniffer's safety rule.
-    if value in {"text/html", "application/xhtml+xml"}:
         return None
     return value
 
@@ -416,21 +453,32 @@ def detect_mimetype(
     return pure or sniffed
 
 
-def mimetype_for(path: str, prefix: bytes = b"") -> str:
-    """Extension first, then a constrained prefix sniff.
+def mimetype_for(path: str, prefix: bytes = b"", size: int | None = None) -> str:
+    """The single serving decision for a file: render, show as text, or download.
 
-    Unknown types are an attachment, never ``text/html``.  An unknown
-    extension whose bytes happen to look like HTML therefore stays
-    ``application/octet-stream``.  Plain text is also kept as an attachment so
-    an extensionless capture cannot silently become a readable document.
+    Detection reports what the bytes look like; this decides how to serve
+    them. Known inline types keep their MIME. Unknown extensions may keep a
+    sniffed binary media type, but guessed markup is never rendered: any file
+    whose prefix reads as text (and is at most ``TEXT_PREVIEW_MAX_BYTES``) is
+    served as inert ``text/plain``. Everything else is an attachment.
     """
 
     mapped = extension_mimetype(path)
-    if mapped:
+    if mapped and is_inline_mimetype(mapped):
         return mapped
-    detected = detect_mimetype(path, prefix)
-    if detected and detected != "text/plain":
+    detected = mapped or detect_mimetype(path, prefix)
+    if (
+        not mapped
+        and detected
+        and is_inline_mimetype(detected)
+        and not _is_textual_mimetype(detected)
+    ):
         return detected
+    encoding = text_encoding(prefix)
+    if encoding is not None and (size is None or size <= TEXT_PREVIEW_MAX_BYTES):
+        return "text/plain; charset=utf-8" if encoding == "utf-8" else "text/plain"
+    if mapped or (detected and not _is_textual_mimetype(detected)):
+        return detected or "application/octet-stream"
     return "application/octet-stream"
 
 
@@ -772,6 +820,7 @@ def file_signature(info: os.stat_result) -> tuple[int, int]:
 
 
 __all__ = [
+    "TEXT_PREVIEW_MAX_BYTES",
     "FilesConfinedError",
     "FilesPathError",
     "OpenedFile",
@@ -802,4 +851,5 @@ __all__ = [
     "regular_file_names",
     "relative_join",
     "sniff_mimetype",
+    "text_encoding",
 ]

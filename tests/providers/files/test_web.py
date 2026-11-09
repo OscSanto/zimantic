@@ -32,8 +32,9 @@ def files_site(tmp_path):
     (root / "algebra" / "image.svg").write_text(
         "<svg xmlns='http://www.w3.org/2000/svg'></svg>", encoding="utf-8"
     )
-    (root / "algebra" / "mystery").write_bytes(
-        b"<html><body>looks like html</body></html>"
+    (root / "algebra" / "mystery").write_bytes(b"\x00\x01\x02binary\xff")
+    (root / "algebra" / "index.htmlf").write_bytes(
+        b"<html><body><script>alert(1)</script></body></html>"
     )
     config = files_config(root)
     index_dir = tmp_path / "indexes"
@@ -124,6 +125,14 @@ def test_direct_svg_is_sandboxed_and_unknown_extension_is_attachment(files_site)
     assert mystery.headers["content-type"].startswith("application/octet-stream")
     assert mystery.headers["content-disposition"].startswith("attachment")
     assert mystery.headers["x-content-type-options"] == "nosniff"
+
+    fragment = client.get(_article(key, "algebra/index.htmlf"))
+    assert fragment.status_code == 200
+    assert fragment.headers["content-type"].startswith("text/plain")
+    assert "content-disposition" not in fragment.headers
+    assert fragment.headers["x-content-type-options"] == "nosniff"
+    shell = client.get(f"/content/{quote(key, safe='')}/algebra/index.htmlf")
+    assert b'<div class="zimantic-shell-attachment"' not in shell.content
 
 
 def test_attachment_shell_offers_a_download_instead_of_a_blank_iframe(files_site):
