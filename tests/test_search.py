@@ -2699,11 +2699,10 @@ class BrowseSearchTests(unittest.TestCase):
         self.assertNotEqual(whole["results"], reshuffled["results"])
         self.assertGreaterEqual(search.cache.hits, 2)
 
-    def test_browsing_is_explicit_and_respects_fast_mode_and_source_scope(self):
+    def test_empty_search_respects_fast_mode_and_source_scope(self):
         search = self.make_search()
         search.semantic = False
-        with self.assertRaises(SearchQueryError):
-            search.search_page("")
+        self.assertTrue(search.search_page("")["results"])
         with self.assertRaises(SearchQueryError):
             search.search_page("", browse="outliers")
         with self.assertRaises(SearchQueryError):
@@ -2722,6 +2721,60 @@ class BrowseSearchTests(unittest.TestCase):
         rare = search.search_page("", source="manual", browse="rare")
         self.assertTrue(rare["results"])
         self.assertTrue(all(doc["source_key"] == "manual" for doc in rare["results"]))
+
+    def test_empty_search_defaults_to_representative_without_embedding_a_query(self):
+        import faiss
+
+        search = self.make_search()
+        vectors = np.array([[1, 0], [0.8, 0.6], [-0.6, 0.8]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([1, 2, 3], dtype=np.int64))
+        search.indexes["manual"].faiss_index = index
+        with patch.object(search, "_query_vector", side_effect=AssertionError("must not embed")):
+            page = search.search_page("  ")
+        self.assertEqual(page["results"][0]["path"], "item-2")
+
+    def test_text_sorts_reorder_matches_and_keep_paging_and_cache_isolated(self):
+        import faiss
+
+        search = self.make_search()
+        search.candidate_count = 32
+        search.max_results = 32
+        angles = np.linspace(-1, 1, 20)
+        vectors = np.column_stack([np.cos(angles), np.sin(angles)]).astype(np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.arange(1, 21, dtype=np.int64))
+        search.indexes["manual"].faiss_index = index
+        with patch.object(search, "_query_vector", return_value=None):
+            relevance = search.search_page("topic", limit=20)["results"]
+            representative = search.search_page("topic", sort="representative", limit=20)["results"]
+            outliers = search.search_page("topic", sort="outliers", limit=20)["results"]
+            rare = search.search_page("topic", sort="rare", limit=20)["results"]
+            first = search.search_page("topic", sort="random", seed=7, limit=2)
+            second = search.search_page("topic", sort="random", seed=7, limit=2, offset=2)
+            whole = search.search_page("topic", sort="random", seed=7, limit=20)
+            reshuffled = search.search_page("topic", sort="random", seed=19, limit=20)
+            cached_relevance = search.search_page("topic", limit=20)["results"]
+        expected = {doc["id"] for doc in relevance}
+        for items in (representative, outliers, rare, whole["results"]):
+            self.assertEqual({doc["id"] for doc in items}, expected)
+        self.assertIn(representative[0]["path"], ("item-10", "item-11"))
+        self.assertIn(outliers[0]["path"], ("item-1", "item-20"))
+        self.assertEqual(first["results"] + second["results"], whole["results"][:4])
+        self.assertNotEqual(whole["results"], reshuffled["results"])
+        self.assertEqual(relevance, cached_relevance)
+
+    def test_text_sorting_preserves_the_relevance_enrichment_candidates(self):
+        search = self.make_search()
+        with (
+            patch.object(search, "_query_vector", return_value=None),
+            patch.object(search, "_enrich_pool", side_effect=lambda results, query, pool, limit: pool[:3]),
+        ):
+            relevance = search.search_page("topic", limit=5)["results"]
+            random = search.search_page("topic", sort="random", seed=7, limit=5)["results"]
+        self.assertEqual(
+            {doc["id"] for doc in random}, {doc["id"] for doc in relevance}
+        )
 
     def test_semantic_browse_recovers_when_deferred_vectors_become_available(self):
         import faiss

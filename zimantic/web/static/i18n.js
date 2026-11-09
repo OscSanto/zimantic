@@ -11,6 +11,8 @@
             "Search your offline library": "Busca en tu biblioteca sin conexión",
             "how to change a lightbulb": "cómo cambiar una bombilla",
             "Search query": "Consulta de búsqueda",
+            "Sort by": "Ordenar por",
+            "Relevance": "Relevancia",
             "Filter by source": "Filtrar por fuente",
             "Search sources": "Buscar fuentes",
             "Search all sources": "Buscar en todas las fuentes",
@@ -45,8 +47,8 @@
                 "Elementos más parecidos al vector semántico medio de su fuente.",
             "Browsing uses local indexes and respects source filters.":
                 "La exploración usa índices locales y respeta los filtros de fuentes.",
-            "No indexed items are available for this browse mode in the selected sources.":
-                "No hay elementos indexados disponibles para este modo de exploración en las fuentes seleccionadas.",
+            "No indexed items are available for this sort order in the selected sources.":
+                "No hay elementos indexados disponibles para este orden en las fuentes seleccionadas.",
             "Open a random article (Alt-click for a random ZIM)":
                 "Abrir un artículo aleatorio (Alt+clic para elegir un ZIM aleatorio)",
             "Home": "Inicio",

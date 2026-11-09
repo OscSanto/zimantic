@@ -27,6 +27,7 @@ class FakeSearch:
         self.suggest_calls = []
         self.stream_calls = []
         self.browse_calls = []
+        self.sort_calls = []
         self.refresh_calls = 0
 
     def local_names(self):
@@ -99,10 +100,11 @@ class FakeSearch:
         )
 
     @staticmethod
-    def _validate_query(query):
-        if not query.strip():
-            raise SearchQueryError("empty")
-        return query
+    def _validate_query(query, *, allow_empty=False):
+        return Search._validate_query(query, allow_empty=allow_empty)
+
+    def _validate_search(self, query, sort=None, seed=0):
+        return Search._validate_search(self, query, sort, seed)
 
     def _validate_browse(self, mode, seed=0):
         Search._validate_browse(self, mode, seed)
@@ -122,10 +124,12 @@ class FakeSearch:
         *,
         browse=None,
         seed=0,
+        sort=None,
     ):
         if browse is not None:
             self._validate_browse(browse, seed)
             self.browse_calls.append((source, collection, browse, seed))
+        self.sort_calls.append((sort, seed))
         self.search_page_calls.append(
             (query, source, limit, offset, collection, debug)
         )
@@ -154,10 +158,12 @@ class FakeSearch:
         *,
         browse=None,
         seed=0,
+        sort=None,
     ):
         if browse is not None:
             self._validate_browse(browse, seed)
             self.browse_calls.append((source, collection, browse, seed))
+        self.sort_calls.append((sort, seed))
         self.stream_calls.append(
             (query, source, limit, offset, collection, debug)
         )
@@ -1071,8 +1077,9 @@ class ServerTests(unittest.TestCase):
 
     def test_browse_api_reuses_pagination_and_accepts_explicit_modes(self):
         homepage = self.client.get("/?q=").text
-        self.assertLess(homepage.index('id="searchForm"'), homepage.index('id="browseSection"'))
-        self.assertLess(homepage.index('id="browseSection"'), homepage.index('id="settingsDetails"'))
+        self.assertNotIn('id="browseSection"', homepage)
+        self.assertIn('<label for="sortSelect" data-i18n="Sort by">', homepage)
+        self.assertLess(homepage.index('id="sortSelect"'), homepage.index('id="settingsDetails"'))
         response = self.client.get(
             "/browse?mode=random&seed=7&offset=10&limit=5&source=manual"
         )
@@ -1089,10 +1096,20 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             self.search.browse_calls[-1], (None, "zim:library", "rare", 0)
         )
-        self.assertEqual(self.client.get("/search?q=").status_code, 422)
-        self.assertEqual(self.client.get("/search/stream?q=").status_code, 422)
         self.assertEqual(self.client.get("/browse?mode=unknown").status_code, 422)
         self.assertEqual(self.client.get("/browse?seed=-1").status_code, 422)
+
+    def test_search_sorting_and_empty_queries_work_for_json_and_streams(self):
+        for path in ("/search", "/search/stream"):
+            with self.subTest(path=path):
+                response = self.client.get(path + "?q=&source=manual&offset=10")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.search.sort_calls[-1], ("representative", 0))
+                response = self.client.get(path + "?q=topic&sort=random&seed=7")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.search.sort_calls[-1], ("random", 7))
+                self.assertEqual(self.client.get(path + "?q=topic&sort=unknown").status_code, 422)
+                self.assertEqual(self.client.get(path + "?q=&seed=-1").status_code, 422)
 
     def test_fast_mode_rejects_semantic_browsing_and_hides_its_controls(self):
         search = FakeSearch()
@@ -1107,6 +1124,12 @@ class ServerTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     client.get(path + "?mode=representative").status_code, 400
+                )
+            for path in ("/search", "/search/stream"):
+                self.assertEqual(client.get(path + "?q=").status_code, 200)
+                self.assertEqual(search.sort_calls[-1], ("rare", 0))
+                self.assertEqual(
+                    client.get(path + "?q=topic&sort=representative").status_code, 400
                 )
 
     def test_search_accepts_multiple_source_filters(self):
@@ -1198,7 +1221,8 @@ class ServerTests(unittest.TestCase):
         )
 
     def test_streaming_search_validates_query(self):
-        self.assertEqual(self.client.get("/search/stream?q=%20").status_code, 400)
+        self.assertEqual(self.client.get("/search/stream?q=%20").status_code, 200)
+        self.assertEqual(self.client.get("/search/stream", params={"q": "x" * 4097}).status_code, 422)
 
     def test_streaming_search_rejects_unknown_scope_before_starting(self):
         class _ValidatingSearch(FakeSearch):

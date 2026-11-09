@@ -231,35 +231,44 @@ The source picker discovers available sources and sorts matching sources by resu
 - An unknown source or collection key is rejected with HTTP 400 instead of silently becoming an unscoped search. A known but unsearchable source, or an intersection with no eligible sources, searches no sources rather than broadening the scope.
 - A scoped search shows **Searching only in: …** or **Searching collection: …** above the results with a **Search all sources** control, so submitting a new query while a filter is active never silently hides the narrower scope.
 
-## Browsing without a query
+## Sorting and empty searches
 
-The home page has a **Browse** section between the search bar and settings.
-Browsing is explicit: `/` and `/?q=` keep their usual no-search behavior.
-Use `/?browse=random`, `/?browse=rare`, `/?browse=outliers`, or
-`/?browse=representative`, optionally with the usual `source` or `collection`
-filters.
+The **Sort by** selector below the search bar offers **Relevance**, **Random**,
+**Rare titles**, **Semantic outliers**, and **Representative**. With a query,
+these orders rearrange the bounded matching result pool without changing its
+membership. Items without the local statistics needed by an order follow the
+scored matches in relevance order.
 
-- **Random** samples indexed items. **Shuffle** creates a new seed in the URL;
-  that seed keeps pagination, bookmarks, and Back/Forward consistent.
+Submitting an empty query, or opening `/?q=`, searches local indexes without
+embedding a query. Its default order is **Representative**, or **Rare titles**
+when semantic search is disabled. `/` still opens without running a search.
+Use `/?q=&sort=random`, `/?q=&sort=rare`, `/?q=&sort=outliers`, or
+`/?q=&sort=representative`, optionally with `source` or `collection` filters.
+
+- **Random** shuffles matches, or samples indexed items for an empty query.
+  Submitting a random search creates a new URL seed; that seed keeps
+  pagination, bookmarks, and Back/Forward consistent.
 - **Rare titles** ranks titles by the mean inverse document frequency of their
   distinct non-stopword terms, using the existing Unicode61 title index.
 - **Semantic outliers** finds items least similar to their source's average
   embedding. **Representative** does the opposite, finding items most like that
-  average. Neither mode embeds a query.
+  average.
 
-Statistics are source-local, and source rankings are interleaved rather than
-comparing their raw scores. Browsing uses only local SQLite indexes; remote
-Kiwix sources and unindexed sources are omitted. Semantic modes additionally
+Statistics are source-local. Empty searches interleave source rankings rather
+than comparing their raw scores, and use only local SQLite indexes; remote
+Kiwix sources and unindexed sources are omitted. Semantic orders additionally
 require loaded FAISS vectors and are unavailable with `serve --fast` or
 `open --fast`. Rare-title pools and centroids are prepared lazily in memory,
 reused for the index handle's lifetime, and discarded when it is retired.
 First requests can take longer and obey the normal source/search deadlines.
 The usual `max_results` pool limit applies. No index rebuild is needed.
 
-The JSON API is `/browse?mode=random&seed=7`; `/browse/stream` streams the same
-request. Both accept `source`, `collection`, `limit`, and `offset`. API random
-requests default to seed `0`; the browser chooses a fresh seed for an unseeded
-random-browse link. Rarity and semantic rankings ignore the seed.
+The JSON API is `/search?q=topic&sort=random&seed=7`, or `/search?q=` for an
+empty search; `/search/stream` streams the same request. Both accept `source`,
+`collection`, `limit`, and `offset`. API random requests default to seed `0`;
+the browser chooses a fresh seed for an unseeded random-search link. Rarity
+and semantic rankings ignore the seed. Legacy `?browse=...` links and the
+`/browse` and `/browse/stream` APIs remain supported.
 
 ## Library view
 

@@ -72,7 +72,7 @@
                 outliers: "Semantic outliers",
                 representative: "Representative",
             };
-            let availableBrowseModes = new Set(["random", "rare"]);
+            let availableBrowseModes = new Set(Object.keys(BROWSE_LABELS));
             const AUTO_SUBMIT_DELAY = 800;
             const AUTO_HISTORY_DELAY = 3000;
             let MAX_QUERY_LENGTH = 4096;
@@ -1582,7 +1582,7 @@
             function effectiveSourceProgress() {
                 if (!current) return { completed: 0, total: 0, selected: false };
                 const selected = [...selectedSourceKeys].filter(
-                    (key) => !current.browse || (current.searchKeys || []).includes(key),
+                    (key) => current.question || (current.searchKeys || []).includes(key),
                 );
                 if (selected.length) {
                     const known = new Set(
@@ -2842,6 +2842,10 @@
                 const grid = document.createElement("dl");
                 grid.className = "result-debug-grid";
                 appendDebugField(grid, "source rank", String(ranking.source_rank ?? item.rank ?? "—"));
+                if (ranking.sort) {
+                    appendDebugField(grid, "sort mode", ranking.sort.mode);
+                    appendDebugField(grid, "sort score", debugNumber(ranking.sort.score));
+                }
                 if (ranking.browse) {
                     appendDebugField(grid, "browse mode", ranking.browse.mode);
                     appendDebugField(grid, "browse score", debugNumber(ranking.browse.score));
@@ -2886,7 +2890,7 @@
             function renderMatchedBy() {
                 const line = $("debugStats");
                 if (!line) return;
-                if (!debugMode || !current?.matchedBy || current.browse) {
+                if (!debugMode || !current?.matchedBy || !current.question) {
                     line.hidden = true;
                     line.textContent = "";
                     return;
@@ -3224,8 +3228,8 @@
                     empty.textContent = current?.streaming
                         ? "" // waiting for search results... but they often appear too fast to read this text so better to print nothing...
                         : t(
-                              current?.browse
-                                  ? "No indexed items are available for this browse mode in the selected sources."
+                              current && !current.question
+                                  ? "No indexed items are available for this sort order in the selected sources."
                                   : "No results found in the available sources. Try using different words.",
                           );
                     $("results").appendChild(empty);
@@ -3354,7 +3358,7 @@
                       ? t("No results")
                       : t("No searchable sources.");
                 if (current.browse) {
-                    range = `${t(BROWSE_LABELS[current.browse] || "Browse")} · ${range}`;
+                    range = `${t(BROWSE_LABELS[current.browse] || "Relevance")} · ${range}`;
                 }
                 // Keep the source tally visible once the stream has finished, on
                 // every page, so paging does not drop it from the status line.
@@ -3460,7 +3464,7 @@
 
             function renderView() {
                 if (!current) return;
-                renderBrowseControls();
+                renderSortControls();
                 // The server already sliced this page and clamped any
                 // out-of-range offset; there is nothing to re-slice here.
                 const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
@@ -3699,7 +3703,7 @@
                         }
                         renderScopeLine();
                         $("status").textContent =
-                            `${current.browse ? t("Browsing") : "Searching"} ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
+                            `Searching ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
                     } else if (event.type === "source") {
                         current.completed = event.completed;
                         current.outcomes.set(event.source.key, event);
@@ -3717,7 +3721,7 @@
                             current.sourcesTotal = event.total_sources;
                         }
                         $("status").textContent =
-                            `${current.browse ? t("Browsing") : "Searching"}… ${Number(event.elapsed || 0).toFixed(1)}s · ` +
+                            `Searching… ${Number(event.elapsed || 0).toFixed(1)}s · ` +
                             sourceProgressText(event.completed, event.total_sources);
                     } else if (event.type === "snapshot") {
                         applyPage(event);
@@ -3784,39 +3788,19 @@
                 return false;
             }
 
-            function renderBrowseControls() {
-                const section = $("browseSection");
-                if (!section) return;
-                for (const link of section.querySelectorAll("a[data-browse]")) {
-                    const mode = link.dataset.browse;
-                    link.hidden = !availableBrowseModes.has(mode);
-                    link.href = makeStateUrl(
-                        "", selectedSourceKeys, 0, null,
-                        nextSearchScope([...selectedSourceKeys]),
-                        selectedCollectionKey, mode, 0,
-                    );
-                    if (current?.browse === mode) {
-                        link.setAttribute("aria-current", "page");
-                    } else {
-                        link.removeAttribute("aria-current");
-                    }
-                }
-                $("browseShuffle").hidden = current?.browse !== "random";
+            function defaultBrowseMode() {
+                return availableBrowseModes.has("representative") ? "representative" : "rare";
             }
 
-            function startBrowse(mode) {
-                clearTimeout(autoSubmitTimer);
-                autoSubmitTimer = null;
-                commitAutoSearchHistory();
-                const seed = mode === "random" ? Math.floor(Math.random() * 2 ** 32) : 0;
-                const selected = [...selectedSourceKeys];
-                const scope = nextSearchScope(selected);
-                const url = makeStateUrl(
-                    "", selected, 0, null, scope, selectedCollectionKey, mode, seed,
-                );
-                if (url !== currentUrlValue()) history.pushState(null, "", url);
-                $("question").value = "";
-                runSearch("", selected, 0, scope, selectedCollectionKey, mode, seed);
+            function renderSortControls() {
+                const select = $("sortSelect");
+                if (!select) return;
+                const question = $("question").value.trim();
+                for (const option of select.options) {
+                    option.hidden = option.value !== "relevance" && !availableBrowseModes.has(option.value);
+                    option.disabled = option.hidden || (option.value === "relevance" && !question);
+                }
+                select.value = current?.browse || (question ? "relevance" : defaultBrowseMode());
             }
 
             function setSettingsOpen(open) {
@@ -3847,7 +3831,7 @@
                 seed = 0,
             ) {
                 question = question.trim();
-                if (!question && !browse) return;
+                if (!question && !browse) browse = defaultBrowseMode();
                 if (browse !== "random") seed = 0;
                 setSettingsOpen(false);
                 sourceFilterShowAll = false;
@@ -3876,7 +3860,7 @@
                 ];
                 setSelectedSources(requested);
                 selectedCollectionKey = collectionKey || null;
-                const discovery = !browse && (scopeKeys.length || selectedCollectionKey)
+                const discovery = question && (scopeKeys.length || selectedCollectionKey)
                     ? sourceDiscovery(question, current)
                     : null;
                 current = {
@@ -3901,14 +3885,13 @@
                 };
                 announceSearchStatus();
                 document.body.classList.add("search-active");
-                document.body.classList.toggle("browse-active", Boolean(browse));
-                renderBrowseControls();
+                renderSortControls();
                 window.scrollTo({ top: 0, left: 0, behavior: "auto" });
                 $("searchSummary").hidden = false;
                 $("searchButton").disabled = true;
                 $("status").innerHTML =
-                    browse
-                        ? `${t("Browsing")}: ${escapeHtml(t(BROWSE_LABELS[browse] || "Browse"))}…`
+                    !question
+                        ? `${escapeHtml(t(BROWSE_LABELS[browse]))}…`
                         : `${t("Searching for")} <span class="query-used">"${escapeHtml(question)}"</span>…`;
                 $("notice").textContent = "";
                 $("pager").innerHTML = "";
@@ -3925,7 +3908,9 @@
                         return;
                     }
                     const params = new URLSearchParams({
-                        ...(browse ? {mode: browse, seed: String(seed)} : {q: question}),
+                        q: question,
+                        ...(browse ? {sort: browse} : {}),
+                        ...(browse === "random" ? {seed: String(seed)} : {}),
                         limit: String(PAGE_SIZE),
                         offset: String(pageIndex * PAGE_SIZE),
                     });
@@ -3952,7 +3937,7 @@
                         controller.signal.addEventListener("abort", abortStream, { once: true });
                         let busy;
                         try {
-                            const response = await fetch(appPath(browse ? "/browse/stream" : "/search/stream") + "?" + params, {
+                            const response = await fetch(appPath("/search/stream") + "?" + params, {
                                 signal: streamController.signal,
                             });
                             if (!response.ok) {
@@ -4003,10 +3988,10 @@
                         sequence === searchSequence
                     ) {
                         clearPartialResults();
-                        $("status").textContent = t(browse ? "Browse failed" : "Search failed");
+                        $("status").textContent = t("Search failed");
                         if (error.status === 400) {
                             $("notice").textContent =
-                                browse
+                                !question
                                     ? error.message
                                     : `${t("One or more selected sources are not available.")}` +
                                       (error.message ? ` (${error.message})` : "");
@@ -4039,9 +4024,9 @@
                 const controller = new AbortController();
                 pageController = controller;
                 const params = new URLSearchParams({
-                    ...(current.browse
-                        ? {mode: current.browse, seed: String(current.seed)}
-                        : {q: current.question}),
+                    q: current.question,
+                    ...(current.browse ? {sort: current.browse} : {}),
+                    ...(current.browse === "random" ? {seed: String(current.seed)} : {}),
                     limit: String(PAGE_SIZE),
                     offset: String(pageIndex * PAGE_SIZE),
                 });
@@ -4060,7 +4045,7 @@
                     let response;
                     let busyRetries = 0;
                     while (true) {
-                        response = await fetch(appPath(current.browse ? "/browse" : "/search") + "?" + params, {
+                        response = await fetch(appPath("/search") + "?" + params, {
                             signal: controller.signal,
                         });
                         if (response.ok) break;
@@ -4124,10 +4109,10 @@
                         controller === pageController
                     ) {
                         clearPartialResults();
-                        $("status").textContent = t(current.browse ? "Browse failed" : "Search failed");
+                        $("status").textContent = t("Search failed");
                         if (error.status === 400) {
                             $("notice").textContent =
-                                current.browse
+                                !current.question
                                     ? error.message
                                     : `${t("One or more selected sources are not available.")}` +
                                       (error.message ? ` (${error.message})` : "");
@@ -4145,7 +4130,7 @@
                 page = 0,
                 scopeSources,
                 collectionKey = null,
-                browse = question ? null : current?.browse || null,
+                browse = current?.browse || null,
                 seed = current?.seed || 0,
             ) {
                 const requested = [...new Set(selectionValues(selectedSources))];
@@ -4198,14 +4183,15 @@
                 // and Back/Forward just work.
                 const url = new URL(location.href);
                 const resolvedBrowse = browse === undefined
-                    ? !question && (current?.browse || url.searchParams.get("browse"))
+                    ? current?.browse || url.searchParams.get("sort") || url.searchParams.get("browse")
                     : browse;
                 const resolvedSeed = seed ?? current?.seed ?? url.searchParams.get("seed") ?? 0;
+                const hasSearch = Boolean(question || resolvedBrowse || current || url.searchParams.has("q"));
                 url.hash = "";
                 url.search = "";
-                if (question) url.searchParams.set("q", question);
+                if (hasSearch) url.searchParams.set("q", question);
                 if (resolvedBrowse) {
-                    url.searchParams.set("browse", resolvedBrowse);
+                    url.searchParams.set("sort", resolvedBrowse);
                     if (resolvedBrowse === "random") {
                         url.searchParams.set("seed", String(resolvedSeed));
                     }
@@ -4291,10 +4277,17 @@
                 ];
                 const collection = params.get("collection") || null;
                 const scopeSources = sourceValues;
+                const question = (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH);
+                const requestedSort = params.get("sort") || (!question ? params.get("browse") : null);
+                const defaultSort = !question && params.has("q") && (!requestedSort || requestedSort === "relevance");
+                const browse = defaultSort
+                    ? defaultBrowseMode()
+                    : requestedSort === "relevance" ? null : requestedSort || null;
                 return {
-                    question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
-                    browse: params.get("q")?.trim() ? null : params.get("browse") || null,
-                    seed: params.get("browse") === "random" &&
+                    question,
+                    browse,
+                    defaultSort,
+                    seed: browse === "random" &&
                         /^\d+$/.test(params.get("seed") || "") &&
                         Number(params.get("seed")) < 2 ** 32
                         ? Number(params.get("seed")) : 0,
@@ -4384,7 +4377,7 @@
                     );
                     renderSourceSelectionSummary();
                     renderScopeLine();
-                    renderBrowseControls();
+                    renderSortControls();
                     focusButton(
                         collectionKey
                             ? `collection:${collectionKey}`
@@ -4545,7 +4538,7 @@
                     );
                     renderSourceSelectionSummary();
                     renderScopeLine();
-                    renderBrowseControls();
+                    renderSortControls();
                     $("question").focus();
                     return;
                 }
@@ -4624,8 +4617,7 @@
                 resultList = null;
                 announceSearchStatus();
                 document.body.classList.remove("search-active");
-                document.body.classList.remove("browse-active");
-                renderBrowseControls();
+                renderSortControls();
                 setSettingsOpen(true);
                 $("searchSummary").hidden = true;
                 $("sourceFilterToolbar").hidden = true;
@@ -4647,12 +4639,11 @@
             }
 
             function clearSearch(pushHistory) {
-                // Explicitly submitted with an empty field: drop the prior search and
-                // re-center. A cleared-but-not-submitted field keeps its results, so an
-                // empty debounce never wipes the page on its own.
+                // The heading clears the current search; submitting an empty field
+                // searches the selected scope instead.
                 const hadSearch = current !== null || Boolean(location.search);
-                resetResults();
                 $("question").value = "";
+                resetResults();
                 if (hadSearch) {
                     history[pushHistory ? "pushState" : "replaceState"](null, "", location.pathname);
                 }
@@ -4835,10 +4826,6 @@
 
             function submitSearch(pushHistory, { auto = false } = {}) {
                 const question = $("question").value.trim();
-                if (!question) {
-                    clearSearch(pushHistory);
-                    return;
-                }
                 if (question.length > MAX_QUERY_LENGTH) {
                     $("searchButton").disabled = false;
                     $("status").textContent = "";
@@ -4853,6 +4840,11 @@
                 const selectedSources = [...selectedSourceKeys];
                 const hasCollection = Boolean(selectedCollectionKey);
                 const scopeSources = nextSearchScope(selectedSources);
+                const selectedSort = $("sortSelect").value;
+                const browse = selectedSort && selectedSort !== "relevance"
+                    ? selectedSort : question ? null : defaultBrowseMode();
+                const seed = browse === "random"
+                    ? Math.floor(Math.random() * 2 ** 32) : 0;
                 const url = makeStateUrl(
                     question,
                     selectedSources,
@@ -4860,6 +4852,8 @@
                     null,
                     scopeSources,
                     hasCollection ? selectedCollectionKey : undefined,
+                    browse,
+                    seed,
                 );
                 if (pushHistory) {
                     commitAutoSearchHistory();
@@ -4882,11 +4876,14 @@
                     0,
                     scopeSources,
                     hasCollection ? selectedCollectionKey : null,
+                    browse,
+                    seed,
                 );
             }
 
             $("question").addEventListener("input", (event) => {
                 if (composing || event.isComposing) return;
+                renderSortControls();
                 scheduleAutoSubmit();
             });
             $("question").addEventListener("compositionstart", () => {
@@ -4896,6 +4893,7 @@
             });
             $("question").addEventListener("compositionend", () => {
                 composing = false;
+                renderSortControls();
                 scheduleAutoSubmit();
             });
 
@@ -4907,15 +4905,11 @@
                 submitSearch(true);
             });
 
-            $("browseSection").addEventListener("click", (event) => {
-                const link = event.target.closest("a[data-browse]");
-                if (!link || modifiedClick(event)) return;
-                event.preventDefault();
-                if (availableBrowseModes.has(link.dataset.browse)) {
-                    startBrowse(link.dataset.browse);
-                }
+            $("sortSelect").addEventListener("change", () => {
+                clearTimeout(autoSubmitTimer);
+                autoSubmitTimer = null;
+                submitSearch(true);
             });
-            $("browseShuffle").addEventListener("click", () => startBrowse("random"));
 
             $("homeHeading").addEventListener("click", activateHomeHeading);
 
@@ -4961,8 +4955,8 @@
                 }
                 if (!state.question && !state.browse) {
                     // Navigated back/forward to the no-search entry: match it.
-                    resetResults();
                     $("question").value = "";
+                    resetResults();
                     return;
                 }
                 $("question").value = state.question;
@@ -5302,7 +5296,7 @@
                 if (Array.isArray(config.browse_modes)) {
                     availableBrowseModes = new Set(config.browse_modes);
                 }
-                renderBrowseControls();
+                renderSortControls();
                 if (Number.isInteger(config.page_size) && config.page_size > 0) {
                     PAGE_SIZE = config.page_size;
                 }
@@ -5412,6 +5406,7 @@
                 } finally {
                     if (startupStatus) startupStatus.hidden = true;
                 }
+                if (state.defaultSort) state.browse = defaultBrowseMode();
                 if (!libraryView && sources.length) {
                     const known = new Set(sources.map((source) => source.key));
                     const unknown = [...selectedSourceKeys].filter(

@@ -1,4 +1,4 @@
-"""Query-free browsing of immutable local indexes."""
+"""Query-free browsing and result ordering using immutable local indexes."""
 
 from __future__ import annotations
 
@@ -77,10 +77,10 @@ def _random_rows(
 
 
 def _rare_rows(
-    db: sqlite3.Connection, index: Any, count: int
+    db: sqlite3.Connection, index: Any, count: int, rowids: list[int] | None = None
 ) -> list[tuple[float, int]]:
     cached = index.browse_rankings.get("rare")
-    if cached is not None and cached[0] >= count:
+    if rowids is None and cached is not None and cached[0] >= count:
         return cached[1][:count]
     db.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS temp.zimantic_browse_words "
@@ -99,22 +99,28 @@ def _rare_rows(
     )
     stopwords = sorted(STOPWORDS)
     placeholders = ",".join("?" for _ in stopwords)
+    selection = (
+        " WHERE doc IN (" + ",".join("?" for _ in rowids) + ")"
+        if rowids is not None else ""
+    )
+    word_selection = " AND term IN (SELECT term FROM terms)" if rowids is not None else ""
     rows = db.execute(
         "WITH weights AS MATERIALIZED ("
         " SELECT term, zimantic_browse_idf(doc) AS weight"
         " FROM temp.zimantic_browse_words"
-        f" WHERE term NOT IN ({placeholders})"
+        f" WHERE term NOT IN ({placeholders}){word_selection}"
         "), terms AS ("
-        " SELECT DISTINCT term, doc FROM temp.zimantic_browse_terms"
+        f" SELECT DISTINCT term, doc FROM temp.zimantic_browse_terms{selection}"
         ") SELECT terms.doc, round(avg(weights.weight), 12) AS score"
         " FROM terms JOIN weights USING (term)"
         " JOIN docs ON docs.rowid = terms.doc"
         " WHERE docs.target IS NULL"
         " GROUP BY terms.doc ORDER BY score DESC, terms.doc LIMIT ?",
-        [*stopwords, count],
+        [*stopwords, *(rowids or []), count],
     ).fetchall()
     ranked = [(float(score), int(rowid)) for rowid, score in rows]
-    index.browse_rankings["rare"] = (count, ranked)
+    if rowids is None:
+        index.browse_rankings["rare"] = (count, ranked)
     return ranked
 
 
@@ -157,6 +163,67 @@ def _centroid(index: Any, deadline: float | None):
         raise ValueError("the index has no mean embedding direction")
     index.browse_centroid = (total / norm).astype(np.float32).reshape(1, -1)
     return index.browse_centroid
+
+
+def sort_scores(
+    index: Any, docs: list[dict[str, Any]], mode: str, deadline: float | None = None
+) -> dict[str, float]:
+    """Score only the matched documents, not a truncated browse sample."""
+    db = index.db_for_thread()
+    if db is None or mode in SEMANTIC_BROWSE_MODES and index.faiss_index is None:
+        return {}
+    acquired = (
+        index.browse_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if deadline is not None else index.browse_lock.acquire()
+    )
+    if not acquired:
+        raise TimeoutError("sort preparation is busy")
+    try:
+        _check_deadline(deadline)
+        db.set_progress_handler(
+            lambda: deadline is not None and time.monotonic() >= deadline, 1000
+        )
+        rows = {doc["_rowid"]: doc["path"] for doc in docs if "_rowid" in doc}
+        paths = [doc["path"] for doc in docs if "_rowid" not in doc]
+        for start in range(0, len(paths), 900):
+            batch = paths[start : start + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows.update(db.execute(
+                f"SELECT rowid, path FROM docs WHERE path IN ({placeholders}) "
+                "AND target IS NULL", batch,
+            ))
+        if not rows:
+            return {}
+        if mode == "rare":
+            ranked = _rare_rows(db, index, len(rows), list(rows))
+        else:
+            import faiss
+            import numpy as np
+
+            centroid = _centroid(index, deadline)
+            query = -centroid if mode == "outliers" else centroid
+            selector = faiss.IDSelectorBatch(np.array(list(rows), dtype=np.int64))
+            vectors = index.faiss_index
+            params = (
+                faiss.SearchParametersIVF(sel=selector, nprobe=vectors.nlist)
+                if hasattr(vectors, "nlist")
+                else faiss.SearchParameters(sel=selector)
+            )
+            scores, ids = vectors.search(query, len(rows), params=params)
+            ranked = [
+                (float(score), int(rowid))
+                for score, rowid in zip(scores[0], ids[0])
+                if rowid in rows and math.isfinite(float(score))
+            ]
+        _check_deadline(deadline)
+        scores_by_path: dict[str, float] = {}
+        for score, rowid in ranked:
+            path = rows[rowid]
+            scores_by_path[path] = max(score, scores_by_path.get(path, -math.inf))
+        return scores_by_path
+    finally:
+        db.set_progress_handler(None, 0)
+        index.browse_lock.release()
 
 
 def browse(

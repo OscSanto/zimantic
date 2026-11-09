@@ -7,7 +7,7 @@ import numpy as np
 
 from zimantic.contracts import SourceInfo
 from zimantic.indexing import schema
-from zimantic.indexing.browse import rank_browse_results
+from zimantic.indexing.browse import rank_browse_results, sort_scores
 from zimantic.indexing.search import SearchLimits, search
 from zimantic.providers.base import SourceQuery
 from zimantic.searching.index import IndexHandle
@@ -66,6 +66,21 @@ class BrowseTests(unittest.TestCase):
         scores = {doc["path"]: doc["score"] for doc in result.items}
         self.assertEqual(scores["accent"], scores["plain"])
         self.assertLess(scores["accent"], scores["unusual"])
+
+    def test_matched_title_rarity_is_scored_even_outside_the_browse_sample(self):
+        self.browse("rare", count=1)
+        statements = []
+        self.db.set_trace_callback(statements.append)
+        scores = sort_scores(self.index, [
+            {"path": "common-1", "_rowid": 2},
+            {"path": "common-2", "_rowid": 12},
+            {"path": "unusual", "_rowid": 31},
+        ], "rare")
+        self.assertEqual(set(scores), {"common-1", "common-2", "unusual"})
+        self.assertEqual(scores["common-1"], scores["common-2"])
+        self.assertGreater(scores["unusual"], scores["common-1"])
+        self.assertFalse(any("WHERE path IN" in sql for sql in statements))
+        self.assertEqual(sort_scores(self.index, [{"path": "missing"}], "rare"), {})
 
     def test_random_is_repeatable_and_handles_sparse_native_ids(self):
         self.db.execute(
@@ -127,6 +142,14 @@ class BrowseTests(unittest.TestCase):
         mean = vectors.mean(axis=0)
         mean /= np.linalg.norm(mean)
         np.testing.assert_allclose(self.index.browse_centroid[0], mean, atol=0.01)
+        paths = [str(ids[0]), str(ids[32]), str(ids[100])]
+        docs = [{"path": path} for path in paths]
+        scores = sort_scores(self.index, docs, "representative")
+        self.assertEqual(set(scores), set(paths))
+        opposite = sort_scores(self.index, docs, "outliers")
+        for path in paths:
+            self.assertAlmostEqual(scores[path], -opposite[path], places=5)
+        self.assertEqual(index.direct_map.type, faiss.DirectMap.NoMap)
 
     def test_deadlines_cancel_without_caching_an_incomplete_ranking(self):
         result = self.browse("rare", deadline=time.monotonic() - 1)

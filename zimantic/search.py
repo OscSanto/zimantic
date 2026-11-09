@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from collections import Counter, deque
@@ -34,6 +36,7 @@ from .indexing.browse import (
     BROWSE_MODES,
     SEMANTIC_BROWSE_MODES,
     rank_browse_results,
+    sort_scores,
 )
 from .providers.base import (
     CollectionInfo,
@@ -1600,15 +1603,26 @@ class Search:
         self._search_scope(source, collection)
 
     @staticmethod
-    def _validate_query(query: str) -> str:
+    def _validate_query(query: str, *, allow_empty: bool = False) -> str:
         if not isinstance(query, str):
             raise SearchQueryError("query must be text")
         query = query.strip()
-        if not query:
+        if not query and not allow_empty:
             raise SearchQueryError("query must not be empty")
         if len(query) > MAX_QUERY_LENGTH:
             raise SearchQueryError(f"query must be at most {MAX_QUERY_LENGTH} characters")
         return query
+
+    def _validate_search(
+        self, query: str, sort: str | None = None, seed: int = 0
+    ) -> tuple[str, str]:
+        query = self._validate_query(query, allow_empty=True)
+        sort = sort or ("relevance" if query else "representative" if self.semantic else "rare")
+        if not query and sort == "relevance":
+            sort = "representative" if self.semantic else "rare"
+        if sort != "relevance":
+            self._validate_browse(sort, seed)
+        return query, sort
 
     def _validate_browse(self, mode: str, seed: int = 0) -> None:
         if mode not in BROWSE_MODES:
@@ -1913,6 +1927,7 @@ class Search:
         *,
         browse: str | None = None,
         seed: int = 0,
+        sort: str | None = None,
     ) -> dict[str, Any]:
         """Return one page plus totals, using the streaming coordinator."""
         final: dict[str, Any] = {}
@@ -1925,6 +1940,7 @@ class Search:
             debug,
             browse=browse,
             seed=seed,
+            sort=sort,
         ):
             if event["type"] == "error":
                 if event.get("busy"):
@@ -2071,6 +2087,7 @@ class Search:
         *,
         browse: str | None = None,
         seed: int = 0,
+        sort: str | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield source progress and one page of the ranked pool.
 
@@ -2082,7 +2099,11 @@ class Search:
         Concurrent identical queries share a single computation.
         """
         if browse is None:
-            query = self._validate_query(query)
+            query, sort = self._validate_search(query, sort, seed)
+            if not query:
+                browse = sort
+            if sort != "random":
+                seed = 0
         else:
             self._validate_browse(browse, seed)
             if not isinstance(query, str) or query.strip():
@@ -2120,6 +2141,8 @@ class Search:
                 "browse", browse, seed,
                 tuple(sorted(src.key for src in sources)), cache_key,
             )
+        elif sort != "relevance":
+            cache_key = ("sort", sort, seed, cache_key)
         inflight_key = (generation, cache_key)
         cached, pending = self._claim_search(cache_key, inflight_key, generation)
         if cached is not None:
@@ -2156,6 +2179,7 @@ class Search:
             False if browse is not None else scope.source_cap,
             browse=browse,
             seed=seed,
+            sort=sort,
         )
 
     def _finalize_search(
@@ -2173,6 +2197,8 @@ class Search:
         pool: list[dict[str, Any]] | None = None,
         cacheable: bool = True,
         deadline: float | None = None,
+        sort: str | None = None,
+        seed: int = 0,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Rank, enrich, hydrate and cache one finished search.
 
@@ -2184,6 +2210,8 @@ class Search:
         if pool is None:
             pool = self._rank_results(source_results, query, pool_target)
         pool = self._enrich_pool(source_results, query, pool, pool_target)
+        if query and sort and sort != "relevance":
+            pool = self._sort_results(pool, sort, seed, deadline)
         state = self._page_state(pool, offset, page_size, debug)
         self._hydrate_results(state["results"])
         hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
@@ -2235,6 +2263,7 @@ class Search:
         *,
         browse: str | None = None,
         seed: int = 0,
+        sort: str | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Run one uncached search and publish progress to waiting callers."""
         total_sources = len(sources)
@@ -2327,6 +2356,13 @@ class Search:
             deadline = started_at + max(
                 1.0, getattr(self, "search_timeout_seconds", 30.0)
             )
+
+            def rank_pool() -> list[dict[str, Any]]:
+                ranked = self._rank_results(completed, query, pool_target)
+                if query and sort and sort != "relevance":
+                    ranked = self._sort_results(ranked, sort, seed, deadline)
+                return ranked
+
             provider_order: list[str] = []
             queues: dict[str, deque[SourceInfo]] = {}
             for src in sources:
@@ -2460,7 +2496,7 @@ class Search:
                         count_rank = count_due and rank_passes < max_stream_ranks
                         should_rank = final or timed_due or count_rank
                         if should_rank:
-                            pool = self._rank_results(completed, query, pool_target)
+                            pool = rank_pool()
                             counts = self._source_counts(pool)
                             # This source is part of the pool that was just
                             # ranked, so its count is current. Between rank
@@ -2509,7 +2545,7 @@ class Search:
                     # A source finished less than one interval after the last
                     # rank pass. Publish it now instead of waiting for the next
                     # completion, which may be a long way off.
-                    pool = self._rank_results(completed, query, pool_target)
+                    pool = rank_pool()
                     last_rank_at = now
                     unranked = 0
                     state = self._page_state(pool, offset, page_size, debug)
@@ -2571,9 +2607,11 @@ class Search:
                 generation,
                 cache_key,
                 scope,
-                pool=None if unranked else pool,
+                pool=None if unranked or (query and sort and sort != "relevance") else pool,
                 cacheable=not deadline_hit,
                 deadline=deadline,
+                sort=sort,
+                seed=seed,
             )
             if time.monotonic() >= deadline and not deadline_hit:
                 scope["status"] = "partial"
@@ -2866,6 +2904,58 @@ class Search:
                 if enrich_source(source_key, result_docs):
                     found = True
         return self._rank_results(source_results, query, limit) if found else pool
+
+    def _sort_results(
+        self,
+        pool: list[dict[str, Any]],
+        mode: str,
+        seed: int,
+        deadline: float | None,
+    ) -> list[dict[str, Any]]:
+        scores: dict[str, float] = {}
+        if mode == "random":
+            scores = {
+                doc["id"]: int.from_bytes(hashlib.blake2b(
+                    f"{seed}:{doc['id']}".encode(), digest_size=8
+                ).digest()) / 2**64
+                for doc in pool
+            }
+        else:
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for doc in pool:
+                grouped.setdefault(doc["source_key"], []).append(doc)
+            with self._state_lock:
+                runtimes = dict(self.runtimes)
+                sources = dict(self.sources)
+            for key, docs in grouped.items():
+                source = sources.get(key)
+                runtime = runtimes.get(source.collection_key) if source else None
+                if not isinstance(runtime, IndexedRuntime):
+                    continue
+                index = runtime.indexes.get(key)
+                if index is None:
+                    continue
+                try:
+                    by_path = sort_scores(index, docs, mode, deadline)
+                except (TimeoutError, sqlite3.Error, ValueError, RuntimeError) as error:
+                    logger.debug("sort unavailable for %s: %s", key, error)
+                    continue
+                scores.update({
+                    doc["id"]: by_path[doc["path"]]
+                    for doc in docs if doc["path"] in by_path
+                })
+        ordered = sorted(pool, key=lambda doc: -scores.get(doc["id"], -math.inf))
+        return [
+            {
+                **doc,
+                "ranking": {
+                    **doc.get("ranking", {}),
+                    "sort": {"mode": mode, "score": scores.get(doc["id"])},
+                    "final_rank": rank,
+                },
+            }
+            for rank, doc in enumerate(ordered, 1)
+        ]
 
     def _rank_results(
         self,

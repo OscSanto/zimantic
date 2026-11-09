@@ -198,6 +198,7 @@ def fetch_docs(
             url_builder=url_builder,
             web_base_path=web_base_path,
         )
+        docs[rowid]["_rowid"] = final_id
     return docs
 
 

@@ -131,7 +131,7 @@ const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); 
 const sourceDisplayName = (key) => key;
 const sourceStemName = () => "";
 const collectionDisplayName = (key) => key;
-const renderBrowseControls = () => {{}};
+const renderSortControls = () => {{}};
 {_function_source(source, "function renderSourceSelectionSummary()", "function renderFilterLine(")}
 {_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
 {_function_source(source, '$("scopeLineReset").addEventListener("click"', '$("articleModal").addEventListener("click"')}
@@ -203,9 +203,9 @@ const t = (text) => text;
 const appPath = (path) => path;
 const mode = {json.dumps(mode)};
 const state = {{
-  question: ["empty", "failure", "browse"].includes(mode) ? "" : "original",
-  browse: mode === "browse" ? "rare" : undefined,
-  seed: mode === "browse" ? 0 : undefined,
+  question: ["empty", "empty-query", "failure", "browse"].includes(mode) ? "" : "original",
+  browse: mode === "browse" ? "rare" : mode === "empty-query" ? "representative" : undefined,
+  seed: ["browse", "empty-query"].includes(mode) ? 0 : undefined,
   selectedSources: [], scopeSources: [], collection: "files:modules", page: 0, modal: null,
 }};
 const normalizePageParam = () => {{}};
@@ -322,18 +322,23 @@ const snapshot = () => ({{
                         payload["searches"], [["new query", [], 0, [], "files:modules"]]
                     )
 
-    def test_startup_browsing_is_explicit_not_an_empty_search(self):
+    def test_startup_requires_a_query_parameter_or_explicit_order(self):
         self.assertEqual(self._initialize_search_page("empty")["searches"], [])
+        self.assertEqual(
+            self._initialize_search_page("empty-query")["searches"],
+            [["", [], 0, [], "files:modules", "representative", 0]],
+        )
         self.assertEqual(
             self._initialize_search_page("browse")["searches"],
             [["", [], 0, [], "files:modules", "rare", 0]],
         )
 
-    def test_browse_state_preserves_seed_scope_paging_and_modal_but_not_new_queries(self):
+    def test_sort_state_preserves_seed_scope_paging_modal_and_new_queries(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 const location = new URL("http://example.test/?q=");
 const MAX_QUERY_LENGTH = 4096;
+const defaultBrowseMode = () => "representative";
 const selectionValues = (values) => [...(values || [])];
 let current = null, selectedSourceKeys = new Set(["manual"]);
 const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); }};
@@ -364,25 +369,25 @@ console.log(JSON.stringify({{empty, browsing, paged, modal, query, rare, searche
             [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
         )
         payload = json.loads(result.stdout)
-        self.assertIsNone(payload["empty"]["browse"])
+        self.assertEqual(payload["empty"]["browse"], "representative")
         self.assertEqual(payload["browsing"]["browse"], "random")
         self.assertEqual(payload["browsing"]["seed"], 7)
         self.assertEqual(
-            payload["paged"], "/?browse=random&seed=7&source=manual&page=2"
+            payload["paged"], "/?q=&sort=random&seed=7&source=manual&page=2"
         )
         self.assertEqual(
             payload["modal"],
-            "/?browse=random&seed=7&source=manual&page=2&modal=%2Fcontent%2Fmanual%2Ftopic",
+            "/?q=&sort=random&seed=7&source=manual&page=2&modal=%2Fcontent%2Fmanual%2Ftopic",
         )
-        self.assertEqual(payload["query"], "/?q=topic&source=manual")
-        self.assertEqual(payload["rare"], "/?browse=rare&collection=files%3Amodules")
+        self.assertEqual(payload["query"], "/?q=topic&sort=random&seed=7&source=manual")
+        self.assertEqual(payload["rare"], "/?q=&sort=rare&collection=files%3Amodules")
         self.assertEqual(
             payload["searches"], [["", ["other"], 0, ["other"], None, "random", 7]]
         )
         self.assertEqual(payload["pages"], [1])
         self.assertIsNone(payload["queryState"]["browse"])
 
-    def test_browse_pagination_uses_the_browse_endpoint_and_original_seed(self):
+    def test_sorted_pagination_uses_the_search_endpoint_and_original_seed(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 let current = {{
@@ -417,10 +422,121 @@ loadPage(1).then(() => console.log(JSON.stringify({{requests, current}})));
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["requests"],
-            ["/zimantic/browse?mode=random&seed=7&limit=10&offset=10&collection=files%3Amodules"],
+            ["/zimantic/search?q=&sort=random&seed=7&limit=10&offset=10&collection=files%3Amodules"],
         )
         self.assertEqual(payload["current"]["page"], 1)
         self.assertEqual(payload["current"]["pageItems"], [{"id": "item"}])
+
+    def test_sort_selector_submits_empty_and_text_queries_without_losing_scope(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/?collection=files%3Amodules");
+const history = {{
+  pushState(_state, _title, url) {{ location.href = new URL(url, location.href).href; }},
+}};
+const elements = {{
+  question: {{value: ""}},
+  sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "representative"]
+    .map((value) => ({{value}}))}},
+}};
+const $ = (id) => elements[id];
+const availableBrowseModes = new Set(["random", "rare", "outliers", "representative"]);
+const selectionValues = (values) => [...(values || [])];
+const selectedSourceKeys = new Set(["manual"]);
+const selectedCollectionKey = "files:modules";
+const nextSearchScope = (selected) => selected;
+const MAX_QUERY_LENGTH = 4096;
+const commitAutoSearchHistory = () => {{}};
+const currentUrlValue = () => location.pathname + location.search;
+const searches = [];
+let current = null;
+const runSearch = (...args) => {{
+  searches.push(args);
+  current = {{question: args[0], browse: args[5], seed: args[6]}};
+}};
+Math.random = () => 7 / 2 ** 32;
+{_function_source(source, "function defaultBrowseMode()", "function setSettingsOpen(")}
+{_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
+{_function_source(source, "function submitSearch(", '$("question").addEventListener("input"')}
+renderSortControls();
+const emptyDefault = $("sortSelect").value;
+const relevanceDisabled = $("sortSelect").options[0].disabled;
+submitSearch(true);
+const emptyUrl = currentUrlValue();
+$("question").value = "topic";
+$("sortSelect").value = "random";
+submitSearch(true);
+renderSortControls();
+const textUrl = currentUrlValue(), textSort = $("sortSelect").value;
+$("sortSelect").value = "relevance";
+submitSearch(true);
+const relevanceUrl = currentUrlValue();
+current = null;
+$("question").value = "";
+availableBrowseModes.delete("representative");
+availableBrowseModes.delete("outliers");
+renderSortControls();
+console.log(JSON.stringify({{
+  emptyDefault, relevanceDisabled, emptyUrl, textUrl, textSort, relevanceUrl, searches,
+  fastDefault: $("sortSelect").value,
+  semanticHidden: $("sortSelect").options.slice(3).every((option) => option.hidden && option.disabled),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["emptyDefault"], "representative")
+        self.assertTrue(payload["relevanceDisabled"])
+        self.assertEqual(payload["emptyUrl"], "/?q=&sort=representative&collection=files%3Amodules&source=manual")
+        self.assertEqual(payload["textUrl"], "/?q=topic&sort=random&seed=7&collection=files%3Amodules&source=manual")
+        self.assertEqual(payload["textSort"], "random")
+        self.assertEqual(payload["relevanceUrl"], "/?q=topic&collection=files%3Amodules&source=manual")
+        self.assertEqual(payload["searches"], [
+            ["", ["manual"], 0, ["manual"], "files:modules", "representative", 0],
+            ["topic", ["manual"], 0, ["manual"], "files:modules", "random", 7],
+            ["topic", ["manual"], 0, ["manual"], "files:modules", None, 0],
+        ])
+        self.assertEqual(payload["fastDefault"], "rare")
+        self.assertTrue(payload["semanticHidden"])
+
+    def test_history_distinguishes_empty_search_from_home_and_restores_sort(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/");
+const MAX_QUERY_LENGTH = 4096;
+const defaultBrowseMode = () => "representative";
+const appPath = (path) => path;
+const elements = {{articleModal: {{hidden: true}}, question: {{value: ""}}}};
+const $ = (id) => elements[id];
+const history = {{state: null}};
+const cancelAutoSearchHistory = () => {{}};
+const syncArticleModal = () => {{}};
+const syncLibraryInfo = () => {{}};
+const searches = [];
+let resets = 0, current = null;
+const resetResults = () => {{ resets++; }};
+const runSearch = (...args) => searches.push(args);
+const window = {{addEventListener(_name, fn) {{ this.popstate = fn; }}}};
+{_function_source(source, "function readLocationState()", "function syncArticleModal(")}
+{_function_source(source, 'window.addEventListener("popstate"', "function applyDiscoveryData(")}
+window.popstate();
+location.search = "?q=";
+window.popstate();
+location.search = "?q=topic&sort=random&seed=7&source=manual&page=2";
+window.popstate();
+console.log(JSON.stringify({{resets, searches}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(json.loads(result.stdout), {
+            "resets": 1,
+            "searches": [
+                ["", [], 0, [], None, "representative", 0],
+                ["topic", ["manual"], 1, ["manual"], None, "random", 7],
+            ],
+        })
 
     def test_library_filter_matches_word_prefixes_not_interior_substrings(self):
         source = APP_JS.read_text(encoding="utf-8")
@@ -1073,7 +1189,7 @@ const renderScopeLine = () => {{}};
 const renderSourceFilters = () => {{}};
 const renderResults = () => {{}};
 const renderView = () => {{}};
-const renderBrowseControls = () => {{}};
+const renderSortControls = () => {{}};
 const searchStatusText = () => "";
 const debugMode = false;
 const syncPage = () => {{}};

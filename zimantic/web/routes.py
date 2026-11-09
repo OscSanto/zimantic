@@ -1384,16 +1384,20 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/search")
     def api_search(
-        q: Annotated[str, Query(min_length=1, max_length=4096)],
+        q: Annotated[str, Query(max_length=4096)],
         source: Annotated[list[str] | None, Query()] = None,
         collection: Annotated[str | None, Query()] = None,
         limit: Annotated[int | None, Query(ge=1)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
+        sort: Literal["relevance", "random", "rare", "outliers", "representative"] | None = None,
+        seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
     ):
         source_filter = source[0] if source and len(source) == 1 else source
         try:
+            q, sort = search_class._validate_search(q, sort, seed)
             page = search_class.search_page(
-                q, source_filter, limit, offset, collection, debug
+                q, source_filter, limit, offset, collection, debug,
+                sort=sort, seed=seed,
             )
         except SearchBusyError as error:
             raise HTTPException(
@@ -1407,14 +1411,16 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/search/stream")
     def api_search_stream(
-        q: Annotated[str, Query(min_length=1, max_length=4096)],
+        q: Annotated[str, Query(max_length=4096)],
         source: Annotated[list[str] | None, Query()] = None,
         collection: Annotated[str | None, Query()] = None,
         limit: Annotated[int | None, Query(ge=1)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
+        sort: Literal["relevance", "random", "rare", "outliers", "representative"] | None = None,
+        seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
     ):
         try:
-            search_class._validate_query(q)
+            q, sort = search_class._validate_search(q, sort, seed)
             source_filter = source[0] if source and len(source) == 1 else source
             validate_scope = getattr(search_class, "validate_search_scope", None)
             if callable(validate_scope):
@@ -1423,7 +1429,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return search_stream_response(
             search_class.stream_search(
-                q, source_filter, limit, offset, collection, debug
+                q, source_filter, limit, offset, collection, debug,
+                sort=sort, seed=seed,
             )
         )
 
