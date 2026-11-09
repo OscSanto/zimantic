@@ -16,6 +16,24 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
+    def test_library_filter_matches_word_prefixes_not_interior_substrings(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+{_function_source(source, "function matchesLibraryTerms(", "function libraryCollectionText(")}
+console.log(JSON.stringify([
+  matchesLibraryTerms("Illustrated guide", "ill"),
+  matchesLibraryTerms("Illustrated guide", "ted"),
+  matchesLibraryTerms("Guide to illustrated topics", "ted"),
+  matchesLibraryTerms("Café guide", "café"),
+  matchesLibraryTerms("Café guide", "fé"),
+  matchesLibraryTerms("Illustrated guide", "-ted"),
+]));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(json.loads(result.stdout), [True, False, False, True, False, True])
+
     def test_library_language_options_use_discovered_codes_and_preserve_selection(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -32,7 +50,7 @@ const $ = (id) => elements[id];
 const t = (text) => text;
 const libraryLanguageOptions = new Set();
 const libraryLanguageDisplayNames = new Map();
-let librarySources = [{{language: "eng,spa"}}, {{language: "fra"}}];
+let librarySources = [{{language: "eng,spa"}}, {{language: "fra,deu"}}];
 const sortLibrarySources = (records) => records;
 {_function_source(source, "function libraryLanguageCodes(", "function infoUrl(")}
 {_function_source(source, "function renderLibraryLanguageOptions()", "function renderLibrary()")}
@@ -64,16 +82,62 @@ console.log(JSON.stringify({{
             payload["initial"]["options"],
             [
                 ["", "All languages"],
-                ["eng", "ENG - English"],
-                ["fra", "FRA - French"],
-                ["spa", "SPA - Spanish"],
+                ["eng", "English (ENG)"],
+                ["fra", "French (FRA)"],
+                ["deu", "German (DEU)"],
+                ["spa", "Spanish (SPA)"],
             ],
         )
         self.assertEqual(
             payload["spanish"]["options"],
-            ["All languages", "ENG - inglés", "FRA - francés", "SPA - español"],
+            ["All languages", "alemán (DEU)", "español (SPA)", "francés (FRA)", "inglés (ENG)"],
         )
         self.assertEqual(payload["selected"], "fra")
+
+    def test_library_language_names_fall_back_when_browser_lookup_is_unavailable(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const elements = {{localePicker: {{value: "en"}}}};
+const $ = (id) => elements[id];
+const libraryLanguageDisplayNames = new Map();
+{_function_source(source, "function libraryLanguageName(", "function setLibraryLanguageFilter(")}
+const results = [];
+for (const mode of ["code", "uppercase", "missing", "throws", "constructor", "unavailable"]) {{
+  Intl.DisplayNames = mode === "unavailable" ? undefined : class {{
+    constructor() {{ if (mode === "constructor") throw new RangeError(); }}
+    of(code) {{
+      if (mode === "throws") throw new RangeError();
+      if (mode === "missing") return undefined;
+      return mode === "uppercase" ? code.toUpperCase() : code;
+    }}
+  }};
+  const labels = [];
+  for (const locale of ["en", "es"]) {{
+    elements.localePicker.value = locale;
+    libraryLanguageDisplayNames.clear();
+    labels.push(["LAO", "ewe", "zzz"].map(libraryLanguageLabel));
+  }}
+  results.push(labels);
+}}
+Intl.DisplayNames = class {{ of() {{ return "Browser name"; }} }};
+libraryLanguageDisplayNames.clear();
+console.log(JSON.stringify({{results, native: libraryLanguageLabel("lao")}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["results"],
+            [
+                [
+                    ["Lao (LAO)", "Ewe (EWE)", "ZZZ"],
+                    ["lao (LAO)", "ewé (EWE)", "ZZZ"],
+                ]
+            ]
+            * 6,
+        )
+        self.assertEqual(payload["native"], "Browser name (LAO)")
 
     def test_library_renders_all_loaded_sources_and_filters_source_media(self):
         source = APP_JS.read_text(encoding="utf-8")
@@ -176,7 +240,7 @@ console.log(JSON.stringify({{
         )
         self.assertEqual(
             payload["initial"][1]["details"],
-            "ENG - English · 2025-08-27\n34,448 items · 109 MB",
+            "English (ENG) · 2025-08-27\n34,448 items · 109 MB",
         )
         self.assertEqual(
             payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources."
@@ -193,7 +257,7 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["filtered"][0]["count"], 1)
         self.assertEqual(
             payload["scopeText"],
-            "Filtered by: Content type: Video · Language: ENG - English",
+            "Filtered by: Content type: Video · Language: English (ENG)",
         )
         self.assertEqual(payload["status"], "1 collection · 1 loaded source")
         self.assertEqual(payload["placeholder"], "Filter 1 source")
@@ -247,7 +311,7 @@ console.log(JSON.stringify({{
         self.assertFalse(payload["active"]["hidden"])
         self.assertEqual(
             payload["active"]["text"],
-            "Filtered by: Provider: Files · Content type: Video · Language: FRA - French · Filter: Trees",
+            "Filtered by: Provider: Files · Content type: Video · Language: French (FRA) · Filter: Trees",
         )
         self.assertEqual(
             payload["active"]["params"],

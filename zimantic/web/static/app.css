@@ -530,12 +530,17 @@ ol.results {
     outline-offset: 2px;
 }
 .library-search-row {
+    align-items: center;
+    display: flex;
     flex-basis: 100%;
+    gap: 10px;
 }
 .library-search-row input {
+    flex: 1;
     max-width: none;
+    min-width: 0;
     padding: 7px 10px;
-    width: 100%;
+    width: auto;
 }
 .library-filter-select {
     align-items: center;
@@ -1055,6 +1060,12 @@ summary {
     .library-toolbar input {
         max-width: none;
         width: 100%;
+    }
+    .library-search-row {
+        width: 100%;
+    }
+    .library-search-row input {
+        width: auto;
     }
     .result {
         display: grid;

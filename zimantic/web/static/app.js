@@ -952,9 +952,16 @@
                     (term) => !term.startsWith("-") || term.length === 1,
                 );
                 const haystack = String(text || "").toLocaleLowerCase();
+                const matchesPrefix = (term) => {
+                    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    return new RegExp(
+                        `(?:^|[^\\p{L}\\p{N}_])${escaped}`,
+                        "u",
+                    ).test(haystack);
+                };
                 return (
-                    included.every((term) => haystack.includes(term)) &&
-                    excluded.every((term) => !haystack.includes(term))
+                    included.every(matchesPrefix) &&
+                    excluded.every((term) => !matchesPrefix(term))
                 );
             }
 
@@ -1245,20 +1252,30 @@
                 allLanguages.textContent = t("All languages");
                 allLanguages.dataset.i18n = "All languages";
                 select.appendChild(allLanguages);
-                for (const language of [...libraryLanguageOptions].sort()) {
+                const locale = $("localePicker")?.value || "en";
+                const options = [...libraryLanguageOptions]
+                    .map((language) => ({ language, label: libraryLanguageLabel(language) }))
+                    .sort((left, right) => left.label.localeCompare(right.label, locale));
+                for (const { language, label } of options) {
                     const option = document.createElement("option");
                     option.value = language;
-                    option.textContent = libraryLanguageLabel(language);
+                    option.textContent = label;
                     select.appendChild(option);
                 }
                 select.value = selected;
             }
 
             function libraryLanguageName(language) {
-                if (typeof Intl.DisplayNames !== "function") {
-                    return language.toUpperCase();
-                }
                 const locale = $("localePicker")?.value || "en";
+                const fallbackNames = {
+                    en: { lao: "Lao", ewe: "Ewe" },
+                    es: { lao: "lao", ewe: "ewé" },
+                };
+                const fallback = (fallbackNames[locale] || fallbackNames.en)[language]
+                    || language.toUpperCase();
+                if (typeof Intl.DisplayNames !== "function") {
+                    return fallback;
+                }
                 let displayNames = libraryLanguageDisplayNames.get(locale);
                 if (!displayNames) {
                     try {
@@ -1267,13 +1284,16 @@
                         });
                         libraryLanguageDisplayNames.set(locale, displayNames);
                     } catch (_) {
-                        return language.toUpperCase();
+                        return fallback;
                     }
                 }
                 try {
-                    return displayNames.of(language) || language.toUpperCase();
+                    const name = displayNames.of(language);
+                    return name && name.toLocaleLowerCase() !== language
+                        ? name
+                        : fallback;
                 } catch (_) {
-                    return language.toUpperCase();
+                    return fallback;
                 }
             }
 
@@ -1281,9 +1301,9 @@
                 const language = String(code || "").trim().toLocaleLowerCase();
                 if (!language) return "";
                 const name = libraryLanguageName(language);
-                return name.toLocaleLowerCase() === language
+                return name === language.toUpperCase()
                     ? language.toUpperCase()
-                    : `${language.toUpperCase()} - ${name}`;
+                    : `${name} (${language.toUpperCase()})`;
             }
 
             function setLibraryLanguageFilter(value) {
