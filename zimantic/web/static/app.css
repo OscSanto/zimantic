@@ -195,8 +195,9 @@ button:disabled {
 .sort-controls {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
-    margin: 12px 0;
+    margin: 0;
     color: var(--muted);
     font-size: 0.85rem;
 }
@@ -239,10 +240,10 @@ a.secondary {
     font-family: var(--mono);
 }
 .search-summary {
-    align-items: baseline;
+    align-items: center;
     display: flex;
     flex-wrap: wrap;
-    gap: 2px 16px;
+    gap: 8px 16px;
     justify-content: space-between;
     margin: 12px 0 8px;
 }
@@ -256,11 +257,13 @@ a.secondary {
     border: 1px solid var(--border);
     border-radius: 8px;
     display: none;
+    flex-direction: column;
+    gap: 8px;
     margin-bottom: 8px;
     padding: 8px 10px;
 }
 .source-scope-panel:has(> :not([hidden])) {
-    display: block;
+    display: flex;
 }
 .source-filters {
     margin: 0;
@@ -271,6 +274,7 @@ a.secondary {
 .source-filter-toolbar {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
 }
 .source-filter-heading,
@@ -279,7 +283,7 @@ a.secondary {
     font-size: 0.85rem;
 }
 .source-filter-search {
-    flex: 1;
+    flex: 1 1 12em;
     max-width: 360px;
     padding: 6px 10px !important;
     font-size: 0.85rem !important;
@@ -372,9 +376,8 @@ button.source-filter-collection[aria-pressed="true"] {
     margin: 0;
     padding: 0;
 }
-.source-scope-panel:has(> .source-filters:not([hidden])) > .scope-line {
+.source-scope-panel > .scope-line:has(~ :not([hidden])) {
     border-bottom: 1px solid var(--border);
-    margin-bottom: 8px;
     padding-bottom: 8px;
 }
 .scope-line-reset {
