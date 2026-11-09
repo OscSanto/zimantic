@@ -651,7 +651,7 @@
                 appendInfoRow(list, "Collection", collectionLabelFor(source));
                 appendInfoRow(
                     list,
-                    "Content types",
+                    "Media types",
                     mediaTypeLabels(source.media_types).join(" · "),
                 );
                 appendInfoRow(
@@ -671,7 +671,7 @@
                     const details = document.createElement("details");
                     details.className = "library-info-counter";
                     const summary = document.createElement("summary");
-                    summary.textContent = t("Content types");
+                    summary.textContent = t("Media types");
                     details.appendChild(summary);
                     const code = document.createElement("code");
                     code.textContent = counter
@@ -1228,7 +1228,7 @@
                     filters.push(`${t("Provider")}: ${providerLabel(provider)}`);
                 }
                 if (media) {
-                    filters.push(`${t("Content type")}: ${mediaTypeLabels([media]).join("")}`);
+                    filters.push(`${t("Media type")}: ${mediaTypeLabels([media]).join("")}`);
                 }
                 if (language) {
                     filters.push(`${t("Language")}: ${libraryLanguageLabel(language)}`);

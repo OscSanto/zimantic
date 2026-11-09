@@ -257,7 +257,7 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["filtered"][0]["count"], 1)
         self.assertEqual(
             payload["scopeText"],
-            "Filtered by: Content type: Video · Language: English (ENG)",
+            "Filtered by: Media type: Video · Language: English (ENG)",
         )
         self.assertEqual(payload["status"], "1 collection · 1 loaded source")
         self.assertEqual(payload["placeholder"], "Filter 1 source")
@@ -311,7 +311,7 @@ console.log(JSON.stringify({{
         self.assertFalse(payload["active"]["hidden"])
         self.assertEqual(
             payload["active"]["text"],
-            "Filtered by: Provider: Files · Content type: Video · Language: French (FRA) · Filter: Trees",
+            "Filtered by: Provider: Files · Media type: Video · Language: French (FRA) · Filter: Trees",
         )
         self.assertEqual(
             payload["active"]["params"],
