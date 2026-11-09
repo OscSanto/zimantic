@@ -14,6 +14,7 @@
             "Filter by source": "Filtrar por fuente",
             "Search sources": "Buscar fuentes",
             "Search all sources": "Buscar en todas las fuentes",
+            "Reset source filters": "Restablecer filtros de fuentes",
             "Results pagination": "Paginación de resultados",
             "Your library": "Tu biblioteca",
             "Shuffle": "Mezclar",

@@ -293,6 +293,7 @@ button.source-filter-option[aria-pressed="true"] {
     flex-direction: column;
     gap: 4px;
     padding: 5px 8px 7px;
+    width: 100%;
 }
 .source-filter-group.selected {
     border-color: var(--accent);
@@ -342,10 +343,14 @@ button.source-filter-collection[aria-pressed="true"] {
 .source-scope-panel > .scope-line {
     background: none;
     border: 0;
-    border-top: 1px solid var(--border);
     border-radius: 0;
-    margin: 8px 0 0;
-    padding: 8px 0 0;
+    margin: 0;
+    padding: 0;
+}
+.source-scope-panel:has(> .source-filters:not([hidden])) > .scope-line {
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+    padding-bottom: 8px;
 }
 .scope-line-reset {
     font-size: 0.78rem;
