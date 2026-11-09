@@ -21,6 +21,7 @@ HOME_HTML = b"<html><head><title>Home</title></head><body>Home body</body></html
 ALPHA_HTML = b"<html><head><title>Alpha</title></head><body>Alpha body</body></html>"
 BETA_HTML = b"<html><head><title>Beta</title></head><body>Beta body</body></html>"
 DATA = bytes(range(64))
+SHELL_SCRIPT = b'#!/bin/sh\necho "<script>not HTML</script>"\n'
 
 
 class _Page(Item):
@@ -62,6 +63,9 @@ def _create_zim(
         creator.add_item(_Page("Alpha", "Alpha", alpha, "text/html"))
         creator.add_item(_Page("Beta", "Beta", BETA_HTML, "text/html"))
         creator.add_item(_Page("data.bin", "Data", DATA, "application/octet-stream"))
+        creator.add_item(
+            _Page("finish_install.sh", "Install", SHELL_SCRIPT, "application/x-sh")
+        )
         creator.add_redirection("Alias", "Alias", "Alpha", {})
 
 
@@ -197,6 +201,7 @@ def test_full_range_requests_and_validators(site):
     assert full.content == DATA
     assert full.headers["accept-ranges"] == "bytes"
     assert full.headers["access-control-allow-origin"] == "*"
+    assert full.headers["content-disposition"].startswith("attachment")
 
     prefix = client.get(_article(key, "data.bin"), headers={"Range": "bytes=0-3"})
     assert prefix.status_code == 206
@@ -229,6 +234,31 @@ def test_full_range_requests_and_validators(site):
     )
     assert partial.content == DATA[2:6]
     assert partial.headers["content-range"] == f"bytes 2-5/{len(DATA)}"
+
+
+def test_script_text_serves_inline_for_get_head_and_ranges(site):
+    client, _search, key = site
+    url = _article(key, "finish_install.sh")
+    full = client.get(url)
+    head = client.head(url)
+    partial = client.get(url, headers={"Range": "bytes=0-8"})
+
+    assert full.status_code == head.status_code == 200
+    assert full.content == SHELL_SCRIPT
+    assert head.content == b""
+    assert head.headers["content-length"] == str(len(SHELL_SCRIPT))
+    assert partial.status_code == 206
+    assert partial.content == SHELL_SCRIPT[:9]
+    assert partial.headers["content-range"] == f"bytes 0-8/{len(SHELL_SCRIPT)}"
+    for response in (full, head, partial):
+        assert response.headers["content-type"].startswith("text/plain")
+        assert "content-disposition" not in response.headers
+        assert response.headers["x-content-type-options"] == "nosniff"
+
+    shell = client.get(f"/content/{quote(key, safe='')}/finish_install.sh")
+    assert f'href="{url}">Install</a>' in shell.text
+    assert f'src="{url}"' in shell.text
+    assert '<div class="zimantic-shell-attachment"' not in shell.text
 
 
 def test_unsatisfiable_and_ignored_ranges(site):

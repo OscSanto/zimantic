@@ -243,6 +243,7 @@ def test_source_key_uses_basename_for_a_single_file_collection(tmp_path):
     try:
         expected = zim_source_key("library", "manual.zim")
         assert [source.key for source in runtime.library_sources()] == [expected]
+        assert len(expected.rsplit("-", 1)[1]) == 8
         assert runtime.library_sources()[0].provider == "zim"
         assert runtime.library_sources()[0].collection_key == "zim:library"
     finally:

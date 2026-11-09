@@ -162,6 +162,7 @@ def test_runtime_discovers_books_and_searches_them():
         assert [source.title for source in runtime.sources] == ["Manual"]
         source = runtime.sources[0]
         assert source.key == kiwix_source_key("remote", "manual")
+        assert len(source.key.rsplit("-", 1)[1]) == 8
         assert source.provider == "kiwix"
         assert source.collection_key == "kiwix:remote"
         assert source.homepage == "http://kiwix/content/manual"

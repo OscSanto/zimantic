@@ -504,6 +504,40 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
         self.assertEqual(response.content, bytes(content))
 
+    def test_source_text_is_displayed_inline_without_executing_markup(self):
+        body = b'#!/bin/sh\nprintf "<script>alert(1)</script>\\n"\n'
+        for mimetype in (
+            "application/x-sh",
+            "application/x-csh",
+            "text/x-shellscript",
+            "text/x-python; charset=utf-8",
+        ):
+            with self.subTest(mimetype=mimetype), patch.object(
+                self.search,
+                "read_article",
+                lambda zim, path, mimetype=mimetype: {
+                    "path": path,
+                    "title": "finish_install.sh",
+                    "mimetype": mimetype,
+                    "content": body,
+                },
+                create=True,
+            ):
+                shell = self.client.get("/content/manual/en-file_share/finish_install.sh")
+                raw = self.client.get("/article/manual/en-file_share/finish_install.sh")
+                head = self.client.head("/article/manual/en-file_share/finish_install.sh")
+
+                self.assertEqual(shell.status_code, 200)
+                self.assertIn(
+                    'src="/article/manual/en-file_share/finish_install.sh"', shell.text
+                )
+                self.assertNotIn('<div class="zimantic-shell-attachment"', shell.text)
+                self.assertEqual(raw.content, body)
+                self.assertTrue(raw.headers["content-type"].startswith("text/plain"))
+                self.assertEqual(head.headers["content-type"], raw.headers["content-type"])
+                self.assertNotIn("content-disposition", raw.headers)
+                self.assertEqual(raw.headers["x-content-type-options"], "nosniff")
+
     def test_content_route_wraps_articles_and_article_route_serves_raw(self):
         body = b"<html><head></head><body>Article body</body></html>"
         self.search.read_article = lambda zim, path: {
@@ -523,6 +557,11 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(shell.status_code, 200)
         self.assertTrue(shell.headers["content-type"].startswith("text/html"))
         self.assertIn("data-zimantic-toolbar", shell.text)
+        self.assertIn(
+            '<a class="zimantic-toolbar-article-full" data-zimantic-raw-article '
+            'href="/article/manual/page">Page</a>',
+            shell.text,
+        )
         self.assertIn('src="/article/manual/page"', shell.text)
         self.assertIn("zimantic-external-link", shell.text)
         self.assertIn("data-zimantic-zim-search", shell.text)

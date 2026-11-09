@@ -42,9 +42,21 @@ INLINE_MIME_TYPES = frozenset(
 INLINE_MIME_PREFIXES = ("image/", "audio/", "video/", "font/")
 
 
+def browser_mimetype(mimetype: str | None) -> str:
+    """Render recognized source text without changing asset MIME types."""
+    original = str(mimetype or "")
+    media_type, separator, parameters = original.partition(";")
+    value = media_type.strip().lower()
+    if value in {"application/x-sh", "application/x-csh"} or (
+        value.startswith("text/") and value not in INLINE_MIME_TYPES
+    ):
+        return "text/plain" + separator + parameters
+    return original
+
+
 def is_inline_mimetype(mimetype: str | None) -> bool:
     """True when a representation may be rendered in place."""
-    value = str(mimetype or "").split(";", 1)[0].strip().lower()
+    value = browser_mimetype(mimetype).split(";", 1)[0].strip().lower()
     if not value:
         return False
     return value in INLINE_MIME_TYPES or value.startswith(INLINE_MIME_PREFIXES)
@@ -149,6 +161,7 @@ __all__ = [
     "INLINE_MIME_TYPES",
     "MAX_ICON_BYTES",
     "RANDOM_ARTICLE_ATTEMPTS",
+    "browser_mimetype",
     "content_disposition",
     "is_inline_mimetype",
     "is_random_article_entry",

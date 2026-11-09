@@ -29,7 +29,7 @@ def _slug(value: str, *, limit: int = 48) -> str:
 
 
 def _digest(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
 
 
 def _file_digest(path: Path) -> str:

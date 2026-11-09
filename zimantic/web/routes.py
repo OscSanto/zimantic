@@ -753,7 +753,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                         "article", source, article_path, highlight, request
                     )
                 content = _article_content(article)
-                mimetype = _article_mimetype(article)
+                mimetype = web_app.browser_mimetype(_article_mimetype(article))
                 if mimetype in web_app.HTML_MIMETYPES:
                     content = _decorated_article(content, source, mimetype)
                 if request.method == "HEAD":
@@ -790,7 +790,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 )
 
             limit = _article_limit()
-            mimetype = entry.mimetype
+            mimetype = web_app.browser_mimetype(entry.mimetype)
             if mimetype in web_app.HTML_MIMETYPES:
                 # Byte offsets and validators for stored HTML do not describe
                 # the decorated response, so ranges are ignored here.

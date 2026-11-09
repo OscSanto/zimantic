@@ -101,6 +101,44 @@ console.log(JSON.stringify(calls));
             [],
         )
 
+    def test_selection_keeps_raw_title_link_separate_from_shell_permalink(self):
+        toolbar = _inline_script(web_app.ARTICLE_TOOLBAR_SCRIPT)
+        source = _section(
+            toolbar, "const shareUrl =", "const scrollArticleTo ="
+        )
+        for framed in (False, True):
+            with self.subTest(framed=framed):
+                payload = _run_node(f"""
+const location = new URL("http://example.test/zimantic/content/files%3Amodules/page.sh?keep=1");
+const permalink = {{href: location.href}};
+const articleLink = {{href: "http://example.test/zimantic/article/files%3Amodules/page.sh?keep=1"}};
+const messages = [];
+const window = {{}};
+window.parent = {("{postMessage: data => messages.push(data)}" if framed else "window")};
+const history = {{state: null, replaceState() {{}}}};
+let articleSelection = "";
+const normalizeSelection = value => String(value || "").trim();
+{source}
+setArticleSelection("Hello world");
+const selected = {{raw: articleLink.href, permalink: permalink.href}};
+setArticleSelection("");
+console.log(JSON.stringify({{selected, cleared: articleLink.href, messages}}));
+""")
+                self.assertEqual(
+                    payload["selected"]["raw"],
+                    "http://example.test/zimantic/article/files%3Amodules/page.sh"
+                    "?keep=1&highlight=Hello+world",
+                )
+                self.assertEqual(
+                    payload["selected"]["permalink"],
+                    "http://example.test/zimantic/content/files%3Amodules/page.sh"
+                    "?keep=1&highlight=Hello+world",
+                )
+                self.assertEqual(
+                    payload["cleared"],
+                    "http://example.test/zimantic/article/files%3Amodules/page.sh?keep=1",
+                )
+
     def test_toolbar_search_navigates_with_canonical_source_scope(self):
         toolbar = _inline_script(web_app.ARTICLE_TOOLBAR_SCRIPT)
         search_source = _section(

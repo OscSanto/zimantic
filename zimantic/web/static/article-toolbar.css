@@ -104,11 +104,17 @@ script[data-zimantic-toolbar] { display: none !important; }
   white-space: nowrap !important;
 }
 [data-zimantic-toolbar] .zimantic-toolbar-article {
+  display: flex !important;
   max-width: min(32vw, 360px) !important;
   min-width: 0 !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
+}
+[data-zimantic-toolbar] .zimantic-toolbar-article > a {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
 }
 [data-zimantic-toolbar] .zimantic-toolbar-home-short {
   display: none !important;

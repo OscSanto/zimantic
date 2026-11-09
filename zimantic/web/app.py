@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response, StreamingResponse
 
-from ..content.serving import content_disposition, is_inline_mimetype
+from ..content.serving import browser_mimetype, content_disposition, is_inline_mimetype
 from ..content.store import (
     ArticleNotFoundError,
     ArticleTooLargeError,
@@ -442,6 +442,9 @@ def _article_toolbar(
         ),
         highlight,
     )
+    raw_url = _append_highlight(
+        _article_url(zim, article_url_path, base_path), highlight
+    )
     article_title = html_escape(
         str(article.get("title") or article_path or "Permalink"),
         quote=False,
@@ -498,14 +501,14 @@ def _article_toolbar(
                 )
         breadcrumb_html = "".join(breadcrumbs) + (
             '<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
-            f'<a class="zimantic-toolbar-article" data-zimantic-permalink '
+            '<span class="zimantic-toolbar-article">'
+            f'<a class="zimantic-toolbar-article-full" data-zimantic-raw-article '
+            f'href="{raw_url}">{article_title}</a>'
+            f'<a class="zimantic-toolbar-article-short" data-zimantic-permalink '
             f'data-zimantic-action="copy" href="{permalink_url}" '
             f'title="Open or copy this article\'s permalink" '
             f'data-i18n-title="Open or copy this article\'s permalink">'
-            f'<span class="zimantic-toolbar-article-full">{article_title}</span>'
-            '<span class="zimantic-toolbar-article-short" '
-            'data-i18n="Permalink">'
-            "Permalink</span></a>"
+            '<span data-i18n="Permalink">Permalink</span></a></span>'
         )
         random_html = (
             f'<a href="{random_url}" data-zimantic-action="random" '
@@ -964,6 +967,7 @@ def _article_content_response(
     headers: dict[str, str] | None = None,
     filename: str | None = None,
 ) -> Response:
+    mimetype = browser_mimetype(mimetype)
     response_headers = {
         "Cache-Control": "no-cache",
         "X-Content-Type-Options": "nosniff",

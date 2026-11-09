@@ -7,7 +7,7 @@ from zimantic.indexing.locator import IndexLocator
 class _Source:
     provider = "zim"
     collection_key = "zim:library"
-    key = "zim:library:book-0123456789abcdef"
+    key = "zim:library:book-01234567"
 
 
 def _database(path: Path, value: int) -> Path:
@@ -37,6 +37,8 @@ def test_publish_and_pin_an_immutable_generation(tmp_path):
         )
         assert directory.is_relative_to(tmp_path)
         assert "tmp" not in str(directory.relative_to(tmp_path))
+        assert len(directory.name.rsplit("-", 1)[1]) == 8
+        assert len(directory.parent.name.rsplit("-", 1)[1]) == 8
     finally:
         lease.close()
 

@@ -63,6 +63,8 @@
     const status = toolbar.querySelector("[data-zimantic-toolbar-status]");
     const home = toolbar.querySelector("[data-zimantic-home]");
     const permalink = toolbar.querySelector("[data-zimantic-permalink]");
+    const articleLabel = toolbar.querySelector(".zimantic-toolbar-article");
+    const articleLink = toolbar.querySelector("[data-zimantic-raw-article]");
     const previous = toolbar.querySelector("[data-zimantic-context-previous]");
     const next = toolbar.querySelector("[data-zimantic-context-next]");
     const parentPrevious = toolbar.querySelector("[data-zimantic-parent-previous]");
@@ -93,8 +95,8 @@
     let offlineRequest = 0;
     const normalizeSelection = value =>
       String(value || "").replace(/\s+/g, " ").trim().slice(0, 2048);
-    const shareUrl = value => {
-      const url = new URL(location.href);
+    const shareUrl = (value, baseUrl = location.href) => {
+      const url = new URL(baseUrl);
       url.hash = "";
       url.searchParams.delete("highlight");
       const text = normalizeSelection(value);
@@ -104,6 +106,7 @@
     const setArticleSelection = value => {
       articleSelection = normalizeSelection(value);
       if (permalink) permalink.href = shareUrl(articleSelection);
+      if (articleLink) articleLink.href = shareUrl(articleSelection, articleLink.href);
       if (window.parent !== window) {
         window.parent.postMessage({
           type: "zimantic-article-selection",
@@ -727,7 +730,7 @@
     }
     const fitToolbarLabels = () => {
       if (!actions) return;
-      for (const control of [home, permalink]) {
+      for (const control of [home, articleLabel]) {
         if (!control) continue;
         control.classList.remove("compact");
         const available = actions.getBoundingClientRect().left -

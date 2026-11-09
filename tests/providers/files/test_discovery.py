@@ -18,6 +18,13 @@ from zimantic.providers.files.discovery import (
 from .helpers import build_tree, files_config, open_runtime
 
 
+def test_directory_source_key_uses_eight_character_path_digest():
+    assert (
+        files_dir_key("modules", "en-file_share")
+        == "files:modules:dir-en-file_share-e8d62e4a"
+    )
+
+
 def test_children_discovery_finds_directories_and_loose_files(tmp_path):
     root = tmp_path / "modules"
     build_tree(root)
