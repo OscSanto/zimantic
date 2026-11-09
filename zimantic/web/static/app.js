@@ -1809,17 +1809,6 @@
                 toolbar.hidden =
                     !layout.query && !layout.showOther && !sourceFilterShowOther;
 
-                const all = document.createElement("button");
-                all.className = "secondary source-filter-option";
-                all.type = "button";
-                all.dataset.source = "";
-                all.dataset.sourceAction = "all";
-                all.setAttribute(
-                    "aria-pressed",
-                    selectedSourceKeys.size || selectedCollectionKey ? "false" : "true",
-                );
-                all.textContent = "All Sources";
-
                 const entries = [];
                 for (const group of layout.groups) {
                     const section = document.createElement("div");
@@ -1867,7 +1856,7 @@
                     section.appendChild(groupOptions);
                     entries.push(section);
                 }
-                options.replaceChildren(all, ...entries);
+                options.replaceChildren(...entries);
                 if (focusKey) {
                     const buttons = [...options.querySelectorAll("button")];
                     const target =
@@ -1924,12 +1913,6 @@
                 panel.hidden = false;
                 panel.classList.add("empty-selection");
                 toolbar.hidden = true;
-                const all = document.createElement("button");
-                all.className = "secondary source-filter-option";
-                all.type = "button";
-                all.dataset.sourceAction = "all";
-                all.setAttribute("aria-pressed", "false");
-                all.textContent = "All Sources";
                 const entries = [];
                 if (selectedCollectionKey) {
                     const collection = document.createElement("button");
@@ -1951,7 +1934,7 @@
                     if (stem) button.title = stem;
                     return button;
                 }));
-                options.replaceChildren(all, ...entries);
+                options.replaceChildren(...entries);
                 const count = selectedSourceKeys.size || (selectedCollectionKey ? 1 : 0);
                 const collectionMode = selectedCollectionKey && !selectedSourceKeys.size;
                 const noun = collectionMode
@@ -1973,6 +1956,7 @@
             function renderScopeLine() {
                 const line = $("scopeLine");
                 const text = $("scopeLineText");
+                const reset = $("scopeLineReset");
                 if (!line || !text) return;
                 const collectionKey =
                     selectedCollectionKey || current?.searchCollection || null;
@@ -1988,6 +1972,7 @@
                             searchKeys.length),
                 );
                 line.hidden = !scoped;
+                reset.hidden = !scoped;
                 if (!scoped) {
                     text.textContent = "";
                     return;
@@ -4273,20 +4258,12 @@
                                 (item) =>
                                     sourceFilterControlKey(item) === wanted,
                             )) ||
-                        buttons.find(
-                            (item) => item.dataset.sourceAction === "all",
-                        ) ||
-                        buttons[0];
+                        buttons.find((item) => !item.disabled);
                     if (next) next.focus({ preventScroll: true });
                     else $("question").focus();
                 };
                 if (!current) {
-                    if (button.dataset.sourceAction === "all") {
-                        selectedSourceKeys.clear();
-                        selectedCollectionKey = null;
-                        sourceFilterShowAll = false;
-                        sourceFilterShowOther = false;
-                    } else if (collectionKey) {
+                    if (collectionKey) {
                         selectedCollectionKey =
                             selectedCollectionKey === collectionKey
                                 ? null
@@ -4318,16 +4295,11 @@
                             ? `collection:${collectionKey}`
                             : key
                               ? `source:${key}`
-                              : "action:all",
+                              : "",
                     );
                     return;
                 }
-                if (button.dataset.sourceAction === "all") {
-                    selectedSourceKeys.clear();
-                    selectedCollectionKey = null;
-                    sourceFilterShowAll = false;
-                    sourceFilterShowOther = false;
-                } else if (collectionKey) {
+                if (collectionKey) {
                     // One collection group is selected as a unit. Switching
                     // groups replaces the previous selection.
                     selectedCollectionKey =
@@ -4343,7 +4315,7 @@
                     );
                     sourceFilterShowAll = true;
                     renderSourceFilters();
-                    focusButton(hidden.length ? `source:${hidden[0]}` : "action:all");
+                    focusButton(hidden.length ? `source:${hidden[0]}` : "");
                     return;
                 } else if (button.dataset.sourceAction === "other") {
                     // "Other" is a disclosure, not a filter. Reveal the group's
@@ -4355,7 +4327,7 @@
                     sourceFilterShowOther = true;
                     renderSourceFilters();
                     focusButton(
-                        hidden.length ? `source:${hidden[0].key}` : "action:all",
+                        hidden.length ? `source:${hidden[0].key}` : "",
                     );
                     return;
                 } else if (selectedCollectionKey) {

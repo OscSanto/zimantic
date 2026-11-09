@@ -97,7 +97,7 @@ console.log(JSON.stringify(cases.map(libraryHomepageUrl)));
             "",
         ])
 
-    def test_both_all_sources_controls_clear_empty_search_scope_and_url(self):
+    def test_all_sources_clears_empty_search_scope_and_url(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 class Node {{
@@ -133,10 +133,9 @@ const sourceStemName = () => "";
 const collectionDisplayName = (key) => key;
 {_function_source(source, "function renderSourceSelectionSummary()", "function renderFilterLine(")}
 {_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
-{_function_source(source, '$("sourceFilterOptions").addEventListener("click"', '$("results").addEventListener("click"')}
 {_function_source(source, '$("scopeLineReset").addEventListener("click"', '$("articleModal").addEventListener("click"')}
 const results = [];
-for (const control of ["scopeLineReset", "sourceFilterOptions"]) {{
+for (const control of ["scopeLineReset"]) {{
   for (const scope of ["collection", "source", "both"]) {{
     selectedCollectionKey = scope === "source" ? null : "files:modules";
     selectedSourceKeys = new Set(scope === "collection" ? [] : ["files:a"]);
@@ -146,13 +145,13 @@ for (const control of ["scopeLineReset", "sourceFilterOptions"]) {{
     renderSourceSelectionSummary();
     renderScopeLine();
     const visibleBefore = !$("scopeLine").hidden && !$("sourceFilters").hidden;
-    const button = {{dataset: {{sourceAction: "all"}}, disabled: false}};
-    $(control).handlers.click({{target: {{closest: () => button}}}});
+    $(control).handlers.click();
     results.push({{
       control, scope, visibleBefore,
       selected: [...selectedSourceKeys], collection: selectedCollectionKey,
       url: location.pathname + location.search,
       scopeHidden: $("scopeLine").hidden, scopeText: $("scopeLineText").textContent,
+      resetHidden: $("scopeLineReset").hidden,
       selectionHidden: $("sourceFilters").hidden,
       showAll: sourceFilterShowAll, showOther: sourceFilterShowOther,
     }});
@@ -171,6 +170,7 @@ console.log(JSON.stringify(results));
                 self.assertEqual(payload["url"], "/")
                 self.assertTrue(payload["scopeHidden"])
                 self.assertEqual(payload["scopeText"], "")
+                self.assertTrue(payload["resetHidden"])
                 self.assertTrue(payload["selectionHidden"])
                 self.assertFalse(payload["showAll"])
                 self.assertFalse(payload["showOther"])
@@ -245,6 +245,7 @@ const applyDiscoveryData = (payload) => {{
 {_function_source(source, "async function initialize()", '$("localePicker")?.addEventListener')}
 const snapshot = () => ({{
   scope: $("scopeLineText").textContent, scopeHidden: $("scopeLine").hidden,
+  resetHidden: $("scopeLineReset").hidden,
   selectionHidden: $("sourceFilters").hidden,
   labels: $("sourceFilterOptions").children.map((button) => button.textContent),
   selectionStatus: $("sourceFilterStatus").textContent,
@@ -284,7 +285,8 @@ const snapshot = () => ({{
             ["config", ["/sources", 200], ["/collections.json", 200]],
         )
         self.assertEqual(payload["labeled"]["scope"], "Searching collection: Modules")
-        self.assertEqual(payload["labeled"]["labels"], ["All Sources", "Modules"])
+        self.assertEqual(payload["labeled"]["labels"], ["Modules"])
+        self.assertFalse(payload["labeled"]["resetHidden"])
         self.assertEqual(
             payload["labeled"]["selectionStatus"],
             "1 selected collection. Type a query to search it.",

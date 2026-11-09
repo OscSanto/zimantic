@@ -60,26 +60,29 @@
                     </div>
                 </div>
                 <div class="debug-stats" id="debugStats" hidden></div>
-                <div class="source-filters" id="sourceFilters" hidden>
-                    <div
-                        class="source-filter-options"
-                        id="sourceFilterOptions"
-                        role="group"
-                        aria-label="Filter by source"
-                        data-i18n-aria-label="Filter by source"
-                    ></div>
-                    <div class="source-filter-status" id="sourceFilterStatus" aria-live="polite"></div>
-                </div>
-                <div class="scope-line" id="scopeLine" hidden>
-                    <span id="scopeLineText"></span>
-                    <button
-                        id="scopeLineReset"
-                        class="secondary scope-line-reset"
-                        type="button"
-                        data-i18n="Search all sources"
-                    >
-                        Search all sources
-                    </button>
+                <div class="source-scope-panel">
+                    <div class="source-filters" id="sourceFilters" hidden>
+                        <div
+                            class="source-filter-options"
+                            id="sourceFilterOptions"
+                            role="group"
+                            aria-label="Filter by source"
+                            data-i18n-aria-label="Filter by source"
+                        ></div>
+                        <div class="source-filter-status" id="sourceFilterStatus" aria-live="polite"></div>
+                    </div>
+                    <div class="scope-line" id="scopeLine" hidden>
+                        <span id="scopeLineText"></span>
+                        <button
+                            id="scopeLineReset"
+                            class="secondary scope-line-reset"
+                            type="button"
+                            data-i18n="All Sources"
+                            hidden
+                        >
+                            All Sources
+                        </button>
+                    </div>
                 </div>
                 <div class="filter-line" id="filterLine"></div>
                 <div id="notice"></div>

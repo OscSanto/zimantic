@@ -226,11 +226,22 @@ a.secondary {
     margin: 0;
     min-width: 0;
 }
-.source-filters {
+.source-scope-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: none;
     margin-bottom: 8px;
+    padding: 8px 10px;
+}
+.source-scope-panel:has(> :not([hidden])) {
+    display: block;
+}
+.source-filters {
+    margin: 0;
 }
 .source-filters.empty-selection {
-    margin-top: 16px;
+    margin-top: 0;
 }
 .source-filter-toolbar {
     align-items: center;
@@ -327,6 +338,14 @@ button.source-filter-collection[aria-pressed="true"] {
     gap: 6px 10px;
     margin: 0 0 8px;
     padding: 6px 10px;
+}
+.source-scope-panel > .scope-line {
+    background: none;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    margin: 8px 0 0;
+    padding: 8px 0 0;
 }
 .scope-line-reset {
     font-size: 0.78rem;
