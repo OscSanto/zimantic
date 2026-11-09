@@ -481,6 +481,7 @@ const makeSources = (count, media) => Array.from({{length: count}}, (_, i) => ({
   collection: {{label: `${{media}} collection`}},
   language: i === 1 ? "fra" : "eng", date: "2025-08-27",
   size: 109 * 1024 * 1024, item_count: 34448,
+  description: "Short <summary>", long_description: "Long description",
 }}));
 const small = makeSources(766, "text"), large = makeSources(1001, "video");
 const libraryCollectionPages = new Map([
@@ -499,6 +500,7 @@ const summarize = () => elements.libraryGrid.children.map((section) => ({{
   meta: find(section, "library-collection-meta").textContent,
   collection: find(section, "library-card-collection").textContent,
   details: find(section, "library-card-details").textContent,
+  description: find(section, "library-card-description").textContent,
   buttons: find(section, "library-collection-actions").children.map((button) => button.textContent),
   note: find(section, "library-collection-note")?.textContent,
 }}));
@@ -530,6 +532,7 @@ console.log(JSON.stringify({{
         )
         payload = json.loads(result.stdout)
         self.assertEqual([item["count"] for item in payload["initial"]], [766, 1000])
+        self.assertEqual(payload["initial"][0]["description"], "Short <summary>")
         self.assertEqual(payload["initial"][0]["buttons"], ["Search collection"])
         self.assertEqual(
             payload["initial"][1]["buttons"], ["Search collection", "Load more sources"]

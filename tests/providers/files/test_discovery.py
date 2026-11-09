@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import logging
+import os
+import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from zimantic.catalog import SourceCatalog, catalog_path
+from zimantic.content import reader
 from zimantic.indexing.derived import SourceDerivedOperations
+from zimantic.providers.files import FilesProvider
+from zimantic.providers.files import discovery as files_discovery
 from zimantic.providers.files.discovery import (
     discover_sources,
     files_collapsed_key,
@@ -15,7 +24,7 @@ from zimantic.providers.files.discovery import (
     files_root_key,
 )
 
-from .helpers import build_tree, files_config, open_runtime
+from .helpers import build_tree, context, files_config, open_runtime, runtime_config
 
 
 def test_directory_source_key_uses_eight_character_path_digest():
@@ -62,6 +71,320 @@ def test_children_discovery_finds_directories_and_loose_files(tmp_path):
 
     assert all(".hidden" not in source.key for source in result.sources)
     assert all("node_modules" not in source.membership_root for source in result.sources)
+
+
+def test_summaries_use_each_source_root_and_refresh_on_discovery(tmp_path):
+    root = tmp_path / "modules"
+    child = root / "algebra"
+    child.mkdir(parents=True)
+    (root / "README.txt").write_text("Collection overview.", encoding="utf-8")
+    readme = child / "ReadMe.MD"
+    readme.write_text(
+        "---\ntitle: Algebra\n---\n"
+        "# Algebra\n\nLearn [numbers](lesson.html) and **equations**.\n"
+        "```python\nhidden_code()\n```",
+        encoding="utf-8",
+    )
+    (child / "about.txt").write_text("About algebra.", encoding="utf-8")
+    (child / "index.html").write_text("<p>Homepage prose.</p>", encoding="utf-8")
+    config = files_config(root)
+
+    by_key = {source.key: source.info for source in discover_sources(config).sources}
+    assert by_key[files_dir_key("modules", "algebra")].description == (
+        "Algebra Learn numbers and equations."
+    )
+    assert by_key[files_loose_key("modules")].description == "Collection overview."
+    readme.write_text("Updated algebra summary.", encoding="utf-8")
+    assert by_key[files_dir_key("modules", "algebra")].description == (
+        "Algebra Learn numbers and equations."
+    )
+    refreshed = discover_sources(config)
+    assert next(
+        source.info.description for source in refreshed.sources
+        if source.key == files_dir_key("modules", "algebra")
+    ) == "Updated algebra summary."
+
+    readme.unlink()
+    assert next(
+        source.info.description for source in discover_sources(config).sources
+        if source.key == files_dir_key("modules", "algebra")
+    ) == "About algebra."
+
+
+@pytest.mark.parametrize("granularity,max_sources", [
+    ("collection", 64), ("children", 1),
+])
+def test_whole_collection_summary_does_not_use_nested_documents(
+    tmp_path, granularity, max_sources
+):
+    root = tmp_path / "modules"
+    for name in ("one", "two"):
+        child = root / name
+        child.mkdir(parents=True)
+        (child / "README.txt").write_text("Nested description.", encoding="utf-8")
+    config = files_config(root, granularity=granularity, max_sources=max_sources)
+    assert discover_sources(config).sources[0].info.description is None
+    (root / "ABOUT.TXT").write_text("Root description.", encoding="utf-8")
+    assert discover_sources(config).sources[0].info.description == "Root description."
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("page,expected", [
+    (
+        (
+            '<meta content="Explore cells &amp; plants." property="og:description">'
+            "<p>Homepage navigation.</p>"
+        ),
+        "Explore cells & plants.",
+    ),
+    (
+        (
+            "<head><title>Not prose</title></head>"
+            "<script>hidden script</script><style>hidden style</style>"
+            "<p>Learn about <b>cells</b>.</p>"
+        ),
+        "Learn about cells.",
+    ),
+])
+def test_html_summary_prefers_metadata_then_visible_prose(
+    tmp_path, monkeypatch, fallback, page, expected
+):
+    if fallback:
+        monkeypatch.setattr(reader, "LexborHTMLParser", None)
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "INDEX.HTML").write_text(page, encoding="utf-8")
+    assert discover_sources(
+        files_config(root, granularity="collection")
+    ).sources[0].info.description == expected
+
+
+def test_summary_skips_excluded_binary_empty_and_symlink_candidates(tmp_path):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "README.md").write_text("Excluded description.", encoding="utf-8")
+    (root / "README.txt").write_bytes(b"\x00binary description")
+    (root / "about.txt").write_text(" \n\t ", encoding="utf-8")
+    (root / "index.htm").write_text("<p>Safe fallback.</p>", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("Outside description.", encoding="utf-8")
+    try:
+        (root / "README").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    config = files_config(
+        root, granularity="collection", exclude=("README.md",)
+    )
+    result = discover_sources(config)
+    assert result.errors == ()
+    assert result.sources[0].info.description == "Safe fallback."
+
+
+def test_summary_bounds_input_and_output(tmp_path):
+    root = tmp_path / "modules"
+    root.mkdir()
+    readme = root / "README.txt"
+    readme.write_text("word " * 20000, encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    summary = discover_sources(config).sources[0].info.description
+    assert summary is not None
+    assert len(summary) <= 400
+    assert summary.split() == ["word"] * 80
+
+    readme.unlink()
+    (root / "index.html").write_text(
+        "<script>" + "x" * (64 << 10) + "</script><p>Beyond read limit.</p>",
+        encoding="utf-8",
+    )
+    assert discover_sources(config).sources[0].info.description is None
+
+
+def test_summary_catalog_survives_restart_without_reading_unchanged_documents(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "README.txt").write_text("Cached summary.", encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    db_path = catalog_path(tmp_path / "indexes")
+    with SourceCatalog(db_path) as catalog:
+        source = discover_sources(config, catalog=catalog).sources[0].info
+        record = catalog.get_key(source.key)
+        assert record.provider == "files"
+        assert record.path == str(root)
+        assert record.description == "Cached summary."
+
+    def unexpected_read(*args, **kwargs):
+        raise AssertionError("unchanged summary documents must not be opened")
+
+    with SourceCatalog(db_path) as catalog:
+        version = catalog.version()
+        monkeypatch.setattr(files_discovery, "open_confined", unexpected_read)
+        assert discover_sources(config, catalog=catalog).sources[0].info.description == (
+            "Cached summary."
+        )
+        assert catalog.version() == version
+
+
+def test_summary_cache_refreshes_for_changed_candidates_and_exclusions(tmp_path):
+    root = tmp_path / "modules"
+    root.mkdir()
+    homepage = root / "index.html"
+    homepage.write_text("<p>Homepage summary.</p>", encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    with SourceCatalog(catalog_path(tmp_path / "indexes")) as catalog:
+        def summary(current_config=config):
+            return discover_sources(
+                current_config, catalog=catalog
+            ).sources[0].info.description
+
+        assert summary() == "Homepage summary."
+        about = root / "about.txt"
+        about.write_text("About summary.", encoding="utf-8")
+        assert summary() == "About summary."
+        readme = root / "README.md"
+        readme.write_text("Readme summary.", encoding="utf-8")
+        assert summary() == "Readme summary."
+
+        info = readme.stat()
+        readme.write_text("Edited summary.", encoding="utf-8")
+        os.utime(readme, ns=(info.st_atime_ns, info.st_mtime_ns))
+        assert summary() == "Edited summary."
+
+        excluded = replace(config, exclude=("README.md",))
+        assert summary(excluded) == "About summary."
+        about.unlink()
+        assert summary(excluded) == "Homepage summary."
+        homepage.unlink()
+        assert summary(excluded) is None
+        homepage.write_text("<p>New homepage.</p>", encoding="utf-8")
+        assert summary(excluded) == "New homepage."
+
+
+def test_negative_summary_cache_is_reused_and_rebuilt_after_catalog_deletion(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "about.txt").write_text(" \n ", encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    db_path = catalog_path(tmp_path / "indexes")
+    with SourceCatalog(db_path) as catalog:
+        assert discover_sources(config, catalog=catalog).sources[0].info.description is None
+    with SourceCatalog(db_path) as catalog, monkeypatch.context() as patch:
+        def unexpected_read(*args, **kwargs):
+            raise AssertionError("empty summaries should also be cached")
+
+        patch.setattr(files_discovery, "open_confined", unexpected_read)
+        assert discover_sources(config, catalog=catalog).sources[0].info.description is None
+
+    db_path.unlink()
+    (root / "about.txt").write_text("Rebuilt summary.", encoding="utf-8")
+    with SourceCatalog(db_path) as catalog:
+        assert discover_sources(config, catalog=catalog).sources[0].info.description == (
+            "Rebuilt summary."
+        )
+
+
+def test_summary_cache_rechecks_source_location_and_recipe(tmp_path):
+    root = tmp_path / "modules"
+    root.mkdir()
+    readme = root / "README.txt"
+    readme.write_text("Current summary.", encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    with SourceCatalog(catalog_path(tmp_path / "indexes")) as catalog:
+        source = discover_sources(config, catalog=catalog).sources[0].info
+        catalog.db.execute(
+            "UPDATE sources SET description = 'Obsolete summary.', "
+            "provider_metadata = '{}' WHERE key = ?", (source.key,)
+        )
+        catalog.db.commit()
+        assert discover_sources(config, catalog=catalog).sources[0].info.description == (
+            "Current summary."
+        )
+        record = catalog.get_key(source.key)
+        record.path = str(tmp_path / "different-root")
+        record.description = "Wrong source summary."
+        catalog.upsert(record)
+        assert discover_sources(config, catalog=catalog).sources[0].info.description == (
+            "Current summary."
+        )
+
+
+@pytest.mark.parametrize("operation", ["get_key", "upsert"])
+def test_summary_cache_errors_do_not_hide_source_summaries(
+    tmp_path, monkeypatch, operation
+):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "about.txt").write_text("Available summary.", encoding="utf-8")
+    config = files_config(root, granularity="collection")
+    with SourceCatalog(None) as catalog:
+        def unavailable(*args, **kwargs):
+            raise sqlite3.OperationalError("catalog unavailable")
+
+        monkeypatch.setattr(catalog, operation, unavailable)
+        assert discover_sources(config, catalog=catalog).sources[0].info.description == (
+            "Available summary."
+        )
+
+
+def test_runtime_persists_summaries_and_prunes_only_successfully_scanned_collection(
+    tmp_path,
+):
+    root = tmp_path / "modules"
+    for name in ("one", "two"):
+        child = root / name
+        child.mkdir(parents=True)
+        (child / "about.txt").write_text(f"{name} summary.", encoding="utf-8")
+    config = files_config(root)
+    index_dir = tmp_path / "indexes"
+    cfg = runtime_config(index_dir, config)
+    ctx = replace(context(index_dir, cfg), persist_catalog=True)
+    provider = FilesProvider()
+    batch = provider.discover(config, ctx)
+    runtime = batch.open(batch.collections[0])
+    db_path = catalog_path(index_dir)
+    try:
+        with SourceCatalog(db_path) as catalog:
+            assert len(catalog.rows(collection_key="files:modules")) == 2
+            catalog.upsert({
+                "provider": "zim", "collection_key": "zim:books",
+                "key": "zim:books:manual", "description": "ZIM description.",
+            })
+            (root / "one" / "about.txt").unlink()
+            (root / "one").rmdir()
+            assert runtime.refresh()
+            assert [row.key for row in catalog.rows(collection_key="files:modules")] == [
+                files_dir_key("modules", "two")
+            ]
+            assert catalog.get_key("zim:books:manual").description == "ZIM description."
+
+            offline = tmp_path / "offline"
+            root.rename(offline)
+            assert not runtime.refresh()
+            assert len(catalog.rows(collection_key="files:modules")) == 1
+            assert runtime.library_sources() == ()
+    finally:
+        runtime.close()
+        runtime.close()
+        batch.close()
+
+
+def test_read_only_runtime_does_not_create_persistent_summary_catalog(tmp_path):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "about.txt").write_text("Read-only summary.", encoding="utf-8")
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(
+        index_dir, files_config(root, granularity="collection")
+    )
+    try:
+        assert runtime.library_sources()[0].description == "Read-only summary."
+        assert not catalog_path(index_dir).exists()
+    finally:
+        runtime.close()
+        batch.close()
 
 
 def test_real_loose_directory_is_distinct_from_the_loose_source(tmp_path):
@@ -196,7 +519,7 @@ def test_unreadable_child_is_reported_and_other_sources_survive(
     real_scandir = __import__("os").scandir
 
     def failing_scandir(path, *args, **kwargs):
-        if Path(path).name == "bad":
+        if not isinstance(path, int) and Path(path).name == "bad":
             raise PermissionError(13, "Permission denied")
         return real_scandir(path, *args, **kwargs)
 

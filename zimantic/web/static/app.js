@@ -1043,8 +1043,8 @@
                         body.appendChild(group);
                     }
                     const description =
-                        source.long_description ||
                         source.description ||
+                        source.long_description ||
                         (linkable
                             ? ""
                             : t(

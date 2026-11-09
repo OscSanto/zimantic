@@ -5,9 +5,9 @@ source in the generic ``sources`` table.  It is a disposable cache: providers
 own extraction and validation, while this module owns only the SQLite schema,
 coordinated rebuild, and cross-process lease.
 
-ZIM is the only provider that writes this catalog.  Files and Kolibri use their
-own manifests/databases, and Kiwix uses remote/in-memory metadata, so nothing
-here may contain ZIM-specific columns, tables, or scan behavior.
+ZIM stores archive metadata here, and Files caches root-document summaries.
+Kolibri uses its own databases and Kiwix uses remote/in-memory metadata.
+Nothing here may contain provider-specific columns, tables, or scan behavior.
 """
 
 from __future__ import annotations

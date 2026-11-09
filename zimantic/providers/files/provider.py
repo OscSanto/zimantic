@@ -19,6 +19,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from ...catalog import SourceCatalog, catalog_path
 from ...content.reader import (
     extract_excerpt,
     extract_markdown_document,
@@ -140,6 +141,19 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
         )
         self._stale_logged: set[str] = set()
         self._was_collapsed = False
+        catalog_db = catalog_path(self.index_dir) if ctx.persist_catalog else None
+        try:
+            self._catalog = SourceCatalog(catalog_db)
+        except (OSError, sqlite3.Error) as error:
+            if catalog_db is None:
+                raise
+            self._logger.warning(
+                "zimantic: catalog unavailable for %s (%s); using an in-memory "
+                "catalog for this collection",
+                collection.label,
+                public_cause(error),
+            )
+            self._catalog = SourceCatalog(None)
 
     # -- contracts ---------------------------------------------------------
 
@@ -444,7 +458,9 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
         return self._version
 
     def close(self) -> None:
-        with self._lock:
+        with self._refresh_lock, self._lock:
+            if self._closed:
+                return
             self._closed = True
             self._state = "closed"
             indexes = list(self.indexes.values())
@@ -452,6 +468,13 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
             self._library = ()
             self._searchable = ()
             self._by_key = {}
+            try:
+                self._catalog.close()
+            except sqlite3.Error as error:
+                self._logger.warning(
+                    "zimantic: catalog close failed for %s (%s)",
+                    self.collection.label, public_cause(error),
+                )
         for index in indexes:
             try:
                 index.close()
@@ -631,8 +654,24 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
             if self._closed:
                 return False
             discovery = discover_sources(
-                self.config, web_base_path=self.web_base_path
+                self.config, web_base_path=self.web_base_path, catalog=self._catalog
             )
+            if not discovery.errors:
+                try:
+                    cached_keys = {
+                        record.key for record in self._catalog.rows(
+                            collection_key=self.collection.key
+                        )
+                    }
+                    self._catalog.delete_keys(
+                        self.collection.key,
+                        cached_keys - {source.key for source in discovery.sources},
+                    )
+                except sqlite3.Error as error:
+                    self._logger.warning(
+                        "zimantic: summary cache cleanup failed for %s (%s)",
+                        self.collection.label, public_cause(error),
+                    )
             if not discovery.sources and discovery.errors:
                 with self._lock:
                     old = list(self.indexes.values())

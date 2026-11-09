@@ -9,7 +9,7 @@ The installed CLI is separate from configuration and runtime data. On XDG platfo
 ├── model/               ← downloaded models; model/int8/ is model_dir         (you download)
 ├── zims/                ← ZIM collection path: your .zim files                (you download)
 ├── indexes/             ← index_dir: immutable generations under provider/collection/source
-└── catalog.sqlite       ← shared ZIM metadata cache (metadata only, no vectors)
+└── catalog.sqlite       ← shared metadata cache (metadata only, no vectors)
 ```
 
 ```
@@ -105,9 +105,9 @@ SQLite must be 3.37 or newer for the STRICT catalog and index schemas, and the
 SQLite build must provide FTS5; Zimantic checks the version early instead of
 deferring a failure to the first query. A sufficiently new SQLite build can
 still be compiled without FTS5. `catalog.sqlite` beside `index_dir` is the
-private ZIM archive metadata cache.
-Files and Kolibri do not write it, and Kiwix has no persistent local catalog. A
-catalog with an unsupported schema is rebuilt by a full ZIM scan. Old
+private cache for ZIM archive metadata and Files root-document summaries.
+Kolibri does not write it, and Kiwix has no persistent local catalog. A
+catalog with an unsupported schema is rebuilt by source discovery. Old
 provider-specific tables are not removed automatically; to reclaim their space,
 stop Zimantic and delete the disposable catalog and any SQLite sidecars.
 Use one schema version for a catalog at a time. Index
@@ -359,4 +359,4 @@ rsync -a --files-from=/tmp/index-generations.txt indexes/ pi@rpi:~/.local/share/
 
 `rsync -a` copies only files whose size or mtime differs. Do not copy `staging-*.sqlite`, `*.tmp`, `*.sqlite-wal`, or `*.sqlite-shm`; staging files are unfinished builds, not published generations. Copy a complete generation directory and then its `current` manifest so a reload never opens a half-written pair. Run `zimantic reload` afterwards.
 
-`catalog.sqlite` is optional for the copy. It contains metadata and icons, never vectors, and a missing catalog is rebuilt by scanning the ZIMs. Its `path` column stores absolute locators, so copying it avoids a scan only when the target resolves a collection to the same absolute paths; otherwise those rows are not reused and the ZIMs are rescanned. The scan opens each ZIM once for metadata, illustration, and counts, not article bodies. A catalog with a different schema is rebuilt under the cross-process catalog lease. Both `build` and `serve` can create it.
+`catalog.sqlite` is optional for the copy. It contains metadata and icons, never vectors, and a missing catalog is rebuilt by source discovery. Its `path` column stores absolute locators, so copying it avoids metadata extraction only when the target resolves a collection to the same absolute paths and matching fingerprints; otherwise those rows are not reused. The ZIM scan opens each archive once for metadata, illustration, and counts, not article bodies. Files summaries read bounded root documents when their cached fingerprints do not match. A catalog with a different schema is rebuilt under the cross-process catalog lease. Both `build` and `serve` can create it.

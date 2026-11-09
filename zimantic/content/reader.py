@@ -8,6 +8,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Iterator
+from html import unescape
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 from urllib.parse import unquote, urlsplit
@@ -303,7 +304,8 @@ class _TextExtractor:
         "details", "summary", "form", "fieldset", "legend",
     }
 
-    def __init__(self):
+    def __init__(self, min_block_chars: int = MIN_BLOCK_CHARS):
+        self.min_block_chars = min_block_chars
         self.skipping = []  # open tags whose contents are not article text
         self.blocks = []
         self.active = []
@@ -394,7 +396,7 @@ class _TextExtractor:
                     block = self.active.pop(index)
                     text = self._text(block["parts"])
                     block["text"] = text
-                    if len(text) >= MIN_BLOCK_CHARS:
+                    if len(text) >= self.min_block_chars:
                         for parent in self.active[:index]:
                             parent["nested"] = True
                         if block["priority"] == 0 and not block["nested"]:
@@ -428,7 +430,7 @@ class _TextExtractor:
             if default_lang is not None and block.get("lang") not in (None, default_lang):
                 continue
             text = block.get("text", self._text(block["parts"]))
-            if len(text) >= MIN_BLOCK_CHARS:
+            if len(text) >= self.min_block_chars:
                 candidates.append((block["priority"], block["order"], text))
         return [
             text
@@ -457,8 +459,8 @@ class _TextExtractor:
 class _StreamingTextExtractor(_TextExtractor, HTMLParser):
     """Stdlib fallback using the same block-selection and visibility rules."""
 
-    def __init__(self):
-        _TextExtractor.__init__(self)
+    def __init__(self, min_block_chars: int = MIN_BLOCK_CHARS):
+        _TextExtractor.__init__(self, min_block_chars)
         HTMLParser.__init__(self)
 
 
@@ -502,6 +504,8 @@ def iter_text_blocks(
     html: bytes,
     max_chars: int | None = None,
     deadline: float | None = None,
+    *,
+    min_block_chars: int = MIN_BLOCK_CHARS,
 ) -> Iterator[str]:
     """Yield substantial article blocks, preferring paragraphs over fallbacks.
 
@@ -511,11 +515,13 @@ def iter_text_blocks(
     ``_TextExtractor._can_stop``). ``deadline`` is a ``time.monotonic()`` budget:
     check it before DOM construction and between traversal events, yielding
     collected text on expiry. Native DOM construction cannot be interrupted.
+    ``min_block_chars`` defaults to the indexing prose threshold; summaries
+    can lower it to retain short paragraphs.
     """
     if not html or (deadline is not None and time.monotonic() >= deadline):
         return
     if LexborHTMLParser is None:
-        parser = _StreamingTextExtractor()
+        parser = _StreamingTextExtractor(min_block_chars)
         html = _SCRIPT_STYLE.sub(b" ", html)
         decoder = codecs.getincrementaldecoder("utf-8")("ignore")
         for start in range(0, len(html), 8192):
@@ -527,7 +533,7 @@ def iter_text_blocks(
         parser.feed(decoder.decode(b"", final=True))
         yield from parser.candidates()
         return
-    parser = _TextExtractor()
+    parser = _TextExtractor(min_block_chars)
     text = _SCRIPT_STYLE.sub(b" ", html).decode("utf-8", "ignore")
     if deadline is not None and time.monotonic() >= deadline:
         return
@@ -627,6 +633,22 @@ def extract_excerpt(
     if not candidates:
         return ""
     return _join_blocks(candidates, max_chars)
+
+
+def extract_html_summary(
+    html: bytes,
+    max_chars: int = 400,
+    deadline: float | None = None,
+) -> str:
+    """Prefer a page's description metadata, falling back to opening prose."""
+    description = unescape(_meta_description(html))
+    text = description
+    if not text:
+        candidates = list(iter_text_blocks(
+            html, max_chars=max_chars, deadline=deadline, min_block_chars=1
+        ))
+        text = _join_blocks(candidates, max_chars) if candidates else ""
+    return truncate_at_word_boundary(" ".join(text.split()), max_chars)
 
 
 def extract_body(

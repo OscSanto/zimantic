@@ -2,14 +2,15 @@
 
 One configured directory is one collection.  The default granularity makes the
 whole root one source; ``children`` splits immediate child directories into
-sources plus one reserved source for loose root files.  Discovery never parses
-file contents or hashes bytes: it uses directory names, extensions, and
-``stat`` only.
+sources plus one reserved source for loose root files. Discovery uses names,
+extensions, and ``stat``, with bounded content probes for unknown MIME types
+and root-document summaries. It never hashes file contents.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -23,6 +24,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from ...catalog import SourceCatalog
+from ...content.reader import (
+    extract_html_summary,
+    extract_markdown_document,
+    extract_plain_text_document,
+)
 from ...contracts import SourceInfo
 from ...diagnostics import public_cause
 from ...indexing import schema
@@ -36,9 +43,11 @@ from .common import (
     extension_mimetype,
     is_hidden_name,
     is_hidden_path,
+    iter_confined_directory,
     library_family,
     matches_any,
     normalize_relative_path,
+    open_confined,
     ordered_families,
     path_components,
     relative_join,
@@ -56,6 +65,17 @@ _SYSTEM_NAMES = frozenset({"__pycache__"})
 LOOSE_IDENTIFIER = "__loose__"
 ROOT_IDENTIFIER = "root"
 COLLAPSED_IDENTIFIER = "collapsed"
+_SUMMARY_NAMES = (
+    "readme.md", "readme.markdown", "readme.txt", "readme",
+    "readme.html", "readme.htm",
+    "about.md", "about.markdown", "about.txt", "about",
+    "about.html", "about.htm",
+    "index.html", "index.htm",
+)
+_SUMMARY_BYTES = 64 << 10
+_SUMMARY_CHARS = 400
+# Bump when summary extraction or candidate selection changes.
+_SUMMARY_VERSION = 1
 
 
 class FilesTraversalError(RuntimeError):
@@ -206,6 +226,123 @@ def _icon_url(source_key: str, has_icon: bool, web_base_path: str) -> str | None
     )
 
 
+def _description(
+    root: Path,
+    membership_root: str,
+    exclude: Sequence[str],
+    budget: _Budget,
+    *,
+    source: SourceInfo,
+    catalog: SourceCatalog | None,
+) -> str | None:
+    candidates: list[tuple[str, os.stat_result]] = []
+    try:
+        for name, info in iter_confined_directory(root, membership_root):
+            budget.tick()
+            if name.casefold() not in _SUMMARY_NAMES:
+                continue
+            candidate = relative_join(membership_root, name)
+            if (
+                stat_module.S_ISREG(info.st_mode)
+                and not is_hidden_path(candidate)
+                and not matches_any(exclude, candidate)
+            ):
+                candidates.append((candidate, info))
+    except (FilesConfinedError, OSError, FilesTraversalError):
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            _SUMMARY_NAMES.index(Path(item[0]).name.casefold()), item[0]
+        )
+    )
+    source_path = str(root / membership_root)
+    metadata = {
+        "summary_version": _SUMMARY_VERSION,
+        "summary_documents": [
+            [path, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode]
+            for path, info in candidates
+        ],
+    }
+    if catalog is not None:
+        try:
+            record = catalog.get_key(source.key, include_favicon=False)
+        except sqlite3.Error as error:
+            logger.warning(
+                "%s: summary cache read failed (%s); reading source documents",
+                source.key, public_cause(error),
+            )
+        else:
+            if (
+                record is not None
+                and record.provider == "files"
+                and record.collection_key == source.collection_key
+                and record.path == source_path
+            ):
+                try:
+                    cached_metadata = json.loads(record.provider_metadata)
+                except ValueError:
+                    cached_metadata = None
+                if cached_metadata == metadata:
+                    return record.description or None
+
+    description = None
+    complete = True
+    for candidate, _info in candidates:
+        if time.monotonic() >= budget.started + budget.timeout_seconds:
+            complete = False
+            break
+        try:
+            opened = open_confined(root, candidate)
+            with opened.handle as handle:
+                raw = handle.read(_SUMMARY_BYTES).removeprefix(b"\xef\xbb\xbf")
+        except (FilesConfinedError, OSError, ValueError):
+            complete = False
+            continue
+        if not raw or b"\x00" in raw:
+            continue
+        suffix = Path(candidate).suffix.casefold()
+        if suffix in {".html", ".htm"}:
+            text = extract_html_summary(
+                raw,
+                _SUMMARY_CHARS,
+                deadline=budget.started + budget.timeout_seconds,
+            )
+        elif suffix in {".md", ".markdown"}:
+            _, text, _, _ = extract_markdown_document(
+                raw, _SUMMARY_CHARS, _SUMMARY_BYTES
+            )
+        else:
+            text, _, _ = extract_plain_text_document(
+                raw, _SUMMARY_CHARS, _SUMMARY_BYTES
+            )
+        if text:
+            description = text
+            break
+    if (
+        catalog is not None
+        and complete
+        and time.monotonic() < budget.started + budget.timeout_seconds
+    ):
+        try:
+            catalog.upsert({
+                "provider": "files",
+                "collection_key": source.collection_key,
+                "key": source.key,
+                "path": source_path,
+                "title": source.title,
+                "description": description,
+                "homepage": source.homepage,
+                "provider_metadata": metadata,
+            })
+        except sqlite3.Error as error:
+            logger.warning(
+                "%s: summary cache write failed (%s); using uncached summary",
+                source.key, public_cause(error),
+            )
+    return description
+
+
 def _classify(
     root: Path,
     *,
@@ -314,6 +451,10 @@ def _classify(
 def _source_info(
     config: Any,
     *,
+    root: Path,
+    membership_root: str,
+    budget: _Budget,
+    catalog: SourceCatalog | None,
     key: str,
     title: str,
     collection_key: str,
@@ -323,7 +464,7 @@ def _source_info(
     has_icon: bool,
     web_base_path: str,
 ) -> SourceInfo:
-    return SourceInfo(
+    info = SourceInfo(
         key=key,
         provider="files",
         title=title,
@@ -334,12 +475,19 @@ def _source_info(
         icon_url=_icon_url(key, has_icon, web_base_path),
         media_types=tuple(media_types),
     )
+    description = _description(
+        root, membership_root, tuple(getattr(config, "exclude", ()) or ()), budget,
+        source=info, catalog=catalog,
+    )
+    object.__setattr__(info, "description", description)
+    return info
 
 
 def discover_sources(
     config: Any,
     *,
     web_base_path: str = "",
+    catalog: SourceCatalog | None = None,
 ) -> FilesDiscovery:
     """Discover the sources of one configured files collection."""
     root = Path(os.path.realpath(Path(getattr(config, "path", "")).expanduser()))
@@ -380,6 +528,10 @@ def discover_sources(
         has_icon, _icon_path = _icon(root, "")
         info = _source_info(
             config,
+            root=root,
+            membership_root="",
+            budget=budget,
+            catalog=catalog,
             key=files_root_key(collection_name),
             title=label,
             collection_key=collection_key,
@@ -451,6 +603,10 @@ def discover_sources(
         has_icon, _icon_path = _icon(root, "")
         info = _source_info(
             config,
+            root=root,
+            membership_root="",
+            budget=budget,
+            catalog=catalog,
             key=files_collapsed_key(collection_name),
             title=label,
             collection_key=collection_key,
@@ -488,6 +644,10 @@ def discover_sources(
         has_icon, _icon_path = _icon(root, relative)
         info = _source_info(
             config,
+            root=root,
+            membership_root=relative,
+            budget=budget,
+            catalog=catalog,
             key=key,
             title=relative,
             collection_key=collection_key,
@@ -512,6 +672,10 @@ def discover_sources(
         has_icon, _icon_path = _icon(root, "")
         info = _source_info(
             config,
+            root=root,
+            membership_root="",
+            budget=budget,
+            catalog=catalog,
             key=key,
             title=f"{label} (files)",
             collection_key=collection_key,
