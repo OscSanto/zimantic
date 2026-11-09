@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 
 from ..content.path import has_encoded_separator, raw_request_path
 from ..content.store import (
@@ -880,6 +881,39 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                         },
                         filename=data.path,
                     )
+
+            open_stream = getattr(store, "open_stream", None)
+            if mimetype.startswith(("video/", "audio/")) and callable(open_stream):
+                opened = open_stream(entry.path)
+                total = int(opened.stat.st_size)
+
+                def media_chunks():
+                    remaining = total
+                    try:
+                        while remaining:
+                            chunk = opened.handle.read(
+                                min(remaining, web_app.ARTICLE_STREAM_CHUNK)
+                            )
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
+                            yield chunk
+                    finally:
+                        opened.handle.close()
+
+                return StreamingResponse(
+                    media_chunks(),
+                    media_type=mimetype,
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Content-Length": str(total),
+                        "Accept-Ranges": "bytes",
+                        "Content-Encoding": "identity",
+                        "X-Content-Type-Options": "nosniff",
+                        **web_app.ARTICLE_CORS_HEADERS,
+                    },
+                    background=BackgroundTask(opened.handle.close),
+                )
 
             data = store.read(path, head_only=False, max_bytes=limit)
             headers = (

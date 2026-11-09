@@ -33,6 +33,7 @@ from ...content.store import (
 )
 from .common import (
     FilesConfinedError,
+    OpenedFile,
     confined_stat,
     extension_mimetype,
     is_hidden_name,
@@ -224,6 +225,14 @@ class FilesContentStore:
             return True
         except (ArticleNotFoundError, ArticleUnavailableError, ValueError):
             return False
+
+    def open_stream(self, path: str) -> OpenedFile:
+        """Open a confined file for streaming; the caller must close its handle."""
+        final = self._resolve_file(path)
+        try:
+            return open_confined(self.root, final)
+        except (FilesConfinedError, OSError) as error:
+            raise ArticleNotFoundError("article not found") from error
 
     def read(
         self, path: str | None, *, head_only: bool, max_bytes: int

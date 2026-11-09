@@ -135,6 +135,8 @@ def test_hidden_excluded_traversal_symlink_and_invalid_paths(tmp_path):
         ):
             with pytest.raises(ArticleNotFoundError):
                 store.resolve(path)
+            with pytest.raises(ArticleNotFoundError):
+                store.open_stream(path)
 
         assert store.resolve("algebra/assets/style.css").mimetype == "text/css"
     finally:

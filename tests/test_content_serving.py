@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.content.store import ArticleNotFoundError
-from zimantic.providers.config import RuntimeConfig, ZimConfig
+from zimantic.providers.config import FilesConfig, RuntimeConfig, ZimConfig
+from zimantic.providers.files.store import FilesContentStore
 from zimantic.providers.zim.discovery import zim_source_key
 from zimantic.search import Search
 from zimantic.web.app import create_app
@@ -366,6 +367,75 @@ def test_oversized_item_returns_too_large_with_cors(tmp_path):
         # The shell only needs a bounded prefix, so a large item still opens.
         shell = client.get(f"/content/{quote(key, safe='')}/Alpha")
         assert shell.status_code == 200
+    finally:
+        client.close()
+        search.close()
+
+
+@pytest.mark.parametrize(
+    ("filename", "mimetype"),
+    [("about_datapost.mp4", "video/mp4"), ("lesson.mp3", "audio/mpeg")],
+)
+def test_oversized_file_media_streams_inline(tmp_path, filename, mimetype):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / filename).write_bytes(DATA)
+    (root / "page.html").write_bytes(ALPHA_HTML)
+    (root / "data.bin").write_bytes(DATA)
+    config = RuntimeConfig(
+        settings={
+            "index_dir": str(tmp_path / "indexes"),
+            "max_article_bytes": 8,
+        },
+        collections=(FilesConfig(name="modules", path=str(root)),),
+    )
+    search = Search(config)
+    client = TestClient(create_app(search))
+    key = "files:modules:root"
+    opened_files = []
+    open_stream = FilesContentStore.open_stream
+
+    def capture_stream(store, path):
+        opened = open_stream(store, path)
+        opened_files.append(opened)
+        return opened
+
+    try:
+        url = _article(key, filename)
+        with (
+            patch.object(FilesContentStore, "open_stream", capture_stream),
+            patch.object(FilesContentStore, "read", side_effect=AssertionError),
+            patch("zimantic.web.app.ARTICLE_STREAM_CHUNK", 16),
+        ):
+            full = client.get(url)
+            head = client.head(url)
+            conditional = client.get(
+                url, headers={"Range": "bytes=0-3", "If-Range": '"stale"'}
+            )
+        for response in (full, conditional):
+            assert response.status_code == 200
+            assert response.content == DATA
+            assert response.headers["content-type"] == mimetype
+            assert response.headers["content-length"] == str(len(DATA))
+            assert response.headers["accept-ranges"] == "bytes"
+            assert response.headers["access-control-allow-origin"] == "*"
+            assert "content-disposition" not in response.headers
+        assert head.status_code == 200
+        assert head.content == b""
+        assert head.headers["content-type"] == mimetype
+        assert head.headers["content-length"] == str(len(DATA))
+        assert len(opened_files) == 2
+        assert all(opened.handle.closed for opened in opened_files)
+
+        partial = client.get(url, headers={"Range": "bytes=10-13"})
+        assert partial.status_code == 206
+        assert partial.content == DATA[10:14]
+        assert partial.headers["content-type"] == mimetype
+        assert partial.headers["content-range"] == f"bytes 10-13/{len(DATA)}"
+        for path in ("page.html", "data.bin"):
+            response = client.get(_article(key, path))
+            assert response.status_code == 413
+            assert response.json()["error"] == "article_too_large"
     finally:
         client.close()
         search.close()
