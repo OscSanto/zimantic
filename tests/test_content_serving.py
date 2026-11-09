@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import quote
 
 import pytest
@@ -13,6 +13,7 @@ from libzim.writer import Creator, Hint, Item, StringProvider
 
 from zimantic.content.store import ArticleNotFoundError
 from zimantic.providers.config import FilesConfig, RuntimeConfig, ZimConfig
+from zimantic.providers.files.common import OpenedFile
 from zimantic.providers.files.store import FilesContentStore
 from zimantic.providers.zim.discovery import zim_source_key
 from zimantic.search import Search
@@ -374,14 +375,19 @@ def test_oversized_item_returns_too_large_with_cors(tmp_path):
 
 @pytest.mark.parametrize(
     ("filename", "mimetype"),
-    [("about_datapost.mp4", "video/mp4"), ("lesson.mp3", "audio/mpeg")],
+    [
+        ("about_datapost.mp4", "video/mp4"),
+        ("lesson.mp3", "audio/mpeg"),
+        ("manual.pdf", "application/pdf"),
+        ("data.bin", "application/octet-stream"),
+        ("drawing.svg", "image/svg+xml"),
+    ],
 )
-def test_oversized_file_media_streams_inline(tmp_path, filename, mimetype):
+def test_oversized_non_html_files_stream(tmp_path, filename, mimetype):
     root = tmp_path / "modules"
     root.mkdir()
     (root / filename).write_bytes(DATA)
     (root / "page.html").write_bytes(ALPHA_HTML)
-    (root / "data.bin").write_bytes(DATA)
     config = RuntimeConfig(
         settings={
             "index_dir": str(tmp_path / "indexes"),
@@ -393,18 +399,22 @@ def test_oversized_file_media_streams_inline(tmp_path, filename, mimetype):
     client = TestClient(create_app(search))
     key = "files:modules:root"
     opened_files = []
+    readers = []
     open_stream = FilesContentStore.open_stream
 
     def capture_stream(store, path):
         opened = open_stream(store, path)
         opened_files.append(opened)
-        return opened
+        reader = Mock(wraps=opened.handle)
+        readers.append(reader)
+        return OpenedFile(reader, opened.stat)
 
     try:
         url = _article(key, filename)
         with (
             patch.object(FilesContentStore, "open_stream", capture_stream),
             patch.object(FilesContentStore, "read", side_effect=AssertionError),
+            patch.object(FilesContentStore, "read_range", side_effect=AssertionError),
             patch("zimantic.web.app.ARTICLE_STREAM_CHUNK", 16),
         ):
             full = client.get(url)
@@ -412,30 +422,55 @@ def test_oversized_file_media_streams_inline(tmp_path, filename, mimetype):
             conditional = client.get(
                 url, headers={"Range": "bytes=0-3", "If-Range": '"stale"'}
             )
-        for response in (full, conditional):
+            partial = client.get(url, headers={"Range": "bytes=10-40"})
+            suffix = client.get(url, headers={"Range": "bytes=-32"})
+            open_ended = client.get(url, headers={"Range": "bytes=16-"})
+            ignored = client.get(url, headers={"Range": "bytes=0-1,4-5"})
+            unsatisfiable = client.get(
+                url, headers={"Range": f"bytes={len(DATA)}-"}
+            )
+        for response in (full, conditional, ignored):
             assert response.status_code == 200
             assert response.content == DATA
-            assert response.headers["content-type"] == mimetype
             assert response.headers["content-length"] == str(len(DATA))
+        for response in (full, conditional, partial, suffix, open_ended, ignored, head):
+            assert response.headers["content-type"] == mimetype
             assert response.headers["accept-ranges"] == "bytes"
             assert response.headers["access-control-allow-origin"] == "*"
-            assert "content-disposition" not in response.headers
+            assert response.headers["x-content-type-options"] == "nosniff"
+            if mimetype == "application/octet-stream":
+                assert response.headers["content-disposition"].startswith("attachment")
+            else:
+                assert "content-disposition" not in response.headers
+            if mimetype == "image/svg+xml":
+                assert response.headers["content-security-policy"].startswith("sandbox;")
         assert head.status_code == 200
         assert head.content == b""
-        assert head.headers["content-type"] == mimetype
         assert head.headers["content-length"] == str(len(DATA))
-        assert len(opened_files) == 2
+        assert len(opened_files) == 6
         assert all(opened.handle.closed for opened in opened_files)
+        assert all(
+            0 < call.args[0] <= 16
+            for reader in readers
+            for call in reader.read.call_args_list
+        )
 
-        partial = client.get(url, headers={"Range": "bytes=10-13"})
-        assert partial.status_code == 206
-        assert partial.content == DATA[10:14]
-        assert partial.headers["content-type"] == mimetype
-        assert partial.headers["content-range"] == f"bytes 10-13/{len(DATA)}"
-        for path in ("page.html", "data.bin"):
-            response = client.get(_article(key, path))
-            assert response.status_code == 413
-            assert response.json()["error"] == "article_too_large"
+        for response, start, end in (
+            (partial, 10, 40),
+            (suffix, 32, 63),
+            (open_ended, 16, 63),
+        ):
+            assert response.status_code == 206
+            assert response.content == DATA[start : end + 1]
+            assert response.headers["content-length"] == str(end - start + 1)
+            assert response.headers["content-range"] == f"bytes {start}-{end}/{len(DATA)}"
+            assert response.headers["content-encoding"] == "identity"
+        assert unsatisfiable.status_code == 416
+        assert unsatisfiable.headers["content-range"] == f"bytes */{len(DATA)}"
+
+        response = client.get(_article(key, "page.html"))
+        assert response.status_code == 413
+        assert response.json()["error"] == "article_too_large"
     finally:
         client.close()
         search.close()

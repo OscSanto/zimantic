@@ -222,7 +222,7 @@ A running `serve` discovers indexes with `zimantic reload`; a fast index remains
 
 ## Source selection
 
-The source picker discovers available sources and sorts matching sources by result count, grouped by collection. Each group shows its top `source_filter_limit` sources (10 by default) plus an **Other** disclosure for the rest, and sourced-filter searches show up to 30 matches plus **Show N more**. Selected sources stay visible even when their group is not expanded. Dated and flavour variants of one book collapse to a single source here and in the library view.
+The source picker discovers available sources and sorts matching sources by result count, grouped by collection. Counts come from the bounded ranked result pool, so a searched source may not appear if none of its results make that pool. To search it directly, open its details in the library and choose **Search source**; choose **Search collection** to search the whole collection. Each group shows its top `source_filter_limit` sources (10 by default) plus an **Other** disclosure for the rest, and source-filter searches show up to 30 matches plus **Show N more**. Selected sources stay visible even when their group is not expanded. Dated and flavour variants of one book collapse to a single source here and in the library view.
 
 - Selecting a collection header searches that whole collection as one unit. Only one collection group can be selected at a time; selecting another replaces it. Selecting an individual source switches to individual-source display mode and clears the group selection, after which sources from different groups can be combined. The other searched sources stay available in the picker, and the next query keeps the current ranked scope while narrowing the returned page to the selected sources.
 - An explicit source or collection selection always defines the search scope directly. There is no small-selection promotion and no `zim` parameter: the canonical API parameter is `source`, and `collection` selects one collection as a unit.
@@ -242,7 +242,7 @@ Each ZIM source with MIME counters is assigned exactly one media type. Classific
 
 If no collection is configured, the page says so and points at a `[[collections]]` entry plus a server restart. Collections that exist but discovered no sources show their discovery state or error instead of appearing unconfigured.
 
-Click a source's title or **Details** for an infobox with its thumbnail, homepage, descriptions, counts, license, attribution, relation, tags, provider, collection, media types, and content-type breakdown. The infobox offers **Search** for one source and **Search collection** for its whole collection. No filesystem path is shown.
+Click a source's title or **Details** for an infobox with its thumbnail, homepage, descriptions, counts, license, attribution, relation, tags, provider, collection, media types, and content-type breakdown. The infobox offers **Search source** for one source and **Search collection** for its whole collection. No filesystem path is shown.
 
 ## Caches
 

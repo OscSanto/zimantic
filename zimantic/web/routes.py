@@ -813,25 +813,9 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 return web_app._article_content_response(content, mimetype)
 
             if request.method == "HEAD":
-                headers = {
-                    "Cache-Control": "no-cache",
-                    "X-Content-Type-Options": "nosniff",
-                    **web_app.ARTICLE_CORS_HEADERS,
-                }
-                if not web_app.is_inline_mimetype(mimetype):
-                    headers["Content-Disposition"] = (
-                        web_app.content_disposition(mimetype, entry.path)
-                    )
-                    headers["X-Content-Type-Options"] = "nosniff"
-                elif (
-                    str(mimetype).split(";", 1)[0].strip().lower()
-                    == "image/svg+xml"
-                ):
-                    headers["Content-Security-Policy"] = (
-                        "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
-                        "img-src data:; font-src data:"
-                    )
-                    headers["X-Content-Type-Options"] = "nosniff"
+                headers = web_app._article_response_headers(
+                    mimetype, filename=entry.path
+                )
                 if entry.size is not None:
                     headers["Content-Length"] = str(entry.size)
                     headers["Accept-Ranges"] = "bytes"
@@ -841,6 +825,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                     headers=headers,
                 )
 
+            open_stream = getattr(store, "open_stream", None)
+            parsed = None
             range_header = request.headers.get("range")
             # The store exposes no validators yet, so If-Range always
             # mismatches and the full representation is served.
@@ -860,35 +846,50 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                                 **web_app.ARTICLE_CORS_HEADERS,
                             },
                         )
-                    start, end = _bounded_range(start, end, suffix, limit)
-                    data = store.read_range(
-                        path,
-                        start=start,
-                        end=end,
-                        max_bytes=limit,
-                    )
-                    return web_app._article_content_response(
-                        data.content,
-                        data.mimetype,
-                        status_code=206,
-                        headers={
-                            "Content-Range": (
-                                f"bytes {data.start}-{data.end}/{data.total}"
-                            ),
-                            "Accept-Ranges": "bytes",
-                            # A partial body must never pass through gzip.
-                            "Content-Encoding": "identity",
-                        },
-                        filename=data.path,
-                    )
+                    if not callable(open_stream):
+                        start, end = _bounded_range(start, end, suffix, limit)
+                        data = store.read_range(
+                            path,
+                            start=start,
+                            end=end,
+                            max_bytes=limit,
+                        )
+                        return web_app._article_content_response(
+                            data.content,
+                            data.mimetype,
+                            status_code=206,
+                            headers={
+                                "Content-Range": (
+                                    f"bytes {data.start}-{data.end}/{data.total}"
+                                ),
+                                "Accept-Ranges": "bytes",
+                                # A partial body must never pass through gzip.
+                                "Content-Encoding": "identity",
+                            },
+                            filename=data.path,
+                        )
 
-            open_stream = getattr(store, "open_stream", None)
-            if mimetype.startswith(("video/", "audio/")) and callable(open_stream):
+            if callable(open_stream):
                 opened = open_stream(entry.path)
                 total = int(opened.stat.st_size)
+                start, end = (0, total - 1) if parsed is None else parsed[:2]
+                try:
+                    opened.handle.seek(start)
+                except OSError as error:
+                    opened.handle.close()
+                    raise ArticleUnavailableError(
+                        "article content is unavailable"
+                    ) from error
+                headers = {
+                    "Content-Length": str(end - start + 1),
+                    "Accept-Ranges": "bytes",
+                    "Content-Encoding": "identity",
+                }
+                if parsed is not None:
+                    headers["Content-Range"] = f"bytes {start}-{end}/{total}"
 
-                def media_chunks():
-                    remaining = total
+                def file_chunks():
+                    remaining = end - start + 1
                     try:
                         while remaining:
                             chunk = opened.handle.read(
@@ -902,16 +903,12 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                         opened.handle.close()
 
                 return StreamingResponse(
-                    media_chunks(),
+                    file_chunks(),
                     media_type=mimetype,
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Content-Length": str(total),
-                        "Accept-Ranges": "bytes",
-                        "Content-Encoding": "identity",
-                        "X-Content-Type-Options": "nosniff",
-                        **web_app.ARTICLE_CORS_HEADERS,
-                    },
+                    status_code=200 if parsed is None else 206,
+                    headers=web_app._article_response_headers(
+                        mimetype, headers=headers, filename=entry.path
+                    ),
                     background=BackgroundTask(opened.handle.close),
                 )
 

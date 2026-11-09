@@ -959,15 +959,12 @@ def _content_shell(
     )
 
 
-def _article_content_response(
-    content: bytes | memoryview,
+def _article_response_headers(
     mimetype: str,
     *,
-    status_code: int = 200,
     headers: dict[str, str] | None = None,
     filename: str | None = None,
-) -> Response:
-    mimetype = browser_mimetype(mimetype)
+) -> dict[str, str]:
     response_headers = {
         "Cache-Control": "no-cache",
         "X-Content-Type-Options": "nosniff",
@@ -989,6 +986,21 @@ def _article_content_response(
             "img-src data:; font-src data:"
         )
         response_headers["X-Content-Type-Options"] = "nosniff"
+    return response_headers
+
+
+def _article_content_response(
+    content: bytes | memoryview,
+    mimetype: str,
+    *,
+    status_code: int = 200,
+    headers: dict[str, str] | None = None,
+    filename: str | None = None,
+) -> Response:
+    mimetype = browser_mimetype(mimetype)
+    response_headers = _article_response_headers(
+        mimetype, headers=headers, filename=filename
+    )
     if len(content) > ARTICLE_STREAM_THRESHOLD:
         # Python-libzim exposes the decompressed item as one memoryview.
         # Chunking here avoids another whole-entry response copy and lets
