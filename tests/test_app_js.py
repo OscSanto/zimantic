@@ -204,7 +204,7 @@ const appPath = (path) => path;
 const mode = {json.dumps(mode)};
 const state = {{
   question: ["empty", "empty-query", "failure", "browse"].includes(mode) ? "" : "original",
-  browse: mode === "browse" ? "rare" : mode === "empty-query" ? "representative" : undefined,
+  browse: mode === "browse" ? "rare" : mode === "empty-query" ? "diverse" : undefined,
   seed: ["browse", "empty-query"].includes(mode) ? 0 : undefined,
   selectedSources: [], scopeSources: [], collection: "files:modules", page: 0, modal: null,
 }};
@@ -326,7 +326,7 @@ const snapshot = () => ({{
         self.assertEqual(self._initialize_search_page("empty")["searches"], [])
         self.assertEqual(
             self._initialize_search_page("empty-query")["searches"],
-            [["", [], 0, [], "files:modules", "representative", 0]],
+            [["", [], 0, [], "files:modules", "diverse", 0]],
         )
         self.assertEqual(
             self._initialize_search_page("browse")["searches"],
@@ -338,7 +338,7 @@ const snapshot = () => ({{
         script = f"""
 const location = new URL("http://example.test/?q=");
 const MAX_QUERY_LENGTH = 4096;
-const defaultBrowseMode = () => "representative";
+const defaultBrowseMode = () => "diverse";
 const selectionValues = (values) => [...(values || [])];
 let current = null, selectedSourceKeys = new Set(["manual"]);
 const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); }};
@@ -369,7 +369,7 @@ console.log(JSON.stringify({{empty, browsing, paged, modal, query, rare, searche
             [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
         )
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["empty"]["browse"], "representative")
+        self.assertEqual(payload["empty"]["browse"], "diverse")
         self.assertEqual(payload["browsing"]["browse"], "random")
         self.assertEqual(payload["browsing"]["seed"], 7)
         self.assertEqual(
@@ -480,11 +480,11 @@ const history = {{
 const elements = {{
   question: {{value: ""}},
   sortControls: {{hidden: true}},
-  sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "representative", "diverse", "semantic-diverse", "recency"]
+  sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "diverse", "recency"]
     .map((value) => ({{value}}))}},
 }};
 const $ = (id) => elements[id];
-const availableBrowseModes = new Set(["random", "rare", "outliers", "representative", "diverse", "semantic-diverse", "recency"]);
+const availableBrowseModes = new Set(["random", "rare", "outliers", "diverse", "recency"]);
 const selectionValues = (values) => [...(values || [])];
 const selectedSourceKeys = new Set(["manual"]);
 const selectedCollectionKey = "files:modules";
@@ -517,15 +517,13 @@ submitSearch(true);
 const relevanceUrl = currentUrlValue();
 current = null;
 $("question").value = "";
-availableBrowseModes.delete("representative");
 availableBrowseModes.delete("outliers");
-availableBrowseModes.delete("semantic-diverse");
 renderSortControls();
 console.log(JSON.stringify({{
   emptyDefault, relevanceDisabled, emptyUrl, textUrl, textSort, relevanceUrl, searches,
   fastDefault: $("sortSelect").value,
   semanticHidden: $("sortSelect").options.filter((option) =>
-    ["outliers", "representative", "semantic-diverse"].includes(option.value)
+    ["outliers"].includes(option.value)
   ).every((option) => option.hidden && option.disabled),
   additionalModesVisible: $("sortSelect").options.filter((option) =>
     ["diverse", "recency"].includes(option.value)
@@ -536,18 +534,18 @@ console.log(JSON.stringify({{
             [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
         )
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["emptyDefault"], "representative")
+        self.assertEqual(payload["emptyDefault"], "diverse")
         self.assertTrue(payload["relevanceDisabled"])
-        self.assertEqual(payload["emptyUrl"], "/?q=&sort=representative&collection=files%3Amodules&source=manual")
+        self.assertEqual(payload["emptyUrl"], "/?q=&sort=diverse&collection=files%3Amodules&source=manual")
         self.assertEqual(payload["textUrl"], "/?q=topic&sort=random&seed=7&collection=files%3Amodules&source=manual")
         self.assertEqual(payload["textSort"], "random")
         self.assertEqual(payload["relevanceUrl"], "/?q=topic&collection=files%3Amodules&source=manual")
         self.assertEqual(payload["searches"], [
-            ["", ["manual"], 0, ["manual"], "files:modules", "representative", 0],
+            ["", ["manual"], 0, ["manual"], "files:modules", "diverse", 0],
             ["topic", ["manual"], 0, ["manual"], "files:modules", "random", 7],
             ["topic", ["manual"], 0, ["manual"], "files:modules", None, 0],
         ])
-        self.assertEqual(payload["fastDefault"], "rare")
+        self.assertEqual(payload["fastDefault"], "diverse")
         self.assertTrue(payload["semanticHidden"])
         self.assertTrue(payload["additionalModesVisible"])
 
@@ -556,7 +554,7 @@ console.log(JSON.stringify({{
         script = f"""
 const location = new URL("http://example.test/");
 const MAX_QUERY_LENGTH = 4096;
-const defaultBrowseMode = () => "representative";
+const defaultBrowseMode = () => "diverse";
 const appPath = (path) => path;
 const elements = {{articleModal: {{hidden: true}}, question: {{value: ""}}}};
 const $ = (id) => elements[id];
@@ -584,7 +582,7 @@ console.log(JSON.stringify({{resets, searches}}));
         self.assertEqual(json.loads(result.stdout), {
             "resets": 1,
             "searches": [
-                ["", [], 0, [], None, "representative", 0],
+                ["", [], 0, [], None, "diverse", 0],
                 ["topic", ["manual"], 1, ["manual"], None, "random", 7],
             ],
         })

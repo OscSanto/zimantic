@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
 import random
 import sqlite3
@@ -14,10 +15,8 @@ from ..searching.diversity import diverse_order
 from ..searching.query import STOPWORDS
 from .search import SearchLimits, fetch_docs, vector_search
 
-BROWSE_MODES = (
-    "random", "rare", "outliers", "representative", "diverse", "semantic-diverse", "recency",
-)
-SEMANTIC_BROWSE_MODES = frozenset({"outliers", "representative", "semantic-diverse"})
+BROWSE_MODES = ("random", "rare", "outliers", "diverse", "recency")
+SEMANTIC_BROWSE_MODES = frozenset({"outliers"})
 
 
 def _check_deadline(deadline: float | None) -> None:
@@ -142,19 +141,6 @@ def _recent_rows(
     return [
         (float(modified) if modified is not None else -1.0, int(rowid))
         for rowid, modified in rows
-    ]
-
-
-def _diverse_paths(
-    entries: list[tuple[str, str]], deadline: float | None = None,
-    *, limit: int | None = None,
-) -> list[str]:
-    """Greedily order titles to minimize overlap with already selected titles."""
-    titles = dict(entries)
-    paths = list(titles)
-    return [
-        paths[position]
-        for position in diverse_order(list(titles.values()), deadline, limit=limit)
     ]
 
 
@@ -298,6 +284,8 @@ def sort_scores(
     index: Any, docs: list[dict[str, Any]], mode: str, deadline: float | None = None
 ) -> dict[str, float]:
     """Score only the matched documents, not a truncated browse sample."""
+    if mode not in {"rare", "recency", "outliers"}:
+        raise ValueError("unknown statistics sort mode")
     db = index.db_for_thread()
     if db is None or mode in SEMANTIC_BROWSE_MODES and index.faiss_index is None:
         return {}
@@ -324,36 +312,12 @@ def sort_scores(
                 for rowid in rows
                 if rowid not in {candidate for _, candidate in ranked}
             )
-        elif mode == "diverse":
-            titles = {
-                int(rowid): str(title or "")
-                for rowid, title in db.execute(
-                    "SELECT rowid, title FROM docs WHERE rowid IN ("
-                    + ",".join("?" for _ in rows)
-                    + ")",
-                    list(rows),
-                )
-            }
-            by_path = {
-                path: rowid for rowid, path in rows.items()
-            }
-            ordered = _diverse_paths(
-                [
-                    (path, titles.get(rowid, ""))
-                    for rowid, path in rows.items()
-                ],
-                deadline,
-            )
-            ranked = [
-                (float(len(ordered) - position), by_path[path])
-                for position, path in enumerate(ordered)
-            ]
         else:
             import faiss
             import numpy as np
 
             centroid = _centroid(index, deadline)
-            query = -centroid if mode == "outliers" else centroid
+            query = -centroid
             selector = faiss.IDSelectorBatch(np.array(list(rows), dtype=np.int64))
             vectors = index.faiss_index
             params = (
@@ -418,28 +382,63 @@ def browse(
             ranked = _recent_rows(db, count)
         elif mode == "diverse":
             candidates = _random_rows(db, max(count * 8, 64), source_order, deadline)
+            centroid = None
+            if index.faiss_index is not None:
+                try:
+                    centroid = _centroid(index, deadline)
+                    scores, rowids = vector_search(
+                        index, centroid,
+                        min(index.faiss_index.ntotal, max(count * 4, 64)),
+                        limits.nprobe,
+                    )
+                    central = [
+                        (float(score), int(rowid))
+                        for score, rowid in zip(scores[0], rowids[0])
+                        if rowid >= 0 and math.isfinite(float(score))
+                    ]
+                    # Keep lexical-only samples in early slots of partial indexes.
+                    candidates = [
+                        candidate for pair in itertools.zip_longest(central, candidates)
+                        for candidate in pair if candidate is not None
+                    ]
+                except (ValueError, RuntimeError):
+                    centroid = None
+            candidate_ids = list(dict.fromkeys(rowid for _, rowid in candidates))
             candidate_docs = fetch_docs(
                 source,
                 db,
-                [rowid for _, rowid in candidates],
+                candidate_ids,
                 url_builder=url_builder,
                 web_base_path=limits.web_base_path,
             )
-            ordered = _diverse_paths(
-                [
-                    (str(doc["path"]), str(doc.get("title") or ""))
-                    for _, rowid in candidates
-                    if (doc := candidate_docs.get(rowid)) is not None
-                ],
-                deadline,
-                limit=count,
+            candidate_ids = [rowid for rowid in candidate_ids if rowid in candidate_docs]
+            embeddings = {}
+            if centroid is not None:
+                try:
+                    embeddings = _reconstruct_rows(
+                        index, {rowid: doc["path"] for rowid, doc in candidate_docs.items()}, deadline,
+                    )
+                except (ValueError, RuntimeError):
+                    embeddings = {}
+            kwargs = {}
+            if embeddings:
+                import numpy as np
+
+                matrix = np.zeros((len(candidate_ids), index.faiss_index.d), dtype=np.float32)
+                semantic = []
+                for position, rowid in enumerate(candidate_ids):
+                    vector = embeddings.get(candidate_docs[rowid]["path"])
+                    semantic.append(vector is not None)
+                    if vector is not None:
+                        matrix[position] = vector
+                kwargs = {"vectors": matrix, "relevance": matrix @ centroid[0], "semantic_mask": semantic}
+            ordered = diverse_order(
+                [candidate_docs[rowid].get("title") or "" for rowid in candidate_ids],
+                deadline, limit=count, **kwargs,
             )
-            rowid_by_path = {
-                doc["path"]: rowid for rowid, doc in candidate_docs.items()
-            }
             ranked = [
-                (float(len(ordered) - position), rowid_by_path[path])
-                for position, path in enumerate(ordered)
+                (float(len(ordered) - position), candidate_ids[candidate])
+                for position, candidate in enumerate(ordered)
             ]
         elif mode in SEMANTIC_BROWSE_MODES:
             if index.faiss_index is None:
@@ -447,7 +446,7 @@ def browse(
             centroid = _centroid(index, deadline)
             _check_deadline(deadline)
             # Negating the mean finds the lowest average embedding similarity.
-            query = -centroid if mode == "outliers" else centroid
+            query = -centroid
             scores, rowids = vector_search(
                 index,
                 query,
@@ -455,37 +454,10 @@ def browse(
                 limits.nprobe,
             )
             ranked = [
-                (float(score) + (1.0 if mode == "outliers" else 0.0), int(rowid))
+                (float(score) + 1.0, int(rowid))
                 for score, rowid in zip(scores[0], rowids[0])
                 if rowid >= 0 and math.isfinite(float(score))
             ]
-            if mode == "semantic-diverse":
-                import numpy as np
-
-                random_rows = _random_rows(db, max(count * 8, 64), source_order, deadline)
-                candidate_ids = list(dict.fromkeys(rowid for _, rowid in [*ranked, *random_rows]))
-                candidate_docs = fetch_docs(
-                    source, db, candidate_ids, url_builder=url_builder,
-                    web_base_path=limits.web_base_path,
-                )
-                rows = {rowid: doc["path"] for rowid, doc in candidate_docs.items()}
-                embeddings = _reconstruct_rows(index, rows, deadline)
-                candidate_ids = [
-                    rowid for rowid in candidate_ids
-                    if rowid in rows and rows[rowid] in embeddings
-                ]
-                if candidate_ids:
-                    matrix = np.stack([embeddings[rows[rowid]] for rowid in candidate_ids])
-                    order = diverse_order(
-                        [candidate_docs[rowid]["title"] for rowid in candidate_ids],
-                        deadline, vectors=matrix, relevance=matrix @ centroid[0], limit=count,
-                    )
-                    ranked = [
-                        (float(len(order) - position), candidate_ids[candidate])
-                        for position, candidate in enumerate(order)
-                    ]
-                else:
-                    ranked = []
         else:
             raise ValueError("unknown browse mode")
         errors: list[str] = []

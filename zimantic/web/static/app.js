@@ -70,9 +70,7 @@
                 random: "Random",
                 rare: "Rare titles",
                 outliers: "Semantic outliers",
-                representative: "Representative",
                 diverse: "Diversity",
-                "semantic-diverse": "Semantic diversity",
                 recency: "Recency",
             };
             let availableBrowseModes = new Set(Object.keys(BROWSE_LABELS));
@@ -3792,7 +3790,7 @@
             }
 
             function defaultBrowseMode() {
-                return availableBrowseModes.has("representative") ? "representative" : "rare";
+                return availableBrowseModes.has("diverse") ? "diverse" : "rare";
             }
 
             function renderSortControls() {

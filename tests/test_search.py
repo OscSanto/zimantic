@@ -2722,7 +2722,7 @@ class BrowseSearchTests(unittest.TestCase):
         self.assertTrue(rare["results"])
         self.assertTrue(all(doc["source_key"] == "manual" for doc in rare["results"]))
 
-    def test_empty_search_defaults_to_representative_without_embedding_a_query(self):
+    def test_empty_search_defaults_to_adaptive_diversity_without_embedding_a_query(self):
         import faiss
 
         search = self.make_search()
@@ -2747,20 +2747,17 @@ class BrowseSearchTests(unittest.TestCase):
         search.indexes["manual"].faiss_index = index
         with patch.object(search, "_query_vector", return_value=None):
             relevance = search.search_page("topic", limit=20)["results"]
-            representative = search.search_page("topic", sort="representative", limit=20)["results"]
             outliers = search.search_page("topic", sort="outliers", limit=20)["results"]
             rare = search.search_page("topic", sort="rare", limit=20)["results"]
             diverse = search.search_page("topic", sort="diverse", limit=20)["results"]
-            semantic = search.search_page("topic", sort="semantic-diverse", limit=20)["results"]
             first = search.search_page("topic", sort="random", seed=7, limit=2)
             second = search.search_page("topic", sort="random", seed=7, limit=2, offset=2)
             whole = search.search_page("topic", sort="random", seed=7, limit=20)
             reshuffled = search.search_page("topic", sort="random", seed=19, limit=20)
             cached_relevance = search.search_page("topic", limit=20)["results"]
         expected = {doc["id"] for doc in relevance}
-        for items in (representative, outliers, rare, diverse, semantic, whole["results"]):
+        for items in (outliers, rare, diverse, whole["results"]):
             self.assertEqual({doc["id"] for doc in items}, expected)
-        self.assertIn(representative[0]["path"], ("item-10", "item-11"))
         self.assertIn(outliers[0]["path"], ("item-1", "item-20"))
         self.assertEqual(first["results"] + second["results"], whole["results"][:4])
         self.assertNotEqual(whole["results"], reshuffled["results"])
@@ -2817,14 +2814,14 @@ class BrowseSearchTests(unittest.TestCase):
             for i, title in enumerate(["Cars", "Automobiles", "Wind turbines", "Unrelated", "Missing vector"], 1)
         ]
         ordered = search._sort_results(
-            pool, "semantic-diverse", 0, None,
+            pool, "diverse", 0, None,
             query_vector=np.array([[1, 0]], dtype=np.float32),
         )
         self.assertEqual([doc["id"] for doc in ordered], ["1", "3", "2", "4", "5"])
         with patch.object(search, "_query_vector", return_value=vectors[:1]) as embed:
-            first = search.search_page("topic", sort="semantic-diverse", limit=2)
-            second = search.search_page("topic", sort="semantic-diverse", offset=2, limit=2)
-            whole = search.search_page("topic", sort="semantic-diverse", limit=5)
+            first = search.search_page("topic", sort="diverse", limit=2)
+            second = search.search_page("topic", sort="diverse", offset=2, limit=2)
+            whole = search.search_page("topic", sort="diverse", limit=5)
         self.assertEqual(embed.call_count, 1)
         self.assertEqual(first["results"] + second["results"], whole["results"][:4])
 
@@ -2837,17 +2834,43 @@ class BrowseSearchTests(unittest.TestCase):
         index.add_with_ids(vectors, np.array([1, 2, 3, 4], dtype=np.int64))
         search.indexes["manual"].faiss_index = index
         with patch.object(search, "_query_vector", side_effect=AssertionError("must not embed")):
-            whole = search.search_page("", sort="semantic-diverse", limit=5)
-            first = search.search_page("", sort="semantic-diverse", limit=2)
-            second = search.search_page("", sort="semantic-diverse", limit=2, offset=2)
-        self.assertEqual(len(whole["results"]), 4)
-        self.assertEqual(first["results"] + second["results"], whole["results"])
+            whole = search.search_page("", sort="diverse", limit=5)
+            first = search.search_page("", sort="diverse", limit=2)
+            second = search.search_page("", sort="diverse", limit=2, offset=2)
+        self.assertEqual(len(whole["results"]), 5)
+        self.assertEqual(first["results"] + second["results"], whole["results"][:4])
         self.assertNotEqual(
             {doc["path"] for doc in whole["results"][:2]}, {"item-1", "item-2"},
         )
         search.semantic = False
-        with self.assertRaises(SearchQueryError):
-            search.search_page("", sort="semantic-diverse")
+        self.assertTrue(search.search_page("", sort="diverse")["results"])
+
+    def test_diversity_interleaves_lexical_fallback_for_missing_and_zero_vectors(self):
+        import faiss
+
+        search = self.make_search()
+        vectors = np.array([[1, 0], [1, 0], [0.8, 0.6], [0, 0]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([1, 2, 3, 6], dtype=np.int64))
+        search.indexes["manual"].faiss_index = index
+        pool = [
+            {"id": str(i), "source_key": "manual", "path": f"item-{i}", "title": title, "score": 1.0}
+            for i, title in (
+                (1, "Cars"), (5, "Solar power"), (2, "Automobiles"),
+                (6, "Solar power"), (3, "Wind turbines"), (7, "Battery storage"),
+            )
+        ]
+        ordered = search._sort_results(
+            pool, "diverse", 0, None, query_vector=np.array([[1, 0]], dtype=np.float32),
+        )
+        self.assertEqual([doc["id"] for doc in ordered], ["1", "5", "3", "7", "2", "6"])
+        search.semantic = False
+        with patch("zimantic.search.diversity_vectors", side_effect=AssertionError("must not use embeddings")):
+            lexical = search._sort_results(pool, "diverse", 0, None)
+        self.assertEqual(
+            [doc["id"] for doc in lexical],
+            ["1", "5", "2", "3", "7", "6"],
+        )
 
     def test_semantic_diversity_preserves_hybrid_relevance_penalties(self):
         import faiss
@@ -2864,7 +2887,7 @@ class BrowseSearchTests(unittest.TestCase):
         ]
         pool = [{**doc, "source_key": "manual"} for doc in pool]
         ordered = search._sort_results(
-            pool, "semantic-diverse", 0, None,
+            pool, "diverse", 0, None,
             query_vector=np.array([[1, 0]], dtype=np.float32),
         )
         self.assertEqual(ordered[0]["id"], "guide")
@@ -2896,7 +2919,7 @@ class BrowseSearchTests(unittest.TestCase):
                 {
                     "id": f"{key}-{rank}", "source_key": key, "title": title,
                     "path": f"item-{rank}", "source_rank": rank, "_browse_order": key,
-                    "score": 1.0, "ranking": {"browse": {"mode": "semantic-diverse"}},
+                    "score": 1.0, "ranking": {"browse": {"mode": "diverse"}},
                 }
                 for rank, title in enumerate(titles, 1)
             ]))
@@ -2909,6 +2932,12 @@ class BrowseSearchTests(unittest.TestCase):
             {doc["id"] for doc in ordered},
             {doc["id"] for result in results for doc in result.items},
         )
+        search.indexes["other"].faiss_index = None
+        results[1].items[0]["title"] = "Cars"
+        mixed = search._rank_results(results, "", 4)
+        self.assertEqual([doc["source_key"] for doc in mixed[:2]], ["manual", "other"])
+        self.assertEqual([doc["title"] for doc in mixed[:2]], ["Cars", "Battery storage"])
+        self.assertEqual({doc["id"] for doc in mixed}, {doc["id"] for doc in ordered})
 
     def test_text_sorting_preserves_the_relevance_enrichment_candidates(self):
         search = self.make_search()
@@ -2934,6 +2963,27 @@ class BrowseSearchTests(unittest.TestCase):
         results = search.search_page("", browse="outliers")["results"]
         self.assertTrue(results)
         self.assertEqual(results[0]["path"], "item-3")
+
+    def test_diversity_refreshes_cached_pools_when_deferred_vectors_become_available(self):
+        import faiss
+
+        vectors = np.array([[1, 0], [0.8, 0.6], [-0.6, 0.8]], dtype=np.float32)
+        for query in ("", "topic"):
+            with self.subTest(query=query):
+                search = self.make_search()
+                with patch.object(search, "_query_vector", return_value=vectors[:1]):
+                    search.search_page(query, sort="diverse")
+                    search.search_page(query, sort="diverse")
+                    hits = search.cache.hits
+                    self.assertGreater(hits, 0)
+                    index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+                    index.add_with_ids(vectors, np.array([1, 2, 3], dtype=np.int64))
+                    search.indexes["manual"].faiss_index = index
+                    page = search.search_page(query, sort="diverse")
+                self.assertEqual(search.cache.hits, hits)
+                self.assertTrue(page["results"])
+                if not query:
+                    self.assertEqual(page["results"][0]["path"], "item-2")
 
 
 class PaginationTests(unittest.TestCase):

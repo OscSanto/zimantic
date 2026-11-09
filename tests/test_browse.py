@@ -1,6 +1,7 @@
 import sqlite3
 import time
 import unittest
+from unittest.mock import patch
 
 import faiss
 import numpy as np
@@ -144,23 +145,48 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(order, [0, 2, 1, 3])
         self.assertEqual(diverse_order(titles), [0, 1, 2, 3])
 
-    def test_semantic_modes_share_the_centroid_and_have_opposite_order(self):
+    def test_outliers_and_diversity_share_the_centroid_with_lexical_fallback(self):
         vectors = np.array([[1, 0], [0.8, 0.6], [-0.6, 0.8]], dtype=np.float32)
         index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
         index.add_with_ids(vectors, np.array([2, 12, 31], dtype=np.int64))
         self.index.faiss_index = index
         outliers = self.browse("outliers")
         centroid = self.index.browse_centroid
-        representative = self.browse("representative")
+        diverse = self.browse("diverse")
         self.assertEqual(outliers.status, "ok", outliers.error)
-        self.assertEqual(representative.status, "ok", representative.error)
+        self.assertEqual(diverse.status, "ok", diverse.error)
         self.assertIs(self.index.browse_centroid, centroid)
         self.assertEqual(outliers.items[0]["path"], "unusual")
-        self.assertEqual(representative.items[0]["path"], "common-2")
+        self.assertEqual(diverse.items[0]["path"], "common-2")
         self.assertEqual(
-            [doc["id"] for doc in outliers.items],
-            list(reversed([doc["id"] for doc in representative.items])),
+            {doc["path"] for doc in diverse.items},
+            {"common-1", "common-2", "unusual", "stopwords"},
         )
+
+    def test_partial_indexes_interleave_semantic_and_lexically_diverse_candidates(self):
+        vectors = np.array([[1, 0], [0.8, 0.6], [-0.6, 0.8]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([2, 12, 31], dtype=np.int64))
+        self.index.faiss_index = index
+        self.db.executemany(
+            "INSERT INTO docs(rowid,title,path) VALUES (?,?,?)",
+            [(60, "Solar power", "solar"), (61, "Solar power", "solar-copy"),
+             (62, "Wind turbines", "wind")],
+        )
+        with patch("zimantic.indexing.browse._random_rows", return_value=[
+            (0.0, 60), (0.0, 61), (0.0, 62),
+        ]):
+            result = self.browse("diverse", count=6)
+            prefix = self.browse("diverse", count=2)
+        self.assertEqual(result.status, "ok", result.error)
+        self.assertEqual(
+            [doc["id"] for doc in prefix.items],
+            [doc["id"] for doc in result.items[:2]],
+        )
+        self.assertEqual(prefix.items[1]["path"], "solar")
+        lexical = [doc["path"] for doc in result.items if doc["path"] in {"solar", "solar-copy", "wind"}]
+        self.assertEqual(lexical, ["solar", "wind", "solar-copy"])
+        self.assertEqual(len(result.items), 6)
 
     def test_ivf_centroid_supports_sparse_ids_without_creating_a_direct_map(self):
         threads = faiss.omp_get_max_threads()
@@ -179,7 +205,7 @@ class BrowseTests(unittest.TestCase):
             [(int(rowid), f"Item {rowid}", str(rowid)) for rowid in ids],
         )
         self.index.faiss_index = index
-        result = self.browse("representative", count=4)
+        result = self.browse("diverse", count=4)
         self.assertEqual(result.status, "ok", result.error)
         self.assertEqual(len(result.items), 4)
         self.assertEqual(index.direct_map.type, faiss.DirectMap.NoMap)
@@ -188,20 +214,15 @@ class BrowseTests(unittest.TestCase):
         np.testing.assert_allclose(self.index.browse_centroid[0], mean, atol=0.01)
         paths = [str(ids[0]), str(ids[32]), str(ids[100])]
         docs = [{"path": path} for path in paths]
-        scores = sort_scores(self.index, docs, "representative")
-        self.assertEqual(set(scores), set(paths))
+        selected, centrality = diversity_vectors(self.index, docs)
+        self.assertEqual(set(centrality), set(paths))
         opposite = sort_scores(self.index, docs, "outliers")
         for path in paths:
-            self.assertAlmostEqual(scores[path], -opposite[path], places=5)
-        selected, centrality = diversity_vectors(self.index, docs)
+            self.assertAlmostEqual(centrality[path], -opposite[path], delta=0.01)
         self.assertEqual(set(selected), set(paths))
         for path, vector in selected.items():
             np.testing.assert_allclose(vector, vectors[list(ids).index(int(path))], atol=0.01)
             self.assertAlmostEqual(float(np.linalg.norm(vector)), 1.0, places=5)
-            self.assertAlmostEqual(centrality[path], scores[path], delta=0.01)
-        semantic = self.browse("semantic-diverse", count=4)
-        self.assertEqual(semantic.status, "ok", semantic.error)
-        self.assertEqual(len(semantic.items), 4)
         self.assertEqual(index.direct_map.type, faiss.DirectMap.NoMap)
 
     def test_candidate_vectors_support_idmaps_missing_and_zero_embeddings(self):

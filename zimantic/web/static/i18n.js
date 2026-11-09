@@ -36,9 +36,7 @@
             "Browse failed": "La exploración falló",
             "Rare titles": "Títulos poco comunes",
             "Semantic outliers": "Atípicos semánticos",
-            "Representative": "Representativos",
             "Diversity": "Diversidad",
-            "Semantic diversity": "Diversidad semántica",
             "Recency": "Más recientes",
             "Explore a shuffled mix of indexed items.":
                 "Explora una mezcla aleatoria de elementos indexados.",
@@ -46,8 +44,6 @@
                 "Títulos con palabras poco comunes en cada fuente.",
             "Items least like their source's average embedding.":
                 "Elementos menos parecidos al vector semántico medio de su fuente.",
-            "Items most like their source's average embedding.":
-                "Elementos más parecidos al vector semántico medio de su fuente.",
             "Browsing uses local indexes and respects source filters.":
                 "La exploración usa índices locales y respeta los filtros de fuentes.",
             "No indexed items are available for this sort order in the selected sources.":

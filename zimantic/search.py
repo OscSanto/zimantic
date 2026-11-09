@@ -1619,9 +1619,9 @@ class Search:
         self, query: str, sort: str | None = None, seed: int = 0
     ) -> tuple[str, str]:
         query = self._validate_query(query, allow_empty=True)
-        sort = sort or ("relevance" if query else "representative" if self.semantic else "rare")
+        sort = sort or ("relevance" if query else "diverse")
         if not query and sort == "relevance":
-            sort = "representative" if self.semantic else "rare"
+            sort = "diverse"
         if sort != "relevance":
             self._validate_browse(sort, seed)
         return query, sort
@@ -2145,6 +2145,17 @@ class Search:
             )
         elif sort != "relevance":
             cache_key = ("sort", sort, seed, cache_key)
+        if browse == "diverse" or sort == "diverse":
+            with self._state_lock:
+                runtimes = dict(self.runtimes)
+                semantic_sources = tuple(sorted(
+                    src.key for src in sources
+                    if self.semantic
+                    and isinstance(runtime := runtimes.get(src.collection_key), IndexedRuntime)
+                    and (index := runtime.indexes.get(src.key)) is not None
+                    and index.faiss_index is not None
+                ))
+            cache_key = ("diversity", semantic_sources, cache_key)
         inflight_key = (generation, cache_key)
         cached, pending = self._claim_search(cache_key, inflight_key, generation)
         if cached is not None:
@@ -2921,20 +2932,12 @@ class Search:
         query_vector=None,
     ) -> list[dict[str, Any]]:
         scores: dict[str, float] = {}
-        if mode in {"diverse", "semantic-diverse"}:
+        if mode == "diverse":
             try:
-                if mode == "semantic-diverse":
-                    ordered = self._semantic_diversity(
-                        pool, deadline, query_vector=query_vector,
-                        balance_sources=balance_sources, limit=limit,
-                    )
-                else:
-                    order = diverse_order(
-                        [doc.get("title") or "" for doc in pool], deadline,
-                        sources=[doc["source_key"] for doc in pool] if balance_sources else None,
-                        limit=limit,
-                    )
-                    ordered = [pool[position] for position in order]
+                ordered = self._diversity(
+                    pool, deadline, query_vector=query_vector,
+                    balance_sources=balance_sources, limit=limit,
+                )
             except TimeoutError:
                 return pool if limit is None else pool[:limit]
             scores = {doc["id"]: float(len(ordered) - rank) for rank, doc in enumerate(ordered)}
@@ -2983,11 +2986,9 @@ class Search:
             for rank, doc in enumerate(ordered, 1)
         ]
 
-    def _semantic_diversity(
+    def _diversity(
         self, pool, deadline, *, query_vector, balance_sources, limit,
     ):
-        import numpy as np
-
         grouped: dict[str, list[dict[str, Any]]] = {}
         for doc in pool:
             grouped.setdefault(doc["source_key"], []).append(doc)
@@ -2996,6 +2997,8 @@ class Search:
             sources = dict(self.sources)
         vectors, relevance = {}, {}
         for key, docs in grouped.items():
+            if not self.semantic:
+                break
             source = sources.get(key)
             runtime = runtimes.get(source.collection_key) if source else None
             if not isinstance(runtime, IndexedRuntime):
@@ -3016,10 +3019,20 @@ class Search:
                     vectors[doc["id"]] = embeddings[path]
                     relevance[doc["id"]] = centrality.get(path, 0.0)
         if not vectors:
-            return pool if limit is None else pool[:limit]
+            order = diverse_order(
+                [doc.get("title") or "" for doc in pool], deadline,
+                sources=[doc["source_key"] for doc in pool] if balance_sources else None,
+                limit=limit,
+            )
+            return [pool[position] for position in order]
+        import numpy as np
+
         dimension = len(next(iter(vectors.values())))
-        candidates = [doc for doc in pool if doc["id"] in vectors and len(vectors[doc["id"]]) == dimension]
-        matrix = np.stack([vectors[doc["id"]] for doc in candidates])
+        semantic = [doc["id"] in vectors and len(vectors[doc["id"]]) == dimension for doc in pool]
+        matrix = np.zeros((len(pool), dimension), dtype=np.float32)
+        for position, doc in enumerate(pool):
+            if semantic[position]:
+                matrix[position] = vectors[doc["id"]]
         if not balance_sources:
             maximum = max(max(0.0, float(doc.get("score") or 0.0)) for doc in pool)
             relevance = (
@@ -3027,7 +3040,7 @@ class Search:
                 if maximum > 0 else
                 {doc["id"]: 1 - rank / max(1, len(pool)) for rank, doc in enumerate(pool)}
             )
-            prior = np.array([relevance[doc["id"]] for doc in candidates], dtype=np.float32)
+            prior = np.array([relevance[doc["id"]] for doc in pool], dtype=np.float32)
             if query_vector is not None and query_vector.shape[-1] == dimension:
                 query = np.asarray(query_vector, dtype=np.float32).reshape(-1)
                 norm = np.linalg.norm(query)
@@ -3039,17 +3052,14 @@ class Search:
         else:
             base = None
         if base is None:
-            base = np.array([relevance[doc["id"]] for doc in candidates])
+            base = np.array([relevance.get(doc["id"], 0.0) for doc in pool])
         order = diverse_order(
-            [doc.get("title") or "" for doc in candidates], deadline,
-            vectors=matrix, relevance=base,
-            sources=[doc["source_key"] for doc in candidates] if balance_sources else None,
+            [doc.get("title") or "" for doc in pool], deadline,
+            vectors=matrix, relevance=base, semantic_mask=semantic,
+            sources=[doc["source_key"] for doc in pool] if balance_sources else None,
             limit=limit,
         )
-        ordered = [candidates[position] for position in order]
-        scored_ids = {doc["id"] for doc in candidates}
-        ordered.extend(doc for doc in pool if doc["id"] not in scored_ids)
-        return ordered if limit is None else ordered[:limit]
+        return [pool[position] for position in order]
 
     def _rank_results(
         self,
@@ -3065,7 +3075,7 @@ class Search:
                  for result in source_results for doc in result.items),
                 None,
             )
-            if mode in {"diverse", "semantic-diverse"}:
+            if mode == "diverse":
                 pool = rank_browse_results(
                     source_results, sum(len(result.items) for result in source_results)
                 )

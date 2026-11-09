@@ -139,6 +139,12 @@ Record any index difference with the comparison.
 
 ### Diversity and representative browsing
 
+This section records the four-way experiment before the controls were
+consolidated. Current production code exposes one adaptive **Diversity** order,
+which is also the empty-query default: semantic MMR for items with usable
+embeddings, lexical diversity otherwise. The historical variant names below
+are not separate current controls.
+
 `diversity.py` compares four variants: original **Diversity**, original
 **Representative**, corrected **Diversity**, and **Semantic diversity**. Capture
 the baseline before changing ranking, then reuse the same output directory:
@@ -157,8 +163,15 @@ uv run python evaluation/diversity.py --phase baseline \
 
 For the original baseline, use ranking code from commit
 `9e40f8de20de605e2553434530ee84953002e90c` with this harness. On current code,
-`--phase baseline` measures the current algorithms; it does not restore old
-implementations.
+the historical phases are rejected rather than silently measuring a different
+algorithm. The separate corrected lexical and semantic orders are available
+at `bc8c8f2`. To measure the unified order, use `--phase adaptive` with the same
+arguments; this writes `adaptive.json` and includes it in the comparison.
+It can also create fresh pools when no historical run exists.
+
+The consolidation rerun reproduced all eight semantic query top-20 lists
+unchanged. These archives are fully embedded; mixed/partial indexes and
+fast-mode lexical fallback are covered separately by regression tests.
 
 The harness builds isolated indexes, freezes the original hybrid query pools,
 and records model, index, ranking-code and pool hashes. Later phases must use
@@ -258,7 +271,8 @@ starts with **User Richard** and retains three profile pages. Both semantic
 browsing modes select **Setting up the build environment 1.7**, whose excerpt
 explicitly calls it obsolete. Content quality/freshness is not solved by
 centrality or diversity, and no content-type exclusions were added here.
-Representative remains unchanged and is still the default empty-query order.
+Representative was unchanged and still the default at the time of these
+measurements; it has since been removed in favor of adaptive Diversity.
 
 These are English, small-corpus, unsupervised smoke benchmarks, not a release
 gate or an independent relevance evaluation. Coverage and semantic repetition

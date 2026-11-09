@@ -1,8 +1,8 @@
 """Compare browsing and matched-pool diversity on isolated, reusable ZIM indexes.
 
-Run --phase baseline before changing ranking, then --phase lexical and semantic
-with the same --output. Raw rankings, metrics, corpus fingerprints and timings
-are saved separately for all four variants; no configured library is changed.
+Use --phase adaptive for current code. Historical --phase baseline, lexical and
+semantic require the revisions with separate sort options. Reuse --output to
+compare frozen pools; no configured library is changed.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from zimantic.contracts import SourceInfo, encode_document_id
 from zimantic.embed import Embedder
-from zimantic.indexing.browse import browse
+from zimantic.indexing.browse import BROWSE_MODES, browse
 from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.pipeline import build_index
 from zimantic.indexing.search import SearchLimits, search
@@ -139,6 +139,9 @@ def quality(items, vectors, reference, centroids, *, pool=None, k=20):
 
 
 def run(args):
+    if args.phase != "adaptive" and "representative" not in BROWSE_MODES:
+        raise ValueError("historical phases require pre-consolidation ranking; use --phase adaptive")
+    args.output = args.output.resolve()
     code_hashes = {
         name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
         for name in (
@@ -206,7 +209,7 @@ def run(args):
     if pools_path.exists():
         pools = json.loads(pools_path.read_text())
     else:
-        if args.phase != "baseline":
+        if args.phase not in {"baseline", "adaptive"}:
             raise ValueError("capture --phase baseline before comparing changes")
         pools = {}
         for case in cases:
@@ -233,6 +236,7 @@ def run(args):
         "baseline": [("diverse-initial", "diverse"), ("representative-initial", "representative")],
         "lexical": [("diverse-corrected", "diverse")],
         "semantic": [("semantic-diversity", "semantic-diverse")],
+        "adaptive": [("adaptive-diversity", "diverse")],
     }[args.phase]
     output = {
         "meta": {
@@ -257,7 +261,7 @@ def run(args):
                 for _ in range(3):
                     started = time.perf_counter()
                     if query:
-                        kwargs = {"query_vector": query_vector} if mode == "semantic-diverse" else {}
+                        kwargs = {"query_vector": query_vector} if args.phase in {"semantic", "adaptive"} else {}
                         items = engine._sort_results(pools[case["name"]], mode, 0, None, **kwargs)
                     else:
                         results = [
@@ -298,7 +302,7 @@ def run(args):
 def summarize(output):
     runs = [
         json.loads(path.read_text())
-        for phase in ("baseline", "lexical", "semantic")
+        for phase in ("baseline", "lexical", "semantic", "adaptive")
         if (path := output / (phase + ".json")).exists()
     ]
     identity = lambda run: (
@@ -331,7 +335,7 @@ def qualitative_samples(output, paths):
     from zimantic.content.reader import read_entry
 
     archives, excerpts, samples = {}, {}, {}
-    for phase in ("baseline", "lexical", "semantic"):
+    for phase in ("baseline", "lexical", "semantic", "adaptive"):
         result = output / (phase + ".json")
         if not result.exists():
             continue
@@ -368,7 +372,7 @@ def main():
     parser.add_argument("--zims", nargs="+", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--phase", choices=("baseline", "lexical", "semantic"), required=True)
+    parser.add_argument("--phase", choices=("baseline", "lexical", "semantic", "adaptive"), required=True)
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--k", type=int, default=20)
     args = parser.parse_args()

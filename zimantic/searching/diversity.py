@@ -16,6 +16,7 @@ def diverse_order(
     *,
     vectors=None,
     relevance=None,
+    semantic_mask: list[bool] | None = None,
     sources: list[str] | None = None,
     limit: int | None = None,
 ) -> list[int]:
@@ -24,17 +25,21 @@ def diverse_order(
     Semantic ordering uses equal-weight MMR: relevance minus maximum cosine
     similarity to the selected prefix, preferring novelty on equal MMR.
     Lexical ordering minimizes maximum title-word Jaccard overlap, placing
-    empty/stopword-only titles last.
+    empty/stopword-only titles last. Mixed pools retain the input's semantic/
+    lexical slot pattern rather than comparing unlike raw novelty scores.
     """
     count = len(titles)
     if limit is None:
         limit = count
     if not count or limit <= 0:
         return []
-    if vectors is None:
-        words = [set(_TITLE_WORD.findall(title.casefold())) - STOPWORDS for title in titles]
-        nearest = [0.0] * count
-    else:
+    words = [set(_TITLE_WORD.findall(title.casefold())) - STOPWORDS for title in titles]
+    lexical_nearest = [0.0] * count
+    semantic = [False] * count if vectors is None else (
+        [True] * count if semantic_mask is None else semantic_mask
+    )
+    lexical_positions = {position for position in range(count) if not semantic[position]}
+    if vectors is not None:
         import numpy as np
 
         nearest = np.zeros(count, dtype=np.float32)
@@ -45,28 +50,34 @@ def diverse_order(
     while remaining and len(selected) < limit:
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("diversity deadline expired")
+        candidates = {
+            position for position in remaining if semantic[position] or words[position]
+        } or remaining
+        if sources is not None:
+            minimum = min(exposure[sources[position]] for position in candidates)
+            candidates = {position for position in candidates if exposure[sources[position]] == minimum}
+        wanted = semantic[len(selected)]
+        candidates = {position for position in candidates if semantic[position] == wanted} or candidates
 
         def priority(position):
+            redundancy = max(float(nearest[position]), lexical_nearest[position]) if semantic[position] else lexical_nearest[position]
             return (
-                bool(words[position]) if vectors is None else True,
-                -exposure[sources[position]] if sources is not None else 0,
-                -nearest[position] if vectors is None else float(relevance[position] - nearest[position]),
-                -nearest[position],
+                float(relevance[position]) - redundancy if semantic[position] else -redundancy,
+                -redundancy,
                 -position,
             )
 
-        chosen = max(remaining, key=priority)
+        chosen = max(candidates, key=priority)
         selected.append(chosen)
         remaining.remove(chosen)
         if sources is not None:
             exposure[sources[chosen]] += 1
-        if vectors is None:
-            for position in remaining:
-                nearest[position] = max(
-                    nearest[position],
-                    len(words[position] & words[chosen])
-                    / max(1, len(words[position] | words[chosen])),
-                )
-        else:
+        for position in remaining if not semantic[chosen] else remaining & lexical_positions:
+            lexical_nearest[position] = max(
+                lexical_nearest[position],
+                len(words[position] & words[chosen])
+                / max(1, len(words[position] | words[chosen])),
+            )
+        if semantic[chosen]:
             np.maximum(nearest, vectors @ vectors[chosen], out=nearest)
     return selected

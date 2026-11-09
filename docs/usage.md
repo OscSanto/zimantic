@@ -234,17 +234,16 @@ The source picker discovers available sources and sorts matching sources by resu
 ## Sorting and empty searches
 
 The **Sort by** selector below the search bar offers **Relevance**, **Random**,
-**Rare titles**, **Semantic outliers**, **Representative**, **Diversity**,
-**Semantic diversity**, and **Recency**. With a query, these orders rearrange the bounded matching result
+**Rare titles**, **Semantic outliers**, **Diversity**, and **Recency**.
+With a query, these orders rearrange the bounded matching result
 pool without changing its membership. Items without the local statistics needed
 by an order follow the scored matches in relevance order.
 
 Submitting an empty query, or opening `/?q=`, searches local indexes without
-embedding a query. Its default order is **Representative**, or **Rare titles**
-when semantic search is disabled. `/` still opens without running a search.
+embedding a query. Its default order is **Diversity**, including when semantic
+search is disabled. `/` still opens without running a search.
 Use `/?q=&sort=random`, `/?q=&sort=rare`, `/?q=&sort=outliers`,
-`/?q=&sort=representative`, `/?q=&sort=diverse`,
-`/?q=&sort=semantic-diverse`, or `/?q=&sort=recency`,
+`/?q=&sort=diverse`, or `/?q=&sort=recency`,
 optionally with `source` or `collection` filters.
 
 - **Random** shuffles matches, or samples indexed items for an empty query.
@@ -253,33 +252,31 @@ optionally with `source` or `collection` filters.
 - **Rare titles** ranks titles by the mean inverse document frequency of their
   distinct non-stopword terms, using the existing Unicode61 title index.
 - **Semantic outliers** finds items least similar to their source's average
-  embedding. **Representative** does the opposite, finding items most like that
-  average.
-- **Diversity** greedily orders titles to reduce word overlap with items already
-  selected across all sources. Ties keep relevance order for a query, or the
-  deterministic sampled order for an empty query; longer titles get no extra
-  preference, and empty/stopword-only titles come last. Empty queries sample
-  candidates per source and keep source exposure balanced.
-- **Semantic diversity** balances embedding novelty against similarity to the
-  query blended with normalized hybrid relevance, or source centrality for an
-  empty query, using equal-weight maximal marginal relevance (MMR). It
-  recognizes related subjects even when their
-  titles use different words, and compares novelty across sources. Empty
-  queries mix central candidates with a deterministic random sample to avoid
-  only exploring one central topic, and keep source exposure balanced.
-  Matched items without embeddings follow in relevance order. If query
-  embedding fails, hybrid relevance supplies the relevance component instead.
+  embedding.
+- **Diversity** adapts per item. Items with usable embeddings use equal-weight
+  maximal marginal relevance (MMR), balancing semantic novelty against query
+  similarity blended with normalized hybrid relevance, or source centrality
+  for an empty query. Other items use greedy title-word diversity, including
+  in fast mode. Word overlap also detects repeated titles across the two
+  groups; lexical-only items are not simply appended after semantic results.
+  Mixed pools retain the input's semantic/lexical slot pattern rather than
+  comparing unlike raw scores. Ties preserve input order after novelty.
+  Empty/stopword-only titles without embeddings come last.
+  Empty queries mix central candidates where available with a deterministic
+  random sample, and balance source exposure. If query embedding fails,
+  hybrid relevance supplies the semantic relevance component instead.
 - **Recency** orders by modified time: file modification time for files,
   primary-file modification time for Kolibri, and archive-file modification time
   for ZIM entries. Items without a timestamp come last.
 
-Representative, outlier and rarity statistics are source-local. Empty searches
+Centroid and rarity statistics are source-local. Empty searches
 interleave source rankings rather than comparing their raw scores, except
-**Recency**, which compares timestamps across sources. Diversity orders also
+**Recency**, which compares timestamps across sources. Diversity also
 consider previously selected items across sources while balancing exposure.
 Empty searches use only local SQLite indexes; remote Kiwix
-sources and unindexed sources are omitted. Semantic orders additionally require
-loaded FAISS vectors and are unavailable with `serve --fast` or `open --fast`.
+sources and unindexed sources are omitted. Semantic outliers additionally
+require loaded FAISS vectors and are unavailable with `serve --fast` or
+`open --fast`; Diversity falls back to title words instead.
 Rare-title pools and centroids are prepared lazily in memory, reused for the
 index handle's lifetime, and discarded when it is retired.
 First requests can take longer and obey the normal source/search deadlines.
