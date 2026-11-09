@@ -58,6 +58,13 @@ class IndexHandle:
     random_article_ids: list[int] | None = field(
         default=None, repr=False, compare=False
     )
+    browse_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
+    browse_rankings: dict[str, tuple[int, list[tuple[float, int]]]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+    browse_centroid: Any | None = field(default=None, repr=False, compare=False)
     source_size: int | None = None
     zim_path: str | None = None
     zim_signature: tuple[int, int, int, int] | None = None
@@ -197,6 +204,8 @@ class IndexHandle:
         self.archive = None
         self.faiss_index = None
         self.random_article_ids = None
+        self.browse_rankings.clear()
+        self.browse_centroid = None
 
     @staticmethod
     def _close_connections(connections: list[sqlite3.Connection | None]) -> None:

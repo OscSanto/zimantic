@@ -175,6 +175,8 @@ class SourceQuery:
     query_vector: Any | None
     limit: int
     deadline: float | None = None  # monotonic; cap provider I/O to remaining time
+    browse: str | None = None
+    seed: int = 0
 
 
 class CollectionRuntime(Protocol):

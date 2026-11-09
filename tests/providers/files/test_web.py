@@ -72,6 +72,29 @@ def _article(key: str, path: str | None = None) -> str:
     return base if path is None else f"{base}/{path}"
 
 
+def test_browsing_uses_published_path_only_indexes_and_source_filters(files_site):
+    client, search, key, _root = files_site
+    search.preview_limit = 0
+    runtime = search.runtimes["files:modules"]
+    assert runtime.indexes[key].db is None
+    assert runtime.indexes[key].db_path is not None
+    for mode in ("random", "rare"):
+        response = client.get(
+            "/browse",
+            params={"mode": mode, "seed": 7, "source": key, "limit": 2},
+        )
+        assert response.status_code == 200
+        results = response.json()
+        assert results
+        assert all(doc["source_key"] == key for doc in results)
+        assert all(doc["mimetype"] for doc in results)
+        assert all(
+            doc["url"].startswith(f"/content/{quote(key, safe='')}/")
+            for doc in results
+        )
+        assert str(_root) not in response.text
+
+
 def test_child_homepage_shell_and_raw_article_keep_the_prefix(files_site):
     client, _search, key, _root = files_site
     homepage = client.get(f"/content/{quote(key, safe='')}", follow_redirects=False)

@@ -813,7 +813,6 @@ class KolibriRuntime(IndexedRuntime):
                     "title": index.db_path is not None,
                     "fulltext": index.db_path is not None,
                     "semantic": index.faiss_index is not None,
-                    "article": True,
                 },
             }
             source = sources.get(key)

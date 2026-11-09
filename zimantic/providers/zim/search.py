@@ -186,6 +186,20 @@ def _search_locked(
     request: Any,
     ctx: ZimSearchContext,
 ) -> SourceResult:
+    if getattr(request, "browse", None) is not None:
+        from ...indexing.browse import browse
+        from ...indexing.search import SearchLimits
+
+        return browse(
+            source,
+            index,
+            request,
+            limits=SearchLimits(
+                candidate_count=ctx.candidate_count,
+                web_base_path=ctx.web_base_path,
+                nprobe=ctx.nprobe,
+            ),
+        )
     count = max(ctx.candidate_count, request.limit)
     db = index.db_for_thread()
     semantic: list[tuple[float, dict[str, Any]]] = []

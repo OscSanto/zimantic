@@ -405,7 +405,6 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertEqual(health["sources"], 1)
             self.assertTrue(health["embedding"]["loaded"] is False)
             self.assertEqual(health["indexes"][0]["status"], "ok")
-            self.assertTrue(health["indexes"][0]["capabilities"]["article"])
             self.assertGreater(health["indexes"][0]["entry_count"], 0)
             self.assertEqual(
                 client.get("/sources").json()[0]["homepage"],
@@ -488,6 +487,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertFalse(report["index_file"])
             self.assertFalse(report["capabilities"]["title"])
             self.assertTrue(report["capabilities"]["fulltext"])
+            self.assertNotIn("article", report["capabilities"])
 
     def test_unindexed_zim_random_only_returns_articles(self):
         with _temp_dir(self) as tmp:

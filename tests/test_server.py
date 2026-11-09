@@ -12,19 +12,21 @@ from zimantic.content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
-from zimantic.search import SearchQueryError
+from zimantic.search import Search, SearchQueryError
 from zimantic.web.app import _article_http_error, create_app
 
 
 class FakeSearch:
     cfg: dict
     read_article: Callable[..., dict]
+    semantic = True
 
     def __init__(self):
         self.cache = QueryCache(4)
         self.search_page_calls = []
         self.suggest_calls = []
         self.stream_calls = []
+        self.browse_calls = []
         self.refresh_calls = 0
 
     def local_names(self):
@@ -102,6 +104,9 @@ class FakeSearch:
             raise SearchQueryError("empty")
         return query
 
+    def _validate_browse(self, mode, seed=0):
+        Search._validate_browse(self, mode, seed)
+
     def suggest(self, query, source, limit, collection):
         self.suggest_calls.append((query, source, limit, collection))
         return [{"id": "manual:page", "title": "Page"}]
@@ -114,7 +119,13 @@ class FakeSearch:
         offset,
         collection,
         debug,
+        *,
+        browse=None,
+        seed=0,
     ):
+        if browse is not None:
+            self._validate_browse(browse, seed)
+            self.browse_calls.append((source, collection, browse, seed))
         self.search_page_calls.append(
             (query, source, limit, offset, collection, debug)
         )
@@ -140,7 +151,13 @@ class FakeSearch:
         offset=0,
         collection=None,
         debug=False,
+        *,
+        browse=None,
+        seed=0,
     ):
+        if browse is not None:
+            self._validate_browse(browse, seed)
+            self.browse_calls.append((source, collection, browse, seed))
         self.stream_calls.append(
             (query, source, limit, offset, collection, debug)
         )
@@ -1051,6 +1068,46 @@ class ServerTests(unittest.TestCase):
             self.search.search_page_calls[-1],
             ("page", "manual", 5, 10, None, False),
         )
+
+    def test_browse_api_reuses_pagination_and_accepts_explicit_modes(self):
+        homepage = self.client.get("/?q=").text
+        self.assertLess(homepage.index('id="searchForm"'), homepage.index('id="browseSection"'))
+        self.assertLess(homepage.index('id="browseSection"'), homepage.index('id="settingsDetails"'))
+        response = self.client.get(
+            "/browse?mode=random&seed=7&offset=10&limit=5&source=manual"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-page"], "2")
+        self.assertEqual(self.search.browse_calls[-1], ("manual", None, "random", 7))
+        stream = self.client.get(
+            "/browse/stream?mode=rare&collection=zim:library"
+        )
+        self.assertEqual(stream.status_code, 200)
+        self.assertEqual(
+            json.loads(stream.text.splitlines()[-1])["type"], "done"
+        )
+        self.assertEqual(
+            self.search.browse_calls[-1], (None, "zim:library", "rare", 0)
+        )
+        self.assertEqual(self.client.get("/search?q=").status_code, 422)
+        self.assertEqual(self.client.get("/search/stream?q=").status_code, 422)
+        self.assertEqual(self.client.get("/browse?mode=unknown").status_code, 422)
+        self.assertEqual(self.client.get("/browse?seed=-1").status_code, 422)
+
+    def test_fast_mode_rejects_semantic_browsing_and_hides_its_controls(self):
+        search = FakeSearch()
+        search.semantic = False
+        with TestClient(create_app(search)) as client:
+            self.assertEqual(
+                client.get("/config").json()["browse_modes"], ["random", "rare"]
+            )
+            for path in ("/browse", "/browse/stream"):
+                self.assertEqual(
+                    client.get(path + "?mode=outliers").status_code, 400
+                )
+                self.assertEqual(
+                    client.get(path + "?mode=representative").status_code, 400
+                )
 
     def test_search_accepts_multiple_source_filters(self):
         response = self.client.get("/search?q=page&source=manual&source=other")

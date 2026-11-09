@@ -2593,6 +2593,78 @@ class RandomArticleServingTests(unittest.TestCase):
         self.assertEqual(random_fallback_article(_Index()), "Article")
 
 
+class BrowseSearchTests(unittest.TestCase):
+    def make_search(self):
+        search = _bare_search(
+            {"page_size": 2, "max_results": 5, "preview_limit": 0}
+        )
+        self.addCleanup(search.close)
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.executescript(index_schema.SCHEMA)
+        db.executemany(
+            "INSERT INTO docs(rowid,title,path) VALUES (?,?,?)",
+            [(i, f"Topic {i}", f"item-{i}") for i in range(1, 21)],
+        )
+        search.sources = {"manual": _zim_source("manual", "Manual")}
+        search.indexes = {"manual": IndexHandle(db, None)}
+        return search
+
+    def test_browse_pages_reuse_a_seeded_pool_without_query_embedding(self):
+        search = self.make_search()
+        with patch.object(
+            search, "_query_vector", side_effect=AssertionError("must not embed")
+        ):
+            first = search.search_page("", limit=2, browse="random", seed=7)
+            second = search.search_page(
+                "", limit=2, offset=2, browse="random", seed=7
+            )
+            whole = search.search_page("", limit=5, browse="random", seed=7)
+            reshuffled = search.search_page("", limit=5, browse="random", seed=19)
+        self.assertEqual(
+            [doc["id"] for doc in first["results"] + second["results"]],
+            [doc["id"] for doc in whole["results"][:4]],
+        )
+        self.assertNotEqual(whole["results"], reshuffled["results"])
+        self.assertGreaterEqual(search.cache.hits, 2)
+
+    def test_browsing_is_explicit_and_respects_fast_mode_and_source_scope(self):
+        search = self.make_search()
+        search.semantic = False
+        with self.assertRaises(SearchQueryError):
+            search.search_page("")
+        with self.assertRaises(SearchQueryError):
+            search.search_page("", browse="outliers")
+        with self.assertRaises(SearchQueryError):
+            search.search_page("", source="missing", browse="random")
+        with self.assertRaises(SearchQueryError):
+            search.search_page("topic", browse="rare")
+        search.sources["remote"] = SourceInfo(
+            key="remote", provider="kiwix", searchable=True
+        )
+        self.assertEqual(
+            search.search_page("", source="remote", browse="random")["results"], []
+        )
+        self.assertEqual(
+            search.search_page("", source=[], browse="random")["results"], []
+        )
+        rare = search.search_page("", source="manual", browse="rare")
+        self.assertTrue(rare["results"])
+        self.assertTrue(all(doc["source_key"] == "manual" for doc in rare["results"]))
+
+    def test_semantic_browse_recovers_when_deferred_vectors_become_available(self):
+        import faiss
+
+        search = self.make_search()
+        self.assertFalse(search.search_page("", browse="outliers")["results"])
+        vectors = np.array([[1, 0], [0.8, 0.6], [-0.6, 0.8]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([1, 2, 3], dtype=np.int64))
+        search.indexes["manual"].faiss_index = index
+        results = search.search_page("", browse="outliers")["results"]
+        self.assertTrue(results)
+        self.assertEqual(results[0]["path"], "item-3")
+
+
 class PaginationTests(unittest.TestCase):
     def _cfg(self, tmp):
         return {

@@ -298,6 +298,12 @@ def search(
         return SourceResult(
             source=source, error="search deadline expired", status="cancelled"
         )
+    if getattr(request, "browse", None) is not None:
+        from .browse import browse
+
+        return browse(
+            source, index, request, limits=limits, url_builder=url_builder
+        )
     db = index.db_for_thread()
     count = max(limits.candidate_count, int(getattr(request, "limit", 10)))
     semantic: list[tuple[float, dict[str, Any]]] = []

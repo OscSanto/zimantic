@@ -231,6 +231,36 @@ The source picker discovers available sources and sorts matching sources by resu
 - An unknown source or collection key is rejected with HTTP 400 instead of silently becoming an unscoped search. A known but unsearchable source, or an intersection with no eligible sources, searches no sources rather than broadening the scope.
 - A scoped search shows **Searching only in: …** or **Searching collection: …** above the results with a **Search all sources** control, so submitting a new query while a filter is active never silently hides the narrower scope.
 
+## Browsing without a query
+
+The home page has a **Browse** section between the search bar and settings.
+Browsing is explicit: `/` and `/?q=` keep their usual no-search behavior.
+Use `/?browse=random`, `/?browse=rare`, `/?browse=outliers`, or
+`/?browse=representative`, optionally with the usual `source` or `collection`
+filters.
+
+- **Random** samples indexed items. **Shuffle** creates a new seed in the URL;
+  that seed keeps pagination, bookmarks, and Back/Forward consistent.
+- **Rare titles** ranks titles by the mean inverse document frequency of their
+  distinct non-stopword terms, using the existing Unicode61 title index.
+- **Semantic outliers** finds items least similar to their source's average
+  embedding. **Representative** does the opposite, finding items most like that
+  average. Neither mode embeds a query.
+
+Statistics are source-local, and source rankings are interleaved rather than
+comparing their raw scores. Browsing uses only local SQLite indexes; remote
+Kiwix sources and unindexed sources are omitted. Semantic modes additionally
+require loaded FAISS vectors and are unavailable with `serve --fast` or
+`open --fast`. Rare-title pools and centroids are prepared lazily in memory,
+reused for the index handle's lifetime, and discarded when it is retired.
+First requests can take longer and obey the normal source/search deadlines.
+The usual `max_results` pool limit applies. No index rebuild is needed.
+
+The JSON API is `/browse?mode=random&seed=7`; `/browse/stream` streams the same
+request. Both accept `source`, `collection`, `limit`, and `offset`. API random
+requests default to seed `0`; the browser chooses a fresh seed for an unseeded
+random-browse link. Rarity and semantic rankings ignore the seed.
+
 ## Library view
 
 `/library` shows every configured collection as a group with artwork, descriptions, metadata, and direct links to each source's homepage or random article. A one-source collection renders as a single card; a larger collection shows a header with its source count and media summary plus a bounded preview grid. **Show all sources** opens the group and pages through its remaining sources, so the first source page is never mistaken for the whole collection. **Shuffle** reorders the visible groups and their loaded sources. Dated and flavour variants of one book still collapse to a single source card.

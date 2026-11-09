@@ -30,6 +30,11 @@ from .content.store import (
 )
 from .contracts import SourceInfo, SourceResult
 from .diagnostics import private_locators, public_cause, sanitize_public_text
+from .indexing.browse import (
+    BROWSE_MODES,
+    SEMANTIC_BROWSE_MODES,
+    rank_browse_results,
+)
 from .providers.base import (
     CollectionInfo,
     CollectionRuntime,
@@ -1588,6 +1593,16 @@ class Search:
             raise SearchQueryError(f"query must be at most {MAX_QUERY_LENGTH} characters")
         return query
 
+    def _validate_browse(self, mode: str, seed: int = 0) -> None:
+        if mode not in BROWSE_MODES:
+            raise SearchQueryError("unknown browse mode")
+        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**32:
+            raise SearchQueryError("browse seed must be an unsigned 32-bit integer")
+        if mode in SEMANTIC_BROWSE_MODES and not self.semantic:
+            raise SearchQueryError(
+                "semantic browsing is unavailable when semantic search is disabled"
+            )
+
     def _cache_key(
         self,
         query: str,
@@ -1878,6 +1893,9 @@ class Search:
         offset: int = 0,
         collection: str | None = None,
         debug: bool = False,
+        *,
+        browse: str | None = None,
+        seed: int = 0,
     ) -> dict[str, Any]:
         """Return one page plus totals, using the streaming coordinator."""
         final: dict[str, Any] = {}
@@ -1888,6 +1906,8 @@ class Search:
             offset,
             collection,
             debug,
+            browse=browse,
+            seed=seed,
         ):
             if event["type"] == "error":
                 if event.get("busy"):
@@ -2031,6 +2051,9 @@ class Search:
         offset: int = 0,
         collection: str | None = None,
         debug: bool = False,
+        *,
+        browse: str | None = None,
+        seed: int = 0,
     ) -> Iterator[dict[str, Any]]:
         """Yield source progress and one page of the ranked pool.
 
@@ -2041,16 +2064,45 @@ class Search:
         the whole scope directly; it is never promoted to a broader search.
         Concurrent identical queries share a single computation.
         """
-        query = self._validate_query(query)
+        if browse is None:
+            query = self._validate_query(query)
+        else:
+            self._validate_browse(browse, seed)
+            if not isinstance(query, str) or query.strip():
+                raise SearchQueryError("browsing does not accept a search query")
+            query = ""
+            if browse != "random":
+                seed = 0
         page_size = self._page_size(limit)
         offset = max(0, int(offset))
         scope = self._search_scope(source, collection)
         sources = scope.sources
+        if browse is not None:
+            with self._state_lock:
+                runtimes = dict(self.runtimes)
+            sources = [
+                src
+                for src in sources
+                if isinstance(
+                    runtime := runtimes.get(src.collection_key), IndexedRuntime
+                )
+                and (index := runtime.indexes.get(src.key)) is not None
+                and (index.db is not None or index.db_path is not None)
+                and (
+                    browse not in SEMANTIC_BROWSE_MODES
+                    or index.faiss_index is not None
+                )
+            ]
         generation = scope.generation
         selective = scope.selective
         scope_key = scope.cache_selection
         all_sources = scope_key is None
         cache_key = self._cache_key(query, scope_key, generation)
+        if browse is not None:
+            cache_key = (
+                "browse", browse, seed,
+                tuple(sorted(src.key for src in sources)), cache_key,
+            )
         inflight_key = (generation, cache_key)
         cached, pending = self._claim_search(cache_key, inflight_key, generation)
         if cached is not None:
@@ -2083,8 +2135,10 @@ class Search:
             debug,
             selective,
             all_sources,
-            scope.requested,
-            scope.source_cap,
+            len(sources) if browse is not None else scope.requested,
+            False if browse is not None else scope.source_cap,
+            browse=browse,
+            seed=seed,
         )
 
     def _finalize_search(
@@ -2161,6 +2215,9 @@ class Search:
         all_sources: bool = True,
         requested: int | None = None,
         source_cap: bool = False,
+        *,
+        browse: str | None = None,
+        seed: int = 0,
     ) -> Iterator[dict[str, Any]]:
         """Run one uncached search and publish progress to waiting callers."""
         total_sources = len(sources)
@@ -2237,7 +2294,9 @@ class Search:
                 )
                 return
 
-            query_vector = self._query_vector(sources, query)
+            query_vector = (
+                None if browse is not None else self._query_vector(sources, query)
+            )
 
             title_query = _title_query(query)
             fulltext_query = _fulltext_query(query)
@@ -2318,6 +2377,7 @@ class Search:
                             query_vector,
                             self._source_limit(total_sources, source),
                             deadline,
+                            **({"browse": browse, "seed": seed} if browse else {}),
                         )
                     except Exception:
                         with active_lock:
@@ -2557,6 +2617,8 @@ class Search:
         stop: threading.Event,
         source: SourceInfo,
         *args,
+        browse: str | None = None,
+        seed: int = 0,
     ) -> SourceResult:
         if stop.is_set():
             return SourceResult(
@@ -2566,6 +2628,8 @@ class Search:
             )
         target = self._search_source
         if getattr(target, "__func__", None) is Search._search_source:
+            if browse is not None:
+                return target(source, *args, browse=browse, seed=seed)
             return target(source, *args)
         # Lightweight test doubles still expose the pre-deadline signature.
         return target(source, *args[:-1])
@@ -2579,6 +2643,9 @@ class Search:
         query_vector,
         limit: int,
         deadline: float | None = None,
+        *,
+        browse: str | None = None,
+        seed: int = 0,
     ) -> SourceResult:
         settings = resolve_settings(self.cfg, source)
         source_deadline = time.monotonic() + settings.get(
@@ -2593,6 +2660,8 @@ class Search:
             deadline=min(deadline, source_deadline)
             if deadline is not None
             else source_deadline,
+            browse=browse,
+            seed=seed,
         )
         with self._state_lock:
             runtime = self.runtimes.get(source.collection_key)
@@ -2787,6 +2856,8 @@ class Search:
         query: str,
         limit: int,
     ) -> list[dict[str, Any]]:
+        if not query:
+            return rank_browse_results(source_results, limit)
         return rank_results(
             source_results,
             query,

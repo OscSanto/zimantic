@@ -798,7 +798,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
                     "title": index.db_path is not None,
                     "fulltext": fulltext_capability,
                     "semantic": vectors_loaded,
-                    "article": archive_current,
                 },
             }
             if reasons:

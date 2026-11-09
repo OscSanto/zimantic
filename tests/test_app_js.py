@@ -131,6 +131,7 @@ const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); 
 const sourceDisplayName = (key) => key;
 const sourceStemName = () => "";
 const collectionDisplayName = (key) => key;
+const renderBrowseControls = () => {{}};
 {_function_source(source, "function renderSourceSelectionSummary()", "function renderFilterLine(")}
 {_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
 {_function_source(source, '$("scopeLineReset").addEventListener("click"', '$("articleModal").addEventListener("click"')}
@@ -202,7 +203,9 @@ const t = (text) => text;
 const appPath = (path) => path;
 const mode = {json.dumps(mode)};
 const state = {{
-  question: mode === "empty" || mode === "failure" ? "" : "original",
+  question: ["empty", "failure", "browse"].includes(mode) ? "" : "original",
+  browse: mode === "browse" ? "rare" : undefined,
+  seed: mode === "browse" ? 0 : undefined,
   selectedSources: [], scopeSources: [], collection: "files:modules", page: 0, modal: null,
 }};
 const normalizePageParam = () => {{}};
@@ -308,7 +311,8 @@ const snapshot = () => ({{
                 self.assertEqual(payload["early"]["question"], "original")
                 if mode == "query":
                     self.assertEqual(
-                        payload["searches"], [["original", [], 0, [], "files:modules"]]
+                        payload["searches"],
+                        [["original", [], 0, [], "files:modules", None, None]],
                     )
                 elif mode == "edited":
                     self.assertEqual(payload["final"]["question"], "new query")
@@ -317,6 +321,106 @@ const snapshot = () => ({{
                     self.assertEqual(
                         payload["searches"], [["new query", [], 0, [], "files:modules"]]
                     )
+
+    def test_startup_browsing_is_explicit_not_an_empty_search(self):
+        self.assertEqual(self._initialize_search_page("empty")["searches"], [])
+        self.assertEqual(
+            self._initialize_search_page("browse")["searches"],
+            [["", [], 0, [], "files:modules", "rare", 0]],
+        )
+
+    def test_browse_state_preserves_seed_scope_paging_and_modal_but_not_new_queries(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/?q=");
+const MAX_QUERY_LENGTH = 4096;
+const selectionValues = (values) => [...(values || [])];
+let current = null, selectedSourceKeys = new Set(["manual"]);
+const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); }};
+const searches = [], pages = [];
+const runSearch = (...args) => searches.push(args);
+const loadPage = (page) => pages.push(page);
+{_function_source(source, "function makeStateUrl(", "function makePageUrl(")}
+{_function_source(source, "function readLocationState()", "function syncArticleModal(")}
+{_function_source(source, "function applySourceSelection(", "function makeStateUrl(")}
+const empty = readLocationState();
+location.href = "http://example.test/?browse=random&seed=7&source=manual";
+const browsing = readLocationState();
+current = {{
+  question: "", browse: "random", seed: 7, searchAll: false,
+  searchKeys: ["manual"], scopeKeys: ["manual"], searchCollection: null,
+}};
+const paged = makeStateUrl("", selectedSourceKeys, 1);
+const modal = makeStateUrl("", selectedSourceKeys, 1, "/content/manual/topic");
+const query = makeStateUrl("topic", selectedSourceKeys, 0);
+const rare = makeStateUrl("", [], 0, null, [], "files:modules", "rare", 99);
+applySourceSelection("", ["other"], 0, ["other"], null);
+applySourceSelection("", ["manual"], 1, ["manual"], null);
+location.href = "http://example.test/?q=topic&browse=random&seed=7";
+const queryState = readLocationState();
+console.log(JSON.stringify({{empty, browsing, paged, modal, query, rare, searches, pages, queryState}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertIsNone(payload["empty"]["browse"])
+        self.assertEqual(payload["browsing"]["browse"], "random")
+        self.assertEqual(payload["browsing"]["seed"], 7)
+        self.assertEqual(
+            payload["paged"], "/?browse=random&seed=7&source=manual&page=2"
+        )
+        self.assertEqual(
+            payload["modal"],
+            "/?browse=random&seed=7&source=manual&page=2&modal=%2Fcontent%2Fmanual%2Ftopic",
+        )
+        self.assertEqual(payload["query"], "/?q=topic&source=manual")
+        self.assertEqual(payload["rare"], "/?browse=rare&collection=files%3Amodules")
+        self.assertEqual(
+            payload["searches"], [["", ["other"], 0, ["other"], None, "random", 7]]
+        )
+        self.assertEqual(payload["pages"], [1])
+        self.assertIsNone(payload["queryState"]["browse"])
+
+    def test_browse_pagination_uses_the_browse_endpoint_and_original_seed(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+let current = {{
+  question: "", browse: "random", seed: 7, searchAll: false,
+  searchCollection: "files:modules", scopeKeys: [], searchKeys: [],
+}};
+let pageController = null, requestController = null, searchSequence = 1;
+const PAGE_SIZE = 10, debugMode = false, BUSY_RETRY_LIMIT = 0;
+const requests = [];
+const $ = () => ({{textContent: ""}});
+const appPath = (path) => "/zimantic" + path;
+const renderView = () => {{}};
+const searchStatusText = () => "";
+const announceSearchStatus = () => {{}};
+const syncPage = () => {{}};
+const window = {{scrollTo() {{}}}};
+const fetch = async (url) => {{
+  requests.push(url);
+  return {{
+    ok: true, json: async () => [{{id: "item"}}],
+    headers: new Map([["X-Total-Count", "20"], ["X-Page", "1"]]),
+  }};
+}};
+const dedupeParams = () => {{}};
+{_function_source(source, "function searchScopeParams(", "function sourceFilterLayout(")}
+{_function_source(source, "async function loadPage(", "function applySourceSelection(")}
+loadPage(1).then(() => console.log(JSON.stringify({{requests, current}})));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["requests"],
+            ["/zimantic/browse?mode=random&seed=7&limit=10&offset=10&collection=files%3Amodules"],
+        )
+        self.assertEqual(payload["current"]["page"], 1)
+        self.assertEqual(payload["current"]["pageItems"], [{"id": "item"}])
 
     def test_library_filter_matches_word_prefixes_not_interior_substrings(self):
         source = APP_JS.read_text(encoding="utf-8")
@@ -958,7 +1062,7 @@ const PAGE_SIZE = 10, SOURCE_FILTER_LIMIT = 10, SOURCE_FILTER_QUERY_LIMIT = 30;
 const STREAM_FIRST_BYTE_TIMEOUT = 1000, STREAM_TOTAL_TIMEOUT = 1000;
 const STREAM_IDLE_TIMEOUT = 1000, BUSY_RETRY_LIMIT = 0;
 const window = {{scrollTo() {{}}}};
-const document = {{body: {{classList: {{add() {{}}}}}}}};
+const document = {{body: {{classList: {{add() {{}}, toggle() {{}}}}}}}};
 const $ = () => ({{value: "", hidden: false, disabled: false}});
 const setSettingsOpen = () => {{}};
 const cancelStreamRender = () => {{}};
@@ -969,6 +1073,7 @@ const renderScopeLine = () => {{}};
 const renderSourceFilters = () => {{}};
 const renderResults = () => {{}};
 const renderView = () => {{}};
+const renderBrowseControls = () => {{}};
 const searchStatusText = () => "";
 const debugMode = false;
 const syncPage = () => {{}};

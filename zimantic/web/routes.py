@@ -3,7 +3,7 @@
 import hashlib
 import json
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -17,6 +17,7 @@ from ..content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
 )
+from ..indexing.browse import BROWSE_MODES, SEMANTIC_BROWSE_MODES
 from ..providers.config import BUILTIN_PROVIDERS
 from ..search import (
     DEFAULT_SOURCE_FILTER_LIMIT,
@@ -475,6 +476,12 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                     getattr(search_class, "max_explicit_collection_sources", 500)
                 ),
                 "providers": list(BUILTIN_PROVIDERS),
+                "browse_modes": [
+                    mode
+                    for mode in BROWSE_MODES
+                    if mode not in SEMANTIC_BROWSE_MODES
+                    or getattr(search_class, "semantic", False)
+                ],
                 "debug": debug,
             },
             memos,
@@ -1333,32 +1340,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return JSONResponse(content=items)
 
-    @app.get("/search")
-    def api_search(
-        q: Annotated[str, Query(min_length=1, max_length=4096)],
-        source: Annotated[list[str] | None, Query()] = None,
-        collection: Annotated[str | None, Query()] = None,
-        limit: Annotated[int | None, Query(ge=1)] = None,
-        offset: Annotated[int, Query(ge=0)] = 0,
-    ):
-        source_filter = source[0] if source and len(source) == 1 else source
-        try:
-            page = search_class.search_page(
-                q,
-                source_filter,
-                limit,
-                offset,
-                collection,
-                debug,
-            )
-        except SearchBusyError as error:
-            raise HTTPException(
-                status_code=503,
-                detail=str(error),
-                headers={"Retry-After": "1"},
-            ) from error
-        except SearchQueryError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
+    def search_page_response(page):
         headers = {
             "X-Total-Count": str(page["total"]),
             "X-Has-More": "true" if page["has_more"] else "false",
@@ -1380,31 +1362,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             )
         return JSONResponse(content=page["results"], headers=headers)
 
-    @app.get("/search/stream")
-    def api_search_stream(
-        q: Annotated[str, Query(min_length=1, max_length=4096)],
-        source: Annotated[list[str] | None, Query()] = None,
-        collection: Annotated[str | None, Query()] = None,
-        limit: Annotated[int | None, Query(ge=1)] = None,
-        offset: Annotated[int, Query(ge=0)] = 0,
-    ):
-        try:
-            search_class._validate_query(q)
-            source_filter = source[0] if source and len(source) == 1 else source
-            validate_scope = getattr(search_class, "validate_search_scope", None)
-            if callable(validate_scope):
-                validate_scope(source_filter, collection)
-        except SearchQueryError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
+    def search_stream_response(stream):
         def events():
-            stream = search_class.stream_search(
-                q,
-                source_filter,
-                limit,
-                offset,
-                collection,
-                debug,
-            )
             try:
                 for event in stream:
                     yield json.dumps(event, separators=(",", ":")) + "\n"
@@ -1421,6 +1380,112 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 "Cache-Control": "no-cache, no-transform",
                 "X-Accel-Buffering": "no",
             },
+        )
+
+    @app.get("/search")
+    def api_search(
+        q: Annotated[str, Query(min_length=1, max_length=4096)],
+        source: Annotated[list[str] | None, Query()] = None,
+        collection: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1)] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ):
+        source_filter = source[0] if source and len(source) == 1 else source
+        try:
+            page = search_class.search_page(
+                q, source_filter, limit, offset, collection, debug
+            )
+        except SearchBusyError as error:
+            raise HTTPException(
+                status_code=503,
+                detail=str(error),
+                headers={"Retry-After": "1"},
+            ) from error
+        except SearchQueryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return search_page_response(page)
+
+    @app.get("/search/stream")
+    def api_search_stream(
+        q: Annotated[str, Query(min_length=1, max_length=4096)],
+        source: Annotated[list[str] | None, Query()] = None,
+        collection: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1)] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ):
+        try:
+            search_class._validate_query(q)
+            source_filter = source[0] if source and len(source) == 1 else source
+            validate_scope = getattr(search_class, "validate_search_scope", None)
+            if callable(validate_scope):
+                validate_scope(source_filter, collection)
+        except SearchQueryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return search_stream_response(
+            search_class.stream_search(
+                q, source_filter, limit, offset, collection, debug
+            )
+        )
+
+    @app.get("/browse")
+    def api_browse(
+        mode: Literal["random", "rare", "outliers", "representative"] = "random",
+        seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
+        source: Annotated[list[str] | None, Query()] = None,
+        collection: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1)] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ):
+        source_filter = source[0] if source and len(source) == 1 else source
+        try:
+            page = search_class.search_page(
+                "",
+                source_filter,
+                limit,
+                offset,
+                collection,
+                debug,
+                browse=mode,
+                seed=seed,
+            )
+        except SearchBusyError as error:
+            raise HTTPException(
+                status_code=503,
+                detail=str(error),
+                headers={"Retry-After": "1"},
+            ) from error
+        except SearchQueryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return search_page_response(page)
+
+    @app.get("/browse/stream")
+    def api_browse_stream(
+        mode: Literal["random", "rare", "outliers", "representative"] = "random",
+        seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
+        source: Annotated[list[str] | None, Query()] = None,
+        collection: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1)] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ):
+        source_filter = source[0] if source and len(source) == 1 else source
+        try:
+            search_class._validate_browse(mode, seed)
+            validate_scope = getattr(search_class, "validate_search_scope", None)
+            if callable(validate_scope):
+                validate_scope(source_filter, collection)
+        except SearchQueryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return search_stream_response(
+            search_class.stream_search(
+                "",
+                source_filter,
+                limit,
+                offset,
+                collection,
+                debug,
+                browse=mode,
+                seed=seed,
+            )
         )
 
     @app.api_route(

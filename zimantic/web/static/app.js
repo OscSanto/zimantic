@@ -66,6 +66,13 @@
             // Filled from /config so highlighting uses the same stopword list as
             // the server instead of maintaining a second copy here.
             let HIGHLIGHT_STOPWORDS = new Set();
+            const BROWSE_LABELS = {
+                random: "Random",
+                rare: "Rare titles",
+                outliers: "Semantic outliers",
+                representative: "Representative",
+            };
+            let availableBrowseModes = new Set(["random", "rare"]);
             const AUTO_SUBMIT_DELAY = 800;
             const AUTO_HISTORY_DELAY = 3000;
             let MAX_QUERY_LENGTH = 4096;
@@ -1574,7 +1581,9 @@
 
             function effectiveSourceProgress() {
                 if (!current) return { completed: 0, total: 0, selected: false };
-                const selected = [...selectedSourceKeys];
+                const selected = [...selectedSourceKeys].filter(
+                    (key) => !current.browse || (current.searchKeys || []).includes(key),
+                );
                 if (selected.length) {
                     const known = new Set(
                         [...current.outcomes.keys()].filter((key) =>
@@ -2833,6 +2842,12 @@
                 const grid = document.createElement("dl");
                 grid.className = "result-debug-grid";
                 appendDebugField(grid, "source rank", String(ranking.source_rank ?? item.rank ?? "—"));
+                if (ranking.browse) {
+                    appendDebugField(grid, "browse mode", ranking.browse.mode);
+                    appendDebugField(grid, "browse score", debugNumber(ranking.browse.score));
+                    details.appendChild(grid);
+                    return;
+                }
                 appendDebugField(grid, "RRF total", debugNumber(ranking.rrf_score));
                 const rrf = ranking.rrf && typeof ranking.rrf === "object" ? ranking.rrf : {};
                 const methods = Object.entries(rrf)
@@ -2871,7 +2886,7 @@
             function renderMatchedBy() {
                 const line = $("debugStats");
                 if (!line) return;
-                if (!debugMode || !current?.matchedBy) {
+                if (!debugMode || !current?.matchedBy || current.browse) {
                     line.hidden = true;
                     line.textContent = "";
                     return;
@@ -3209,7 +3224,9 @@
                     empty.textContent = current?.streaming
                         ? "" // waiting for search results... but they often appear too fast to read this text so better to print nothing...
                         : t(
-                              "No results found in the available sources. Try using different words.",
+                              current?.browse
+                                  ? "No indexed items are available for this browse mode in the selected sources."
+                                  : "No results found in the available sources. Try using different words.",
                           );
                     $("results").appendChild(empty);
                     return;
@@ -3331,11 +3348,14 @@
             function searchStatusText() {
                 if (!current) return "";
                 const progress = effectiveSourceProgress();
-                const range = current.total
+                let range = current.total
                     ? pageRangeText(current.total, current.page)
                     : progress.total
                       ? t("No results")
                       : t("No searchable sources.");
+                if (current.browse) {
+                    range = `${t(BROWSE_LABELS[current.browse] || "Browse")} · ${range}`;
+                }
                 // Keep the source tally visible once the stream has finished, on
                 // every page, so paging does not drop it from the status line.
                 return progress.total > 0 && progress.completed === progress.total
@@ -3440,6 +3460,7 @@
 
             function renderView() {
                 if (!current) return;
+                renderBrowseControls();
                 // The server already sliced this page and clamped any
                 // out-of-range offset; there is nothing to re-slice here.
                 const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
@@ -3678,7 +3699,7 @@
                         }
                         renderScopeLine();
                         $("status").textContent =
-                            `Searching ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
+                            `${current.browse ? t("Browsing") : "Searching"} ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;
                     } else if (event.type === "source") {
                         current.completed = event.completed;
                         current.outcomes.set(event.source.key, event);
@@ -3696,7 +3717,7 @@
                             current.sourcesTotal = event.total_sources;
                         }
                         $("status").textContent =
-                            `Searching… ${Number(event.elapsed || 0).toFixed(1)}s · ` +
+                            `${current.browse ? t("Browsing") : "Searching"}… ${Number(event.elapsed || 0).toFixed(1)}s · ` +
                             sourceProgressText(event.completed, event.total_sources);
                     } else if (event.type === "snapshot") {
                         applyPage(event);
@@ -3763,6 +3784,41 @@
                 return false;
             }
 
+            function renderBrowseControls() {
+                const section = $("browseSection");
+                if (!section) return;
+                for (const link of section.querySelectorAll("a[data-browse]")) {
+                    const mode = link.dataset.browse;
+                    link.hidden = !availableBrowseModes.has(mode);
+                    link.href = makeStateUrl(
+                        "", selectedSourceKeys, 0, null,
+                        nextSearchScope([...selectedSourceKeys]),
+                        selectedCollectionKey, mode, 0,
+                    );
+                    if (current?.browse === mode) {
+                        link.setAttribute("aria-current", "page");
+                    } else {
+                        link.removeAttribute("aria-current");
+                    }
+                }
+                $("browseShuffle").hidden = current?.browse !== "random";
+            }
+
+            function startBrowse(mode) {
+                clearTimeout(autoSubmitTimer);
+                autoSubmitTimer = null;
+                commitAutoSearchHistory();
+                const seed = mode === "random" ? Math.floor(Math.random() * 2 ** 32) : 0;
+                const selected = [...selectedSourceKeys];
+                const scope = nextSearchScope(selected);
+                const url = makeStateUrl(
+                    "", selected, 0, null, scope, selectedCollectionKey, mode, seed,
+                );
+                if (url !== currentUrlValue()) history.pushState(null, "", url);
+                $("question").value = "";
+                runSearch("", selected, 0, scope, selectedCollectionKey, mode, seed);
+            }
+
             function setSettingsOpen(open) {
                 const settings = $("settingsDetails");
                 if (settings) settings.open = Boolean(open);
@@ -3787,9 +3843,12 @@
                 page = 0,
                 scopeSources,
                 collectionKey = null,
+                browse = null,
+                seed = 0,
             ) {
                 question = question.trim();
-                if (!question) return;
+                if (!question && !browse) return;
+                if (browse !== "random") seed = 0;
                 setSettingsOpen(false);
                 sourceFilterShowAll = false;
                 sourceFilterShowOther = false;
@@ -3817,11 +3876,13 @@
                 ];
                 setSelectedSources(requested);
                 selectedCollectionKey = collectionKey || null;
-                const discovery = scopeKeys.length || selectedCollectionKey
+                const discovery = !browse && (scopeKeys.length || selectedCollectionKey)
                     ? sourceDiscovery(question, current)
                     : null;
                 current = {
                     question,
+                    browse,
+                    seed,
                     terms: queryTerms(question),
                     discovery,
                     outcomes: new Map(),
@@ -3840,11 +3901,15 @@
                 };
                 announceSearchStatus();
                 document.body.classList.add("search-active");
+                document.body.classList.toggle("browse-active", Boolean(browse));
+                renderBrowseControls();
                 window.scrollTo({ top: 0, left: 0, behavior: "auto" });
                 $("searchSummary").hidden = false;
                 $("searchButton").disabled = true;
                 $("status").innerHTML =
-                    `${t("Searching for")} <span class="query-used">"${escapeHtml(question)}"</span>…`;
+                    browse
+                        ? `${t("Browsing")}: ${escapeHtml(t(BROWSE_LABELS[browse] || "Browse"))}…`
+                        : `${t("Searching for")} <span class="query-used">"${escapeHtml(question)}"</span>…`;
                 $("notice").textContent = "";
                 $("pager").innerHTML = "";
                 renderScopeLine();
@@ -3860,7 +3925,7 @@
                         return;
                     }
                     const params = new URLSearchParams({
-                        q: question,
+                        ...(browse ? {mode: browse, seed: String(seed)} : {q: question}),
                         limit: String(PAGE_SIZE),
                         offset: String(pageIndex * PAGE_SIZE),
                     });
@@ -3887,7 +3952,7 @@
                         controller.signal.addEventListener("abort", abortStream, { once: true });
                         let busy;
                         try {
-                            const response = await fetch(appPath("/search/stream") + "?" + params, {
+                            const response = await fetch(appPath(browse ? "/browse/stream" : "/search/stream") + "?" + params, {
                                 signal: streamController.signal,
                             });
                             if (!response.ok) {
@@ -3938,11 +4003,13 @@
                         sequence === searchSequence
                     ) {
                         clearPartialResults();
-                        $("status").textContent = t("Search failed");
+                        $("status").textContent = t(browse ? "Browse failed" : "Search failed");
                         if (error.status === 400) {
                             $("notice").textContent =
-                                `${t("One or more selected sources are not available.")}` +
-                                (error.message ? ` (${error.message})` : "");
+                                browse
+                                    ? error.message
+                                    : `${t("One or more selected sources are not available.")}` +
+                                      (error.message ? ` (${error.message})` : "");
                         }
                         announceSearchStatus($("status").textContent);
                     }
@@ -3972,7 +4039,9 @@
                 const controller = new AbortController();
                 pageController = controller;
                 const params = new URLSearchParams({
-                    q: current.question,
+                    ...(current.browse
+                        ? {mode: current.browse, seed: String(current.seed)}
+                        : {q: current.question}),
                     limit: String(PAGE_SIZE),
                     offset: String(pageIndex * PAGE_SIZE),
                 });
@@ -3991,7 +4060,7 @@
                     let response;
                     let busyRetries = 0;
                     while (true) {
-                        response = await fetch(appPath("/search") + "?" + params, {
+                        response = await fetch(appPath(current.browse ? "/browse" : "/search") + "?" + params, {
                             signal: controller.signal,
                         });
                         if (response.ok) break;
@@ -4055,11 +4124,13 @@
                         controller === pageController
                     ) {
                         clearPartialResults();
-                        $("status").textContent = t("Search failed");
+                        $("status").textContent = t(current.browse ? "Browse failed" : "Search failed");
                         if (error.status === 400) {
                             $("notice").textContent =
-                                `${t("One or more selected sources are not available.")}` +
-                                (error.message ? ` (${error.message})` : "");
+                                current.browse
+                                    ? error.message
+                                    : `${t("One or more selected sources are not available.")}` +
+                                      (error.message ? ` (${error.message})` : "");
                         }
                         announceSearchStatus($("status").textContent);
                     }
@@ -4074,6 +4145,8 @@
                 page = 0,
                 scopeSources,
                 collectionKey = null,
+                browse = question ? null : current?.browse || null,
+                seed = current?.seed || 0,
             ) {
                 const requested = [...new Set(selectionValues(selectedSources))];
                 const scopeKeys = [...new Set(selectionValues(
@@ -4082,6 +4155,8 @@
                 if (
                     current &&
                     current.question === question &&
+                    (current.browse || null) === browse &&
+                    (current.seed || 0) === seed &&
                     (current.searchCollection || null) === (collectionKey || null)
                 ) {
                     const previous = current.searchAll
@@ -4104,6 +4179,8 @@
                     page,
                     scopeKeys,
                     collectionKey,
+                    browse,
+                    seed,
                 );
             }
 
@@ -4114,13 +4191,25 @@
                 modal = null,
                 scopeSources,
                 collectionKey,
+                browse,
+                seed,
             ) {
                 // Keep search and modal state in the query string so links are shareable
                 // and Back/Forward just work.
                 const url = new URL(location.href);
+                const resolvedBrowse = browse === undefined
+                    ? !question && (current?.browse || url.searchParams.get("browse"))
+                    : browse;
+                const resolvedSeed = seed ?? current?.seed ?? url.searchParams.get("seed") ?? 0;
                 url.hash = "";
                 url.search = "";
                 if (question) url.searchParams.set("q", question);
+                if (resolvedBrowse) {
+                    url.searchParams.set("browse", resolvedBrowse);
+                    if (resolvedBrowse === "random") {
+                        url.searchParams.set("seed", String(resolvedSeed));
+                    }
+                }
                 const sourceValues = [...new Set(selectionValues(selectedSources))];
                 const hasCollectionArg = collectionKey !== undefined;
                 const explicitScope = scopeSources !== undefined || hasCollectionArg;
@@ -4204,6 +4293,11 @@
                 const scopeSources = sourceValues;
                 return {
                     question: (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH),
+                    browse: params.get("q")?.trim() ? null : params.get("browse") || null,
+                    seed: params.get("browse") === "random" &&
+                        /^\d+$/.test(params.get("seed") || "") &&
+                        Number(params.get("seed")) < 2 ** 32
+                        ? Number(params.get("seed")) : 0,
                     selectedSources: scopeSources,
                     scopeSources,
                     collection,
@@ -4290,6 +4384,7 @@
                     );
                     renderSourceSelectionSummary();
                     renderScopeLine();
+                    renderBrowseControls();
                     focusButton(
                         collectionKey
                             ? `collection:${collectionKey}`
@@ -4450,6 +4545,7 @@
                     );
                     renderSourceSelectionSummary();
                     renderScopeLine();
+                    renderBrowseControls();
                     $("question").focus();
                     return;
                 }
@@ -4528,6 +4624,8 @@
                 resultList = null;
                 announceSearchStatus();
                 document.body.classList.remove("search-active");
+                document.body.classList.remove("browse-active");
+                renderBrowseControls();
                 setSettingsOpen(true);
                 $("searchSummary").hidden = true;
                 $("sourceFilterToolbar").hidden = true;
@@ -4572,6 +4670,8 @@
                 if (current) {
                     previousHeadingSearch = {
                         question: current.question,
+                        browse: current.browse || null,
+                        seed: current.seed || 0,
                         selectedSources: [...selectedSourceKeys],
                         scopeSources:
                             current.searchAll
@@ -4602,6 +4702,8 @@
                         null,
                         previous.scopeSources,
                         previous.collection,
+                        previous.browse,
+                        previous.seed,
                     ),
                 );
                 runSearch(
@@ -4610,6 +4712,8 @@
                     previous.page,
                     previous.scopeSources,
                     previous.collection,
+                    previous.browse,
+                    previous.seed,
                 );
             }
 
@@ -4803,6 +4907,16 @@
                 submitSearch(true);
             });
 
+            $("browseSection").addEventListener("click", (event) => {
+                const link = event.target.closest("a[data-browse]");
+                if (!link || modifiedClick(event)) return;
+                event.preventDefault();
+                if (availableBrowseModes.has(link.dataset.browse)) {
+                    startBrowse(link.dataset.browse);
+                }
+            });
+            $("browseShuffle").addEventListener("click", () => startBrowse("random"));
+
             $("homeHeading").addEventListener("click", activateHomeHeading);
 
             // The active view link should be a no-op. Reloading it would drop
@@ -4845,7 +4959,7 @@
                 } else {
                     syncLibraryInfo(history.state?.zimanticLibraryInfo || null);
                 }
-                if (!state.question) {
+                if (!state.question && !state.browse) {
                     // Navigated back/forward to the no-search entry: match it.
                     resetResults();
                     $("question").value = "";
@@ -4868,6 +4982,8 @@
                 if (
                     current &&
                     current.question === state.question &&
+                    (current.browse || null) === (state.browse || null) &&
+                    (current.seed || 0) === (state.seed || 0) &&
                     sameCollection &&
                     sameScope
                 ) {
@@ -4880,6 +4996,8 @@
                         state.page,
                         undefined,
                         state.collection,
+                        state.browse,
+                        state.seed,
                     );
                 } else {
                     runSearch(
@@ -4888,6 +5006,8 @@
                         state.page,
                         state.scopeSources,
                         state.collection,
+                        state.browse,
+                        state.seed,
                     );
                 }
             });
@@ -5179,6 +5299,10 @@
                 if (!configResponse.ok) return;
                 const config = await configResponse.json();
                 debugMode = Boolean(config.debug);
+                if (Array.isArray(config.browse_modes)) {
+                    availableBrowseModes = new Set(config.browse_modes);
+                }
+                renderBrowseControls();
                 if (Number.isInteger(config.page_size) && config.page_size > 0) {
                     PAGE_SIZE = config.page_size;
                 }
@@ -5222,6 +5346,10 @@
                     setLibraryLanguageFilter(libraryParams.get("language") || "");
                 }
                 const state = readLocationState();
+                if (state.browse === "random" && !new URLSearchParams(location.search).has("seed")) {
+                    state.seed = Math.floor(Math.random() * 2 ** 32);
+                    replaceQueryParam("seed", String(state.seed));
+                }
                 let invalidScope = false;
                 // Apply the URL state before the discovery fetches below: a query typed
                 // while they are in flight must keep the URL's source selection.
@@ -5240,7 +5368,7 @@
                 $("searchView").hidden = libraryView;
                 $("libraryView").hidden = !libraryView;
                 document.body.classList.toggle("library-active", libraryView);
-                setSettingsOpen(!libraryView && !state.question && !state.modal);
+                setSettingsOpen(!libraryView && !state.question && !state.browse && !state.modal);
                 for (const link of document.querySelectorAll(".view-nav a")) {
                     const isLibraryLink = link.getAttribute("href") === "library";
                     if (isLibraryLink === libraryView) {
@@ -5297,7 +5425,7 @@
                         $("notice").textContent =
                             `${t("Unknown source")}: ${unknown.join(", ")}. ` +
                             t("Choose a source from the list.");
-                        invalidScope = !valid.length && Boolean(state.question);
+                        invalidScope = !valid.length && Boolean(state.question || state.browse);
                         if (invalidScope) {
                             $("status").textContent = t("Search failed");
                         }
@@ -5311,6 +5439,8 @@
                                 state.modal,
                                 valid,
                                 state.collection,
+                                state.browse,
+                                state.seed,
                             ),
                         );
                     }
@@ -5322,7 +5452,7 @@
                     syncLibraryInfo(history.state?.zimanticLibraryInfo || null);
                 }
                 if (
-                    state.question &&
+                    (state.question || state.browse) &&
                     searchSequence === initialSearchSequence &&
                     $("question").value === state.question
                 ) {
@@ -5342,6 +5472,8 @@
                             state.page,
                             scopeNow,
                             state.collection,
+                            state.browse,
+                            state.seed,
                         );
                     }
                 } else if (!libraryView) {

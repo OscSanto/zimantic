@@ -41,6 +41,32 @@
                     <button id="searchButton" type="submit" data-i18n="Search">Search</button>
                 </form>
 
+                <section id="browseSection" class="browse-section" aria-labelledby="browseHeading">
+                    <div class="browse-heading">
+                        <h2 id="browseHeading" data-i18n="Browse">Browse</h2>
+                        <button id="browseShuffle" class="secondary" type="button" hidden data-i18n="Shuffle">Shuffle</button>
+                    </div>
+                    <div class="browse-options">
+                        <a href="?browse=random" data-browse="random">
+                            <strong data-i18n="Random">Random</strong>
+                            <span data-i18n="Explore a shuffled mix of indexed items.">Explore a shuffled mix of indexed items.</span>
+                        </a>
+                        <a href="?browse=rare" data-browse="rare">
+                            <strong data-i18n="Rare titles">Rare titles</strong>
+                            <span data-i18n="Titles with uncommon words in each source.">Titles with uncommon words in each source.</span>
+                        </a>
+                        <a href="?browse=outliers" data-browse="outliers" hidden>
+                            <strong data-i18n="Semantic outliers">Semantic outliers</strong>
+                            <span data-i18n="Items least like their source's average embedding.">Items least like their source's average embedding.</span>
+                        </a>
+                        <a href="?browse=representative" data-browse="representative" hidden>
+                            <strong data-i18n="Representative">Representative</strong>
+                            <span data-i18n="Items most like their source's average embedding.">Items most like their source's average embedding.</span>
+                        </a>
+                    </div>
+                    <p class="browse-hint" data-i18n="Browsing uses local indexes and respects source filters.">Browsing uses local indexes and respects source filters.</p>
+                </section>
+
                 <div id="startupStatus" class="startup-status" role="status" hidden data-i18n="Loading sources…">
                     Loading sources…
                 </div>

@@ -29,6 +29,24 @@
             "Return to article ↩️": "Volver al artículo ↩️",
             "Open online site": "Abrir sitio en línea",
             "Random": "Aleatorio",
+            "Browse": "Explorar",
+            "Browsing": "Explorando",
+            "Browse failed": "La exploración falló",
+            "Rare titles": "Títulos poco comunes",
+            "Semantic outliers": "Atípicos semánticos",
+            "Representative": "Representativos",
+            "Explore a shuffled mix of indexed items.":
+                "Explora una mezcla aleatoria de elementos indexados.",
+            "Titles with uncommon words in each source.":
+                "Títulos con palabras poco comunes en cada fuente.",
+            "Items least like their source's average embedding.":
+                "Elementos menos parecidos al vector semántico medio de su fuente.",
+            "Items most like their source's average embedding.":
+                "Elementos más parecidos al vector semántico medio de su fuente.",
+            "Browsing uses local indexes and respects source filters.":
+                "La exploración usa índices locales y respeta los filtros de fuentes.",
+            "No indexed items are available for this browse mode in the selected sources.":
+                "No hay elementos indexados disponibles para este modo de exploración en las fuentes seleccionadas.",
             "Open a random article (Alt-click for a random ZIM)":
                 "Abrir un artículo aleatorio (Alt+clic para elegir un ZIM aleatorio)",
             "Home": "Inicio",
