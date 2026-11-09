@@ -3795,10 +3795,12 @@
             function renderSortControls() {
                 const select = $("sortSelect");
                 if (!select) return;
+                $("sortControls").hidden = !current?.pageItems?.length;
                 const question = $("question").value.trim();
                 for (const option of select.options) {
-                    option.hidden = option.value !== "relevance" && !availableBrowseModes.has(option.value);
-                    option.disabled = option.hidden || (option.value === "relevance" && !question);
+                    option.hidden = option.value === "relevance"
+                        ? !question : !availableBrowseModes.has(option.value);
+                    option.disabled = option.hidden;
                 }
                 select.value = current?.browse || (question ? "relevance" : defaultBrowseMode());
             }

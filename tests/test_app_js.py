@@ -427,6 +427,49 @@ loadPage(1).then(() => console.log(JSON.stringify({{requests, current}})));
         self.assertEqual(payload["current"]["page"], 1)
         self.assertEqual(payload["current"]["pageItems"], [{"id": "item"}])
 
+    def test_sort_controls_visibility_tracks_results_and_relevance_availability(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const elements = {{
+  question: {{value: ""}},
+  sortControls: {{hidden: true}},
+  sortSelect: {{options: ["relevance", "random", "rare"]
+    .map((value) => ({{value}}))}},
+}};
+const $ = (id) => elements[id];
+const availableBrowseModes = new Set(["random", "rare"]);
+let current = null;
+{_function_source(source, "function defaultBrowseMode()", "function setSettingsOpen(")}
+const states = [
+  {{question: "", current: null}},
+  {{question: "topic", current: {{pageItems: [], streaming: true}}}},
+  {{question: "topic", current: {{pageItems: [{{}}], streaming: true}}}},
+  {{question: "", current: {{pageItems: [{{}}], browse: "rare"}}}},
+  {{question: "missing", current: {{pageItems: []}}}},
+  {{question: "", current: null}},
+];
+console.log(JSON.stringify(states.map((state) => {{
+  elements.question.value = state.question;
+  current = state.current;
+  renderSortControls();
+  return {{
+    hidden: elements.sortControls.hidden,
+    relevanceHidden: elements.sortSelect.options[0].hidden,
+  }};
+}})));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(json.loads(result.stdout), [
+            {"hidden": True, "relevanceHidden": True},
+            {"hidden": True, "relevanceHidden": False},
+            {"hidden": False, "relevanceHidden": False},
+            {"hidden": False, "relevanceHidden": True},
+            {"hidden": True, "relevanceHidden": False},
+            {"hidden": True, "relevanceHidden": True},
+        ])
+
     def test_sort_selector_submits_empty_and_text_queries_without_losing_scope(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -436,6 +479,7 @@ const history = {{
 }};
 const elements = {{
   question: {{value: ""}},
+  sortControls: {{hidden: true}},
   sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "representative"]
     .map((value) => ({{value}}))}},
 }};
