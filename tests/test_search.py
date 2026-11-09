@@ -1327,9 +1327,9 @@ class SearchContractTests(unittest.TestCase):
 
         real_rank_results = search._rank_results
 
-        def rank_results(source_results, query, limit):
+        def rank_results(source_results, query, limit, **kwargs):
             rank_sizes.append(len(source_results))
-            return real_rank_results(source_results, query, limit)
+            return real_rank_results(source_results, query, limit, **kwargs)
 
         search._search_source = fake_source_search
         search._rank_results = rank_results
@@ -2750,19 +2750,165 @@ class BrowseSearchTests(unittest.TestCase):
             representative = search.search_page("topic", sort="representative", limit=20)["results"]
             outliers = search.search_page("topic", sort="outliers", limit=20)["results"]
             rare = search.search_page("topic", sort="rare", limit=20)["results"]
+            diverse = search.search_page("topic", sort="diverse", limit=20)["results"]
+            semantic = search.search_page("topic", sort="semantic-diverse", limit=20)["results"]
             first = search.search_page("topic", sort="random", seed=7, limit=2)
             second = search.search_page("topic", sort="random", seed=7, limit=2, offset=2)
             whole = search.search_page("topic", sort="random", seed=7, limit=20)
             reshuffled = search.search_page("topic", sort="random", seed=19, limit=20)
             cached_relevance = search.search_page("topic", limit=20)["results"]
         expected = {doc["id"] for doc in relevance}
-        for items in (representative, outliers, rare, whole["results"]):
+        for items in (representative, outliers, rare, diverse, semantic, whole["results"]):
             self.assertEqual({doc["id"] for doc in items}, expected)
         self.assertIn(representative[0]["path"], ("item-10", "item-11"))
         self.assertIn(outliers[0]["path"], ("item-1", "item-20"))
         self.assertEqual(first["results"] + second["results"], whole["results"][:4])
         self.assertNotEqual(whole["results"], reshuffled["results"])
         self.assertEqual(relevance, cached_relevance)
+
+    def test_diversity_scores_the_global_pool_without_source_size_bias(self):
+        search = self.make_search()
+        pool = [
+            {"id": "best", "source_key": "small", "title": "Solar power"},
+            {"id": "duplicate", "source_key": "large", "title": "Solar power"},
+            {"id": "wind", "source_key": "large", "title": "Wind turbines"},
+            {"id": "battery", "source_key": "large", "title": "Battery storage"},
+        ]
+        ordered = search._sort_results(pool, "diverse", 0, None)
+        self.assertEqual(
+            [doc["id"] for doc in ordered], ["best", "wind", "battery", "duplicate"],
+        )
+        self.assertEqual(
+            [doc["ranking"]["final_rank"] for doc in ordered], [1, 2, 3, 4],
+        )
+        self.assertTrue(all("ranking" not in doc for doc in pool))
+        self.assertEqual(search._sort_results(pool, "diverse", 0, time.monotonic() - 1), pool)
+
+    def test_empty_diversity_avoids_cross_source_repeats_and_preserves_balance(self):
+        search = self.make_search()
+        results = []
+        for key, titles in (("a", ["Solar power", "Wind turbines"]),
+                            ("b", ["Solar power", "Battery storage"])):
+            source = _zim_source(key, key)
+            results.append(SourceResult(source=source, items=[
+                {
+                    "id": f"{key}-{rank}", "source_key": key, "title": title,
+                    "source_rank": rank, "_browse_order": key, "score": 1.0,
+                    "ranking": {"browse": {"mode": "diverse"}},
+                }
+                for rank, title in enumerate(titles, 1)
+            ]))
+        ordered = search._rank_results(results, "", 3)
+        self.assertEqual([doc["title"] for doc in ordered], [
+            "Solar power", "Battery storage", "Wind turbines",
+        ])
+        self.assertEqual([doc["source_key"] for doc in ordered[:2]], ["a", "b"])
+
+    def test_semantic_diversity_reuses_query_vectors_and_retains_unscored_matches(self):
+        import faiss
+
+        search = self.make_search()
+        vectors = np.array([[1, 0], [1, 0], [0.8, 0.6], [-1, 0]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([1, 2, 3, 4], dtype=np.int64))
+        search.indexes["manual"].faiss_index = index
+        pool = [
+            {"id": str(i), "source_key": "manual", "path": f"item-{i}", "title": title}
+            for i, title in enumerate(["Cars", "Automobiles", "Wind turbines", "Unrelated", "Missing vector"], 1)
+        ]
+        ordered = search._sort_results(
+            pool, "semantic-diverse", 0, None,
+            query_vector=np.array([[1, 0]], dtype=np.float32),
+        )
+        self.assertEqual([doc["id"] for doc in ordered], ["1", "3", "2", "4", "5"])
+        with patch.object(search, "_query_vector", return_value=vectors[:1]) as embed:
+            first = search.search_page("topic", sort="semantic-diverse", limit=2)
+            second = search.search_page("topic", sort="semantic-diverse", offset=2, limit=2)
+            whole = search.search_page("topic", sort="semantic-diverse", limit=5)
+        self.assertEqual(embed.call_count, 1)
+        self.assertEqual(first["results"] + second["results"], whole["results"][:4])
+
+    def test_empty_semantic_diversity_uses_vectors_without_embedding_a_query(self):
+        import faiss
+
+        search = self.make_search()
+        vectors = np.array([[1, 0], [1, 0], [0.8, 0.6], [-1, 0]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([1, 2, 3, 4], dtype=np.int64))
+        search.indexes["manual"].faiss_index = index
+        with patch.object(search, "_query_vector", side_effect=AssertionError("must not embed")):
+            whole = search.search_page("", sort="semantic-diverse", limit=5)
+            first = search.search_page("", sort="semantic-diverse", limit=2)
+            second = search.search_page("", sort="semantic-diverse", limit=2, offset=2)
+        self.assertEqual(len(whole["results"]), 4)
+        self.assertEqual(first["results"] + second["results"], whole["results"])
+        self.assertNotEqual(
+            {doc["path"] for doc in whole["results"][:2]}, {"item-1", "item-2"},
+        )
+        search.semantic = False
+        with self.assertRaises(SearchQueryError):
+            search.search_page("", sort="semantic-diverse")
+
+    def test_semantic_diversity_preserves_hybrid_relevance_penalties(self):
+        import faiss
+
+        search = self.make_search()
+        vectors = np.array([[0.8, 0.6], [1, 0], [0.6, 0.8]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([1, 2, 3], dtype=np.int64))
+        search.indexes["manual"].faiss_index = index
+        pool = [
+            {"id": "guide", "path": "item-1", "title": "Linux guide", "score": 0.04},
+            {"id": "profile", "path": "item-2", "title": "User Linux", "score": 0.004},
+            {"id": "install", "path": "item-3", "title": "Installing Linux", "score": 0.03},
+        ]
+        pool = [{**doc, "source_key": "manual"} for doc in pool]
+        ordered = search._sort_results(
+            pool, "semantic-diverse", 0, None,
+            query_vector=np.array([[1, 0]], dtype=np.float32),
+        )
+        self.assertEqual(ordered[0]["id"], "guide")
+        self.assertIsNone(search.indexes["manual"].browse_centroid)
+        self.assertEqual({doc["id"] for doc in ordered}, {"guide", "profile", "install"})
+
+    def test_semantic_diversity_compares_embeddings_across_balanced_sources(self):
+        import faiss
+
+        search = self.make_search()
+        other_db = sqlite3.connect(":memory:")
+        other_db.executescript(index_schema.SCHEMA)
+        other_db.executemany(
+            "INSERT INTO docs(rowid,title,path) VALUES (?,?,?)",
+            [(1, "Automobiles", "item-1"), (2, "Battery storage", "item-2")],
+        )
+        self.addCleanup(other_db.close)
+        search.sources["other"] = _zim_source("other", "Other")
+        search.indexes["other"] = IndexHandle(other_db, None)
+        results = []
+        for key, titles, vectors in (
+            ("manual", ["Cars", "Wind turbines"], [[1, 0, 0], [0.8, 0.6, 0]]),
+            ("other", ["Automobiles", "Battery storage"], [[1, 0, 0], [0.8, 0, 0.6]]),
+        ):
+            index = faiss.IndexIDMap(faiss.IndexFlatIP(3))
+            index.add_with_ids(np.array(vectors, dtype=np.float32), np.array([1, 2], dtype=np.int64))
+            search.indexes[key].faiss_index = index
+            results.append(SourceResult(source=search.sources[key], items=[
+                {
+                    "id": f"{key}-{rank}", "source_key": key, "title": title,
+                    "path": f"item-{rank}", "source_rank": rank, "_browse_order": key,
+                    "score": 1.0, "ranking": {"browse": {"mode": "semantic-diverse"}},
+                }
+                for rank, title in enumerate(titles, 1)
+            ]))
+        ordered = search._rank_results(results, "", 4)
+        self.assertEqual(len({doc["source_key"] for doc in ordered[:2]}), 2)
+        self.assertNotEqual(
+            {doc["title"] for doc in ordered[:2]}, {"Cars", "Automobiles"},
+        )
+        self.assertEqual(
+            {doc["id"] for doc in ordered},
+            {doc["id"] for result in results for doc in result.items},
+        )
 
     def test_text_sorting_preserves_the_relevance_enrichment_candidates(self):
         search = self.make_search()

@@ -38,6 +38,7 @@
             "Semantic outliers": "Atípicos semánticos",
             "Representative": "Representativos",
             "Diversity": "Diversidad",
+            "Semantic diversity": "Diversidad semántica",
             "Recency": "Más recientes",
             "Explore a shuffled mix of indexed items.":
                 "Explora una mezcla aleatoria de elementos indexados.",

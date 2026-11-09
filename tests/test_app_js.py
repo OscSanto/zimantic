@@ -480,11 +480,11 @@ const history = {{
 const elements = {{
   question: {{value: ""}},
   sortControls: {{hidden: true}},
-  sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "representative", "diverse", "recency"]
+  sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "representative", "diverse", "semantic-diverse", "recency"]
     .map((value) => ({{value}}))}},
 }};
 const $ = (id) => elements[id];
-const availableBrowseModes = new Set(["random", "rare", "outliers", "representative", "diverse", "recency"]);
+const availableBrowseModes = new Set(["random", "rare", "outliers", "representative", "diverse", "semantic-diverse", "recency"]);
 const selectionValues = (values) => [...(values || [])];
 const selectedSourceKeys = new Set(["manual"]);
 const selectedCollectionKey = "files:modules";
@@ -519,12 +519,17 @@ current = null;
 $("question").value = "";
 availableBrowseModes.delete("representative");
 availableBrowseModes.delete("outliers");
+availableBrowseModes.delete("semantic-diverse");
 renderSortControls();
 console.log(JSON.stringify({{
   emptyDefault, relevanceDisabled, emptyUrl, textUrl, textSort, relevanceUrl, searches,
   fastDefault: $("sortSelect").value,
-  semanticHidden: $("sortSelect").options.slice(3, 5).every((option) => option.hidden && option.disabled),
-  additionalModesVisible: $("sortSelect").options.slice(5).every((option) => !option.hidden && !option.disabled),
+  semanticHidden: $("sortSelect").options.filter((option) =>
+    ["outliers", "representative", "semantic-diverse"].includes(option.value)
+  ).every((option) => option.hidden && option.disabled),
+  additionalModesVisible: $("sortSelect").options.filter((option) =>
+    ["diverse", "recency"].includes(option.value)
+  ).every((option) => !option.hidden && !option.disabled),
 }}));
 """
         result = subprocess.run(

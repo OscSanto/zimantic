@@ -5,18 +5,19 @@ from __future__ import annotations
 import hashlib
 import math
 import random
-import re
 import sqlite3
 import time
 from typing import Any
 
 from ..contracts import SourceInfo, SourceResult
+from ..searching.diversity import diverse_order
 from ..searching.query import STOPWORDS
 from .search import SearchLimits, fetch_docs, vector_search
 
-BROWSE_MODES = ("random", "rare", "outliers", "representative", "diverse", "recency")
-SEMANTIC_BROWSE_MODES = frozenset({"outliers", "representative"})
-_TITLE_WORD = re.compile(r"\w+", re.UNICODE)
+BROWSE_MODES = (
+    "random", "rare", "outliers", "representative", "diverse", "semantic-diverse", "recency",
+)
+SEMANTIC_BROWSE_MODES = frozenset({"outliers", "representative", "semantic-diverse"})
 
 
 def _check_deadline(deadline: float | None) -> None:
@@ -145,35 +146,16 @@ def _recent_rows(
 
 
 def _diverse_paths(
-    entries: list[tuple[str, str]], deadline: float | None = None
+    entries: list[tuple[str, str]], deadline: float | None = None,
+    *, limit: int | None = None,
 ) -> list[str]:
     """Greedily order titles to minimize overlap with already selected titles."""
-    words_by_path = {
-        path: set(_TITLE_WORD.findall(title.casefold())) - STOPWORDS
-        for path, title in entries
-    }
-    remaining = set(words_by_path)
-    selected: list[str] = []
-    while remaining:
-        _check_deadline(deadline)
-        if not selected:
-            path = min(
-                remaining, key=lambda item: (-len(words_by_path[item]), item)
-            )
-        else:
-            def diversity(item: str) -> tuple[float, int, str]:
-                words = words_by_path[item]
-                similarity = max(
-                    len(words & words_by_path[chosen])
-                    / max(1, len(words | words_by_path[chosen]))
-                    for chosen in selected
-                )
-                return similarity, -len(words), item
-
-            path = min(remaining, key=diversity)
-        selected.append(path)
-        remaining.remove(path)
-    return selected
+    titles = dict(entries)
+    paths = list(titles)
+    return [
+        paths[position]
+        for position in diverse_order(list(titles.values()), deadline, limit=limit)
+    ]
 
 
 def _centroid(index: Any, deadline: float | None):
@@ -217,6 +199,101 @@ def _centroid(index: Any, deadline: float | None):
     return index.browse_centroid
 
 
+def _doc_rows(db, docs: list[dict[str, Any]]) -> dict[int, str]:
+    rows = {doc["_rowid"]: doc["path"] for doc in docs if "_rowid" in doc}
+    paths = [doc["path"] for doc in docs if "_rowid" not in doc]
+    for start in range(0, len(paths), 900):
+        batch = paths[start : start + 900]
+        placeholders = ",".join("?" for _ in batch)
+        rows.update(db.execute(
+            f"SELECT rowid, path FROM docs WHERE path IN ({placeholders}) "
+            "AND target IS NULL", batch,
+        ))
+    return rows
+
+
+def _reconstruct_rows(index: Any, rows: dict[int, str], deadline: float | None):
+    import faiss
+    import numpy as np
+
+    if not rows:
+        return {}
+    vectors = index.faiss_index
+    wanted = np.array(list(rows), dtype=np.int64)
+    reconstructed = {}
+    if hasattr(vectors, "invlists"):
+        vector = np.empty(vectors.d, dtype=np.float32)
+        for list_no in range(vectors.nlist):
+            _check_deadline(deadline)
+            size = vectors.invlists.list_size(list_no)
+            if not size:
+                continue
+            pointer = vectors.invlists.get_ids(list_no)
+            try:
+                ids = faiss.rev_swig_ptr(pointer, size)
+                offsets = np.flatnonzero(np.isin(ids, wanted))
+                matching = ids[offsets].copy()
+            finally:
+                vectors.invlists.release_ids(list_no, pointer)
+            # IVF search_and_reconstruct cannot combine an ID selector with
+            # store_pairs. Read matching offsets without a mutable direct map.
+            for offset, rowid in zip(offsets, matching):
+                _check_deadline(deadline)
+                vectors.reconstruct_from_offset(
+                    list_no, int(offset), faiss.swig_ptr(vector),
+                )
+                reconstructed[int(rowid)] = vector.copy()
+    else:
+        base = faiss.downcast_index(vectors.index) if hasattr(vectors, "index") else vectors
+        ids = (
+            faiss.vector_to_array(vectors.id_map)
+            if hasattr(vectors, "id_map") else np.arange(base.ntotal)
+        )
+        for offset in np.flatnonzero(np.isin(ids, wanted)):
+            _check_deadline(deadline)
+            reconstructed[int(ids[offset])] = base.reconstruct(int(offset))
+    result = {}
+    for rowid, vector in reconstructed.items():
+        norm = np.linalg.norm(vector)
+        if norm > 0 and np.isfinite(norm):
+            result[rows[rowid]] = vector / norm
+    return result
+
+
+def diversity_vectors(
+    index: Any, docs: list[dict[str, Any]], deadline: float | None = None,
+    *, with_centroid: bool = True,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    """Reconstruct only candidate embeddings and their source centrality."""
+    db = index.db_for_thread()
+    if db is None or index.faiss_index is None:
+        return {}, {}
+    acquired = (
+        index.browse_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if deadline is not None else index.browse_lock.acquire()
+    )
+    if not acquired:
+        raise TimeoutError("semantic diversity preparation is busy")
+    try:
+        _check_deadline(deadline)
+        db.set_progress_handler(
+            lambda: deadline is not None and time.monotonic() >= deadline, 1000,
+        )
+        rows = _doc_rows(db, docs)
+        if not rows:
+            return {}, {}
+        centroid = _centroid(index, deadline)[0] if with_centroid else None
+        vectors = _reconstruct_rows(index, rows, deadline)
+        _check_deadline(deadline)
+        return vectors, (
+            {path: float(vector @ centroid) for path, vector in vectors.items()}
+            if centroid is not None else {}
+        )
+    finally:
+        db.set_progress_handler(None, 0)
+        index.browse_lock.release()
+
+
 def sort_scores(
     index: Any, docs: list[dict[str, Any]], mode: str, deadline: float | None = None
 ) -> dict[str, float]:
@@ -235,15 +312,7 @@ def sort_scores(
         db.set_progress_handler(
             lambda: deadline is not None and time.monotonic() >= deadline, 1000
         )
-        rows = {doc["_rowid"]: doc["path"] for doc in docs if "_rowid" in doc}
-        paths = [doc["path"] for doc in docs if "_rowid" not in doc]
-        for start in range(0, len(paths), 900):
-            batch = paths[start : start + 900]
-            placeholders = ",".join("?" for _ in batch)
-            rows.update(db.execute(
-                f"SELECT rowid, path FROM docs WHERE path IN ({placeholders}) "
-                "AND target IS NULL", batch,
-            ))
+        rows = _doc_rows(db, docs)
         if not rows:
             return {}
         if mode == "rare":
@@ -363,6 +432,7 @@ def browse(
                     if (doc := candidate_docs.get(rowid)) is not None
                 ],
                 deadline,
+                limit=count,
             )
             rowid_by_path = {
                 doc["path"]: rowid for rowid, doc in candidate_docs.items()
@@ -389,6 +459,33 @@ def browse(
                 for score, rowid in zip(scores[0], rowids[0])
                 if rowid >= 0 and math.isfinite(float(score))
             ]
+            if mode == "semantic-diverse":
+                import numpy as np
+
+                random_rows = _random_rows(db, max(count * 8, 64), source_order, deadline)
+                candidate_ids = list(dict.fromkeys(rowid for _, rowid in [*ranked, *random_rows]))
+                candidate_docs = fetch_docs(
+                    source, db, candidate_ids, url_builder=url_builder,
+                    web_base_path=limits.web_base_path,
+                )
+                rows = {rowid: doc["path"] for rowid, doc in candidate_docs.items()}
+                embeddings = _reconstruct_rows(index, rows, deadline)
+                candidate_ids = [
+                    rowid for rowid in candidate_ids
+                    if rowid in rows and rows[rowid] in embeddings
+                ]
+                if candidate_ids:
+                    matrix = np.stack([embeddings[rows[rowid]] for rowid in candidate_ids])
+                    order = diverse_order(
+                        [candidate_docs[rowid]["title"] for rowid in candidate_ids],
+                        deadline, vectors=matrix, relevance=matrix @ centroid[0], limit=count,
+                    )
+                    ranked = [
+                        (float(len(order) - position), candidate_ids[candidate])
+                        for position, candidate in enumerate(order)
+                    ]
+                else:
+                    ranked = []
         else:
             raise ValueError("unknown browse mode")
         errors: list[str] = []

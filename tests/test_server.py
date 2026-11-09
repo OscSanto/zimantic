@@ -1108,6 +1108,9 @@ class ServerTests(unittest.TestCase):
                 response = self.client.get(path + "?q=topic&sort=random&seed=7")
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(self.search.sort_calls[-1], ("random", 7))
+                response = self.client.get(path + "?q=topic&sort=semantic-diverse")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.search.sort_calls[-1], ("semantic-diverse", 0))
                 self.assertEqual(self.client.get(path + "?q=topic&sort=unknown").status_code, 422)
                 self.assertEqual(self.client.get(path + "?q=&seed=-1").status_code, 422)
 
@@ -1126,11 +1129,17 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(
                     client.get(path + "?mode=representative").status_code, 400
                 )
+                self.assertEqual(
+                    client.get(path + "?mode=semantic-diverse").status_code, 400
+                )
             for path in ("/search", "/search/stream"):
                 self.assertEqual(client.get(path + "?q=").status_code, 200)
                 self.assertEqual(search.sort_calls[-1], ("rare", 0))
                 self.assertEqual(
                     client.get(path + "?q=topic&sort=representative").status_code, 400
+                )
+                self.assertEqual(
+                    client.get(path + "?q=topic&sort=semantic-diverse").status_code, 400
                 )
 
     def test_search_accepts_multiple_source_filters(self):

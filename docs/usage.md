@@ -234,8 +234,8 @@ The source picker discovers available sources and sorts matching sources by resu
 ## Sorting and empty searches
 
 The **Sort by** selector below the search bar offers **Relevance**, **Random**,
-**Rare titles**, **Semantic outliers**, **Representative**, **Diversity**, and
-**Recency**. With a query, these orders rearrange the bounded matching result
+**Rare titles**, **Semantic outliers**, **Representative**, **Diversity**,
+**Semantic diversity**, and **Recency**. With a query, these orders rearrange the bounded matching result
 pool without changing its membership. Items without the local statistics needed
 by an order follow the scored matches in relevance order.
 
@@ -243,7 +243,8 @@ Submitting an empty query, or opening `/?q=`, searches local indexes without
 embedding a query. Its default order is **Representative**, or **Rare titles**
 when semantic search is disabled. `/` still opens without running a search.
 Use `/?q=&sort=random`, `/?q=&sort=rare`, `/?q=&sort=outliers`,
-`/?q=&sort=representative`, `/?q=&sort=diverse`, or `/?q=&sort=recency`,
+`/?q=&sort=representative`, `/?q=&sort=diverse`,
+`/?q=&sort=semantic-diverse`, or `/?q=&sort=recency`,
 optionally with `source` or `collection` filters.
 
 - **Random** shuffles matches, or samples indexed items for an empty query.
@@ -255,15 +256,28 @@ optionally with `source` or `collection` filters.
   embedding. **Representative** does the opposite, finding items most like that
   average.
 - **Diversity** greedily orders titles to reduce word overlap with items already
-  selected, starting with the title containing the most distinct non-stopword
-  terms.
+  selected across all sources. Ties keep relevance order for a query, or the
+  deterministic sampled order for an empty query; longer titles get no extra
+  preference, and empty/stopword-only titles come last. Empty queries sample
+  candidates per source and keep source exposure balanced.
+- **Semantic diversity** balances embedding novelty against similarity to the
+  query blended with normalized hybrid relevance, or source centrality for an
+  empty query, using equal-weight maximal marginal relevance (MMR). It
+  recognizes related subjects even when their
+  titles use different words, and compares novelty across sources. Empty
+  queries mix central candidates with a deterministic random sample to avoid
+  only exploring one central topic, and keep source exposure balanced.
+  Matched items without embeddings follow in relevance order. If query
+  embedding fails, hybrid relevance supplies the relevance component instead.
 - **Recency** orders by modified time: file modification time for files,
   primary-file modification time for Kolibri, and archive-file modification time
   for ZIM entries. Items without a timestamp come last.
 
-Statistics are source-local. Empty searches interleave source rankings rather
-than comparing their raw scores, except **Recency**, which compares timestamps
-across sources. Empty searches use only local SQLite indexes; remote Kiwix
+Representative, outlier and rarity statistics are source-local. Empty searches
+interleave source rankings rather than comparing their raw scores, except
+**Recency**, which compares timestamps across sources. Diversity orders also
+consider previously selected items across sources while balancing exposure.
+Empty searches use only local SQLite indexes; remote Kiwix
 sources and unindexed sources are omitted. Semantic orders additionally require
 loaded FAISS vectors and are unavailable with `serve --fast` or `open --fast`.
 Rare-title pools and centroids are prepared lazily in memory, reused for the

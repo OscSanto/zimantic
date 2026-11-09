@@ -137,6 +137,137 @@ For a fair comparison, both runs use the same ZIM files. Each run also uses
 indexes built by its own code when the index format or build behavior differs.
 Record any index difference with the comparison.
 
+### Diversity and representative browsing
+
+`diversity.py` compares four variants: original **Diversity**, original
+**Representative**, corrected **Diversity**, and **Semantic diversity**. Capture
+the baseline before changing ranking, then reuse the same output directory:
+
+```bash
+# Use the same four archive paths, model and output directory for every phase.
+uv run python evaluation/diversity.py --phase baseline \
+  --model /path/to/model/int8 --output evaluation/results/diversity-quality \
+  --zims /path/to/communitybuilding.stackexchange.com_en_all_2026-08.zim \
+         /path/to/communitybuilding.stackexchange.com_en_all_2025-08.zim \
+         /path/to/alpinelinux_en_all_nopic_2025-09.zim \
+         /path/to/alcohol.stackexchange.com_en_all_2025-06.zim
+# After the lexical fixes: repeat with --phase lexical.
+# After adding Semantic diversity: repeat with --phase semantic.
+```
+
+For the original baseline, use ranking code from commit
+`9e40f8de20de605e2553434530ee84953002e90c` with this harness. On current code,
+`--phase baseline` measures the current algorithms; it does not restore old
+implementations.
+
+The harness builds isolated indexes, freezes the original hybrid query pools,
+and records model, index, ranking-code and pool hashes. Later phases must use
+identical inputs. It writes `baseline.json`, `lexical.json`, `semantic.json`,
+`comparison.json`, and `qualitative.json` with top-five article excerpts.
+These are ignored local outputs, not changes to the configured library.
+
+#### Measures
+
+There is deliberately no single composite "diversity quality" number:
+
+| Measure | Interpretation |
+|---|---|
+| Reference coverage, higher better | Mean best cosine match from a fixed sample of up to 256 reference articles per source to the selected top 20; selected articles are excluded from the reference, and sources have equal weight |
+| Semantic repetition, lower better | Mean cosine similarity between each selected item and its most similar other selected item; catches a repeated subset that mean pairwise distance can hide |
+| Title repetition, lower better | Same nearest-neighbor measure using non-stopword title-word Jaccard overlap |
+| Centrality | Mean similarity to each selected item's source centroid; a representativeness guardrail, not an article-quality judgement |
+| Source balance | Source counts and normalized source entropy; equal exposure is desirable for unscoped browsing, not necessarily for a focused query |
+| Query relevance retention | Fraction of the original hybrid top 20 still present, plus mean original relevance rank; a regression proxy, not labelled relevance |
+
+Reference coverage across the whole corpus is useful for empty queries.
+It must **not** be maximized for a focused query: adding unrelated topics can
+improve that number while making search worse. Query comparisons instead
+consider repetition together with relevance retention and the actual articles.
+
+#### Four-way comparison, 2026-11-09
+
+Inputs: the four archives named above, 6,512 embeddings, the local int8 E5 model
+(fingerprint `cee53c88b877c344c7ddf0327772421d047718bfcfdda0e9f8aea282841845dc`),
+two ONNX/FAISS threads, `candidate_count=16`, and a 100-item pool. The two
+Community Building editions are deliberately separate sources to stress
+cross-source repetition; a normal library may collapse editions.
+
+Five browsing scopes were measured: all four archives together and each archive
+alone. Eight mixed-source queries used identical frozen candidate pools:
+`community`, `online community`, `moderation`, `water`, `beer`, `linux`,
+`software`, and `installation`. All quality measures use the top 20. Numbers
+below are macro averages across scopes or queries. Warm time is the median
+across cases of two warm repetitions after one initial repetition.
+
+| Empty-query browsing | Coverage ↑ | Semantic repetition ↓ | Title repetition ↓ | Centrality | Warm ms |
+|---|---:|---:|---:|---:|---:|
+| Original Diversity | 0.8667 | 0.8640 | 0.0110 | 0.9019 | 24,532.7 |
+| Original Representative | 0.8932 | 0.9618 | 0.4466 | 0.9556 | 1.72 |
+| Corrected Diversity | 0.8879 | 0.8670 | **0.0000** | 0.9065 | 39.07 |
+| Semantic diversity | 0.8914 | **0.8547** | 0.0880 | 0.9074 | 30.14 |
+
+Every mixed-source empty-query top 20 contained five items from each source.
+Representative has slightly higher reference coverage, but much greater
+repetition. Corrected Diversity removes title overlap cheaply; Semantic
+diversity gets nearly Representative's coverage with less semantic repetition
+than either lexical variant.
+
+| Nonempty queries | Semantic repetition ↓ | Title repetition ↓ | Original top 20 retained ↑ | Mean original rank ↓ | Warm ms |
+|---|---:|---:|---:|---:|---:|
+| Original Diversity | 0.9156 | 0.3344 | 14.4% | 48.23 | 6.82 |
+| Original Representative | 0.9507 | 0.5029 | 8.8% | 64.99 | 0.19 |
+| Corrected Diversity | **0.8717** | **0.0177** | 23.1% | 43.04 | 2.56 |
+| Semantic diversity | 0.8942 | 0.3524 | **81.3%** | **13.19** | 2.03 |
+
+Semantic diversity intentionally sacrifices some novelty to keep relevant
+matches. Shared query words also increase title overlap even when articles
+cover different subtopics. It is not the winner of every metric.
+
+#### Qualitative findings
+
+The following counts use mixed-source top-20 results; excerpts were read for
+the top five in browsing and the `community`, `linux`, and `beer` queries.
+
+| Variant | Browse user-profile pages | Extra identical titles for `community` | First result for `linux` |
+|---|---:|---:|---|
+| Original Diversity | 0 | 7 | Alpine Install: from a disc to a old computer single only boot |
+| Original Representative | 15 | 5 | User ccleve |
+| Corrected Diversity | 1 | 0 | Alpine Linux in a chroot |
+| Semantic diversity | 3 | 1 | Alpine Linux in a chroot |
+
+Original Diversity favored long titles and repeated matching articles across
+the two Community Building editions. Corrected Diversity no longer privileges
+long titles or sources with larger matching pools, checks overlap globally,
+keeps relevance order on novelty ties, and postpones stopword-only titles.
+Incremental maximum-overlap updates and stopping at the required browse
+prefix remove the previous cubic full-sample ranking cost.
+
+An initial semantic trial using query cosine alone put an unrelated beer-site
+user profile first for `linux`. The final query objective averages query cosine
+with max-normalized hybrid relevance, then uses equal-weight MMR against
+maximum similarity to already selected items. This retains existing title
+boosts and profile penalties. Its first Linux results cover chroots, iSCSI,
+hardening, speech synthesis, voicemail, and bootstrapping. Corrected lexical
+Diversity starts well too, but later includes Community Building navigation
+pages simply because their titles add novel words.
+
+For browsing, Semantic diversity mixes central candidates with a deterministic
+random sample, balances source exposure, and considers redundancy across
+sources. It replaces most repeated profiles with distinct material, but still
+starts with **User Richard** and retains three profile pages. Both semantic
+browsing modes select **Setting up the build environment 1.7**, whose excerpt
+explicitly calls it obsolete. Content quality/freshness is not solved by
+centrality or diversity, and no content-type exclusions were added here.
+Representative remains unchanged and is still the default empty-query order.
+
+These are English, small-corpus, unsupervised smoke benchmarks, not a release
+gate or an independent relevance evaluation. Coverage and semantic repetition
+use the same embeddings as the algorithms and can reward boilerplate;
+the profile-page examples demonstrate why qualitative review matters.
+Timings exclude model loading, query retrieval/embedding, previews, and HTTP,
+and were measured on a shared host without confidence intervals. Existing
+vectors suffice for the new sort; production indexes need no rebuild.
+
 ### Small-ZIM body-index comparison
 
 ```bash

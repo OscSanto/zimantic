@@ -72,6 +72,7 @@
                 outliers: "Semantic outliers",
                 representative: "Representative",
                 diverse: "Diversity",
+                "semantic-diverse": "Semantic diversity",
                 recency: "Recency",
             };
             let availableBrowseModes = new Set(Object.keys(BROWSE_LABELS));

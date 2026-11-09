@@ -7,9 +7,10 @@ import numpy as np
 
 from zimantic.contracts import SourceInfo
 from zimantic.indexing import schema
-from zimantic.indexing.browse import rank_browse_results, sort_scores
+from zimantic.indexing.browse import diversity_vectors, rank_browse_results, sort_scores
 from zimantic.indexing.search import SearchLimits, search
 from zimantic.providers.base import SourceQuery
+from zimantic.searching.diversity import diverse_order
 from zimantic.searching.index import IndexHandle
 
 
@@ -116,8 +117,32 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(result.status, "ok", result.error)
         paths = [doc["path"] for doc in result.items]
         self.assertEqual(set(paths), {"common-1", "common-2", "unusual", "stopwords"})
-        self.assertEqual(paths[0], "common-1")
-        self.assertNotEqual(paths[1], "common-2")
+        self.assertEqual(paths[-1], "stopwords")
+        self.assertIn("unusual", paths[:2])
+
+    def test_diversity_keeps_relevance_ties_instead_of_favoring_long_titles(self):
+        order = diverse_order([
+            "Solar power", "Solar power technology panel installation guide",
+            "Wind turbines", "the and", "",
+        ])
+        self.assertEqual(order, [0, 2, 1, 3, 4])
+        self.assertEqual(diverse_order(["solar", "wind"], limit=1), [0])
+        with self.assertRaises(TimeoutError):
+            diverse_order(["solar"], time.monotonic() - 1)
+
+    def test_diversity_balances_sources_and_checks_overlap_across_them(self):
+        order = diverse_order(
+            ["Solar power", "Solar power", "Wind turbines", "Battery storage"],
+            sources=["a", "b", "b", "a"],
+        )
+        self.assertEqual(order, [0, 2, 3, 1])
+
+    def test_semantic_diversity_recognizes_synonyms_without_promoting_outliers(self):
+        titles = ["Cars", "Automobiles", "Wind turbines", "Unrelated"]
+        vectors = np.array([[1, 0], [1, 0], [0.8, 0.6], [-1, 0]], dtype=np.float32)
+        order = diverse_order(titles, vectors=vectors, relevance=[1, 1, 0.8, -1])
+        self.assertEqual(order, [0, 2, 1, 3])
+        self.assertEqual(diverse_order(titles), [0, 1, 2, 3])
 
     def test_semantic_modes_share_the_centroid_and_have_opposite_order(self):
         vectors = np.array([[1, 0], [0.8, 0.6], [-0.6, 0.8]], dtype=np.float32)
@@ -168,7 +193,32 @@ class BrowseTests(unittest.TestCase):
         opposite = sort_scores(self.index, docs, "outliers")
         for path in paths:
             self.assertAlmostEqual(scores[path], -opposite[path], places=5)
+        selected, centrality = diversity_vectors(self.index, docs)
+        self.assertEqual(set(selected), set(paths))
+        for path, vector in selected.items():
+            np.testing.assert_allclose(vector, vectors[list(ids).index(int(path))], atol=0.01)
+            self.assertAlmostEqual(float(np.linalg.norm(vector)), 1.0, places=5)
+            self.assertAlmostEqual(centrality[path], scores[path], delta=0.01)
+        semantic = self.browse("semantic-diverse", count=4)
+        self.assertEqual(semantic.status, "ok", semantic.error)
+        self.assertEqual(len(semantic.items), 4)
         self.assertEqual(index.direct_map.type, faiss.DirectMap.NoMap)
+
+    def test_candidate_vectors_support_idmaps_missing_and_zero_embeddings(self):
+        vectors = np.array([[1, 0], [0, 0], [0.8, 0.6]], dtype=np.float32)
+        index = faiss.IndexIDMap(faiss.IndexFlatIP(2))
+        index.add_with_ids(vectors, np.array([2, 12, 31], dtype=np.int64))
+        self.index.faiss_index = index
+        selected, centrality = diversity_vectors(self.index, [
+            {"path": "common-1", "_rowid": 2}, {"path": "common-2"},
+            {"path": "unusual"}, {"path": "missing"}, {"path": "stopwords"},
+        ])
+        self.assertEqual(set(selected), {"common-1", "unusual"})
+        self.assertEqual(set(centrality), set(selected))
+        np.testing.assert_allclose(selected["unusual"], vectors[2])
+        with self.assertRaises(TimeoutError):
+            diversity_vectors(self.index, [{"path": "unusual"}], time.monotonic() - 1)
+        self.assertEqual(self.db.execute("SELECT 1").fetchone(), (1,))
 
     def test_deadlines_cancel_without_caching_an_incomplete_ranking(self):
         result = self.browse("rare", deadline=time.monotonic() - 1)

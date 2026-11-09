@@ -35,6 +35,7 @@ from .diagnostics import private_locators, public_cause, sanitize_public_text
 from .indexing.browse import (
     BROWSE_MODES,
     SEMANTIC_BROWSE_MODES,
+    diversity_vectors,
     rank_browse_results,
     sort_scores,
 )
@@ -55,6 +56,7 @@ from .searching.config import (
     _float_config,
     _int_config,
 )
+from .searching.diversity import diverse_order
 from .searching.query import (
     MAX_QUERY_LENGTH,
     _content_terms,
@@ -2199,6 +2201,7 @@ class Search:
         deadline: float | None = None,
         sort: str | None = None,
         seed: int = 0,
+        query_vector=None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Rank, enrich, hydrate and cache one finished search.
 
@@ -2208,10 +2211,10 @@ class Search:
         ranked pool so the final page does not pay for one more ranking pass.
         """
         if pool is None:
-            pool = self._rank_results(source_results, query, pool_target)
+            pool = self._rank_results(source_results, query, pool_target, deadline=deadline)
         pool = self._enrich_pool(source_results, query, pool, pool_target)
         if query and sort and sort != "relevance":
-            pool = self._sort_results(pool, sort, seed, deadline)
+            pool = self._sort_results(pool, sort, seed, deadline, query_vector=query_vector)
         state = self._page_state(pool, offset, page_size, debug)
         self._hydrate_results(state["results"])
         hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
@@ -2358,9 +2361,9 @@ class Search:
             )
 
             def rank_pool() -> list[dict[str, Any]]:
-                ranked = self._rank_results(completed, query, pool_target)
+                ranked = self._rank_results(completed, query, pool_target, deadline=deadline)
                 if query and sort and sort != "relevance":
-                    ranked = self._sort_results(ranked, sort, seed, deadline)
+                    ranked = self._sort_results(ranked, sort, seed, deadline, query_vector=query_vector)
                 return ranked
 
             provider_order: list[str] = []
@@ -2612,6 +2615,7 @@ class Search:
                 deadline=deadline,
                 sort=sort,
                 seed=seed,
+                query_vector=query_vector,
             )
             if time.monotonic() >= deadline and not deadline_hit:
                 scope["status"] = "partial"
@@ -2911,9 +2915,31 @@ class Search:
         mode: str,
         seed: int,
         deadline: float | None,
+        *,
+        balance_sources: bool = False,
+        limit: int | None = None,
+        query_vector=None,
     ) -> list[dict[str, Any]]:
         scores: dict[str, float] = {}
-        if mode == "random":
+        if mode in {"diverse", "semantic-diverse"}:
+            try:
+                if mode == "semantic-diverse":
+                    ordered = self._semantic_diversity(
+                        pool, deadline, query_vector=query_vector,
+                        balance_sources=balance_sources, limit=limit,
+                    )
+                else:
+                    order = diverse_order(
+                        [doc.get("title") or "" for doc in pool], deadline,
+                        sources=[doc["source_key"] for doc in pool] if balance_sources else None,
+                        limit=limit,
+                    )
+                    ordered = [pool[position] for position in order]
+            except TimeoutError:
+                return pool if limit is None else pool[:limit]
+            scores = {doc["id"]: float(len(ordered) - rank) for rank, doc in enumerate(ordered)}
+            pool = ordered
+        elif mode == "random":
             scores = {
                 doc["id"]: int.from_bytes(hashlib.blake2b(
                     f"{seed}:{doc['id']}".encode(), digest_size=8
@@ -2957,13 +2983,95 @@ class Search:
             for rank, doc in enumerate(ordered, 1)
         ]
 
+    def _semantic_diversity(
+        self, pool, deadline, *, query_vector, balance_sources, limit,
+    ):
+        import numpy as np
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for doc in pool:
+            grouped.setdefault(doc["source_key"], []).append(doc)
+        with self._state_lock:
+            runtimes = dict(self.runtimes)
+            sources = dict(self.sources)
+        vectors, relevance = {}, {}
+        for key, docs in grouped.items():
+            source = sources.get(key)
+            runtime = runtimes.get(source.collection_key) if source else None
+            if not isinstance(runtime, IndexedRuntime):
+                continue
+            index = runtime.indexes.get(key)
+            if index is None:
+                continue
+            try:
+                embeddings, centrality = diversity_vectors(
+                    index, docs, deadline, with_centroid=balance_sources,
+                )
+            except (TimeoutError, sqlite3.Error, ValueError, RuntimeError) as error:
+                logger.debug("semantic diversity unavailable for %s: %s", key, error)
+                continue
+            for doc in docs:
+                path = doc["path"]
+                if path in embeddings:
+                    vectors[doc["id"]] = embeddings[path]
+                    relevance[doc["id"]] = centrality.get(path, 0.0)
+        if not vectors:
+            return pool if limit is None else pool[:limit]
+        dimension = len(next(iter(vectors.values())))
+        candidates = [doc for doc in pool if doc["id"] in vectors and len(vectors[doc["id"]]) == dimension]
+        matrix = np.stack([vectors[doc["id"]] for doc in candidates])
+        if not balance_sources:
+            maximum = max(max(0.0, float(doc.get("score") or 0.0)) for doc in pool)
+            relevance = (
+                {doc["id"]: max(0.0, float(doc.get("score") or 0.0)) / maximum for doc in pool}
+                if maximum > 0 else
+                {doc["id"]: 1 - rank / max(1, len(pool)) for rank, doc in enumerate(pool)}
+            )
+            prior = np.array([relevance[doc["id"]] for doc in candidates], dtype=np.float32)
+            if query_vector is not None and query_vector.shape[-1] == dimension:
+                query = np.asarray(query_vector, dtype=np.float32).reshape(-1)
+                norm = np.linalg.norm(query)
+                # Raw cosine alone discards exact-title boosts and profile
+                # penalties already applied by hybrid relevance ranking.
+                base = (matrix @ (query / norm) + prior) / 2 if norm > 0 and np.isfinite(norm) else prior
+            else:
+                base = prior
+        else:
+            base = None
+        if base is None:
+            base = np.array([relevance[doc["id"]] for doc in candidates])
+        order = diverse_order(
+            [doc.get("title") or "" for doc in candidates], deadline,
+            vectors=matrix, relevance=base,
+            sources=[doc["source_key"] for doc in candidates] if balance_sources else None,
+            limit=limit,
+        )
+        ordered = [candidates[position] for position in order]
+        scored_ids = {doc["id"] for doc in candidates}
+        ordered.extend(doc for doc in pool if doc["id"] not in scored_ids)
+        return ordered if limit is None else ordered[:limit]
+
     def _rank_results(
         self,
         source_results: list[SourceResult],
         query: str,
         limit: int,
+        *,
+        deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         if not query:
+            mode = next(
+                (doc.get("ranking", {}).get("browse", {}).get("mode")
+                 for result in source_results for doc in result.items),
+                None,
+            )
+            if mode in {"diverse", "semantic-diverse"}:
+                pool = rank_browse_results(
+                    source_results, sum(len(result.items) for result in source_results)
+                )
+                return self._sort_results(
+                    pool, mode, 0, deadline, balance_sources=True, limit=limit,
+                )
             return rank_browse_results(source_results, limit)
         return rank_results(
             source_results,
