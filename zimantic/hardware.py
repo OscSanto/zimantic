@@ -148,8 +148,9 @@ def _ram() -> tuple[int, int]:
     except (OSError, ValueError):
         pass
     if not total:
-        total = GB
-    return total, available or total // 2
+        return GB, GB // 2
+    # A full container can report 0 or less free (used > limit): that is "no RAM free", not "unknown".
+    return total, max(0, available)
 
 
 def _cgroup_memory_limit() -> tuple[int, int] | None:
