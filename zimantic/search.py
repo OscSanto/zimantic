@@ -440,6 +440,20 @@ class Search:
             cfg=self.cfg,
         )
 
+    def _start_runtime_faiss(self, runtime: CollectionRuntime) -> None:
+        if not isinstance(runtime, IndexedRuntime):
+            return
+        try:
+            runtime.start_faiss()
+        except Exception as error:
+            logger.warning(
+                "zimantic: semantic search disabled for %s (%s); "
+                "falling back to title and full-text",
+                runtime.collection.label,
+                self.public_error(error),
+            )
+            logger.debug("FAISS reopen error: %s", error)
+
     def start_faiss(self) -> None:
         """Load FAISS and vector indexes off the server startup path."""
         if not self.semantic or not self._defer_faiss:
@@ -477,17 +491,7 @@ class Search:
                 for runtime in runtimes:
                     self._bind_runtime(runtime)
             for runtime in runtimes:
-                if isinstance(runtime, IndexedRuntime):
-                    try:
-                        runtime.start_faiss()
-                    except Exception as error:
-                        logger.warning(
-                            "zimantic: semantic search disabled for %s (%s); "
-                            "falling back to title and full-text",
-                            runtime.collection.label,
-                            self.public_error(error),
-                        )
-                        logger.debug("FAISS reopen error: %s", error)
+                self._start_runtime_faiss(runtime)
             with self._state_lock:
                 semantic_indexes = sum(
                     1
@@ -731,6 +735,11 @@ class Search:
             self.collections = new_collections
             self._discovery_batches = new_batches
             self._aggregate_revision = getattr(self, "_aggregate_revision", 0) + 1
+            load_faiss = self.semantic and not self._defer_faiss
+        if load_faiss:
+            for key, runtime in new_runtimes.items():
+                if runtime is not previous_runtimes.get(key):
+                    self._start_runtime_faiss(runtime)
         sources = self._publish_runtime_sources()
         kept_runtime_ids = {id(runtime) for runtime in new_runtimes.values()}
         kept_batch_ids = {id(batch) for batch in new_batches}
@@ -804,6 +813,10 @@ class Search:
             self.collections = new_collections
             self._discovery_batches = [batch] if batch is not None else []
             self._aggregate_revision = getattr(self, "_aggregate_revision", 0) + 1
+            load_faiss = self.semantic and not self._defer_faiss
+        if load_faiss:
+            for runtime in new_runtimes.values():
+                self._start_runtime_faiss(runtime)
         sources = self._publish_runtime_sources()
         for runtime in old_runtimes.values():
             try:
@@ -850,6 +863,7 @@ class Search:
                         stale = True
                     else:
                         stale = False
+                        load_faiss = self.semantic and not self._defer_faiss
                         for discovered in result.collections:
                             self._bind_runtime(discovered.runtime)
                             self.runtimes[discovered.collection.key] = (
@@ -864,6 +878,9 @@ class Search:
                 if stale:
                     result.close()
                     return
+                if load_faiss:
+                    for discovered in result.collections:
+                        self._start_runtime_faiss(discovered.runtime)
                 self._publish_runtime_sources()
             except Exception as error:
                 logger.warning(

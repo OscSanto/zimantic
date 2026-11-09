@@ -382,6 +382,78 @@ class RuntimeCapabilityTests(unittest.TestCase):
         finally:
             search._executor.shutdown(wait=True)
 
+    def test_late_discovery_loads_vectors_only_after_faiss_is_ready(self):
+        for semantic, deferred in ((True, False), (True, True), (False, False)):
+            with self.subTest(semantic=semantic, deferred=deferred):
+                search = _bare_search({})
+                runtime = search.runtimes.pop("")
+                search.semantic = semantic
+                search._defer_faiss = deferred
+                batch = unittest.mock.Mock()
+                discovered = types.SimpleNamespace(
+                    collection=runtime.collection, runtime=runtime, batch=batch
+                )
+                result = types.SimpleNamespace(
+                    collections=[discovered], diagnostics=()
+                )
+                try:
+                    with (
+                        patch("zimantic.discovery.discover_collections", return_value=result),
+                        patch.object(search, "_publish_runtime_sources", return_value=[]),
+                        patch.object(runtime, "start_faiss") as start,
+                        patch("zimantic.search.threading.Thread") as thread,
+                    ):
+                        search._start_background_discovery(())
+                        thread.call_args.kwargs["target"]()
+                        self.assertEqual(start.call_count, int(semantic and not deferred))
+                        self.assertIs(search.runtimes[runtime.collection.key], runtime)
+                        if semantic and deferred:
+                            search.start_faiss()
+                            thread.call_args.kwargs["target"]()
+                            start.assert_called_once_with()
+                finally:
+                    search._executor.shutdown(wait=True)
+
+    def test_collection_refresh_loads_new_runtime_vectors_after_startup(self):
+        search = _bare_search({})
+        runtime = search.runtimes.pop("")
+        batch = unittest.mock.Mock(
+            collections=[runtime.collection], error=None
+        )
+        batch.open.return_value = runtime
+        search.runtime_config = _zim_runtime_config(".")
+        search.providers = {
+            "zim": types.SimpleNamespace(discover=lambda *_args: batch)
+        }
+        try:
+            with (
+                patch.object(search, "_publish_runtime_sources", return_value=[]),
+                patch.object(runtime, "start_faiss") as start,
+            ):
+                Search.refresh_collections(search, wait=True)
+                start.assert_called_once_with()
+                self.assertFalse(runtime.bindings["defer_faiss"])
+        finally:
+            search._executor.shutdown(wait=True)
+
+    def test_open_scope_refresh_loads_new_runtime_vectors_after_startup(self):
+        search = _bare_search({})
+        search.open_scope = object()
+        runtime = search.runtimes.pop("")
+        batch = unittest.mock.Mock(collections=[runtime.collection])
+        batch.open.return_value = runtime
+        try:
+            with (
+                patch("zimantic.providers.zim.provider.open_zim_scope_batch", return_value=batch),
+                patch.object(search, "_publish_runtime_sources", return_value=[]),
+                patch.object(runtime, "start_faiss") as start,
+            ):
+                search._refresh_open_scope()
+                start.assert_called_once_with()
+                self.assertFalse(runtime.bindings["defer_faiss"])
+        finally:
+            search._executor.shutdown(wait=True)
+
     def test_fulltext_startup_shares_one_budget_across_declared_runtimes(self):
         class _IsolatedRuntime(IsolatedFulltextRuntime):
             def set_fulltext_pool(self, pool):
