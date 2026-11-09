@@ -375,6 +375,7 @@
                 const zim = source.key;
                 if (!zim) return "";
                 if (source.homepage) return contentUrl(zim, source.homepage);
+                if (source.provider === "files") return contentUrl(zim);
                 // A readable archive can lack a resolvable main entry. If it is
                 // searchable, open a random article instead of a broken
                 // homepage link; otherwise the card has Details only.
@@ -598,8 +599,10 @@
                         open.className = "library-button library-info-action";
                         open.href = homepage;
                         open.dataset.libraryArticle = "true";
-                        open.textContent = source.homepage ? "Open" : "Random article";
-                        open.dataset.i18n = source.homepage ? "Open" : "Random article";
+                        const label = source.homepage ? "Open" :
+                            source.provider === "files" ? "Browse files" : "Random article";
+                        open.textContent = label;
+                        open.dataset.i18n = label;
                         actions.append(open);
                     }
                     if (searchable) {

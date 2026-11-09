@@ -51,6 +51,7 @@
             "Details": "Detalles",
             "Open": "Abrir",
             "Random article": "Artículo aleatorio",
+            "Browse files": "Explorar archivos",
             "Unavailable": "No disponible",
             "Loading...": "Cargando...",
             "No results": "Sin resultados",

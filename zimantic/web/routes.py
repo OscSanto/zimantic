@@ -775,7 +775,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             entry = store.resolve(path)
 
             requested_path = None if path is None else path
-            if requested_path != entry.path:
+            if (requested_path or "") != entry.path:
                 return _redirect_article(
                     "article", source, entry.path, highlight, request
                 )
@@ -1126,7 +1126,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 source_next=source_next,
             )
 
-        if requested_path != article_dict["path"]:
+        if (requested_path or "") != article_dict["path"]:
             return _redirect_article(
                 "content", source, article_dict["path"], highlight, request
             )

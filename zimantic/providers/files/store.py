@@ -17,8 +17,10 @@ import logging
 import os
 import secrets
 import stat as stat_module
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from ...content.serving import HEAD_READ_BYTES, MAX_ICON_BYTES
 from ...content.store import (
@@ -36,12 +38,14 @@ from .common import (
     is_hidden_name,
     is_hidden_path,
     is_track_sidecar,
+    iter_confined_directory,
     matches_any,
     mimetype_for,
     normalize_relative_path,
     open_confined,
     relative_join,
 )
+from .listing import directory_page, listing_row
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +74,7 @@ class FilesContentStore:
         max_article_bytes: int = 1 << 30,
         max_icon_bytes: int = MAX_ICON_BYTES,
         index: Any | None = None,
+        web_base_path: str = "",
     ) -> None:
         self.source = source
         self.root = Path(os.path.realpath(Path(root)))
@@ -81,6 +86,10 @@ class FilesContentStore:
         self.max_article_bytes = max(0, int(max_article_bytes))
         self.max_icon_bytes = max(0, int(max_icon_bytes))
         self.index = index
+        self.web_base_path = web_base_path
+        traversal = getattr(config, "traversal", None)
+        self._max_visited_entries = getattr(traversal, "max_visited_entries", 1_000_000)
+        self._traversal_timeout = getattr(traversal, "traversal_timeout_seconds", 300)
         self._closed = False
         try:
             info = os.stat(self.root, follow_symlinks=False)
@@ -120,7 +129,7 @@ class FilesContentStore:
     def _directory_index(self, directory: str) -> str | None:
         for name in _INDEX_NAMES:
             candidate = relative_join(directory, name)
-            if self._regular(candidate):
+            if not matches_any(self.exclude, candidate) and self._regular(candidate):
                 return candidate
         return None
 
@@ -128,7 +137,13 @@ class FilesContentStore:
         if path is None or path == "":
             main = self.main_path()
             if main is None:
-                raise ArticleNotFoundError("source has no homepage")
+                candidate = self.membership_root
+                if candidate:
+                    return self._resolve_file(candidate + "/")
+                info = self._stat("")
+                if info is None or not stat_module.S_ISDIR(info.st_mode):
+                    raise ArticleNotFoundError("article not found")
+                return ""
             return main
         candidate, trailing = self._normalize(path)
         info = self._stat(candidate)
@@ -139,7 +154,7 @@ class FilesContentStore:
                 raise ArticleNotFoundError("article not found")
             index = self._directory_index(candidate)
             if index is None:
-                raise ArticleNotFoundError("article not found")
+                return candidate + "/"
             return index
         if trailing or not stat_module.S_ISREG(info.st_mode):
             raise ArticleNotFoundError("article not found")
@@ -173,8 +188,17 @@ class FilesContentStore:
     def resolve(self, path: str | None) -> ContentEntry:
         requested = path
         final = self._resolve_file(path)
-        info = self._stat(final)
-        if info is None or not stat_module.S_ISREG(info.st_mode):
+        info = self._stat(final.rstrip("/"))
+        if info is None:
+            raise ArticleNotFoundError("article not found")
+        if stat_module.S_ISDIR(info.st_mode):
+            return ContentEntry(
+                path=final,
+                title=self._directory_title(final),
+                mimetype="text/html",
+                redirect_path=requested if requested != final else None,
+            )
+        if not stat_module.S_ISREG(info.st_mode):
             raise ArticleNotFoundError("article not found")
         return ContentEntry(
             path=final,
@@ -197,8 +221,27 @@ class FilesContentStore:
         self, path: str | None, *, head_only: bool, max_bytes: int
     ) -> ArticleData:
         final = self._resolve_file(path)
-        info = self._stat(final)
-        if info is None or not stat_module.S_ISREG(info.st_mode):
+        info = self._stat(final.rstrip("/"))
+        if info is None:
+            raise ArticleNotFoundError("article not found")
+        if stat_module.S_ISDIR(info.st_mode):
+            content = self._directory_page(final)
+            limit = max(0, int(max_bytes))
+            if not head_only and len(content) > limit:
+                raise ArticleTooLargeError("directory listing exceeds the serving limit")
+            total = len(content)
+            if head_only:
+                content = content[: min(limit, HEAD_READ_BYTES)]
+            return ArticleData(
+                source_key=self.source.key,
+                path=final,
+                title=self._directory_title(final),
+                mimetype="text/html",
+                content=content,
+                total=total,
+                truncated=len(content) < total,
+            )
+        if not stat_module.S_ISREG(info.st_mode):
             raise ArticleNotFoundError("article not found")
         size = int(info.st_size)
         limit = max(0, int(max_bytes))
@@ -249,6 +292,63 @@ class FilesContentStore:
             total=total,
             truncated=truncated,
         )
+
+    def _directory_title(self, path: str) -> str:
+        return Path(path.rstrip("/")).name if path else self.source.title
+
+    def _directory_page(self, path: str) -> bytes:
+        directory = path.rstrip("/")
+        base_url = f"{self.web_base_path}/article/{quote(self.source.key, safe='')}/"
+        rows: list[tuple[bool, str, str]] = []
+        row_bytes = 0
+        started = time.monotonic()
+        entries = iter_confined_directory(self.root, directory)
+        try:
+            for examined, (name, info) in enumerate(entries, 1):
+                if (
+                    examined > self._max_visited_entries
+                    or time.monotonic() - started > self._traversal_timeout
+                ):
+                    raise ArticleTooLargeError(
+                        "directory listing exceeds the traversal limit"
+                    )
+                if is_hidden_name(name):
+                    continue
+                relative = relative_join(directory, name)
+                try:
+                    normalize_relative_path(relative)
+                except ValueError:
+                    continue
+                is_directory = stat_module.S_ISDIR(info.st_mode)
+                if not is_directory and not stat_module.S_ISREG(info.st_mode):
+                    continue
+                if is_directory and self.loose_only and not directory:
+                    continue
+                if matches_any(self.exclude, relative, directory=is_directory):
+                    continue
+                row = listing_row(
+                    base_url,
+                    relative + ("/" if is_directory else ""),
+                    name,
+                    directory=is_directory,
+                    size=int(info.st_size),
+                    mtime=info.st_mtime,
+                )
+                row_bytes += len(row.encode("utf-8"))
+                if row_bytes > self.max_article_bytes:
+                    raise ArticleTooLargeError("directory listing exceeds the serving limit")
+                rows.append((not is_directory, name.casefold(), row))
+        except FilesConfinedError as error:
+            raise ArticleNotFoundError("directory not found") from error
+        finally:
+            entries.close()
+        content = directory_page(
+            self._directory_title(path), path, base_url,
+            [row for _kind, _name, row in sorted(rows)],
+        )
+        if len(content) > self.max_article_bytes:
+            raise ArticleTooLargeError("directory listing exceeds the serving limit")
+        return content
 
     def read_range(
         self, path: str, *, start: int, end: int, max_bytes: int

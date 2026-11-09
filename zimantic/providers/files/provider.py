@@ -424,6 +424,7 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
             config=self.config,
             max_article_bytes=self._max_article_bytes,
             index=index,
+            web_base_path=self.web_base_path,
         )
 
     def max_sources_per_search(self) -> int | None:

@@ -240,7 +240,7 @@ def test_icons_and_random(tmp_path):
         store.close()
 
 
-def test_directory_without_index_is_not_listed(tmp_path):
+def test_directory_without_index_lists_files_and_preserves_homepages(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()
     (root / "no-index").mkdir()
@@ -248,9 +248,77 @@ def test_directory_without_index_is_not_listed(tmp_path):
     config = files_config(root, granularity="collection")
     store = _store(root, config, "files:modules:root")
     try:
-        with pytest.raises(ArticleNotFoundError):
-            store.resolve("no-index")
+        assert store.resolve(None).path == ""
+        assert store.resolve("no-index").path == "no-index/"
+        assert store.resolve("no-index/").mimetype == "text/html"
+        listing = store.read("no-index/", head_only=False, max_bytes=1 << 20)
+        assert b'no-index/page.html' in listing.content
+        assert b'Filter files' in listing.content
+        assert listing.total == len(listing.content)
+        assert not listing.truncated
         assert store.exists("no-index/page.html") is True
+
+        (root / "no-index" / "index.htm").write_text("homepage", encoding="utf-8")
+        assert store.resolve("no-index/").path == "no-index/index.htm"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_listing_escapes_links_and_omits_denied_paths(tmp_path, monkeypatch, fallback):
+    root = tmp_path / "modules"
+    root.mkdir()
+    (root / "folder & stuff").mkdir()
+    (root / "a & b #%.txt").write_text("notes", encoding="utf-8")
+    (root / ".secret.txt").write_text("secret", encoding="utf-8")
+    (root / "excluded.txt").write_text("secret", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leaked.txt").write_text("secret", encoding="utf-8")
+    try:
+        (root / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    if fallback:
+        monkeypatch.setattr(files_common, "_no_follow_supported", lambda: False)
+    config = files_config(
+        root, granularity="collection", exclude=("excluded.txt", "**/node_modules/**")
+    )
+    store = _store(root, config, "files:modules:root")
+    try:
+        store.web_base_path = "/zimantic"
+        data = store.read(None, head_only=False, max_bytes=1 << 20).content
+        assert b'/zimantic/article/files%3Amodules%3Aroot/a%20%26%20b%20%23%25.txt' in data
+        assert b'a &amp; b #%.txt' in data
+        assert b'folder%20%26%20stuff/' in data
+        assert data.index(b'folder &amp; stuff/') < data.index(b'a &amp; b #%.txt')
+        for name in (b".secret", b"excluded.txt", b"node_modules", b"linked", b"leaked", str(root).encode()):
+            assert name not in data
+        with pytest.raises(ArticleNotFoundError):
+            store.read("linked/", head_only=False, max_bytes=1 << 20)
+    finally:
+        store.close()
+
+
+def test_listing_loose_source_and_serving_limits(tmp_path):
+    root = tmp_path / "modules"
+    build_tree(root)
+    store = _store(root, files_config(root), "files:modules:__loose__")
+    try:
+        data = store.read(None, head_only=False, max_bytes=1 << 20).content
+        assert b"loose.txt" in data
+        assert b"algebra/" not in data
+        assert b"biology/" not in data
+        head = store.read(None, head_only=True, max_bytes=32)
+        assert head.content == data[:32]
+        assert head.total == len(data)
+        assert head.truncated
+        with pytest.raises(ArticleTooLargeError):
+            store.read(None, head_only=False, max_bytes=32)
+        store._max_visited_entries = 1
+        with pytest.raises(ArticleTooLargeError, match="traversal limit"):
+            store.read(None, head_only=False, max_bytes=1 << 20)
     finally:
         store.close()
 

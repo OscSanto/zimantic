@@ -12,7 +12,13 @@ from zimantic.providers.files.discovery import files_dir_key
 from zimantic.search import Search
 from zimantic.web.app import create_app
 
-from .helpers import build_sources, build_tree, files_config, open_runtime
+from .helpers import (
+    build_sources,
+    build_tree,
+    files_config,
+    open_runtime,
+    runtime_config,
+)
 
 
 @pytest.fixture()
@@ -167,3 +173,48 @@ def test_search_and_library_payloads_use_files_keys_without_absolute_paths(
     assert algebra["collection"]["key"] == "files:modules"
     assert algebra["homepage"] == "algebra/index.html"
     assert algebra["provider"] == "files"
+
+
+@pytest.mark.parametrize("granularity", ["collection", "children"])
+def test_unindexed_source_opens_directory_listing(tmp_path, granularity):
+    root = tmp_path / "modules"
+    (root / "folder & stuff").mkdir(parents=True)
+    (root / "folder & stuff" / "notes #%.txt").write_text("hello", encoding="utf-8")
+    (root / "loose.txt").write_text("loose", encoding="utf-8")
+    config = files_config(root, granularity=granularity)
+    settings = runtime_config(
+        tmp_path / "indexes", config, web_base_path="/zimantic"
+    )
+    search = Search(settings, semantic=False)
+    try:
+        with TestClient(create_app(search), root_path="/zimantic") as client:
+            library = client.get("/library.json").json()
+            key = (
+                "files:modules:root" if granularity == "collection"
+                else files_dir_key("modules", "folder & stuff")
+            )
+            source = next(item for item in library if item["key"] == key)
+            assert source["homepage"] is None
+            assert source["searchable"] is False
+            home = f"/content/{quote(key, safe='')}"
+            shell = client.get(home)
+            assert shell.status_code == 200
+            assert b"<iframe" in shell.content
+            path = "" if granularity == "collection" else "folder & stuff/"
+            raw = client.get(_article(key, path or None))
+            assert raw.status_code == 200
+            assert b"Filter files" in raw.content
+            assert b"data-zimantic-bridge" in raw.content
+            assert str(root).encode() not in raw.content
+            listing = client.get(_article(key, "folder%20%26%20stuff/"))
+            assert b'/zimantic/article/' in listing.content
+            assert b'notes%20%23%25.txt' in listing.content
+            file = client.get(_article(key, "folder%20%26%20stuff/notes%20%23%25.txt"))
+            assert file.status_code == 200
+            assert file.content == b"hello"
+            head = client.head(_article(key, path or None))
+            assert head.status_code == 200
+            assert head.content == b""
+            assert int(head.headers["content-length"]) == len(raw.content)
+    finally:
+        search.close()

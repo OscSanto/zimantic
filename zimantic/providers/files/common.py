@@ -15,7 +15,7 @@ import re
 import shutil
 import stat as stat_module
 import subprocess
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -712,6 +712,46 @@ def list_directory(root: Path | str, relative_dir: str = "") -> list[os.DirEntry
         return sorted(iterator, key=lambda entry: entry.name)
 
 
+def iter_confined_directory(
+    root: Path | str, relative_dir: str = ""
+) -> Iterator[tuple[str, os.stat_result]]:
+    """Scan a directory through a no-follow descriptor where supported."""
+    root_path = Path(root)
+    parts = path_components(relative_dir)
+    directory_fd: int | None = None
+    try:
+        if _no_follow_supported():
+            directory_fd = os.open(
+                root_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+            for part in parts:
+                child_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                os.close(directory_fd)
+                directory_fd = child_fd
+            target = directory_fd
+        else:
+            target, info = _fallback_confined_path(root_path, parts)
+            if not stat_module.S_ISDIR(info.st_mode):
+                raise FilesConfinedError("not a directory")
+        with os.scandir(target) as entries:
+            for entry in entries:
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not _is_reparse_point(info):
+                    yield entry.name, info
+    except OSError as error:
+        raise FilesConfinedError(str(error)) from error
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
 def regular_file_names(root: Path | str, relative_dir: str = "") -> list[str]:
     """Names of regular, non-symlink files directly inside a directory."""
     names: list[str] = []
@@ -747,6 +787,7 @@ __all__ = [
     "is_ocr_candidate",
     "is_track_sidecar",
     "is_within",
+    "iter_confined_directory",
     "library_family",
     "list_directory",
     "matches_any",

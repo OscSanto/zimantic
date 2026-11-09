@@ -4,6 +4,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from zimantic.providers.files.listing import directory_page
+
 APP_JS = Path(__file__).resolve().parents[1] / "zimantic" / "web" / "static" / "app.js"
 NODE = shutil.which("node")
 
@@ -16,6 +18,85 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
+    def test_directory_listing_filters_names_and_sorts_folders_first(self):
+        page = directory_page("Files", "", "/article/files/", []).decode()
+        listing_script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+        script = """
+const makeRow = (name, kind, size, modified) => ({
+  cells: [{textContent: name}, {textContent: kind}],
+  dataset: {size, modified}, hidden: false,
+});
+const rows = [
+  makeRow("notes.txt", "File", 100, 20),
+  makeRow("Folder/", "Folder", 0, 10),
+  makeRow("big.txt", "File", 10, 30),
+];
+const body = {
+  rows: [...rows],
+  appendChild(row) { this.rows = this.rows.filter((item) => item !== row); this.rows.push(row); },
+};
+const controls = {
+  filter: {value: "", addEventListener(event, fn) {this[event] = fn;}},
+  sort: {value: "name", addEventListener(event, fn) {this[event] = fn;}},
+  count: {}, "no-matches": {},
+};
+const document = {
+  querySelector: () => body,
+  getElementById: (id) => controls[id],
+};
+""" + listing_script + """
+const names = () => body.rows.filter((row) => !row.hidden).map((row) => row.cells[0].textContent);
+controls.filter.value = "NOTES";
+controls.filter.input();
+const filtered = {names: names(), count: controls.count.textContent};
+controls.filter.value = "missing";
+controls.filter.input();
+const noMatches = !controls["no-matches"].hidden && names().length === 0;
+controls.filter.value = "";
+controls.sort.value = "size";
+controls.sort.change();
+const bySize = names();
+controls.sort.value = "name";
+controls.sort.change();
+console.log(JSON.stringify({filtered, noMatches, bySize, byName: names()}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(json.loads(result.stdout), {
+            "filtered": {"names": ["notes.txt"], "count": "1 of 3 items"},
+            "noMatches": True,
+            "bySize": ["Folder/", "notes.txt", "big.txt"],
+            "byName": ["Folder/", "big.txt", "notes.txt"],
+        })
+
+    def test_unindexed_files_link_to_listing_instead_of_random_or_dead_end(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const appPath = (path) => "/zimantic" + path;
+const contentUrl = (key, path = "") =>
+    appPath("/content/" + encodeURIComponent(key) + (path ? "/" + path : ""));
+{_function_source(source, "function libraryHomepageUrl(", "function libraryLanguage(")}
+const cases = [
+    {{key: "files:modules:root", provider: "files", searchable: false}},
+    {{key: "files:modules:root", provider: "files", searchable: true}},
+    {{key: "files:modules:root", provider: "files", homepage: "index.html"}},
+    {{key: "zim:books:manual", provider: "zim", searchable: true}},
+    {{key: "zim:books:manual", provider: "zim", searchable: false}},
+];
+console.log(JSON.stringify(cases.map(libraryHomepageUrl)));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(json.loads(result.stdout), [
+            "/zimantic/content/files%3Amodules%3Aroot",
+            "/zimantic/content/files%3Amodules%3Aroot",
+            "/zimantic/content/files%3Amodules%3Aroot/index.html",
+            "/zimantic/random?source=zim%3Abooks%3Amanual",
+            "",
+        ])
+
     def test_both_all_sources_controls_clear_empty_search_scope_and_url(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
