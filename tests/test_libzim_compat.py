@@ -8,7 +8,11 @@ import pytest
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-from zimantic.libzim_compat import get_entry_by_id, search_results
+from zimantic.libzim_compat import (
+    get_entry_by_id,
+    search_results,
+    supports_threaded_search,
+)
 
 
 @pytest.mark.parametrize(
@@ -62,3 +66,41 @@ def test_versioned_entry_lookup_and_search_results():
         {"path": "alpha", "title": "Alpha"}
     ]
     assert search_results(new_search, 0, 1) == [{"path": "alpha", "title": "Alpha"}]
+
+
+@pytest.mark.parametrize(
+    ("search_class", "supported"),
+    [
+        (SimpleNamespace(getResults=lambda start, count: []), False),
+        (SimpleNamespace(get_results=lambda start, count: []), False),
+        (SimpleNamespace(
+            get_results=lambda start, count, *, include_snippets=True: [],
+        ), True),
+    ],
+)
+def test_development_thread_capability_checks_search_api(monkeypatch, search_class, supported):
+    from libzim import search
+
+    monkeypatch.setattr(search, "Search", search_class)
+    supports_threaded_search.cache_clear()
+    try:
+        assert supports_threaded_search() is supported
+    finally:
+        supports_threaded_search.cache_clear()
+
+
+@pytest.mark.parametrize("gil_released", [False, True])
+def test_snippet_opt_out_is_only_passed_to_capable_bindings(monkeypatch, gil_released):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        "zimantic.libzim_compat.supports_threaded_search", lambda: gil_released,
+    )
+    getter = Mock(return_value=[SimpleNamespace(path="alpha", title="Alpha")])
+    assert search_results(
+        SimpleNamespace(get_results=getter), 0, 1, include_snippets=False,
+    ) == [{"path": "alpha", "title": "Alpha"}]
+    if gil_released:
+        getter.assert_called_once_with(0, 1, include_snippets=False)
+    else:
+        getter.assert_called_once_with(0, 1)

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Benchmark shared native-search budgets in transient systemd user services."""
 
 from __future__ import annotations
@@ -18,6 +17,9 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import libzim
+from libzim.version import get_versions
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -73,11 +75,16 @@ def probe(spec: dict) -> dict:
     resident = bytearray(spec.get("resident_mib", 0) << 20)
     for offset in range(0, len(resident), 4096):
         resident[offset] = 1
-    pools = [FulltextPool(workers) for _ in range(len(paths) if mode == "per-collection" else 1)]
+    backend = spec.get("backend", "processes")
+    pools = [
+        FulltextPool(workers) if backend == "processes"
+        else FulltextPool(workers, backend=backend)
+        for _ in range(len(paths) if mode == "per-collection" else 1)
+    ]
     jobs = [(index, path, query) for query in QUERIES for index, path in enumerate(paths)]
     jobs = (jobs * ((spec["requests"] + len(jobs) - 1) // len(jobs)))[:spec["requests"]]
     report = {
-        "workers": workers, "mode": mode, "pool_count": len(pools),
+        "workers": workers, "mode": mode, "backend": backend, "pool_count": len(pools),
         "worker_budget": workers * len(pools), "source_workers": spec["source_workers"],
         "detected_hardware": vars(hw), "requested_workers": spec["workers"],
         "resident_mib": spec.get("resident_mib", 0),
@@ -106,29 +113,44 @@ def probe(spec: dict) -> dict:
             else:
                 before = cgroup_stats()
                 started = time.perf_counter()
-                results = list(executor.map(search, jobs))
+                results = []
+                reference = None
+                consistent = True
+                while True:
+                    batch = list(executor.map(search, jobs))
+                    digests = [item[1] for item in batch]
+                    if reference is None:
+                        reference = digests
+                    consistent &= digests == reference
+                    results.extend(batch)
+                    if time.perf_counter() - started >= spec.get("min_seconds", 0):
+                        break
                 elapsed = time.perf_counter() - started
                 after = cgroup_stats()
                 latencies = sorted(item[0] for item in results)
                 failures = sum(item[1] is None for item in results)
                 report.update(
-                    status="failed-search" if failures else "ok",
-                    requests=len(jobs), elapsed_seconds=elapsed,
-                    requests_per_second=len(jobs) / elapsed,
+                    status="failed-search" if failures or not consistent else "ok",
+                    requests=len(results), elapsed_seconds=elapsed,
+                    requests_per_second=len(results) / elapsed,
                     p50_ms=statistics.median(latencies),
                     p95_ms=latencies[int(0.95 * (len(latencies) - 1))],
                     failed_searches=failures,
                     returned_hits=sum(item[2] for item in results),
                     result_digest=None if failures else hashlib.sha256(
-                        "".join(item[1] for item in results).encode()
+                        "".join(reference).encode()
                     ).hexdigest(),
                     measured_cpu_usage_usec=after.get("cpu.stat", {}).get("usage_usec", 0)
                     - before.get("cpu.stat", {}).get("usage_usec", 0),
                     measured_throttled_usec=after.get("cpu.stat", {}).get("throttled_usec", 0)
                     - before.get("cpu.stat", {}).get("throttled_usec", 0),
                 )
+                cpu_seconds = report["measured_cpu_usage_usec"] / 1_000_000
+                report["cpu_ms_per_request"] = cpu_seconds * 1000 / len(results)
+                report["average_cpu_cores"] = cpu_seconds / elapsed
         report["started_helpers"] = sum(
-            worker._process is not None for pool in pools for worker in pool._all
+            getattr(worker, "_process", None) is not None
+            for pool in pools for worker in pool._all
         )
         report["blacklisted_archives"] = [
             Path(path).name for path in paths if any(pool.is_broken(path) for pool in pools)
@@ -173,7 +195,9 @@ def pss_kib(pid: int) -> int:
     return total
 
 
-def constrained_trial(spec: dict, cpus: int, ram_mib: int) -> dict:
+def constrained_trial(
+    spec: dict, cpus: int, ram_mib: int, *, probe_script: Path | None = None,
+) -> dict:
     unit = f"zimantic-native-bench-{uuid.uuid4().hex}"
     command = [
         "systemd-run", "--user", "--wait", "--pipe", "--collect",
@@ -181,8 +205,12 @@ def constrained_trial(spec: dict, cpus: int, ram_mib: int) -> dict:
         "-p", f"MemoryMax={ram_mib}M", "-p", "MemorySwapMax=0",
         "-p", "RuntimeMaxSec=90s", "-p", "OOMPolicy=continue",
         "-p", "LimitCORE=0", "-p", f"WorkingDirectory={ROOT}",
-        sys.executable, str(Path(__file__).resolve()), "--probe", json.dumps(spec),
+        sys.executable, str(probe_script or Path(__file__).resolve()),
+        "--probe", json.dumps(spec),
     ]
+    for name in ("PYTHONPATH", "LD_LIBRARY_PATH"):
+        if name in os.environ:
+            command.insert(1, f"--setenv={name}={os.environ[name]}")
     with tempfile.TemporaryFile(mode="w+t") as errors, subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=errors, text=True
     ) as process:
@@ -230,12 +258,20 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--workers", nargs="+", default=["1", "2", "4", "8", "auto"])
     parser.add_argument(
+        "--backends", nargs="+", choices=("processes", "threads"),
+        default=["processes"],
+    )
+    parser.add_argument(
         "--limits", nargs="+",
         default=["1:256", "1:512", "2:512", "2:1024", "4:1024", "8:2048"],
         help="CPU-quota:RAM-MiB pairs",
     )
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--requests", type=int, default=96)
+    parser.add_argument(
+        "--min-seconds", type=float, default=0,
+        help="repeat measured query batches for at least this many seconds",
+    )
     parser.add_argument("--source-workers", type=int, default=8)
     parser.add_argument(
         "--resident-mib", type=int, default=0,
@@ -254,6 +290,8 @@ def main() -> None:
         parser.error("request, source-worker and repeat counts must be positive")
     if args.resident_mib < 0:
         parser.error("--resident-mib must not be negative")
+    if not 0 <= args.min_seconds <= 30:
+        parser.error("--min-seconds must be between 0 and 30")
     if any(value != "auto" and (not value.isdigit() or int(value) < 1) for value in args.workers):
         parser.error("--workers values must be positive integers or auto")
     try:
@@ -270,32 +308,43 @@ def main() -> None:
         "platform": platform.platform(), "queries": QUERIES,
         "archives": [{"name": Path(path).name, "bytes": Path(path).stat().st_size} for path in paths],
         "result_limit": 16, "requests_per_trial": args.requests,
+        "backends": args.backends,
+        "binding_path": libzim.__file__, "native_versions": dict(get_versions()),
+        "minimum_measured_seconds": args.min_seconds,
         "resident_mib": args.resident_mib,
         "rows": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for repetition in range(args.repeats):
         for cpus, ram in limits:
-            modes = [("shared", workers) for workers in args.workers]
+            modes = [
+                ("shared", workers, backend)
+                for workers in args.workers for backend in args.backends
+            ]
             if args.legacy:
-                modes.append(("per-collection", "2"))
+                modes.append(("per-collection", "2", "processes"))
             if repetition % 2:
                 modes.reverse()
-            for mode, workers in modes:
+            for mode, workers, backend in modes:
                 spec = {
                     "paths": paths, "workers": workers, "mode": mode,
                     "requests": args.requests, "source_workers": args.source_workers,
                     "resident_mib": args.resident_mib,
+                    "backend": backend,
+                    "min_seconds": args.min_seconds,
                 }
                 row = constrained_trial(spec, cpus, ram)
-                row.update(repetition=repetition, mode=mode, requested_workers=workers)
+                row.update(
+                    repetition=repetition, mode=mode,
+                    requested_workers=workers, backend=backend,
+                )
                 output["rows"].append(row)
                 args.output.write_text(json.dumps(output, indent=2) + "\n")
                 speed = row.get("requests_per_second", 0)
                 peak = row.get("cgroup", {}).get("memory.peak")
                 peak_text = f"{peak / (1 << 20):6.1f}" if peak is not None else "   n/a"
                 print(
-                    f"{repetition} cpu={cpus} ram={ram:4} {mode:14} workers={workers:4} "
+                    f"{repetition} cpu={cpus} ram={ram:4} {backend:9} {mode:14} workers={workers:4} "
                     f"{row['status']:14} {speed:7.1f} req/s "
                     f"cgroup={peak_text}MiB PSS={row['peak_tree_pss_mib']:6.1f}MiB",
                     flush=True,

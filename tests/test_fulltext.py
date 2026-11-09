@@ -45,6 +45,113 @@ class FulltextTimeoutTests(unittest.TestCase):
         finally:
             pool.close()
 
+
+class FulltextThreadTests(unittest.TestCase):
+    def make_pool(self, workers=1):
+        with patch("zimantic.libzim_compat.supports_threaded_search", return_value=True):
+            pool = FulltextPool(workers, backend="threads")
+        self.addCleanup(pool.close)
+        return pool
+
+    def test_requires_gil_releasing_binding(self):
+        with (
+            patch("zimantic.libzim_compat.supports_threaded_search", return_value=False),
+            self.assertRaisesRegex(ValueError, "GIL-releasing"),
+        ):
+            FulltextPool(1, backend="threads")
+
+    def test_timeout_keeps_worker_occupied_and_close_does_not_clear_active_cache(self):
+        pool = self.make_pool()
+        worker = pool._all[0]
+        started = threading.Event()
+        finish = threading.Event()
+        cleared = threading.Event()
+
+        def blocked(*_):
+            started.set()
+            finish.wait(timeout=5)
+            return [{"path": "article", "title": "Article"}]
+
+        try:
+            with (
+                patch.object(worker._cache, "search_results", side_effect=blocked),
+                patch.object(worker._cache, "clear", side_effect=cleared.set),
+                patch("zimantic.fulltext.FULLTEXT_TIMEOUT_SECONDS", 0.02),
+            ):
+                self.assertIsNone(pool.search_results("/tmp/example.zim", "query", 1))
+                self.assertTrue(started.is_set())
+                self.assertTrue(pool._idle.empty())
+                self.assertFalse(pool.is_broken("/tmp/example.zim"))
+                self.assertIsNone(pool.search_results("/tmp/example.zim", "again", 1))
+                pool.close()
+                self.assertFalse(cleared.is_set())
+                finish.set()
+                self.assertTrue(cleared.wait(timeout=2))
+                self.assertIsNone(pool.search_results("/tmp/example.zim", "closed", 1))
+        finally:
+            finish.set()
+
+    def test_workers_run_concurrently_with_distinct_caches(self):
+        pool = self.make_pool(2)
+        ready = threading.Barrier(2)
+
+        def search(*_):
+            ready.wait(timeout=2)
+            return [{"path": "article", "title": "Article"}]
+
+        self.assertIsNot(pool._all[0]._cache, pool._all[1]._cache)
+        with (
+            patch.object(pool._all[0]._cache, "search_results", side_effect=search),
+            patch.object(pool._all[1]._cache, "search_results", side_effect=search),
+            ThreadPoolExecutor(2) as callers,
+        ):
+            results = list(callers.map(
+                lambda _: pool.search("/tmp/example.zim", "query", 1), range(2),
+            ))
+        self.assertEqual(results, [["article"], ["article"]])
+
+    def test_archive_failure_and_reload(self):
+        pool = self.make_pool()
+        with patch.object(pool._all[0]._cache, "search_results", side_effect=RuntimeError("bad archive")):
+            self.assertIsNone(pool.search("/tmp/faulty.zim", "query", 1))
+        self.assertTrue(pool.is_broken("/tmp/faulty.zim"))
+        pool.clear_broken()
+        with patch.object(
+            pool._all[0]._cache, "search_results",
+            return_value=[{"path": "fixed", "title": "Fixed"}],
+        ):
+            self.assertEqual(pool.search("/tmp/faulty.zim", "query", 1), ["fixed"])
+
+
+class FulltextArchiveCacheTests(unittest.TestCase):
+    def test_versioned_handles_are_worker_private_and_lru_bounded(self):
+        from types import SimpleNamespace
+
+        from zimantic.fulltext_worker import ArchiveCache
+
+        archive = SimpleNamespace(has_fulltext_index=True)
+        with (
+            patch("zimantic.fulltext_worker.Archive", return_value=archive) as factory,
+            patch("zimantic.fulltext_worker.Searcher"),
+            patch("zimantic.fulltext_worker.search_results", return_value=[]),
+        ):
+            cache = ArchiveCache()
+            other = ArchiveCache()
+            cache.search_results("a", "query", 1, [1, 2])
+            cache.search_results("a", "query", 1, (1, 2))
+            self.assertEqual(factory.call_count, 1)
+            other.search_results("a", "query", 1, (1, 2))
+            self.assertEqual(factory.call_count, 2)
+            for path in ("b", "c", "d"):
+                cache.search_results(path, "query", 1)
+            cache.search_results("a", "query", 1, (1, 2))
+            cache.search_results("e", "query", 1)
+            self.assertNotIn(("b", None), cache.archives)
+            cache.search_results("a", "query", 1, (2, 3))
+            self.assertIn(("a", (2, 3)), cache.archives)
+            self.assertEqual(len(cache.archives), 4)
+
+class FulltextWorkerFailureTests(unittest.TestCase):
     def test_archive_failure_is_captured_before_worker_is_reused(self):
         pool = FulltextPool(1)
         worker = pool._all[0]

@@ -325,7 +325,7 @@ class RuntimeCapabilityTests(unittest.TestCase):
             try:
                 self.assertEqual(search.source_workers, 2)
                 search.start_fulltext_isolation()
-                pool_factory.assert_called_once_with(3)
+                pool_factory.assert_called_once_with(3, backend="processes")
             finally:
                 search.close()
 
@@ -342,7 +342,7 @@ class RuntimeCapabilityTests(unittest.TestCase):
                 late = _IsolatedRuntime()
                 search._bind_runtime(late)
                 self.assertIs(late.pool, search.fulltext_pool)
-                pool_factory.assert_called_once_with(1)
+                pool_factory.assert_called_once_with(1, backend="processes")
             finally:
                 search.close()
 
@@ -387,7 +387,9 @@ class RuntimeCapabilityTests(unittest.TestCase):
             def set_fulltext_pool(self, pool):
                 self.pool = pool
 
-        search = _bare_search({"libzim_search_processes": 6})
+        search = _bare_search({
+            "libzim_search_processes": 6, "libzim_search_backend": "threads",
+        })
         isolated = _IsolatedRuntime()
         second = _IsolatedRuntime()
         with patch("zimantic.fulltext.FulltextPool") as pool_factory:
@@ -399,7 +401,7 @@ class RuntimeCapabilityTests(unittest.TestCase):
             try:
                 search.start_fulltext_isolation()
                 search.start_fulltext_isolation()
-                pool_factory.assert_called_once_with(6)
+                pool_factory.assert_called_once_with(6, backend="threads")
                 self.assertIs(isolated.pool, search.fulltext_pool)
                 self.assertIs(second.pool, search.fulltext_pool)
                 search.runtimes["other"].set_fulltext_pool.assert_not_called()

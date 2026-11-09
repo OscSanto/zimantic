@@ -1,4 +1,4 @@
-"""Crash-isolated libzim full-text search.
+"""Bounded libzim full-text search, using processes or opt-in threads.
 
 python-libzim declares the ``SearchIterator`` getters without ``except +`` (see
 openzim/python-libzim#266). When a ZIM's full-text index references an entry
@@ -9,6 +9,9 @@ archive can take down a helper, not the server.
 
 The helpers also keep opened archives and searchers cached, so repeated
 searches do not pay the archive-open cost again.
+
+The thread backend requires a GIL-releasing binding. Each worker owns separate
+native handles; timeouts stop waiting but cannot interrupt a native call.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import signal
 import subprocess
 import sys
 import threading
+from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
 from .diagnostics import sanitize_public_text
@@ -211,20 +215,78 @@ class _Worker:
             pass
 
 
-class FulltextPool:
-    """A small pool of helper processes for native full-text searches."""
+class _ThreadWorker:
+    def __init__(self, closed: threading.Event) -> None:
+        from .fulltext_worker import ArchiveCache
 
-    def __init__(self, workers: int | None = None) -> None:
+        self._cache = ArchiveCache()
+        self._closed = closed
+        self._lock = threading.Lock()
+        self.archive_failure = False
+
+    def search_results(
+        self, zim_path: str, query: str, count: int, version: object = None,
+    ) -> list[dict[str, str]] | None:
+        with self._lock:
+            self.archive_failure = False
+            if self._closed.is_set():
+                return None
+            try:
+                return self._cache.search_results(zim_path, query, count, version)
+            except Exception as error:
+                self.archive_failure = True
+                logger.warning(
+                    "zimantic: native full-text search failed for %s: %s",
+                    _archive_name(zim_path),
+                    sanitize_public_text(str(error), (str(zim_path),)),
+                )
+                logger.debug("full-text failure for %s", zim_path, exc_info=True)
+                return None
+            finally:
+                if self._closed.is_set():
+                    self._cache.clear()
+
+    def close(self) -> None:
+        if self._lock.acquire(blocking=False):
+            try:
+                self._cache.clear()
+            finally:
+                self._lock.release()
+
+
+class FulltextPool:
+    """A bounded native-search pool with worker-private archive caches."""
+
+    def __init__(
+        self, workers: int | None = None, *, backend: str = "processes",
+    ) -> None:
+        if backend not in {"processes", "threads"}:
+            raise ValueError("native full-text backend must be 'processes' or 'threads'")
+        if backend == "threads":
+            from .libzim_compat import supports_threaded_search
+
+            if not supports_threaded_search():
+                raise ValueError(
+                    "threaded full-text search requires a GIL-releasing libzim binding"
+                )
         if workers is None:
             from .settings import default_fulltext_workers
 
             workers = default_fulltext_workers()
         count = max(1, int(workers))
+        self.backend = backend
         self._closed = threading.Event()
-        self._idle: queue.Queue[_Worker] = queue.Queue()
-        self._all: list[_Worker] = []
+        self._executor = (
+            ThreadPoolExecutor(count, thread_name_prefix="zimantic-fulltext")
+            if backend == "threads" else None
+        )
+        self._idle: queue.Queue[_Worker | _ThreadWorker] = queue.Queue()
+        self._all: list[_Worker | _ThreadWorker] = []
         for _ in range(count):
-            worker = _Worker(self._closed)
+            worker = (
+                _ThreadWorker(self._closed) if backend == "threads"
+                else _Worker(self._closed)
+            )
             self._all.append(worker)
             self._idle.put(worker)
         self._broken: set[str] = set()
@@ -255,7 +317,7 @@ class FulltextPool:
         count: int,
         version: object = None,
     ) -> list[dict[str, str]] | None:
-        """Return result paths and titles from one helper process."""
+        """Return result paths and titles from one native worker."""
         if self._closed.is_set() or self.is_broken(zim_path):
             return None
         try:
@@ -268,22 +330,42 @@ class FulltextPool:
             logger.debug("full-text worker unavailable for %s", zim_path)
             return None
         archive_failure = False
+        release_worker = True
         try:
-            results = (
-                None if self._closed.is_set()
-                else worker.search_results(zim_path, query, count, version)
-            )
-            archive_failure = worker.archive_failure
+            if self._closed.is_set():
+                results = None
+            elif self._executor is not None:
+                future = self._executor.submit(
+                    self._thread_search, worker, zim_path, query, count, version,
+                )
+                release_worker = False
+                try:
+                    results, archive_failure = future.result(
+                        timeout=FULLTEXT_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "zimantic: native full-text thread timed out for %s; "
+                        "its slot remains occupied until native work finishes",
+                        _archive_name(zim_path),
+                    )
+                    return None
+                except CancelledError:
+                    return None
+            else:
+                results = worker.search_results(zim_path, query, count, version)
+                archive_failure = worker.archive_failure
         except Exception as error:  # never let helper plumbing fail a search
             logger.warning(
                 "zimantic: full-text helper failed for %s: %s",
                 _archive_name(zim_path),
                 type(error).__name__,
             )
-            logger.debug("full-text helper failure for %s: %s", zim_path, error)
+            logger.debug("full-text helper failure for %s: %s", zim_path, error, exc_info=True)
             results = None
         finally:
-            self._idle.put(worker)
+            if release_worker:
+                self._idle.put(worker)
         if results is None and archive_failure and not self._closed.is_set():
             with self._broken_lock:
                 first_failure = zim_path not in self._broken
@@ -298,6 +380,15 @@ class FulltextPool:
                 logger.debug("full-text archive marked broken: %s", zim_path)
         return results
 
+    def _thread_search(self, worker, zim_path, query, count, version):
+        try:
+            return (
+                worker.search_results(zim_path, query, count, version),
+                worker.archive_failure,
+            )
+        finally:
+            self._idle.put(worker)
+
     def clear_broken(self) -> None:
         """Retry archives after a reload; an in-place repair may have fixed one."""
         with self._broken_lock:
@@ -306,6 +397,8 @@ class FulltextPool:
     def close(self) -> None:
         self._closed.set()
         atexit.unregister(self.close)
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
         for worker in self._all:
             worker.close()
         with self._broken_lock:

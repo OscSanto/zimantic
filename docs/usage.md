@@ -154,7 +154,8 @@ Normally omit these settings. They control different layers and should not be me
 |---|---|---|
 | `source_query_threads` | Shared server threads for source searches and previews: SQLite/FAISS, remote I/O and native-helper calls | Up to 8 usable logical CPU threads |
 | `onnx_query_threads` | ONNX threads inside one query-embedding call, not source fan-out | Up to 4 usable physical cores, leaving one for other work; minimum 1 |
-| `libzim_search_processes` | Shared native full-text subprocesses across every ZIM collection | Up to 8, bounded by CPU, source threads and available RAM; 256 MiB server/model reserve plus 128 MiB per helper |
+| `libzim_search_backend` | Native full-text execution backend | `"processes"`; opt-in `"threads"` requires a GIL-releasing python-libzim build |
+| `libzim_search_processes` | Shared native full-text worker slots across every ZIM collection, for either backend | Up to 8, bounded by CPU, source threads and available RAM; 256 MiB server/model reserve plus 128 MiB per worker |
 | `build_workers` | Concurrent source builds, not model calls | Up to 8; four usable logical CPU threads and four GiB available RAM per worker; minimum 1 |
 | `onnx_build_threads` | ONNX threads inside each build model call | Profile value 1/2/8, bounded by usable physical cores |
 | `onnx_build_workers` | Concurrent build model calls sharing one loaded model, including single-source builds | CPU, per-call threads, padded-token budget and available RAM, up to 8 |
@@ -253,5 +254,19 @@ Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` 
 For large libraries, `source_query_threads` controls source-query fan-out through one shared thread pool. It defaults to at most eight usable logical CPU threads, independently of the memory profile. `max_stream_ranks` limits completion-spaced intermediate ranking passes. Timed snapshots are additionally emitted about every 700 ms so a slow query keeps updating, and the final result still ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. Profiles retain 16 completion-spaced passes on desktops and 8 on low-memory devices.
 
 Native ZIM full-text search uses one reusable helper pool shared across all ZIM collections, rather than running libzim in the server's source threads. `libzim_search_processes` sets its server-wide budget independently of `source_query_threads`; when omitted, CPU affinity/quota, source-thread capacity and available RAM (including cgroup limits) determine the budget. Explicit positive values override that estimate. See [advanced resource overrides](#advanced-resource-overrides).
+
+`libzim_search_backend = "threads"` selects a bounded native thread pool instead.
+It requires the patched GIL-releasing reader bindings and gives
+each worker independent archive/searcher handles, with a four-archive LRU cache.
+Use it with the native libzim database-mutex acquisition fix as well.
+Both backends skip snippet generation when the binding supports that option:
+Zimantic only needs native paths and titles.
+The [controlled reader/thread benchmark](architecture.md#reader-gilthread-comparison-november-9-2026)
+documents native-search overrides for this desktop and a four-CPU/2 GiB proxy;
+it does not establish a whole-server Pi memory budget.
+Thread timeouts are soft: the caller stops waiting, but the worker slot and
+its handles remain occupied until the native call returns. Closing the pool
+rejects new work and cancels queued jobs without destroying active handles;
+running calls can delay interpreter exit. Processes remain the default.
 
 With libzim 4.1.0, malformed full-text results can abort the interpreter, and reader calls hold the GIL. Helpers both contain those crashes and provide real native-search parallelism: a four-worker benchmark was 3.4–4 times faster than threads, at a higher memory cost. A native crash logs the archive basename and disables that archive's native search until reload; other available channels remain usable. A helper killed by SIGKILL, including a cgroup OOM kill, does not blacklist the archive. Budget memory for the server and its helpers. See [the architecture rationale and benchmarks](architecture.md#native-zim-full-text-search-uses-helper-processes).

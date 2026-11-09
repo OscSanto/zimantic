@@ -150,6 +150,24 @@ class LibzimRuntimeApiTests(unittest.TestCase):
             pool.close()
         self.assertIn({"path": "Beta", "title": "Beta"}, results)
 
+    def test_threaded_fulltext_returns_the_same_titles_as_processes(self):
+        from zimantic.fulltext import FulltextPool
+        from zimantic.libzim_compat import supports_threaded_search
+
+        if not supports_threaded_search():
+            self.skipTest("requires a GIL-releasing libzim binding")
+        if not self.archive.has_fulltext_index:
+            self.skipTest("libzim was built without a full-text index")
+        results = []
+        for backend in ("processes", "threads"):
+            pool = FulltextPool(2, backend=backend)
+            try:
+                results.append(pool.search_results(str(self.zim_path), "brakes", 10))
+            finally:
+                pool.close()
+        self.assertEqual(results[0], results[1])
+        self.assertIn({"path": "Beta", "title": "Beta"}, results[1])
+
     def test_read_entry_produces_an_excerpt(self):
         # End-to-end: the real Archive -> private lookup -> text extraction.
         row = next(

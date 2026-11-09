@@ -71,6 +71,7 @@ _COMMON = {
     # Global request-work cap for an explicitly selected Kiwix collection.
     "max_explicit_collection_sources": 500,
     "embed_device": "auto",
+    "libzim_search_backend": "processes",
     "onnx_build_threads": 1,
     "embedding_batch_tokens": 1000,
     "max_html_bytes": 4_194_304,
@@ -175,6 +176,8 @@ def _coerce_config_value(key: str, value: object, default: object) -> object | N
     ``batch_size`` or ``port``), so reject it at load time and keep the profile
     default.
     """
+    if key == "libzim_search_backend":
+        return value if value in ("processes", "threads") else None
     if isinstance(default, bool):
         return value if isinstance(value, bool) else None
     if isinstance(default, float):

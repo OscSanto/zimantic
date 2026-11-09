@@ -137,6 +137,20 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual({key: cfg[key] for key in values}, values)
         self.assertEqual(warnings, [])
 
+    def test_fulltext_backend_rejects_unknown_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            for value in ("threads", "processes", "invalid"):
+                with self.subTest(value=value):
+                    path.write_text(f'libzim_search_backend = "{value}"\n')
+                    warnings = []
+                    cfg = load_config(path, warn=warnings.append)
+                    self.assertEqual(
+                        cfg["libzim_search_backend"],
+                        value if value != "invalid" else "processes",
+                    )
+                    self.assertEqual(bool(warnings), value == "invalid")
+
     def test_renamed_resource_keys_accept_legacy_configs(self):
         for old, new in (
             ("embed_threads", "onnx_query_threads"),

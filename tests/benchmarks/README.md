@@ -85,6 +85,22 @@ throughput/p50/p95, CPU throttling, cgroup memory peaks and OOM counters,
 sampled process-tree PSS, failures, and exact-result digest agreement.
 Durations include backend queue waits but not time queued in the source executor.
 
+Use `--backends processes threads --min-seconds 3` with a GIL-releasing binding
+to compare both backends. The minimum duration repeats the same measured query
+batch, checks result agreement between batches, and reports total requests,
+CPU milliseconds per request, and average utilized CPU cores. Run several
+fresh-service repetitions. `PYTHONPATH` and `LD_LIBRARY_PATH` are forwarded
+explicitly into the transient service so local binding/native builds also
+reach process helpers. The report records native dependency versions and the
+loaded binding path; different dependency versions are a before/after caveat,
+not evidence of a pure GIL speedup.
+
+For a four-core/2 GiB resource proxy use `--limits 4:2048`; for this 20-thread
+desktop with a safety memory cap use `--limits 20:8192`. Add
+`--resident-mib 512` to retain the same simulated server/model headroom in
+both profiles. CPUQuota counts CPU time, not Pi instruction speed: neither
+this nor MemoryMax emulates ARM cores, Pi storage, or whole-server work.
+
 These are native-search microbenchmarks, not whole-server memory or
 Raspberry Pi performance guarantees. They do not load models/FAISS or hydrate
 previews. OS caches remain warm: the harness never drops shared host caches,
@@ -99,3 +115,94 @@ The native-only matrix records the initial four-helper automatic ceiling;
 the headroom matrix uses the revised eight-helper ceiling. Additional
 [short failure-report validation](results/native-oom-2026-11-08.json)
 retains systemd's termination result when the probe cannot finish.
+
+### Reader GIL/thread results, November 9, 2026
+
+The [81-trial report](results/native-threads-2026-11-09.json) preserves original
+installed-stack baselines, controlled original-reader baselines on the same
+native dependencies, the process/thread matrix, and four-source-thread
+Pi-budget confirmation. Summaries are medians of three fresh-service trials.
+Absolute binding paths are removed; source revisions and native dependency
+versions identify each stack. The installed distribution version may differ
+from a locally overridden binding.
+
+The main updated-stack command was:
+
+```sh
+uv run python tests/benchmarks/run_native.py \
+    evaluation.zims/wikipedia_en_astronomy_maxi_2025-11.zim \
+    evaluation.zims/wikipedia_en_medicine_maxi_2026-04.zim \
+    evaluation.zims/cooking.stackexchange.com_en_all_2026-07.zim \
+    --workers 1 2 4 8 --backends processes threads \
+    --limits 20:8192 4:2048 --repeats 3 --requests 144 \
+    --min-seconds 3 --source-workers 8 --resident-mib 512 \
+    --output tests/benchmarks/results/native-threads-local.json
+```
+
+Set `PYTHONPATH` to the built reader-binding directory and `LD_LIBRARY_PATH`
+to the patched native library and its dependencies before invoking the runner.
+The controlled baseline exports zimantic `cb261c5`, copies this same runner
+into it, and uses an unchanged python-libzim `57555c2` build linked against
+that identical native stack. It runs only `--backends processes`, with
+`--workers 4 8`; other main-matrix options are unchanged. The final Pi-budget
+confirmation uses `--workers 4 --limits 4:2048 --source-workers 4` for both
+the controlled baseline and updated backends.
+
+The [analysis and native-search profile overrides](../../docs/architecture.md#reader-gilthread-comparison-november-9-2026)
+separate snippet suppression from threading gains and describe resource,
+memory-accounting, and whole-server limitations.
+
+## Fetching snippets during search
+
+`run_snippets.py` compares the current deferred previews with native snippets
+or identical HTML leads prefetched for the first N candidates **per source**:
+
+```sh
+uv run python tests/benchmarks/run_snippets.py \
+    evaluation.zims/wikipedia_en_astronomy_maxi_2025-11.zim \
+    evaluation.zims/wikipedia_en_medicine_maxi_2026-04.zim \
+    evaluation.zims/cooking.stackexchange.com_en_all_2026-07.zim \
+    --strategies deferred native:4 native:16 lead:4 \
+    --limits 4:2048 --repeats 3 --requests 24 --min-seconds 2 \
+    --output tests/benchmarks/results/snippets-single-client-2026-11-09.json
+```
+
+Set `PYTHONPATH` and `LD_LIBRARY_PATH` to the patched binding/native builds as
+above. Both backends need snippet suppression; threads additionally require
+the native mutex fix. Production search behavior is not changed by this runner.
+`deferred` uses the unchanged production `FulltextPool`; the eager variants
+replace only its worker cache/entry point, retaining its scheduling and JSON IPC.
+
+Every query searches all supplied archives for 16 candidates each, ranks with
+the production ranker, then hydrates only the displayed ten. `native:N` keeps
+libzim's query-centered snippets and falls back to the normal bounded reader
+for displayed results without one. `lead:N` uses that same reader in the
+search worker, preserving the existing opening-text preview. Native snippets
+are normally about 500 characters, versus the configured 1,000-character lead;
+they are **not equivalent text or UX**. Native `<b>` highlighting is stripped
+before reuse as plain text.
+
+Both `--cache miss hit` cases bypass finalized-query caching. Misses disable
+preview reuse; hits prepopulate every displayed path with a normal,
+query-independent lead. This isolates expensive preview misses from searches
+whose paths are already cached. It is not a prediction of the real hit rate.
+The same bounded source executor handles source search and deferred hydration.
+Default trials retain 512 MiB of simulated server/model headroom.
+
+Reports include end-to-end and pre-hydration p50/p95, CPU/query, throughput,
+prefetch generation/reuse/waste, fallback reads, cache hits, preview lengths,
+text samples, cgroup accounting and sampled process-tree PSS. All repeated
+batches and strategies must preserve exact candidates and ranked identities;
+`lead:N`, deferred previews, and all warm-cache cases must also return identical
+preview text. Query latency includes source/native queue waits, not time queued
+in the client executor.
+
+For four concurrent uncached queries on this desktop, use `--clients 4
+--workers 8 --source-workers 8 --limits 20:8192 --cache miss --requests 48`.
+Also repeat with just one archive: a selective-prefetch win from overlapping
+work across several sources need not survive a single-source search.
+These are native-only search/preview pipeline measurements: no model,
+SQLite title/body channels, phrase enrichment, HTTP, or whole-server startup.
+Shared host caches are never dropped; CPU quotas do not emulate Pi hardware.
+
+See the [75-trial results and recommendation](../../docs/architecture.md#snippet-prefetch-comparison-november-9-2026).

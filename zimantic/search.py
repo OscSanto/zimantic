@@ -517,9 +517,11 @@ class Search:
                     and not isinstance(configured, bool) and configured > 0
                     else default_fulltext_workers(source_workers=self.source_workers)
                 )
-                self.fulltext_pool = FulltextPool(workers)
+                backend = self.cfg.get("libzim_search_backend", "processes")
+                self.fulltext_pool = FulltextPool(workers, backend=backend)
                 logger.info(
-                    "zimantic: native full-text budget: %d shared helper slot(s)", workers
+                    "zimantic: native full-text budget: %d shared %s slot(s)",
+                    workers, backend,
                 )
             for runtime in runtimes:
                 runtime.set_fulltext_pool(self.fulltext_pool)
