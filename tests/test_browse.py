@@ -100,6 +100,25 @@ class BrowseTests(unittest.TestCase):
             [doc["id"] for doc in self.browse("random", seed=19).items],
         )
 
+    def test_recency_orders_newest_items_before_undated_items(self):
+        self.db.executemany(
+            "UPDATE docs SET modified = ? WHERE path = ?",
+            [(100, "common-1"), (300, "unusual"), (200, "stopwords")],
+        )
+        result = self.browse("recency")
+        self.assertEqual(
+            [doc["path"] for doc in result.items],
+            ["unusual", "stopwords", "common-1", "common-2"],
+        )
+
+    def test_diversity_greedily_selects_titles_with_less_word_overlap(self):
+        result = self.browse("diverse")
+        self.assertEqual(result.status, "ok", result.error)
+        paths = [doc["path"] for doc in result.items]
+        self.assertEqual(set(paths), {"common-1", "common-2", "unusual", "stopwords"})
+        self.assertEqual(paths[0], "common-1")
+        self.assertNotEqual(paths[1], "common-2")
+
     def test_semantic_modes_share_the_centroid_and_have_opposite_order(self):
         vectors = np.array([[1, 0], [0.8, 0.6], [-0.6, 0.8]], dtype=np.float32)
         index = faiss.IndexIDMap(faiss.IndexFlatIP(2))

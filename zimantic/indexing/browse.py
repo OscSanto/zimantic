@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import random
+import re
 import sqlite3
 import time
 from typing import Any
@@ -13,8 +14,9 @@ from ..contracts import SourceInfo, SourceResult
 from ..searching.query import STOPWORDS
 from .search import SearchLimits, fetch_docs, vector_search
 
-BROWSE_MODES = ("random", "rare", "outliers", "representative")
+BROWSE_MODES = ("random", "rare", "outliers", "representative", "diverse", "recency")
 SEMANTIC_BROWSE_MODES = frozenset({"outliers", "representative"})
+_TITLE_WORD = re.compile(r"\w+", re.UNICODE)
 
 
 def _check_deadline(deadline: float | None) -> None:
@@ -124,6 +126,56 @@ def _rare_rows(
     return ranked
 
 
+def _recent_rows(
+    db: sqlite3.Connection, count: int, rowids: list[int] | None = None
+) -> list[tuple[float, int]]:
+    selection = (
+        " AND rowid IN (" + ",".join("?" for _ in rowids) + ")"
+        if rowids is not None else ""
+    )
+    rows = db.execute(
+        "SELECT rowid, modified FROM docs WHERE target IS NULL"
+        f"{selection} ORDER BY modified IS NULL, modified DESC, rowid LIMIT ?",
+        [*(rowids or []), count],
+    ).fetchall()
+    return [
+        (float(modified) if modified is not None else -1.0, int(rowid))
+        for rowid, modified in rows
+    ]
+
+
+def _diverse_paths(
+    entries: list[tuple[str, str]], deadline: float | None = None
+) -> list[str]:
+    """Greedily order titles to minimize overlap with already selected titles."""
+    words_by_path = {
+        path: set(_TITLE_WORD.findall(title.casefold())) - STOPWORDS
+        for path, title in entries
+    }
+    remaining = set(words_by_path)
+    selected: list[str] = []
+    while remaining:
+        _check_deadline(deadline)
+        if not selected:
+            path = min(
+                remaining, key=lambda item: (-len(words_by_path[item]), item)
+            )
+        else:
+            def diversity(item: str) -> tuple[float, int, str]:
+                words = words_by_path[item]
+                similarity = max(
+                    len(words & words_by_path[chosen])
+                    / max(1, len(words | words_by_path[chosen]))
+                    for chosen in selected
+                )
+                return similarity, -len(words), item
+
+            path = min(remaining, key=diversity)
+        selected.append(path)
+        remaining.remove(path)
+    return selected
+
+
 def _centroid(index: Any, deadline: float | None):
     if index.browse_centroid is not None:
         return index.browse_centroid
@@ -196,6 +248,37 @@ def sort_scores(
             return {}
         if mode == "rare":
             ranked = _rare_rows(db, index, len(rows), list(rows))
+        elif mode == "recency":
+            ranked = _recent_rows(db, len(rows), list(rows))
+            ranked.extend(
+                (-1.0, rowid)
+                for rowid in rows
+                if rowid not in {candidate for _, candidate in ranked}
+            )
+        elif mode == "diverse":
+            titles = {
+                int(rowid): str(title or "")
+                for rowid, title in db.execute(
+                    "SELECT rowid, title FROM docs WHERE rowid IN ("
+                    + ",".join("?" for _ in rows)
+                    + ")",
+                    list(rows),
+                )
+            }
+            by_path = {
+                path: rowid for rowid, path in rows.items()
+            }
+            ordered = _diverse_paths(
+                [
+                    (path, titles.get(rowid, ""))
+                    for rowid, path in rows.items()
+                ],
+                deadline,
+            )
+            ranked = [
+                (float(len(ordered) - position), by_path[path])
+                for position, path in enumerate(ordered)
+            ]
         else:
             import faiss
             import numpy as np
@@ -262,6 +345,32 @@ def browse(
             ranked = _random_rows(db, count, source_order, deadline)
         elif mode == "rare":
             ranked = _rare_rows(db, index, count)
+        elif mode == "recency":
+            ranked = _recent_rows(db, count)
+        elif mode == "diverse":
+            candidates = _random_rows(db, max(count * 8, 64), source_order, deadline)
+            candidate_docs = fetch_docs(
+                source,
+                db,
+                [rowid for _, rowid in candidates],
+                url_builder=url_builder,
+                web_base_path=limits.web_base_path,
+            )
+            ordered = _diverse_paths(
+                [
+                    (str(doc["path"]), str(doc.get("title") or ""))
+                    for _, rowid in candidates
+                    if (doc := candidate_docs.get(rowid)) is not None
+                ],
+                deadline,
+            )
+            rowid_by_path = {
+                doc["path"]: rowid for rowid, doc in candidate_docs.items()
+            }
+            ranked = [
+                (float(len(ordered) - position), rowid_by_path[path])
+                for position, path in enumerate(ordered)
+            ]
         elif mode in SEMANTIC_BROWSE_MODES:
             if index.faiss_index is None:
                 raise ValueError("semantic browsing requires loaded vectors")
@@ -335,13 +444,29 @@ def rank_browse_results(
 ) -> list[dict[str, Any]]:
     # Scores describe source-local statistics, not comparable global units.
     # Interleave source ranks so one large or unusual source cannot dominate.
-    items = sorted(
-        (doc for result in source_results for doc in result.items),
-        key=lambda doc: (
-            doc["source_rank"],
-            doc["_browse_order"],
-            doc["id"],
+    all_items = [doc for result in source_results for doc in result.items]
+    mode = next(
+        (
+            doc.get("ranking", {}).get("browse", {}).get("mode")
+            for doc in all_items
+            if doc.get("ranking", {}).get("browse", {}).get("mode")
         ),
+        None,
+    )
+    items = (
+        sorted(
+            all_items,
+            key=lambda doc: (-doc["score"], doc["_browse_order"], doc["id"]),
+        )
+        if mode == "recency"
+        else sorted(
+            all_items,
+            key=lambda doc: (
+                doc["source_rank"],
+                doc["_browse_order"],
+                doc["id"],
+            ),
+        )
     )
     ranked = []
     seen: set[str] = set()

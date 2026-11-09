@@ -49,7 +49,7 @@ BUILD_GENERATION = "build_generation"
 BUILD_SCOPE = "build_scope"
 DERIVED_TEXT = "derived_text"
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 META_KEYS = frozenset(
     {
@@ -93,7 +93,7 @@ DONE_VALUES = frozenset({DONE_FAST, DONE_FULL})
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
-    title, path UNINDEXED, target UNINDEXED,
+    title, path UNINDEXED, target UNINDEXED, modified UNINDEXED,
     tokenize='unicode61 remove_diacritics 2');
 -- docs keeps only title/path/final target.  Excerpts and raw body text are
 -- intentionally not stored in the new index.

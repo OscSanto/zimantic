@@ -234,16 +234,17 @@ The source picker discovers available sources and sorts matching sources by resu
 ## Sorting and empty searches
 
 The **Sort by** selector below the search bar offers **Relevance**, **Random**,
-**Rare titles**, **Semantic outliers**, and **Representative**. With a query,
-these orders rearrange the bounded matching result pool without changing its
-membership. Items without the local statistics needed by an order follow the
-scored matches in relevance order.
+**Rare titles**, **Semantic outliers**, **Representative**, **Diversity**, and
+**Recency**. With a query, these orders rearrange the bounded matching result
+pool without changing its membership. Items without the local statistics needed
+by an order follow the scored matches in relevance order.
 
 Submitting an empty query, or opening `/?q=`, searches local indexes without
 embedding a query. Its default order is **Representative**, or **Rare titles**
 when semantic search is disabled. `/` still opens without running a search.
-Use `/?q=&sort=random`, `/?q=&sort=rare`, `/?q=&sort=outliers`, or
-`/?q=&sort=representative`, optionally with `source` or `collection` filters.
+Use `/?q=&sort=random`, `/?q=&sort=rare`, `/?q=&sort=outliers`,
+`/?q=&sort=representative`, `/?q=&sort=diverse`, or `/?q=&sort=recency`,
+optionally with `source` or `collection` filters.
 
 - **Random** shuffles matches, or samples indexed items for an empty query.
   Submitting a random search creates a new URL seed; that seed keeps
@@ -253,13 +254,20 @@ Use `/?q=&sort=random`, `/?q=&sort=rare`, `/?q=&sort=outliers`, or
 - **Semantic outliers** finds items least similar to their source's average
   embedding. **Representative** does the opposite, finding items most like that
   average.
+- **Diversity** greedily orders titles to reduce word overlap with items already
+  selected, starting with the title containing the most distinct non-stopword
+  terms.
+- **Recency** orders by modified time: file modification time for files,
+  primary-file modification time for Kolibri, and archive-file modification time
+  for ZIM entries. Items without a timestamp come last.
 
 Statistics are source-local. Empty searches interleave source rankings rather
-than comparing their raw scores, and use only local SQLite indexes; remote
-Kiwix sources and unindexed sources are omitted. Semantic orders additionally
-require loaded FAISS vectors and are unavailable with `serve --fast` or
-`open --fast`. Rare-title pools and centroids are prepared lazily in memory,
-reused for the index handle's lifetime, and discarded when it is retired.
+than comparing their raw scores, except **Recency**, which compares timestamps
+across sources. Empty searches use only local SQLite indexes; remote Kiwix
+sources and unindexed sources are omitted. Semantic orders additionally require
+loaded FAISS vectors and are unavailable with `serve --fast` or `open --fast`.
+Rare-title pools and centroids are prepared lazily in memory, reused for the
+index handle's lifetime, and discarded when it is retired.
 First requests can take longer and obey the normal source/search deadlines.
 The usual `max_results` pool limit applies. No index rebuild is needed.
 

@@ -71,6 +71,8 @@
                 rare: "Rare titles",
                 outliers: "Semantic outliers",
                 representative: "Representative",
+                diverse: "Diversity",
+                recency: "Recency",
             };
             let availableBrowseModes = new Set(Object.keys(BROWSE_LABELS));
             const AUTO_SUBMIT_DELAY = 800;

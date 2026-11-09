@@ -1116,7 +1116,8 @@ class ServerTests(unittest.TestCase):
         search.semantic = False
         with TestClient(create_app(search)) as client:
             self.assertEqual(
-                client.get("/config").json()["browse_modes"], ["random", "rare"]
+                client.get("/config").json()["browse_modes"],
+                ["random", "rare", "diverse", "recency"],
             )
             for path in ("/browse", "/browse/stream"):
                 self.assertEqual(

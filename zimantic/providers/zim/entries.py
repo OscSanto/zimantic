@@ -173,6 +173,11 @@ class ArchiveEntryProducer:
             )
         return row
 
+    def modified_at(self, index: int) -> int | None:
+        if not isinstance(index, int) or index < 0 or index >= self.count:
+            return None
+        return self.source_mtime
+
     def prepare_iteration(self, order: str | None = None) -> str:
         """Keep canonical ids and caps while choosing a resumable reading order.
 

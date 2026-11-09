@@ -594,6 +594,11 @@ class KolibriEntryProducer:
             return None
         return self._record_for(index, self._items[index])
 
+    def modified_at(self, index: int) -> int | None:
+        if not isinstance(index, int) or index < 0 or index >= self.count:
+            return None
+        return self._items[index].primary_mtime
+
     def node_id_for_row(self, row_id: int) -> str | None:
         """Return the node id behind a canonical row id, or ``None``."""
         return self._node_ids_by_row_id.get(int(row_id))

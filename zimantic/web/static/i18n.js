@@ -37,6 +37,8 @@
             "Rare titles": "Títulos poco comunes",
             "Semantic outliers": "Atípicos semánticos",
             "Representative": "Representativos",
+            "Diversity": "Diversidad",
+            "Recency": "Más recientes",
             "Explore a shuffled mix of indexed items.":
                 "Explora una mezcla aleatoria de elementos indexados.",
             "Titles with uncommon words in each source.":

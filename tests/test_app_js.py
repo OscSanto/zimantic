@@ -480,11 +480,11 @@ const history = {{
 const elements = {{
   question: {{value: ""}},
   sortControls: {{hidden: true}},
-  sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "representative"]
+  sortSelect: {{value: "", options: ["relevance", "random", "rare", "outliers", "representative", "diverse", "recency"]
     .map((value) => ({{value}}))}},
 }};
 const $ = (id) => elements[id];
-const availableBrowseModes = new Set(["random", "rare", "outliers", "representative"]);
+const availableBrowseModes = new Set(["random", "rare", "outliers", "representative", "diverse", "recency"]);
 const selectionValues = (values) => [...(values || [])];
 const selectedSourceKeys = new Set(["manual"]);
 const selectedCollectionKey = "files:modules";
@@ -523,7 +523,8 @@ renderSortControls();
 console.log(JSON.stringify({{
   emptyDefault, relevanceDisabled, emptyUrl, textUrl, textSort, relevanceUrl, searches,
   fastDefault: $("sortSelect").value,
-  semanticHidden: $("sortSelect").options.slice(3).every((option) => option.hidden && option.disabled),
+  semanticHidden: $("sortSelect").options.slice(3, 5).every((option) => option.hidden && option.disabled),
+  additionalModesVisible: $("sortSelect").options.slice(5).every((option) => !option.hidden && !option.disabled),
 }}));
 """
         result = subprocess.run(
@@ -543,6 +544,7 @@ console.log(JSON.stringify({{
         ])
         self.assertEqual(payload["fastDefault"], "rare")
         self.assertTrue(payload["semanticHidden"])
+        self.assertTrue(payload["additionalModesVisible"])
 
     def test_history_distinguishes_empty_search_from_home_and_restores_sort(self):
         source = APP_JS.read_text(encoding="utf-8")

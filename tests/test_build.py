@@ -661,6 +661,7 @@ class BuildBatchTests(unittest.TestCase):
             embedder,
             [EntryRecord(1, "A title", "a stored excerpt", "article", None, "body text")],
             1,
+            modified={1: 123},
         )
 
         self.assertNotIn(
@@ -670,6 +671,10 @@ class BuildBatchTests(unittest.TestCase):
         self.assertEqual(
             db.execute("SELECT title, path FROM docs WHERE rowid = 1").fetchone(),
             ("A title", "article"),
+        )
+        self.assertEqual(
+            db.execute("SELECT modified FROM docs WHERE rowid = 1").fetchone(),
+            (123,),
         )
         self.assertEqual(
             embedder.truncate_calls,

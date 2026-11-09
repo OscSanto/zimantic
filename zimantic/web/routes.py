@@ -1389,7 +1389,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         collection: Annotated[str | None, Query()] = None,
         limit: Annotated[int | None, Query(ge=1)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
-        sort: Literal["relevance", "random", "rare", "outliers", "representative"] | None = None,
+        sort: Literal["relevance", "random", "rare", "outliers", "representative", "diverse", "recency"] | None = None,
         seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
     ):
         source_filter = source[0] if source and len(source) == 1 else source
@@ -1416,7 +1416,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         collection: Annotated[str | None, Query()] = None,
         limit: Annotated[int | None, Query(ge=1)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
-        sort: Literal["relevance", "random", "rare", "outliers", "representative"] | None = None,
+        sort: Literal["relevance", "random", "rare", "outliers", "representative", "diverse", "recency"] | None = None,
         seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
     ):
         try:
@@ -1436,7 +1436,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/browse")
     def api_browse(
-        mode: Literal["random", "rare", "outliers", "representative"] = "random",
+        mode: Literal["random", "rare", "outliers", "representative", "diverse", "recency"] = "random",
         seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
         source: Annotated[list[str] | None, Query()] = None,
         collection: Annotated[str | None, Query()] = None,
@@ -1467,7 +1467,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
 
     @app.get("/browse/stream")
     def api_browse_stream(
-        mode: Literal["random", "rare", "outliers", "representative"] = "random",
+        mode: Literal["random", "rare", "outliers", "representative", "diverse", "recency"] = "random",
         seed: Annotated[int, Query(ge=0, lt=2**32)] = 0,
         source: Annotated[list[str] | None, Query()] = None,
         collection: Annotated[str | None, Query()] = None,

@@ -655,8 +655,15 @@ class FilesEntryProducer:
                 False,
             )
         if self.fast:
-            return self._fast_document_record(item, row_id)
-        return self._document_record(item, row_id)
+            row = self._fast_document_record(item, row_id)
+        else:
+            row = self._document_record(item, row_id)
+        return row
+
+    def modified_at(self, index: int) -> int | None:
+        if not isinstance(index, int) or index < 0 or index >= self.count:
+            return None
+        return self._items[index].mtime
 
     def _fast_document_record(
         self, item: _ManifestItem, row_id: int

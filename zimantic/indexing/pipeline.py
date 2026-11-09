@@ -636,7 +636,9 @@ def _index_entries(
     reuse_vectors=None,
     interrupt_event: threading.Event | None = None,
 ) -> None:
-    pending_embeddings: list[tuple[Future, list[EntryRecord], int, int]] = []
+    pending_embeddings: list[
+        tuple[Future, list[EntryRecord], int, int, dict[int, int | None]]
+    ] = []
     count = int(_producer_attr(producer, "count", 0) or 0)
     truncated_rows = 0
     try:
@@ -646,7 +648,12 @@ def _index_entries(
     except (ValueError, index_schema.SchemaError):
         truncated_rows = 0
 
-    def save_batch(rows: list[EntryRecord], next_entry: int, reserved: int) -> None:
+    def save_batch(
+        rows: list[EntryRecord],
+        modified: dict[int, int | None],
+        next_entry: int,
+        reserved: int,
+    ) -> None:
         nonlocal truncated_rows
         if embedding_pipeline is None:
             try:
@@ -659,6 +666,7 @@ def _index_entries(
                         fast=fast,
                         derived_refs=derived_refs,
                         token_budget=token_budget,
+                        modified=modified,
                     ) or 0
                 else:
                     vectors = _embed_rows(
@@ -667,6 +675,7 @@ def _index_entries(
                     truncated_rows += _save_rows(
                         db, rows, next_entry, vectors,
                         fast=fast, derived_refs=derived_refs,
+                        modified=modified,
                     )
                 if progress is not None:
                     progress.advance(next_entry)
@@ -683,7 +692,7 @@ def _index_entries(
         except BaseException:
             body_budget.release(reserved)
             raise
-        pending_embeddings.append((future, rows, next_entry, reserved))
+        pending_embeddings.append((future, rows, next_entry, reserved, modified))
         if len(pending_embeddings) >= embedding_pipeline.max_pending_per_build:
             drain_one()
 
@@ -691,11 +700,14 @@ def _index_entries(
         nonlocal truncated_rows
         if interrupt_event is not None and interrupt_event.is_set():
             raise KeyboardInterrupt
-        future, pending_rows, pending_next, pending_reserved = pending_embeddings.pop(0)
+        future, pending_rows, pending_next, pending_reserved, pending_modified = (
+            pending_embeddings.pop(0)
+        )
         try:
             truncated_rows += _save_rows(
                 db, pending_rows, pending_next, future.result(),
                 fast=fast, derived_refs=derived_refs,
+                modified=pending_modified,
             )
             if progress is not None:
                 progress.advance(pending_next)
@@ -703,20 +715,28 @@ def _index_entries(
             body_budget.release(pending_reserved)
 
     batch: list[EntryRecord] = []
+    batch_modified: dict[int, int | None] = {}
     reserved = 0
 
     def flush(next_entry: int) -> None:
-        nonlocal batch, reserved
-        rows, reservation = batch, reserved
+        nonlocal batch, batch_modified, reserved
+        rows, modified, reservation = batch, batch_modified, reserved
         batch = []
+        batch_modified = {}
         reserved = 0
-        save_batch(rows, next_entry, reservation)
+        save_batch(rows, modified, next_entry, reservation)
 
     for index in range(start, count):
         try:
             if interrupt_event is not None and interrupt_event.is_set():
                 raise KeyboardInterrupt
             row = producer.entry_at(index)
+            modified_at = getattr(producer, "modified_at", None)
+            modified_value = modified_at(index) if callable(modified_at) else None
+            if modified_value is not None and (
+                isinstance(modified_value, bool) or not isinstance(modified_value, int)
+            ):
+                raise TypeError("producer modified_at() must return an integer or None")
             if row is not None and derived_stage is not None and not fast:
                 try:
                     from .derived import compose_body
@@ -791,6 +811,7 @@ def _index_entries(
                             f"derived stage failed: {error}"
                         )
             if row is not None:
+                batch_modified[row.id] = modified_value
                 if row.body and not fast:
                     size = len(row.body.encode("utf-8", "ignore"))
                     reservation = body_budget.try_reserve(size)
@@ -807,7 +828,7 @@ def _index_entries(
         except BaseException:
             body_budget.release(reserved)
             reserved = 0
-            for _future, _rows, _next, pending_reserved in pending_embeddings:
+            for _future, _rows, _next, pending_reserved, _modified in pending_embeddings:
                 body_budget.release(pending_reserved)
             pending_embeddings.clear()
             raise
@@ -818,7 +839,7 @@ def _index_entries(
             drain_one()
     finally:
         body_budget.release(reserved)
-        for _future, _rows, _next, pending_reserved in pending_embeddings:
+        for _future, _rows, _next, pending_reserved, _modified in pending_embeddings:
             body_budget.release(pending_reserved)
 
 
@@ -1503,6 +1524,7 @@ def _save_rows(
     *,
     fast: bool = False,
     derived_refs: dict[int, list[tuple[str, int, str]]] | None = None,
+    modified: dict[int, int | None] | None = None,
 ) -> int:
     """Store one ordered batch and its resume point in one transaction.
 
@@ -1514,8 +1536,18 @@ def _save_rows(
     truncated = 0
     with db:
         db.executemany(
-            "INSERT INTO docs(rowid, title, path, target) VALUES (?, ?, ?, ?)",
-            [(row.id, row.title, row.path, row.target_id) for row in rows],
+            "INSERT INTO docs(rowid, title, path, target, modified) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    row.id,
+                    row.title,
+                    row.path,
+                    row.target_id,
+                    (modified or {}).get(row.id),
+                )
+                for row in rows
+            ],
         )
         if not fast:
             body_rows = [
@@ -1578,6 +1610,7 @@ def _save(
     fast: bool = False,
     derived_refs: dict[int, list[tuple[str, int, str]]] | None = None,
     token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
+    modified: dict[int, int | None] | None = None,
 ) -> int:
     """Embed and store a batch and the resume point in one transaction."""
     return _save_rows(
@@ -1587,6 +1620,7 @@ def _save(
         _embed_rows(embedder, rows, token_budget),
         fast=fast,
         derived_refs=derived_refs,
+        modified=modified,
     )
 
 
