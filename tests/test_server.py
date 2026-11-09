@@ -280,11 +280,9 @@ class ServerTests(unittest.TestCase):
             text = client.get("/library.json", params={"media_type": "text"})
             video = client.get("/library.json", params={"media_type": "video"})
             self.assertEqual([source["title"] for source in text.json()], ["Manual"])
-            self.assertEqual(
-                [source["title"] for source in video.json()], ["Manual", "TED"]
-            )
+            self.assertEqual([source["title"] for source in video.json()], ["TED"])
             self.assertEqual(text.headers["x-total-count"], "1")
-            self.assertEqual(video.headers["x-total-count"], "2")
+            self.assertEqual(video.headers["x-total-count"], "1")
 
     def test_collections_endpoint_is_paged_and_reports_snapshot(self):
         response = self.client.get("/collections.json", params={"limit": 1})

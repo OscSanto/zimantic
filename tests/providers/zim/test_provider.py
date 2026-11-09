@@ -545,10 +545,10 @@ def test_catalog_schema_has_no_zim_specific_tables(tmp_path):
 @pytest.mark.parametrize(
     ("counter", "expected"),
     [
-        ("text/html=3;image/png=2;video/mp4=1", ("text", "video", "image")),
+        ("text/html=3;image/png=2;video/mp4=1", ("image",)),
         (
             "text/html=25;video/webm=24;text/vtt=544;image/webp=42",
-            ("video", "image"),
+            ("video",),
         ),
     ],
 )
@@ -604,14 +604,18 @@ def test_source_media_types_come_from_the_mime_counter(counter, expected):
 @pytest.mark.parametrize(
     ("counter", "expected"),
     [
-        ("text/html=4;video/mp4=1;audio/mpeg=1", ("video", "audio")),
-        ("text/html=5;video/mp4=1;audio/mpeg=1", ("text", "video", "audio")),
+        ("text/html=4;video/mp4=1;audio/mpeg=1", ("video",)),
+        ("text/html=5;video/mp4=1;audio/mpeg=1", ("video",)),
         ("application/xhtml+xml=2;application/pdf=2;video/mp4=2", ("video",)),
-        ("text/plain=100;text/markdown=2;video/mp4=1", ("text", "video")),
-        ("text/vtt=500;text/css=2;video/mp4=5", ("video",)),
-        ("text/html=unknown;video/mp4=5", ("text", "video")),
-        ("text/html=1;video/mp4=unknown", ("text", "video")),
-        ("text/html=1;video/mp4=0", ("text", "video")),
+        ("text/plain=100;text/markdown=2;video/mp4=1", ("text",)),
+        ("text/vtt=500;text/css=2;video/mp4=5", ("text",)),
+        ("text/html=unknown;video/mp4=5", ("video",)),
+        ("text/html=1;video/mp4=unknown", ("text",)),
+        ("text/html=1;video/mp4=0", ("text",)),
+        ("text/html=100;text/css=90;image/webp=50", ("image",)),
+        ("text/html=100;application/json=20", ("other",)),
+        ("text/html=100;application/json=5", ("text",)),
+        ("text/html=0;video/mp4=0", ()),
     ],
 )
 def test_zim_media_types_use_document_and_audiovisual_counts(counter, expected):
