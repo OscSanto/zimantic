@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
 # Articles read per window. Big enough that sorting finds texts of similar length and every worker thread
 # gets many batches (512 / 8 = 64), small enough to hold in memory anywhere (~0.5 MB of text).
 WINDOW = 512
+# A window also ends after this many rows of any kind. Storage order reads redirects last, and they have no
+# text, so without this cap the article count never reaches WINDOW there: every redirect would pile up in
+# memory (~650k rows on wikipedia_en_top) and no resume point would be saved until the very end.
+MAX_WINDOW_ROWS = 8192
 
 
 # Peak RAM measured during builds (batch 8, Windows, 2026-11-07): ~300 MB before any embedding (model,
@@ -174,7 +178,7 @@ def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, 
                 articles += bool(row[2])
             if progress is not None:
                 progress.update()
-            if articles >= WINDOW:
+            if articles >= WINDOW or len(rows) >= MAX_WINDOW_ROWS:
                 if pending:
                     yield finished(*pending)  # wait for window k-1 and hand it over to be written...
                 pending = embed_window(pool, rows), position + 1  # ...start embedding window k, read on
