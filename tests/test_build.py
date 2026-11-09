@@ -825,8 +825,11 @@ class EmbeddingPipelineTests(unittest.TestCase):
                 self.close()
 
         producer = SimpleNamespace(key="test", count=1000, article_work_count=10)
+        updates = []
         with patch.object(build_module, "tqdm", Bar):
-            progress = build_module._BuildProgress(producer, 3)
+            progress = build_module._BuildProgress(
+                producer, 3, lambda position, total: updates.append((position, total))
+            )
             progress.advance(7)
             self.assertEqual(bars[0].n, 7)
             progress.advance(20)
@@ -837,6 +840,44 @@ class EmbeddingPipelineTests(unittest.TestCase):
         self.assertIsNone(bars[1].kwargs["total"])
         self.assertNotIn("remaining", bars[1].kwargs["bar_format"])
         self.assertEqual(bars[1].n, 990)
+        self.assertEqual(updates, [(3, 1000), (7, 1000), (20, 1000), (1000, 1000)])
+
+    def test_all_files_progress_tracks_resume_and_waits_for_publication(self):
+        with patch.object(build_module, "tqdm") as bar:
+            progress = build_module._AllFilesProgress(3)
+            progress.advance(0, 30, 100)
+            progress.advance(0, 20, 100)
+            progress.advance(1, 50, 100)
+            progress.advance(0, 100, 100)
+            self.assertAlmostEqual(
+                sum(call.args[0] for call in bar.return_value.update.call_args_list),
+                1.49,
+            )
+            progress.finish(0)
+            progress.finish(1)
+            progress.advance(2, 0, 0)
+            progress.finish(2)
+            self.assertAlmostEqual(
+                sum(call.args[0] for call in bar.return_value.update.call_args_list), 3
+            )
+            progress.close()
+            calls = bar.return_value.update.call_count
+            progress.advance(1, 100, 100)
+            progress.finish(1)
+            self.assertEqual(bar.return_value.update.call_count, calls)
+            bar.return_value.close.assert_called_once()
+
+    def test_build_reports_committed_progress_to_overall_callback(self):
+        updates = []
+        producer = Producer([EntryRecord(i, f"Title {i}") for i in range(300)])
+        with tempfile.TemporaryDirectory() as directory:
+            _build(
+                producer,
+                directory,
+                {"progress_callback": lambda position, total: updates.append((position, total))},
+                fast=True,
+            )
+        self.assertEqual(updates, [(0, 300), (256, 300), (300, 300)])
 
     def test_limits_concurrent_embedding_calls(self):
         active = 0

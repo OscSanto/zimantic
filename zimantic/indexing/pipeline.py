@@ -822,11 +822,52 @@ def _index_entries(
             body_budget.release(pending_reserved)
 
 
+class _AllFilesProgress:
+    """Estimate overall work without opening queued sources to count entries."""
+
+    def __init__(self, count: int):
+        self._lock = threading.Lock()
+        self._fractions = [0.0] * count
+        self._closed = False
+        self._bar = tqdm(
+            total=count,
+            desc="All files",
+            unit="file",
+            delay=5,
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| "
+            "{n:.2f}/{total_fmt} files [{elapsed}<{remaining}, {rate_fmt}]",
+        )
+
+    def advance(self, index: int, position: int, total: int) -> None:
+        # Leave completion to the caller, after FAISS and publication finish.
+        fraction = min(position / total, 0.99) if total else 0.0
+        self._advance(index, fraction)
+
+    def finish(self, index: int) -> None:
+        self._advance(index, 1.0)
+
+    def _advance(self, index: int, fraction: float) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            previous = self._fractions[index]
+            fraction = max(previous, fraction)
+            self._fractions[index] = fraction
+            self._bar.update(fraction - previous)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._bar.close()
+
+
 class _BuildProgress:
     """Report committed article work separately from cheap entries."""
 
-    def __init__(self, producer, start: int):
+    def __init__(self, producer, start: int, callback=None):
         self._stack = ExitStack()
+        self._callback = callback
+        self._count = producer.count
         self._key = str(_producer_attr(producer, "key", "index"))
         self._work = _producer_attr(producer, "article_work_count")
         self._position = start
@@ -838,6 +879,8 @@ class _BuildProgress:
             delay=5,
         ))
         self._cheap = None
+        if self._callback is not None:
+            self._callback(start, self._count)
 
     def advance(self, position: int) -> None:
         if self._work is None:
@@ -856,6 +899,8 @@ class _BuildProgress:
                     ))
                 self._cheap.update(position - max(self._position, self._work))
         self._position = position
+        if self._callback is not None:
+            self._callback(position, self._count)
 
     def close(self) -> None:
         self._stack.close()
@@ -1215,7 +1260,7 @@ def build_index(
             body_budget = cfg.get("body_budget")
             if not isinstance(body_budget, BodyBudget):
                 body_budget = shared_body_budget(max_body_text_bytes)
-            progress = _BuildProgress(producer, start)
+            progress = _BuildProgress(producer, start, cfg.get("progress_callback"))
             _index_entries(
                 producer,
                 state.db,

@@ -1212,7 +1212,7 @@ def _build_tasks(
 ) -> None:
     """Build one or more already-discovered sources through the generic pipeline."""
     from .indexing.locator import IndexLocator
-    from .indexing.pipeline import EmbeddingPipeline, build_index
+    from .indexing.pipeline import EmbeddingPipeline, _AllFilesProgress, build_index
 
     workers = args.workers
     if workers is None:
@@ -1261,8 +1261,21 @@ def _build_tasks(
     build_cfg["embedding_pipeline"] = embedding_pipeline
     build_cfg["interrupt_event"] = _BUILD_STOP_EVENT
     locator = IndexLocator(cfg["index_dir"])
+    overall = _AllFilesProgress(len(tasks))
 
-    def run_task(label: str, runtime: object, source: object):
+    def run_task(index: int, runtime: object, source: object):
+        task_interrupted = False
+        try:
+            return build_task(index, runtime, source)
+        except KeyboardInterrupt:
+            task_interrupted = True
+            raise
+        finally:
+            stop_event = build_cfg["interrupt_event"]
+            if not task_interrupted and (stop_event is None or not stop_event.is_set()):
+                overall.finish(index)
+
+    def build_task(index: int, runtime: object, source: object):
         producer = runtime.entry_producer(source, fast=args.fast)
         if paths is not None:
             from .indexing.scope import restrict_producer
@@ -1278,7 +1291,12 @@ def _build_tasks(
             producer,
             locator,
             embedder,
-            build_cfg,
+            {
+                **build_cfg,
+                "progress_callback": lambda position, total: overall.advance(
+                    index, position, total
+                ),
+            },
             fast=args.fast,
             force=args.force,
         )
@@ -1287,9 +1305,9 @@ def _build_tasks(
     interrupted = False
     try:
         if workers == 1 or len(tasks) == 1:
-            for label, runtime, source in tasks:
+            for index, (label, runtime, source) in enumerate(tasks):
                 try:
-                    report = run_task(label, runtime, source)
+                    report = run_task(index, runtime, source)
                     if report is not None:
                         _log_build_report(report)
                 except Exception as error:
@@ -1303,8 +1321,8 @@ def _build_tasks(
             )
             try:
                 futures = {
-                    pool.submit(run_task, label, runtime, source): (label, source)
-                    for label, runtime, source in tasks
+                    pool.submit(run_task, index, runtime, source): (label, source)
+                    for index, (label, runtime, source) in enumerate(tasks)
                 }
                 for future in as_completed(futures):
                     label, source = futures[future]
@@ -1326,6 +1344,7 @@ def _build_tasks(
         interrupted = True
         raise
     finally:
+        overall.close()
         if embedding_pipeline is not None:
             embedding_pipeline.close(wait=not interrupted)
     if failures:
@@ -1451,7 +1470,7 @@ def _run_positional_zim_build(
     parser: argparse.ArgumentParser,
 ) -> None:
     from .indexing.locator import IndexLocator
-    from .indexing.pipeline import build_index
+    from .indexing.pipeline import _AllFilesProgress, build_index
 
     zims = _collect_zims([Path(path) for path in args.paths], ".")
     if args.list:
@@ -1511,23 +1530,38 @@ def _run_positional_zim_build(
     locator = IndexLocator(cfg["index_dir"])
     failures: list[tuple[Path, BaseException]] = []
     interrupted = False
+    overall = _AllFilesProgress(len(zims))
 
-    def run_build(zim: Path):
-        producer = _build_producer_for_zim(zim, cfg, fast=args.fast)
-        return build_index(
-            producer,
-            locator,
-            embedder,
-            build_cfg,
-            fast=args.fast,
-            force=args.force,
-        )
+    def run_build(index: int, zim: Path):
+        task_interrupted = False
+        try:
+            producer = _build_producer_for_zim(zim, cfg, fast=args.fast)
+            return build_index(
+                producer,
+                locator,
+                embedder,
+                {
+                    **build_cfg,
+                    "progress_callback": lambda position, total: overall.advance(
+                        index, position, total
+                    ),
+                },
+                fast=args.fast,
+                force=args.force,
+            )
+        except KeyboardInterrupt:
+            task_interrupted = True
+            raise
+        finally:
+            stop_event = build_cfg["interrupt_event"]
+            if not task_interrupted and (stop_event is None or not stop_event.is_set()):
+                overall.finish(index)
 
     try:
         if workers == 1 or len(zims) == 1:
-            for zim in zims:
+            for index, zim in enumerate(zims):
                 try:
-                    _log_build_report(run_build(zim))
+                    _log_build_report(run_build(index, zim))
                 except Exception as error:
                     logger.error(
                         "zimantic: failed to index %s: %s",
@@ -1542,7 +1576,10 @@ def _run_positional_zim_build(
                 thread_name_prefix="zimantic-build",
             )
             try:
-                futures = {pool.submit(run_build, zim): zim for zim in zims}
+                futures = {
+                    pool.submit(run_build, index, zim): zim
+                    for index, zim in enumerate(zims)
+                }
                 for future in as_completed(futures):
                     zim = futures[future]
                     try:
@@ -1565,6 +1602,7 @@ def _run_positional_zim_build(
         interrupted = True
         raise
     finally:
+        overall.close()
         if embedding_pipeline is not None:
             embedding_pipeline.close(wait=not interrupted)
     if failures:

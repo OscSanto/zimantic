@@ -54,7 +54,7 @@ body { margin: 0 auto; padding: 1.5rem; max-width: 72rem; }
 a { color: light-dark(#2458a6, #9cc5ff); text-decoration: none; }
 a:hover { text-decoration: underline; }
 nav { display: flex; flex-wrap: wrap; gap: .6rem; }
-nav a + a::before { content: "/"; margin-right: .6rem; color: gray; }
+nav a + a::before { content: "/"; display: inline-block; margin-right: .6rem; color: gray; }
 h1 { font-size: 1.6rem; overflow-wrap: anywhere; }
 .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin: 1.5rem 0; }
 input, select { font: inherit; padding: .5rem; border: 1px solid gray; border-radius: .4rem; }

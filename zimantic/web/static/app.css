@@ -625,7 +625,7 @@ ol.results {
 .library-card-collection {
     color: var(--muted);
     font-size: 0.7rem;
-    margin: 3px 0 0;
+    margin: 3px 0 5px;
     text-transform: uppercase;
 }
 .library-grid {
@@ -799,6 +799,7 @@ body.library-info-open {
     display: flex;
     gap: 16px;
     padding-right: 32px;
+    padding-bottom: 16px;
 }
 .library-info-thumb {
     align-items: center;

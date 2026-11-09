@@ -10,8 +10,8 @@ from unittest.mock import patch
 from zimantic.indexing.pipeline import BuildReport
 
 
-def _build_report():
-    return BuildReport("zim", "zim:library", "manual", "built", 1, 0, False, 0, 0.0)
+def _build_report(status="built"):
+    return BuildReport("zim", "zim:library", "manual", status, 1, 0, False, 0, 0.0)
 
 
 class LoggingTests(unittest.TestCase):
@@ -242,8 +242,9 @@ class BuildWorkerTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         built = []
 
-        def fake_build(producer, *_args, **_kwargs):
+        def fake_build(producer, _locator, _embedder, cfg, **_kwargs):
             barrier.wait(timeout=2)
+            cfg["progress_callback"](5, 10)
             built.append(Path(producer.path).name)
             return _build_report()
 
@@ -273,6 +274,7 @@ class BuildWorkerTests(unittest.TestCase):
                 patch.object(main_module, "_configure_logging"),
                 patch.object(main_module, "_find_downloading_sizes", return_value=set()),
                 patch.object(build_module, "build_index", side_effect=fake_build),
+                patch.object(build_module, "_AllFilesProgress") as progress,
                 patch.object(
                     main_module,
                     "_build_producer_for_zim",
@@ -284,6 +286,46 @@ class BuildWorkerTests(unittest.TestCase):
                 main_module.main()
 
         self.assertEqual(set(built), {"first.zim", "second.zim"})
+        self.assertEqual(
+            {call.args for call in progress.return_value.advance.call_args_list},
+            {(0, 5, 10), (1, 5, 10)},
+        )
+        self.assertEqual(
+            {call.args for call in progress.return_value.finish.call_args_list},
+            {(0,), (1,)},
+        )
+        progress.return_value.close.assert_called_once()
+
+    def test_all_files_progress_finishes_skips_and_failures_but_not_interrupts(self):
+        import zimantic.__main__ as main_module
+
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
+        cfg = {"index_dir": "/unused/indexes"}
+        args = types.SimpleNamespace(workers=1, fast=True, force=False)
+        for failure in (RuntimeError("failed"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                runtime = types.SimpleNamespace(
+                    entry_producer=lambda *_args, **_kwargs: object()
+                )
+                report = _build_report(status="skipped")
+                with (
+                    patch.object(main_module, "_build_config", return_value=cfg.copy()),
+                    patch.object(main_module, "_log_build_failure"),
+                    patch.object(build_module, "build_index", side_effect=[report, failure]),
+                    patch.object(build_module, "_AllFilesProgress") as progress,
+                    self.assertRaises(
+                        KeyboardInterrupt if isinstance(failure, KeyboardInterrupt) else SystemExit
+                    ),
+                ):
+                    main_module._build_tasks(
+                        [("one", runtime, object()), ("two", runtime, object())],
+                        cfg, args, argparse.ArgumentParser(),
+                    )
+                finished = [call.args[0] for call in progress.return_value.finish.call_args_list]
+                self.assertEqual(
+                    finished, [0] if isinstance(failure, KeyboardInterrupt) else [0, 1]
+                )
+                progress.return_value.close.assert_called_once()
 
     def test_build_interrupt_exits_with_standard_status(self):
         import zimantic.__main__ as main_module
