@@ -183,3 +183,20 @@ def test_source_payload_has_no_private_locator():
     for key, value in payload.items():
         assert "/tmp/" not in str(value), key
         assert "private" not in str(value).casefold(), key
+
+
+def test_kolibri_server_url_links_viewer_only_presets(tmp_path):
+    import pytest
+
+    from zimantic.providers.config import ConfigValidationError
+    from zimantic.providers.kolibri.store import KolibriContentStore
+
+    with pytest.raises(ConfigValidationError):
+        KolibriConfig(name="kolibri", path=str(tmp_path), server_url="ftp://host")
+    store = object.__new__(KolibriContentStore)
+    store.config = KolibriConfig(
+        name="kolibri", path=str(tmp_path), server_url="http://host:8080/"
+    )
+    assert store._external_url("abc") == "http://host:8080/learn/#/topics/c/abc"
+    store.config = KolibriConfig(name="kolibri", path=str(tmp_path))
+    assert store._external_url("abc") is None

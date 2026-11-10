@@ -7,7 +7,12 @@ from typing import Annotated, Literal
 from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.background import BackgroundTask
 
 from ..content.path import has_encoded_separator, raw_request_path
@@ -1122,6 +1127,9 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         try:
             if callable(resolve):
                 entry = resolve(source, path)
+                external_url = getattr(entry, "external_url", None)
+                if external_url:
+                    return RedirectResponse(external_url, status_code=302)
                 article_dict = {
                     "path": entry.path,
                     "title": entry.title,

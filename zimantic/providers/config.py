@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from ..scoped_settings import FILTER_KEYS, SCOPED_KEYS, parse_scoped_settings
 from ..settings import KNOWN_KEYS, normalize_resource_settings
@@ -238,6 +239,7 @@ class KolibriConfig:
     granularity: Granularity = "children"
     database_path: str | None = None
     storage: str | None = None
+    server_url: str | None = None
     max_sources: int | None = None
     max_entries: int | None = None
     max_snapshot_bytes: int = 1_073_741_824
@@ -255,6 +257,12 @@ class KolibriConfig:
         validate_name(self.name)
         if not self.path:
             raise ConfigValidationError("kolibri path must not be empty")
+        if self.server_url is not None:
+            parsed = urlsplit(self.server_url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ConfigValidationError(
+                    "kolibri server_url must be an http(s) URL"
+                )
         if self.granularity not in ("collection", "children"):
             raise ConfigValidationError("granularity must be collection or children")
         for name in (
@@ -587,6 +595,7 @@ _KOLIBRI_KEYS = SCOPED_KEYS | frozenset(
         "granularity",
         "database_path",
         "storage",
+        "server_url",
         "max_sources",
         "max_entries",
         "derived_text",
@@ -623,6 +632,7 @@ def _parse_kolibri(entry: Mapping[str, Any], base: Path) -> KolibriConfig:
             entry.get("database_path"), "database_path", base
         ),
         storage=_optional_path(entry.get("storage"), "storage", base),
+        server_url=_string(entry.get("server_url"), "server_url", optional=True),
         max_sources=_positive_int(
             entry.get("max_sources", defaults["max_sources"]), "max_sources"
         ),

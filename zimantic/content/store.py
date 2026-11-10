@@ -36,6 +36,7 @@ class ContentEntry:
     mimetype: str
     size: int | None = None
     redirect_path: str | None = None
+    external_url: str | None = None
 
 
 @dataclass(frozen=True)

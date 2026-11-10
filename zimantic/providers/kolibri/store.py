@@ -14,6 +14,7 @@ import os
 import posixpath
 import secrets
 import stat as stat_module
+from urllib.parse import quote
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ from .html5 import Html5Archive
 from .schema import (
     EXERCISE_KIND,
     HTML5_PRESETS,
+    KOLIBRI_ONLY_PRESETS,
     SUPPORTED_HTML5_PRESETS,
     FileRow,
     FileSelection,
@@ -82,6 +84,7 @@ class _Target:
     metadata: bytes = b""
     size: int | None = None
     redirect_path: str | None = None
+    external_url: str | None = None
 
 
 class KolibriContentStore:
@@ -252,6 +255,15 @@ class KolibriContentStore:
         text = f"{node.title}\n\n{description}\n"
         return text.encode("utf-8", "ignore")
 
+    def _external_url(self, node_id: str) -> str | None:
+        server_url = getattr(self.config, "server_url", None)
+        if not server_url:
+            return None
+        return (
+            f"{str(server_url).rstrip('/')}/learn/#/topics/c/"
+            f"{quote(node_id, safe='')}"
+        )
+
     def _node_target(
         self,
         node_id: str,
@@ -288,7 +300,14 @@ class KolibriContentStore:
                     size=len(metadata),
                 )
             raise ArticleNotFoundError("article not found")
-        if primary.preset in HTML5_PRESETS:
+        external_url = None
+        if (
+            primary.preset in KOLIBRI_ONLY_PRESETS
+            or primary.preset in HTML5_PRESETS
+            and primary.preset not in SUPPORTED_HTML5_PRESETS
+        ):
+            external_url = self._external_url(node_id)
+        if primary.preset in HTML5_PRESETS and external_url is None:
             if primary.preset not in SUPPORTED_HTML5_PRESETS:
                 raise ArticleUnavailableError(
                     f"unsupported Kolibri HTML5 preset {primary.preset!r}"
@@ -338,6 +357,7 @@ class KolibriContentStore:
             primary.mimetype,
             file=primary,
             size=int(info.st_size),
+            external_url=external_url,
         )
 
     def _channel_target(self, parts: list[str]) -> _Target:
@@ -416,6 +436,7 @@ class KolibriContentStore:
             mimetype=target.mimetype,
             size=target.size,
             redirect_path=target.redirect_path,
+            external_url=target.external_url,
         )
 
     def exists(self, path: str) -> bool:

@@ -240,6 +240,8 @@ HTML5_PRESETS = (
     "zim",
 )
 SUPPORTED_HTML5_PRESETS = frozenset({"html5_zip"})
+# Presets only Kolibri's own players can render (Perseus exercises).
+KOLIBRI_ONLY_PRESETS = frozenset({"exercise"})
 CAPTION_PRESETS = frozenset({"video_subtitle"})
 THUMBNAIL_PRESETS = frozenset(
     {
