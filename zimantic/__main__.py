@@ -47,6 +47,10 @@ class _LazyEmbedder:
     def embed_encoded(self, *args, **kwargs):
         return self._get().embed_encoded(*args, **kwargs)
 
+    def batch_shape(self, width):
+        method = getattr(self._get(), "batch_shape", None)
+        return method(width) if method is not None else None
+
     @property
     def fingerprint(self) -> str:
         """The loaded model's fingerprint, or empty when it was never needed."""
@@ -111,8 +115,8 @@ def _add_device_argument(parser: argparse.ArgumentParser) -> None:
         type=_device_argument,
         help=(
             "embedding device: auto (default), gpu, cpu, cuda, rocm, "
-            "directml/dml, openvino or coreml; overrides embed_device in "
-            "config.toml"
+            "migraphx, directml/dml, openvino or coreml; overrides "
+            "embed_device in config.toml"
         ),
     )
 
@@ -1226,12 +1230,14 @@ def _build_tasks(
         from .embed import Embedder
 
         build_embed_threads = cfg.get("onnx_build_threads") or 1
+        token_budget = int(cfg.get("embedding_batch_tokens", 1000))
 
         def _make_embedder():
             return Embedder(
                 cfg["model_dir"],
                 threads=build_embed_threads,
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
+                batch_tokens=token_budget,
             )
 
         embedder = _LazyEmbedder(_make_embedder)
@@ -1239,7 +1245,6 @@ def _build_tasks(
         from .settings import default_embedding_workers
 
         hw = detect()
-        token_budget = int(cfg.get("embedding_batch_tokens", 1000))
         embedding_workers = int(cfg.get("onnx_build_workers") or default_embedding_workers(
             build_embed_threads=build_embed_threads, token_budget=token_budget
         ))
@@ -1512,6 +1517,7 @@ def _run_positional_zim_build(
                 cfg["model_dir"],
                 threads=cfg.get("onnx_build_threads"),
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
+                batch_tokens=int(cfg.get("embedding_batch_tokens", 1000)),
             )
 
         embedder = _LazyEmbedder(_make_embedder)

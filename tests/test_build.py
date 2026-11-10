@@ -808,6 +808,115 @@ class EmbeddingPipelineTests(unittest.TestCase):
         finally:
             pipeline.close()
 
+    def test_fixed_shape_batches_fill_the_provider_capacity(self):
+        calls = []
+
+        class FixedEmbedder(_Embedder):
+            def batch_shape(self, width):
+                return 3, 256
+
+            def encode(self, texts):
+                return [[int(text.split("\n")[-1])] * int(text.split("\n")[-1]) for text in texts]
+
+            def embed_encoded(self, inputs):
+                calls.append([len(tokens) for tokens in inputs])
+                return np.array([[tokens[0], 1] for tokens in inputs], dtype=np.float32)
+
+        lengths = [250, 20] * 5
+        rows = [EntryRecord(i, "T", str(length), str(i)) for i, length in enumerate(lengths)]
+        result = build_module._embed_rows(FixedEmbedder(), rows, token_budget=1000)
+        self.assertEqual(sorted(calls), [[20] * 3, [20, 20, 250], [250], [250] * 3])
+        self.assertEqual(set(result), set(range(10)))
+        for i, length in enumerate(lengths):
+            self.assertEqual(result[i][0], length)
+
+    def test_fixed_shape_requests_coalesce_without_mixing_source_ids(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        class FixedEmbedder(_Embedder):
+            def batch_shape(self, width):
+                return 4, 8
+
+            def encode(self, texts):
+                return [[int(text.split("\n")[-1]), 0] for text in texts]
+
+            def embed_encoded(self, inputs):
+                calls.append(len(inputs))
+                if len(calls) == 1:
+                    started.set()
+                    if not release.wait(timeout=5):
+                        raise TimeoutError("test did not release first batch")
+                return np.array([[tokens[0], 1] for tokens in inputs], dtype=np.float32)
+
+        def rows(values):
+            return [EntryRecord(i, "T", str(value), str(i)) for i, value in enumerate(values)]
+
+        pipeline = build_module.EmbeddingPipeline(FixedEmbedder(), queue_size=8, token_budget=32)
+        try:
+            first = pipeline.submit(rows([1, 2, 3]))
+            self.assertTrue(started.wait(timeout=2))
+            values = [[10], [20, 21, 22], [30, 31], [40, 41]]
+            pending = [pipeline.submit(rows(group)) for group in values]
+            release.set()
+            self.assertEqual(set(first.result(timeout=2)), {0, 1, 2})
+            for future, expected in zip(pending, values):
+                result = future.result(timeout=2)
+                self.assertEqual([result[i][0] for i in range(len(expected))], expected)
+        finally:
+            release.set()
+            pipeline.close()
+        self.assertEqual(calls, [3, 8])
+
+    def test_coalesced_failure_keeps_other_shapes_and_shutdown_working(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        class FixedEmbedder(_Embedder):
+            def batch_shape(self, width):
+                return 4, 8 if width <= 8 else 16
+
+            def encode(self, texts):
+                return [
+                    [int(text.split("\n")[-1])] * int(text.split("\n")[-1])
+                    for text in texts
+                ]
+
+            def embed_encoded(self, inputs):
+                lengths = list(map(len, inputs))
+                calls.append(lengths)
+                if lengths == [1]:
+                    started.set()
+                    if not release.wait(timeout=5):
+                        raise TimeoutError("test did not release first batch")
+                elif lengths == [2, 3]:
+                    raise RuntimeError("coalesced model failure")
+                return np.array([[tokens[0], 1] for tokens in inputs], dtype=np.float32)
+
+        def rows(value):
+            return [EntryRecord(0, "T", str(value), "p")]
+
+        pipeline = build_module.EmbeddingPipeline(FixedEmbedder(), queue_size=8)
+        try:
+            first = pipeline.submit(rows(1))
+            self.assertTrue(started.wait(timeout=2))
+            pending = [pipeline.submit(rows(value)) for value in (2, 9, 3)]
+            pipeline._requests.put(None)
+            release.set()
+            self.assertEqual(first.result(timeout=2)[0][0], 1)
+            for future in (pending[0], pending[2]):
+                with self.assertRaisesRegex(RuntimeError, "coalesced model failure"):
+                    future.result(timeout=2)
+            self.assertEqual(pending[1].result(timeout=2)[0][0], 9)
+            pipeline._threads[0].join(timeout=2)
+            self.assertFalse(pipeline._threads[0].is_alive())
+        finally:
+            release.set()
+            pipeline.close()
+        self.assertEqual(calls, [[1], [2, 3], [9]])
+
     def test_progress_counts_committed_articles_and_omits_redirect_eta(self):
         bars = []
 

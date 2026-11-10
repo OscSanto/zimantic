@@ -199,12 +199,48 @@ class EmbeddingPipeline:
             request = self._requests.get()
             if request is None:
                 return
-            try:
-                vectors = self._embedder.embed_encoded(request.inputs)
-                request.future.set_result(dict(zip(request.ids, vectors)))
-            except BaseException as error:  # surface it to the build thread
-                logger.debug("embedding batch failed", exc_info=True)
+            requests = [request]
+            stop_after_batch = False
+            batch_shape = getattr(self._embedder, "batch_shape", None)
+            if (
+                batch_shape is not None
+                and batch_shape(max(map(len, request.inputs))) is not None
+            ):
+                for _ in range(self._requests.maxsize):
+                    try:
+                        queued = self._requests.get_nowait()
+                    except Empty:
+                        break
+                    if queued is None:
+                        stop_after_batch = True
+                        break
+                    requests.append(queued)
+            groups = {}
+            for pending in requests:
+                shape = (
+                    batch_shape(max(map(len, pending.inputs)))
+                    if batch_shape is not None else None
+                )
+                groups.setdefault(shape, []).append(pending)
+            for group in groups.values():
+                self._run_group(group)
+            if stop_after_batch:
+                return
+
+    def _run_group(self, requests: list[_EmbeddingRequest]) -> None:
+        try:
+            inputs = [tokens for request in requests for tokens in request.inputs]
+            vectors = self._embedder.embed_encoded(inputs)
+        except BaseException as error:  # surface it to the build threads
+            logger.debug("embedding batch failed", exc_info=True)
+            for request in requests:
                 request.future.set_exception(error)
+        else:
+            offset = 0
+            for request in requests:
+                stop = offset + len(request.ids)
+                request.future.set_result(dict(zip(request.ids, vectors[offset:stop])))
+                offset = stop
 
 
 class BodyBudget:
@@ -1488,13 +1524,22 @@ def _embedding_batches(embedder, rows: list[EntryRecord], token_budget: int):
         passages.append(prefix + embedder.truncate(row.excerpt, prefix=prefix))
     encoded = embedder.encode(passages)
     ordered = sorted(zip(articles, encoded), key=lambda pair: len(pair[1]))
+    batch_shape = getattr(embedder, "batch_shape", None)
     batches = []
     ids, inputs = [], []
+    current_shape = None
     for row, tokens in ordered:
         # Padding, not just useful tokens, occupies the model workspace.
-        if inputs and (len(inputs) + 1) * len(tokens) > token_budget:
+        shape = batch_shape(len(tokens)) if batch_shape is not None else None
+        full = (
+            shape != current_shape or len(inputs) >= shape[0]
+            if shape is not None
+            else (len(inputs) + 1) * len(tokens) > token_budget
+        )
+        if inputs and full:
             batches.append((ids, inputs))
             ids, inputs = [], []
+        current_shape = shape
         ids.append(row.id)
         inputs.append(tokens)
     if inputs:

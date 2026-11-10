@@ -183,13 +183,13 @@ model_dir = "model/fp16"   # relative to the XDG data directory
 
 Install the accelerated wheel after every `uv sync`, because the lockfile
 reinstalls the plain `onnxruntime` package. Embedding can run on a GPU through
-ONNX Runtime's accelerated execution providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX Runtime build exposes, in CUDA, ROCm, DirectML, and OpenVINO order, and otherwise stays on the CPU.
+ONNX Runtime's accelerated execution providers. `embed_device = "auto"` (the default) tries every accelerated provider the installed ONNX Runtime build exposes, in CUDA, ROCm, MIGraphX, DirectML, and OpenVINO order, and otherwise stays on the CPU.
 
-Supported values are `auto`, `gpu` (require an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm` (AMD), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection), and `coreml` (Apple). `--device` overrides the setting for one `build` or `serve` run. CoreML is never selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be slower than the CPU for this model.
+Supported values are `auto`, `gpu` (prefer an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm` (AMD), `migraphx` (AMD through a MIGraphX-enabled ONNX Runtime build), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection), and `coreml` (Apple). `--device` overrides the setting for one `build` or `serve` run. CoreML is never selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be slower than the CPU for this model.
 
 Use the fp16 model with a GPU. Download it with `zimantic model fp16` and point `model_dir` at that folder. Accelerated providers usually run fp16 faster than the default quantized int8 export, which is tuned for CPUs. Keep int8 for CPU-only hosts and small devices.
 
-The provider comes from the ONNX Runtime package, not from Zimantic. Replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`, `onnxruntime-directml`, or `onnxruntime-openvino`. If the requested provider is missing or cannot initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so the same configuration also runs on machines without a GPU. If a run fails on the device after initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead of failing the build.
+The provider comes from the ONNX Runtime package, not from Zimantic. Replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`, `onnxruntime-directml`, or `onnxruntime-openvino`; MIGraphX requires an ONNX Runtime build that includes `MIGraphXExecutionProvider` (for example, a ROCm build targeting gfx803). If the requested provider is missing or cannot initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so the same configuration also runs on machines without a GPU. If a run fails on the device after initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead of failing the build.
 
 ```bash
 pip uninstall -y onnxruntime   # only one onnxruntime distribution provides the module
@@ -200,6 +200,39 @@ zimantic build --device cuda   # or embed_device = "cuda" in config.toml
 When Zimantic is managed with `uv`, `uv sync` reinstalls the plain `onnxruntime` dependency, so install the GPU wheel after syncing (or change the dependency in the project environment).
 
 GPU acceleration helps full index builds the most, because they embed every article; raising `embedding_batch_tokens` (and, if needed, the `batch_size` read window) uses the device more efficiently. Lower the token budget if a call exhausts GPU memory. Query embedding also runs on the device, but a single short query is too small to gain much. Vector search (FAISS) deliberately stays on the CPU: the indexes are memory-mapped, and copying one to GPU memory to search a single query vector would cost more than the search itself.
+
+MIGraphX compiles programs for input shapes. Zimantic serializes MIGraphX runs
+to avoid concurrent first-run crashes. Builds use fixed shapes: sequence widths
+are rounded up to powers of two, starting at 32 tokens (or the model limit if
+smaller), and batch capacity comes from `embedding_batch_tokens` divided by that
+width, with a minimum of one input. At a 256-token limit and a 1,024-token
+budget, the shapes are `4x256`, `8x128`, `16x64`, and `32x32`. Up to four sessions
+stay resident, or one in low-memory mode. Already queued requests with compatible
+shapes are coalesced, including across sources, without waiting for more work;
+CPU batching is unchanged.
+
+Set `ORT_MIGRAPHX_CACHE_DIR` to a writable, GPU-specific directory to reuse
+compiled build shapes across commands. Zimantic creates subdirectories isolated
+by model fingerprint, ONNX Runtime version, and input shape. The first build
+still compiles each shape; a warm build reloads the compiled sessions. Dynamic
+query sessions do not use the disk cache because some MIGraphX versions reuse
+an incompatible first-shape program. Compilation and session loading can make
+small builds slower than CPU int8 even with a warm cache.
+
+For throughput on a desktop gfx803 GPU, the following settings beat CPU int8 on
+a two-source build; they are not universal defaults:
+
+```toml
+embed_device = "migraphx"
+model_dir = "model/fp16"
+batch_size = 256
+embedding_batch_tokens = 1024
+onnx_build_workers = 4
+onnx_build_threads = 1
+```
+
+See [the warm CPU/GPU comparison](build-performance.md#warm-migraphx-versus-cpu-builds-gfx803)
+for complete-command timings and the small-build limitation.
 
 ## Automatic indexing with systemd
 

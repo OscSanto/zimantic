@@ -44,6 +44,7 @@ EMBED_DEVICES = frozenset(
         "cpu",
         "cuda",
         "rocm",
+        "migraphx",
         "directml",
         "dml",
         "openvino",

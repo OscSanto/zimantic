@@ -388,7 +388,7 @@ class BuildWorkerTests(unittest.TestCase):
             )
             pipeline.call_args.args[0].embed(["text"])
             embedder.assert_called_once_with(
-                config["model_dir"], threads=2, device=None
+                config["model_dir"], threads=2, device=None, batch_tokens=1000
             )
         self.assertEqual(pipeline.call_args.kwargs["workers"], 3)
         self.assertEqual(pipeline.call_args.kwargs["token_budget"], 1000)

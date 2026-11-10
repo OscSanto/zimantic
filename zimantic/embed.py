@@ -4,9 +4,11 @@ import ctypes
 import hashlib
 import json
 import logging
+import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -36,18 +38,22 @@ SPECIAL_TOKEN_COUNT = 2
 CPU_PROVIDER = "CPUExecutionProvider"
 DML_PROVIDER = "DmlExecutionProvider"
 OPENVINO_PROVIDER = "OpenVINOExecutionProvider"
+MIGRAPHX_PROVIDER = "MIGraphXExecutionProvider"
+MIGRAPHX_SESSION_CACHE_SIZE = 4
 OPENVINO_PROVIDER_OPTIONS = {"device_type": "AUTO"}
 
 # Accelerated ONNX Runtime providers, best first. "auto" tries every provider
 # the installed onnxruntime build reports (and otherwise stays on the CPU) so a
 # broken first choice does not hide a working second one. The provider names are
-# stable across onnxruntime-gpu, -rocm, -directml and -openvino; a plain
-# onnxruntime wheel only exposes CPUExecutionProvider. CoreML is deliberately
-# excluded: stock macOS wheels include it, and its dynamic-shape handling can be
-# slower than the CPU for this model, so it must be requested explicitly.
+# stable across onnxruntime-gpu, -rocm, -directml and -openvino; MIGraphX is
+# available in some ROCm builds. A plain onnxruntime wheel only exposes
+# CPUExecutionProvider. CoreML is deliberately excluded: stock macOS wheels
+# include it, and its dynamic-shape handling can be slower than the CPU for
+# this model, so it must be requested explicitly.
 AUTO_PROVIDERS = (
     "CUDAExecutionProvider",
     "ROCMExecutionProvider",
+    MIGRAPHX_PROVIDER,
     DML_PROVIDER,
     OPENVINO_PROVIDER,
 )
@@ -57,6 +63,7 @@ DEVICE_PROVIDERS = {
     "cpu": CPU_PROVIDER,
     "cuda": "CUDAExecutionProvider",
     "rocm": "ROCMExecutionProvider",
+    "migraphx": MIGRAPHX_PROVIDER,
     "directml": DML_PROVIDER,
     "dml": DML_PROVIDER,
     "openvino": OPENVINO_PROVIDER,
@@ -93,7 +100,8 @@ def resolve_providers(
                 warning = (
                     "no accelerated ONNX Runtime provider is available; "
                     "embedding on CPU (install onnxruntime-gpu, onnxruntime-rocm, "
-                    "onnxruntime-directml or onnxruntime-openvino for GPU support)"
+                    "onnxruntime-directml or onnxruntime-openvino, or use an "
+                    "ONNX Runtime build with MIGraphX, for GPU support)"
                 )
             return [CPU_PROVIDER], warning
         return _with_cpu_fallback(providers, available), warning
@@ -121,17 +129,40 @@ def _with_cpu_fallback(providers: list[str], available: list[str]) -> list[str]:
     return list(providers)
 
 
-def provider_entries(providers: list[str]) -> list[str | tuple[str, dict[str, str]]]:
+def provider_entries(
+    providers: list[str],
+    *,
+    migraphx_cache: bool = True,
+    migraphx_cache_key: str | None = None,
+) -> list[str | tuple[str, dict[str, str]]]:
     """Add provider options where a bare provider name is not enough.
 
     OpenVINO's default target comes from the wheel's build-time configuration;
     passing only the provider name can silently keep running on the CPU. AUTO
     lets OpenVINO choose its best device (GPU, NPU or CPU) at runtime.
     """
-    return [
-        (name, dict(OPENVINO_PROVIDER_OPTIONS)) if name == OPENVINO_PROVIDER else name
-        for name in providers
-    ]
+    entries = []
+    for name in providers:
+        if name == OPENVINO_PROVIDER:
+            entries.append((name, dict(OPENVINO_PROVIDER_OPTIONS)))
+        elif (
+            name == MIGRAPHX_PROVIDER
+            and migraphx_cache
+            and os.environ.get("ORT_MIGRAPHX_CACHE_DIR")
+        ):
+            cache_dir = Path(os.environ["ORT_MIGRAPHX_CACHE_DIR"]).expanduser()
+            if migraphx_cache_key:
+                cache_dir /= migraphx_cache_key
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            entries.append(
+                (
+                    name,
+                    {"migraphx_model_cache_dir": str(cache_dir)},
+                )
+            )
+        else:
+            entries.append(name)
+    return entries
 
 
 # Hosts with up to this much RAM get the embedding budget trimmed. ONNX
@@ -422,6 +453,7 @@ class Embedder:
         threads: int | None = None,
         low_memory: bool | None = None,
         device: str = "auto",
+        batch_tokens: int | None = None,
     ):
         """model_dir holds model.onnx and one tokenizer vocabulary.
 
@@ -432,8 +464,8 @@ class Embedder:
         automatically on hosts with LOW_MEMORY_GB or less of RAM. device is
         "auto" (try every accelerated provider the installed onnxruntime
         offers), "cpu", "gpu", or a provider alias such as "cuda", "rocm",
-        "directml" or "openvino"; an unavailable device falls back to the CPU
-        with a warning, as does a run that fails after initialization.
+        "migraphx", "directml" or "openvino"; an unavailable device falls back
+        to the CPU with a warning, as does a run that fails after initialization.
         """
         self.embedding_tokens = int(embedding_tokens)
         if self.embedding_tokens < SPECIAL_TOKEN_COUNT:
@@ -449,7 +481,51 @@ class Embedder:
         if device_warning:
             logger.warning("zimantic: %s", device_warning)
         self.provider = self.providers[0]
+        self.fingerprint = model_fingerprint(model_dir, hashes)
+        self._build_batch_tokens = None
+        self._migraphx_sessions = OrderedDict()
+        if self.provider == MIGRAPHX_PROVIDER and batch_tokens is not None:
+            if batch_tokens < 1:
+                raise ValueError("batch_tokens must be at least 1")
+            self._build_batch_tokens = int(batch_tokens)
         logger.info("zimantic: embedding with %s", self.provider)
+        self._model_path = str(Path(model_dir) / "model.onnx")
+        self._session_options = self._new_session_options()
+        self._fallback_lock = threading.Lock()
+        initial_shape = self.batch_shape(self.embedding_tokens)
+        self.session = self._create_session(
+            self._model_path, self._new_session_options(), shape=initial_shape
+        )
+        if initial_shape is not None and self.provider == MIGRAPHX_PROVIDER:
+            self._migraphx_sessions[initial_shape] = self.session
+        # DirectML rejects concurrent Run calls. MIGraphX can segfault if
+        # concurrent calls trigger compilation on the first input shape.
+        self._run_lock = (
+            threading.Lock()
+            if self.provider in {DML_PROVIDER, MIGRAPHX_PROVIDER}
+            else None
+        )
+        # Exported graphs differ: some XLM-R models (for example
+        # multilingual-e5-base) omit token_type_ids, while multilingual-e5-small
+        # requires it. Feed only the inputs the graph declares.
+        self._input_names = {item.name for item in self.session.get_inputs()}
+        self.tokenizer_kind, tokenizer_path = _resolve_tokenizer(model_dir)
+        if self.tokenizer_kind == "sentencepiece":
+            # sentencepiece loads this vocabulary in ~45 MB; Hugging Face
+            # `tokenizers` needed ~250 MB.
+            self.tokenizer = sentencepiece.SentencePieceProcessor(
+                model_file=str(tokenizer_path)
+            )
+            # XLM-RoBERTa reserves 0 for <s>, 1 for <pad> and 2 for </s>.
+            self.pad_id = 1
+        else:
+            self.tokenizer = WordPieceTokenizer(tokenizer_path)
+            # BERT uses [PAD] = 0, unlike XLM-R. Do not hard-code 1 here: it is
+            # [unused0] in a standard BERT vocabulary.
+            self.pad_id = self.tokenizer.pad_id
+        self._tokenizer_lock = threading.Lock()
+
+    def _new_session_options(self):
         opts = ort.SessionOptions()  # ty: ignore[possibly-missing-attribute]
         opts.intra_op_num_threads = self.threads
         opts.inter_op_num_threads = 1
@@ -469,56 +545,38 @@ class Embedder:
             opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         except RuntimeError:
             pass
-        self._model_path = str(Path(model_dir) / "model.onnx")
-        self._session_options = opts
-        self._fallback_lock = threading.Lock()
-        self.session = self._create_session(self._model_path, opts)
-        actual_providers = list(self.session.get_providers())
-        if actual_providers:
-            if actual_providers[0] != self.provider:
-                logger.warning(
-                    "zimantic: ONNX Runtime selected %s instead of %s; "
-                    "embedding on %s",
-                    actual_providers[0],
-                    self.provider,
-                    actual_providers[0],
-                )
-            self.providers = actual_providers
-            self.provider = actual_providers[0]
-        # DirectML does not support concurrent Run calls on one session.
-        self._run_lock = (
-            threading.Lock() if self.provider == DML_PROVIDER else None
-        )
-        # Exported graphs differ: some XLM-R models (for example
-        # multilingual-e5-base) omit token_type_ids, while multilingual-e5-small
-        # requires it. Feed only the inputs the graph declares.
-        self._input_names = {item.name for item in self.session.get_inputs()}
-        self.tokenizer_kind, tokenizer_path = _resolve_tokenizer(model_dir)
-        self.fingerprint = model_fingerprint(model_dir, hashes)
-        if self.tokenizer_kind == "sentencepiece":
-            # sentencepiece loads this vocabulary in ~45 MB; Hugging Face
-            # `tokenizers` needed ~250 MB.
-            self.tokenizer = sentencepiece.SentencePieceProcessor(
-                model_file=str(tokenizer_path)
-            )
-            # XLM-RoBERTa reserves 0 for <s>, 1 for <pad> and 2 for </s>.
-            self.pad_id = 1
-        else:
-            self.tokenizer = WordPieceTokenizer(tokenizer_path)
-            # BERT uses [PAD] = 0, unlike XLM-R. Do not hard-code 1 here: it is
-            # [unused0] in a standard BERT vocabulary.
-            self.pad_id = self.tokenizer.pad_id
-        # The tokenizer is not safe for concurrent encode calls from several
-        # search threads; serialize access to it. DirectML also requires
-        # session runs to be serialized; other providers use the session
-        # concurrently.
-        self._tokenizer_lock = threading.Lock()
+        return opts
 
-    def _create_session(self, model_path: str, opts):
+    def batch_shape(self, width: int) -> tuple[int, int] | None:
+        if self.provider != MIGRAPHX_PROVIDER or self._build_batch_tokens is None:
+            return None
+        width = min(
+            max(32, 1 << (width - 1).bit_length()),
+            1 << (self.embedding_tokens - 1).bit_length(),
+        )
+        return max(1, self._build_batch_tokens // width), width
+
+    def _create_session(self, model_path: str, opts, *, shape=None):
         """Create the ONNX session, falling back to CPU if a GPU cannot start."""
-        providers = provider_entries(self.providers)
+        cache_key = None
+        if shape is not None:
+            batch_size, width = shape
+            opts.add_free_dimension_override_by_name("batch_size", batch_size)
+            opts.add_free_dimension_override_by_name("sequence_length", width)
+            if self.fingerprint:
+                cache_key = (
+                    f"{self.fingerprint}/{ort.__version__}/"
+                    f"{batch_size}x{width}"
+                )
+        # Dynamic first-run shapes share a cache key in some MIGraphX versions.
+        # Only cache a session whose input geometry is constant across runs.
         try:
-            return ort.InferenceSession(model_path, opts, providers=providers)
+            providers = provider_entries(
+                self.providers,
+                migraphx_cache=cache_key is not None,
+                migraphx_cache_key=cache_key,
+            )
+            session = ort.InferenceSession(model_path, opts, providers=providers)
         except Exception as error:
             if self.provider == CPU_PROVIDER:
                 raise
@@ -530,9 +588,26 @@ class Embedder:
             )
             self.providers = [CPU_PROVIDER]
             self.provider = CPU_PROVIDER
-            return ort.InferenceSession(
-                model_path, opts, providers=[CPU_PROVIDER]
+            session = ort.InferenceSession(
+                model_path, self._session_options, providers=[CPU_PROVIDER]
             )
+        actual_providers = list(session.get_providers())
+        if actual_providers:
+            if actual_providers[0] != self.provider:
+                logger.warning(
+                    "zimantic: ONNX Runtime selected %s instead of %s; "
+                    "embedding on %s",
+                    actual_providers[0],
+                    self.provider,
+                    actual_providers[0],
+                )
+                if shape is not None and actual_providers[0] == CPU_PROVIDER:
+                    session = ort.InferenceSession(
+                        model_path, self._session_options, providers=[CPU_PROVIDER]
+                    )
+            self.providers = actual_providers
+            self.provider = actual_providers[0]
+        return session
 
     def _fall_back_to_cpu(self, error: Exception) -> bool:
         """Rebuild the session on CPU after a device run fails.
@@ -564,6 +639,7 @@ class Embedder:
             self.session = session
             self.providers = [CPU_PROVIDER]
             self.provider = CPU_PROVIDER
+            self._migraphx_sessions.clear()
             self._run_lock = None
             return True
 
@@ -573,7 +649,23 @@ class Embedder:
             return self.session.run(None, inputs)[0]
         with lock:
             # Read the session inside the lock: a fallback may replace it while
-            # another DirectML run is waiting.
+            # another run is waiting.
+            if self.provider == MIGRAPHX_PROVIDER and self._build_batch_tokens is not None:
+                shape = inputs["input_ids"].shape
+                session = self._migraphx_sessions.pop(shape, None)
+                if session is None:
+                    session = self._create_session(
+                        self._model_path, self._new_session_options(), shape=shape
+                    )
+                self.session = session
+                if self.provider == MIGRAPHX_PROVIDER:
+                    self._migraphx_sessions[shape] = session
+                    capacity = 1 if self.low_memory else MIGRAPHX_SESSION_CACHE_SIZE
+                    while len(self._migraphx_sessions) > capacity:
+                        self._migraphx_sessions.popitem(last=False)
+                else:
+                    self._migraphx_sessions.clear()
+                    self._run_lock = None
             return self.session.run(None, inputs)[0]
 
     def token_count(self, text: str, prefix: str = "") -> int:
@@ -636,11 +728,31 @@ class Embedder:
             # ``max()`` over an empty list; the shape is unknown until the
             # first real batch, so return a degenerate row-less array.
             return np.empty((0, 0), dtype=np.float32)
+        item_count = len(encoded)
         width = max(map(len, encoded))
-        ids = np.array(
-            [e + [self.pad_id] * (width - len(e)) for e in encoded],
-            dtype=np.int64,
+        shape = self.batch_shape(width)
+        capacity = shape[0] if shape is not None else (
+            max(1, self._build_batch_tokens // width)
+            if self._build_batch_tokens is not None else item_count
         )
+        if item_count > capacity:
+            return np.concatenate([
+                self.embed_encoded(encoded[start:start + capacity])
+                for start in range(0, len(encoded), capacity)
+            ])
+        batch_size = item_count
+        if shape is not None:
+            if width > self.embedding_tokens:
+                raise ValueError("encoded input exceeds the fixed embedding width")
+            batch_size, width = shape
+        elif self.provider == MIGRAPHX_PROVIDER:
+            # MIGraphX compiles programs per input shape. Power-of-two buckets
+            # bound recompiles as token lengths and build batch sizes vary.
+            width = 1 << (width - 1).bit_length()
+            batch_size = 1 << (item_count - 1).bit_length()
+        rows = [e + [self.pad_id] * (width - len(e)) for e in encoded]
+        rows.extend([rows[0]] * (batch_size - item_count))
+        ids = np.array(rows, dtype=np.int64)
         mask = (ids != self.pad_id).astype(np.int64)
         inputs = {"input_ids": ids, "attention_mask": mask}
         if "token_type_ids" in self._input_names:
@@ -648,10 +760,16 @@ class Embedder:
         provider = self.provider
         try:
             hidden = self._run_once(inputs)
+            if provider == MIGRAPHX_PROVIDER and hidden.shape[:2] != ids.shape:
+                raise RuntimeError(
+                    f"MIGraphX returned shape {hidden.shape[:2]} for input {ids.shape}"
+                )
         except Exception as error:
             if provider == CPU_PROVIDER or not self._fall_back_to_cpu(error):
                 raise
             hidden = self._run_once(inputs)
+        hidden = hidden[:item_count]
+        mask = mask[:item_count]
         weights = mask[..., None].astype(np.float32)
         vectors = (hidden * weights).sum(1) / weights.sum(1)
         result = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)

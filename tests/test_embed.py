@@ -5,6 +5,7 @@ import threading
 import time
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -290,15 +291,30 @@ class DeviceSelectionTests(unittest.TestCase):
     def test_auto_tries_every_available_gpu_provider_in_priority_order(self):
         providers, warning = embed.resolve_providers(
             "auto",
-            ["CPUExecutionProvider", "ROCMExecutionProvider", "CUDAExecutionProvider"],
+            [
+                "CPUExecutionProvider",
+                "ROCMExecutionProvider",
+                "MIGraphXExecutionProvider",
+                "CUDAExecutionProvider",
+            ],
         )
         self.assertEqual(
             providers,
             [
                 "CUDAExecutionProvider",
                 "ROCMExecutionProvider",
+                "MIGraphXExecutionProvider",
                 "CPUExecutionProvider",
             ],
+        )
+        self.assertIsNone(warning)
+
+    def test_explicit_migraphx_keeps_the_cpu_fallback(self):
+        providers, warning = embed.resolve_providers(
+            "migraphx", ["CPUExecutionProvider", "MIGraphXExecutionProvider"]
+        )
+        self.assertEqual(
+            providers, ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
         )
         self.assertIsNone(warning)
 
@@ -329,6 +345,7 @@ class DeviceSelectionTests(unittest.TestCase):
             "CPUExecutionProvider",
             "CUDAExecutionProvider",
             "ROCMExecutionProvider",
+            "MIGraphXExecutionProvider",
             "DmlExecutionProvider",
             "OpenVINOExecutionProvider",
             "CoreMLExecutionProvider",
@@ -391,6 +408,24 @@ class DeviceSelectionTests(unittest.TestCase):
                 "CPUExecutionProvider",
             ],
         )
+
+    def test_migraphx_uses_configured_disk_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "migraphx-cache"
+            with patch.dict(os.environ, {"ORT_MIGRAPHX_CACHE_DIR": str(cache_dir)}):
+                self.assertEqual(
+                    embed.provider_entries(
+                        ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+                    ),
+                    [
+                        (
+                            "MIGraphXExecutionProvider",
+                            {"migraphx_model_cache_dir": str(cache_dir)},
+                        ),
+                        "CPUExecutionProvider",
+                    ],
+                )
+            self.assertTrue(cache_dir.is_dir())
 
 
 class SessionProviderTests(unittest.TestCase):
@@ -455,6 +490,295 @@ class SessionProviderTests(unittest.TestCase):
             captured["execution_mode"], embed.ort.ExecutionMode.ORT_SEQUENTIAL
         )
         self.assertIsNotNone(embedder._run_lock)
+
+    def test_migraphx_serializes_concurrent_runs(self):
+        class ConcurrentSession:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self.active = 0
+                self.max_active = 0
+
+            def get_providers(self):
+                return ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def run(self, _outputs, _inputs):
+                with self._lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                time.sleep(0.01)
+                with self._lock:
+                    self.active -= 1
+                return [None]
+
+        session = ConcurrentSession()
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=session),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp, device="migraphx")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: embedder._run_once({}), range(8)))
+        self.assertEqual(session.max_active, 1)
+
+    def test_migraphx_buckets_input_shapes_and_slices_padding(self):
+        captured = {}
+
+        class CaptureSession:
+            def get_providers(self):
+                return ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def run(self, _outputs, inputs):
+                captured["shape"] = inputs["input_ids"].shape
+                batch, width = captured["shape"]
+                return [np.ones((batch, width, 2), dtype=np.float32)]
+
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+                "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=CaptureSession()),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp, device="migraphx")
+        vectors = embedder.embed_encoded([[0, 1], [0, 1, 2], [0, 1, 2, 3, 4]])
+        self.assertEqual(captured["shape"], (4, 8))
+        self.assertEqual(vectors.shape, (3, 2))
+
+    def test_migraphx_build_reuses_one_shape_and_preserves_vector_rows(self):
+        calls = []
+
+        class CaptureSession:
+            def get_providers(self):
+                return ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def run(self, _outputs, inputs):
+                ids = inputs["input_ids"]
+                calls.append(ids.shape)
+                return [np.stack((ids, np.ones_like(ids)), axis=-1).astype(np.float32)]
+
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider", "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=CaptureSession()),
+            patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            model = embed.Embedder(tmp, device="migraphx", embedding_tokens=8, batch_tokens=16)
+        inputs = [[0, 2], [0, 2, 4], [0, 2, 4, 6], [0, 2, 8], [0, 2, 6]]
+        vectors = model.embed_encoded(inputs)
+        expected = np.array([[1, 1], [2, 1], [3, 1], [10 / 3, 1], [8 / 3, 1]])
+        expected /= np.linalg.norm(expected, axis=1, keepdims=True)
+        np.testing.assert_allclose(vectors, expected, rtol=1e-6)
+        np.testing.assert_allclose(model.embed_encoded(inputs[:1]), expected[:1], rtol=1e-6)
+        self.assertEqual(calls, [(2, 8)] * 4)
+
+    def test_migraphx_build_cache_is_isolated_by_model_and_shape(self):
+        session = MagicMock()
+        session.get_providers.return_value = ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+        session.get_inputs.return_value = []
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider", "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=session) as load,
+            patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+            patch.object(embed, "verify_model_files", return_value={}),
+            patch.dict(os.environ, {"ORT_MIGRAPHX_CACHE_DIR": str(Path(tmp) / "cache")}),
+        ):
+            _sentencepiece_dir(tmp)
+            path = Path(tmp) / "model.onnx"
+            path.write_bytes(b"first model")
+            caches = []
+            for budget in (16, 32, 16):
+                if len(caches) == 2:
+                    path.write_bytes(b"other model")
+                model = embed.Embedder(tmp, device="migraphx", embedding_tokens=8, batch_tokens=budget)
+                provider, options = load.call_args.kwargs["providers"][0]
+                self.assertEqual(provider, "MIGraphXExecutionProvider")
+                cache = Path(options["migraphx_model_cache_dir"])
+                self.assertTrue(cache.is_dir())
+                self.assertEqual(cache.parts[-3:], (
+                    model.fingerprint, embed.ort.__version__, f"{budget // 8}x8",
+                ))
+                caches.append(cache)
+            self.assertEqual(len(set(caches)), 3)
+            embed.Embedder(tmp, device="migraphx")
+            self.assertEqual(load.call_args.kwargs["providers"], [
+                "MIGraphXExecutionProvider", "CPUExecutionProvider",
+            ])
+
+    def test_migraphx_wrong_cached_shape_falls_back_to_cpu(self):
+        gpu, cpu = MagicMock(), MagicMock()
+        gpu.get_providers.return_value = ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+        cpu.get_providers.return_value = ["CPUExecutionProvider"]
+        gpu.get_inputs.return_value = [types.SimpleNamespace(name="input_ids")]
+        gpu.run.return_value = [np.ones((2, 8, 2), dtype=np.float32)]
+        cpu.run.return_value = [np.ones((4, 8, 2), dtype=np.float32)]
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider", "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", side_effect=[gpu, cpu]),
+            patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+        ):
+            _sentencepiece_dir(tmp)
+            model = embed.Embedder(tmp, device="migraphx", embedding_tokens=8, batch_tokens=32)
+            with self.assertLogs(embed.logger, level="WARNING") as logs:
+                vectors = model.embed_encoded([[0, 2]] * 3)
+        self.assertEqual(vectors.shape, (3, 2))
+        self.assertEqual(model.provider, "CPUExecutionProvider")
+        self.assertIn("returned shape", logs.output[0])
+
+    def test_migraphx_reuses_shape_sessions_with_a_bounded_pool(self):
+        for low_memory, expected_loads in ((False, 3), (True, 5)):
+            with self.subTest(low_memory=low_memory):
+                sessions = []
+                calls = []
+
+                class CaptureSession:
+                    def get_providers(self):
+                        return ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+
+                    def get_inputs(self):
+                        return [types.SimpleNamespace(name="input_ids")]
+
+                    def run(self, _outputs, inputs, *, calls=calls):
+                        batch, width = inputs["input_ids"].shape
+                        calls.append((self, width))
+                        return [np.ones((batch, width, 2), dtype=np.float32)]
+
+                def load(*_args, sessions=sessions, **_kwargs):
+                    session = CaptureSession()
+                    sessions.append(session)
+                    return session
+
+                with (
+                    tempfile.TemporaryDirectory() as tmp,
+                    patch.object(embed.ort, "get_available_providers", return_value=[
+                        "CPUExecutionProvider", "MIGraphXExecutionProvider",
+                    ]),
+                    patch.object(embed.ort, "InferenceSession", side_effect=load),
+                    patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+                ):
+                    _sentencepiece_dir(tmp)
+                    model = embed.Embedder(
+                        tmp, device="migraphx", embedding_tokens=128,
+                        batch_tokens=128, low_memory=low_memory,
+                    )
+                    for length in (9, 41, 9, 90):
+                        model.embed_encoded([[0] + [4] * (length - 1)])
+                self.assertEqual(len(sessions), expected_loads)
+                self.assertEqual([width for _, width in calls], [32, 64, 32, 128])
+                if low_memory:
+                    self.assertEqual(len(model._migraphx_sessions), 1)
+                else:
+                    self.assertIs(calls[0][0], calls[2][0])
+
+    def test_migraphx_coalesced_batches_remain_bounded_after_cpu_fallback(self):
+        gpu, cpu = MagicMock(), MagicMock()
+        gpu.get_providers.return_value = ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+        cpu.get_providers.return_value = ["CPUExecutionProvider"]
+        gpu.get_inputs.return_value = [types.SimpleNamespace(name="input_ids")]
+        gpu.run.side_effect = RuntimeError("GPU unavailable")
+        shapes = []
+
+        def cpu_run(_outputs, inputs):
+            batch, width = inputs["input_ids"].shape
+            shapes.append((batch, width))
+            return [np.ones((batch, width, 2), dtype=np.float32)]
+
+        cpu.run.side_effect = cpu_run
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider", "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", side_effect=[gpu, cpu]),
+            patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+        ):
+            _sentencepiece_dir(tmp)
+            model = embed.Embedder(tmp, device="migraphx", embedding_tokens=8, batch_tokens=16)
+            with self.assertLogs(embed.logger, level="WARNING"):
+                model.embed_encoded([[0, 2]])
+            vectors = model.embed_encoded([[0, 2]] * 20)
+        self.assertEqual(vectors.shape, (20, 2))
+        self.assertTrue(all(batch * width <= 16 for batch, width in shapes))
+        self.assertEqual(shapes[-3:], [(8, 2), (8, 2), (4, 2)])
+
+    def test_migraphx_late_session_fallback_drops_static_shape_constraints(self):
+        gpu, cpu = MagicMock(), MagicMock()
+        gpu.get_providers.return_value = ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
+        gpu.get_inputs.return_value = [types.SimpleNamespace(name="input_ids")]
+        cpu.get_providers.return_value = ["CPUExecutionProvider"]
+        cpu.run.side_effect = lambda _outputs, inputs: [
+            np.ones((*inputs["input_ids"].shape, 2), dtype=np.float32)
+        ]
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider", "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", side_effect=[gpu, cpu, cpu]) as load,
+            patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+        ):
+            _sentencepiece_dir(tmp)
+            model = embed.Embedder(tmp, device="migraphx", embedding_tokens=128, batch_tokens=128)
+            with self.assertLogs(embed.logger, level="WARNING"):
+                model.embed_encoded([[0, 2]])
+            model.embed_encoded([[0, 2], [0, 2]])
+        self.assertEqual(model.provider, "CPUExecutionProvider")
+        self.assertFalse(model._migraphx_sessions)
+        self.assertEqual(load.call_args.args[1], model._session_options)
+        self.assertEqual(load.call_args.kwargs["providers"], ["CPUExecutionProvider"])
+        self.assertEqual(cpu.run.call_args.args[1]["input_ids"].shape, (2, 2))
+
+    def test_migraphx_unusable_cache_falls_back_to_cpu(self):
+        cpu = MagicMock()
+        cpu.get_providers.return_value = ["CPUExecutionProvider"]
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider", "MIGraphXExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=cpu) as load,
+            patch.object(embed.sentencepiece, "SentencePieceProcessor"),
+            patch.object(embed, "verify_model_files", return_value={}),
+            patch.dict(os.environ, {"ORT_MIGRAPHX_CACHE_DIR": str(Path(tmp) / "cache")}),
+        ):
+            _sentencepiece_dir(tmp)
+            (Path(tmp) / "model.onnx").write_bytes(b"model")
+            (Path(tmp) / "cache").write_text("not a directory")
+            with self.assertLogs(embed.logger, level="WARNING"):
+                model = embed.Embedder(tmp, device="migraphx", batch_tokens=1024)
+        self.assertEqual(model.provider, "CPUExecutionProvider")
+        load.assert_called_once()
+        self.assertEqual(load.call_args.kwargs["providers"], ["CPUExecutionProvider"])
 
     def test_runtime_failure_falls_back_to_cpu(self):
         calls = []

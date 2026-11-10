@@ -254,6 +254,58 @@ after rows **and vectors** commit, including resumed work. The redirect and
 asset phase has no ETA. Metadata-only order preparation and final FAISS
 publication are outside the article ETA.
 
+## Warm MIGraphX versus CPU builds (gfx803)
+
+Linux x86-64, Intel i5-13600KF (14 physical/20 logical cores, unrestricted
+affinity), 31.2 GiB RAM, AMD gfx803 GPU. CPU uses multilingual-e5-small int8
+with ONNX Runtime 1.31.1. GPU uses the fp16 export with ONNX Runtime 1.29.0 in
+`ghcr.io/schaka/rocm-migraphx-ort-torch-builder:latest-gfx803`.
+
+Each command force-rebuilds both `devdocs_en_cmake_2025-10.zim` and
+`devdocs_en_cpp_2025-10.zim`, publishing **2,001 + 4,870 = 6,871 documents**.
+Both configurations use `--workers 2`, `batch_size = 256`,
+`embedding_batch_tokens = 1024`, and `onnx_build_threads = 1`.
+CPU uses eight embedding workers; GPU uses four workers feeding serialized
+MIGraphX calls. Source reading, extraction, lexical indexing, vector creation,
+FAISS writing, publication, model/session loading, and command startup are all
+included. GPU timing also includes container startup.
+
+These are fresh-process, warm-filesystem and warm-compiled-cache builds, not
+reused-vector or persistent-process timings. No system caches were dropped.
+After tuning, repeated alternating runs gave:
+
+| Backend | Full-command wall seconds, three runs | Median |
+|---|---|---:|
+| CPU int8 | 51.680 / 54.823 / 53.235 | 53.235 s |
+| GPU fp16, MIGraphX | 47.049 / 46.849 / 48.312 | 47.049 s |
+
+GPU took **11.6% less wall time** (1.13x throughput) on this workload, including
+against CPU with the same larger read windows and token budget. No GPU run
+compiled new shapes or fell back to CPU. Per-source report durations overlap;
+do not sum them to compare complete commands.
+
+The improvements are shape-isolated compiled caches, a bounded resident
+session pool, and coalescing already queued compatible requests. With the
+256-token model limit, the 1,024-token budget needs four fixed shapes:
+`4x256`, `8x128`, `16x64`, and `32x32`. A separate warm CMake profile spent
+6.535 seconds loading sessions and 8.740 seconds in GPU calls. Small ZIMs still
+favored CPU int8 in separate smoke runs: warm disk caches do not eliminate
+session-loading overhead. This is not a universal GPU speedup or a search
+latency result. See [GPU setup and settings](usage.md#gpu-acceleration).
+
+Published CPU/GPU indexes have identical document rows, vector IDs, and all
+596,366 lexical body postings for the two archives, with no body truncation.
+Reconstructed vectors are finite and unit-length within the existing float16
+storage tolerance. Int8 CPU and fp16 GPU vectors are not bit-identical:
+corresponding-vector cosine means are 0.996388 (CMake) and 0.995869 (C++).
+A separate same-model fp16 CPU/GPU check on all 85 Go by Example vectors gives
+mean cosine 0.999921, minimum 0.999877. These are numerical checks, not labelled
+retrieval-quality measurements.
+
+SQLite plus FAISS occupies 141.8% of the original CMake archive and 121.6% of
+the C++ archive for both backends. Neither meets the advisory index-size goal;
+the throughput improvement does not come from dropping content or vectors.
+
 ## Measurements: November 7, 2026
 
 Linux x86-64, Intel i5-13600KF, 31.2 GiB RAM; CPU affinity restricted to CPUs
