@@ -229,6 +229,11 @@ class IndexedRuntime(CollectionRuntime, ABC):
 
     indexes: Mapping[str, IndexHandle]
 
+    @property
+    def result_metadata_token(self) -> Any:
+        """Revision of result metadata held outside the published index."""
+        return None
+
     def source_paths(self, source: SourceInfo) -> Mapping[str, Path]:
         """Private backing locations, when available, for CLI use only."""
         return {}

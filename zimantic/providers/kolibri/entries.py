@@ -12,9 +12,10 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,12 +36,14 @@ from .captions import associated_captions
 from .discovery import (
     ChannelRow,
     KolibriSource,
+    KolibriTraversalError,
     NodeRow,
     SourceScope,
     candidate_nodes,
     load_files_for_nodes,
 )
 from .html5 import Html5Archive, Html5LimitError, Html5ZipError
+from .metadata import BATCH_SIZE, MetadataReader
 from .schema import (
     EXERCISE_KIND,
     HTML5_PRESETS,
@@ -100,6 +103,7 @@ class _ManifestItem:
     primary_size: int | None
     primary_mtime: int | None
     caption_signatures: tuple[tuple[str, int | None, int | None], ...] = ()
+    metadata_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -288,14 +292,10 @@ class KolibriEntryProducer:
                 db, self.channel, self.scope, limit=self.max_entries
             )
             if len(nodes) > self.max_visited:
-                from .discovery import KolibriTraversalError
-
                 raise KolibriTraversalError(
                     f"Kolibri traversal exceeded the {self.max_visited}-entry limit"
                 )
             if time.monotonic() - started > self.traversal_timeout:
-                from .discovery import KolibriTraversalError
-
                 raise KolibriTraversalError(
                     "Kolibri traversal exceeded its "
                     f"{self.traversal_timeout:g}-second limit"
@@ -349,6 +349,37 @@ class KolibriEntryProducer:
                         caption_signatures,
                     )
                 )
+            if not self.fast:
+                reader = MetadataReader(db, self.channel)
+                db.set_progress_handler(
+                    lambda: int(time.monotonic() - started > self.traversal_timeout),
+                    1000,
+                )
+                for start in range(0, len(items), BATCH_SIZE):
+                    if time.monotonic() - started > self.traversal_timeout:
+                        raise KolibriTraversalError(
+                            "Kolibri traversal exceeded its "
+                            f"{self.traversal_timeout:g}-second limit"
+                        )
+                    chunk = items[start : start + BATCH_SIZE]
+                    metadata = reader.load(
+                        self.scope,
+                        (item.node.id for item in chunk),
+                        include_position=False,
+                    )
+                    for offset, item in enumerate(chunk, start):
+                        details = metadata.get(item.node.id)
+                        if details is not None:
+                            items[offset] = replace(
+                                item, metadata_text=details.indexing_text()
+                            )
+        except sqlite3.OperationalError as error:
+            if time.monotonic() - started > self.traversal_timeout:
+                raise KolibriTraversalError(
+                    "Kolibri traversal exceeded its "
+                    f"{self.traversal_timeout:g}-second limit"
+                ) from error
+            raise
         finally:
             db.close()
         return _Snapshot(
@@ -396,6 +427,7 @@ class KolibriEntryProducer:
                     "title": item.node.title,
                     "kind": item.node.kind,
                     "description": item.node.description,
+                    "metadata_text": item.metadata_text,
                     "available": item.node.available,
                     "coach_content": item.node.coach_content,
                     "family": item.family,
@@ -555,7 +587,7 @@ class KolibriEntryProducer:
         title = node.title or "Untitled"
         if self.fast:
             return EntryRecord(row_id, title, "", path, None, "", False)
-        description = str(node.description or "").strip()
+        description = item.metadata_text or str(node.description or "").strip()
         if item.selection.primary is None:
             if node.kind == EXERCISE_KIND and description:
                 body, truncated = truncate_utf8(

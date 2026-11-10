@@ -492,6 +492,12 @@ ol.results {
     object-fit: contain;
     width: 16px;
 }
+.result-resource {
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: 4px 0 6px;
+    overflow-wrap: anywhere;
+}
 .result-snippet {
     font-size: 0.92rem;
     margin-top: 6px;

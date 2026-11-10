@@ -20,6 +20,7 @@ from .helpers import (
     KolibriFixture,
     build_sources,
     kolibri_config,
+    make_metadata_fixture,
     make_two_channel_fixture,
     open_runtime,
 )
@@ -330,3 +331,36 @@ def test_fingerprint_tracks_effective_derived_options(tmp_path):
         fixture.db.close()
         runtime.close()
         batch.close()
+
+
+def test_descriptive_metadata_is_searchable_and_invalidates_the_build(tmp_path):
+    fixture = make_metadata_fixture(tmp_path)
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        source = next(item for item in runtime.library_sources() if item.key.endswith(":unit"))
+        producer = runtime.entry_producer(source, fast=False)
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        row = next(item for item in rows if item.path == "node/count")
+        for text in ("Khan Academy", "Lower Primary", "numeracy", "Practice", "Counting", "Questions: 8"):
+            assert text in row.body
+        locator = build_sources(runtime, index_dir)
+        assert _body_hits(locator, source, "numeracy")
+        assert _body_hits(locator, source, "Primary")
+        assert _body_hits(locator, source, "Academy")
+        fixture.db.execute(
+            "UPDATE content_contenttag SET tag_name = 'new tag' WHERE id = 'tag-1'"
+        )
+        fixture.db.commit()
+        assert not producer.validate_snapshot()
+        changed = runtime.entry_producer(source, fast=False)
+        assert producer.fingerprint != changed.fingerprint
+        fast = runtime.entry_producer(source, fast=True)
+        assert all(
+            not fast.entry_at(index).body and not fast.entry_at(index).excerpt
+            for index in range(fast.count)
+        )
+    finally:
+        runtime.close()
+        batch.close()
+        fixture.dispose()

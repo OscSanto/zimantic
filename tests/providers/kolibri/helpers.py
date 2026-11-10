@@ -98,6 +98,13 @@ CREATE TABLE content_localfile (
     available INTEGER DEFAULT 1,
     file_size INTEGER
 );
+CREATE TABLE content_contenttag (id TEXT PRIMARY KEY, tag_name TEXT);
+CREATE TABLE content_contentnode_tags (contentnode_id TEXT, contenttag_id TEXT);
+CREATE TABLE content_assessmentmetadata (
+    id TEXT PRIMARY KEY,
+    contentnode_id TEXT,
+    number_of_assessments INTEGER
+);
 """
 
 
@@ -383,6 +390,50 @@ def make_two_channel_fixture(root: Path) -> KolibriFixture:
     fixture.add_node("audio-1", "channel-b", "Audio One", kind="audio", parent_id="root-b", lft=2, rght=3, level=1, tree_id=2)
     fixture.add_file("audio-1", sample("audio/speech.mp3").read_bytes(), "mp3", preset="audio")
     fixture.add_node("exercise-1", "channel-b", "Exercise One", kind="exercise", parent_id="root-b", lft=4, rght=5, level=1, tree_id=2, description="public exercise description")
+    fixture.close()
+    return fixture
+
+
+def make_metadata_fixture(root: Path) -> KolibriFixture:
+    fixture = KolibriFixture(root)
+    fixture.add_channel("math", "Math", "root")
+    fixture.add_node("root", "math", "Math", kind="topic", lft=1, rght=20, level=0)
+    fixture.add_node("unit", "math", "Unit 1", kind="topic", parent_id="root", lft=2, rght=17)
+    fixture.add_node("topic", "math", "Counting", kind="topic", parent_id="unit", lft=3, rght=14, level=2)
+    fixture.add_node("intro", "math", "Introduction", parent_id="topic", lft=4, rght=5, level=3)
+    fixture.add_document("intro", "Counting introduction body", extension="txt")
+    fixture.add_node(
+        "count", "math", "Count with small numbers", kind="exercise",
+        parent_id="topic", lft=6, rght=7, level=3, sort_order=750,
+        description="Practice counting small groups of objects.",
+    )
+    fixture.add_file("count", b"{}", "perseus", preset="exercise")
+    fixture.add_node("subtopic", "math", "More counting", kind="topic", parent_id="topic", lft=8, rght=9, level=3)
+    fixture.add_node("coach", "math", "Private coach notes", kind="exercise", parent_id="topic", lft=10, rght=11, level=3, coach_content=True, description="private description")
+    fixture.add_node("unavailable", "math", "Not installed", kind="exercise", parent_id="topic", lft=12, rght=13, level=3, available=False, description="not installed description")
+    fixture.add_node("other", "math", "Other topic resource", parent_id="unit", lft=15, rght=16, level=2)
+    fixture.add_document("other", "Other resource body", extension="txt")
+    fixture.add_node("outside", "math", "Outside unit", parent_id="root", lft=18, rght=19)
+    fixture.add_document("outside", "Outside resource body", extension="txt")
+    fixture.db.execute(
+        "INSERT INTO content_language VALUES ('en', 'eng', NULL, 'English', 'ltr')"
+    )
+    fixture.db.execute(
+        "UPDATE content_contentnode SET author = 'Khan Academy', lang_id = 'en', "
+        "duration = 125, grade_levels = '[\"wnarlxKo\"]', "
+        "learning_activities = 'VwRCom7G,wA01urpi' WHERE id = 'count'"
+    )
+    fixture.db.executemany(
+        "INSERT INTO content_contenttag VALUES (?, ?)",
+        [("tag-1", "numeracy"), ("tag-2", "arithmetic")],
+    )
+    fixture.db.executemany(
+        "INSERT INTO content_contentnode_tags VALUES ('count', ?)",
+        [("tag-1",), ("tag-2",)],
+    )
+    fixture.db.execute(
+        "INSERT INTO content_assessmentmetadata VALUES ('assessment', 'count', 8)"
+    )
     fixture.close()
     return fixture
 

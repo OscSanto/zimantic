@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -58,8 +59,10 @@ from .discovery import (
     kolibri_collection_key,
     load_channel,
     load_channels,
+    parse_node_path,
 )
 from .entries import KolibriEntryProducer
+from .metadata import MetadataReader
 from .snapshot import SnapshotError, SnapshotManager, database_signature
 from .store import KolibriContentStore
 
@@ -214,6 +217,11 @@ class KolibriRuntime(IndexedRuntime):
         with self._lock:
             return tuple(source.info for source in self._searchable)
 
+    @property
+    def result_metadata_token(self) -> Any:
+        with self._lock:
+            return self._snapshot.source_signature
+
     def library_sources(self) -> Sequence[SourceInfo]:
         with self._lock:
             return tuple(source.info for source in self._library)
@@ -240,7 +248,7 @@ class KolibriRuntime(IndexedRuntime):
         except RuntimeError as error:
             return SourceResult(source, error=str(error), status="cancelled")
         try:
-            return generic_search.search(
+            result = generic_search.search(
                 source,
                 index,
                 request,
@@ -249,8 +257,65 @@ class KolibriRuntime(IndexedRuntime):
                     self.web_base_path
                 ),
             )
+            documents = [
+                *result.items,
+                *(doc for _, doc in result.semantic),
+                *(doc for _, doc in result.keyword),
+                *(doc for _, doc in result.fulltext),
+            ]
+            self._enrich_metadata(source, documents, deadline=request.deadline)
+            return result
         finally:
             index.release()
+
+    def _enrich_metadata(
+        self,
+        source: SourceInfo,
+        documents: Sequence[Any],
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        by_node: dict[str, list[Any]] = {}
+        for document in documents:
+            try:
+                node_id, asset = parse_node_path(str(document.get("path") or ""))
+            except ValueError:
+                continue
+            if not asset:
+                by_node.setdefault(node_id, []).append(document)
+        if not by_node or (deadline is not None and time.monotonic() >= deadline):
+            return
+        with self._lock:
+            kolibri_source = self._by_key.get(source.key)
+            if kolibri_source is None or self._closed:
+                return
+            snapshot = self._snapshot.retain()
+        db = None
+        try:
+            db = snapshot.connect()
+            if deadline is not None:
+                db.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline), 1000
+                )
+            metadata = MetadataReader(db, kolibri_source.channel).load(
+                kolibri_source.scope, by_node
+            )
+            preview_chars = self._search_limits(source).preview_chars
+            for node_id, details in metadata.items():
+                resource = dict(details.resource)
+                if resource.get("description"):
+                    resource["description"] = truncate_at_word_boundary(
+                        resource["description"], preview_chars
+                    )
+                for document in by_node[node_id]:
+                    document["breadcrumbs"] = list(details.breadcrumbs)
+                    document["resource"] = resource
+        except (sqlite3.Error, SnapshotError, ValueError):
+            logger.debug("Kolibri result metadata unavailable for %s", source.key, exc_info=True)
+        finally:
+            if db is not None:
+                db.close()
+            snapshot.release()
 
     def suggest(
         self, source: SourceInfo, query: str, limit: int
@@ -302,7 +367,12 @@ class KolibriRuntime(IndexedRuntime):
         max_bytes: int,
         deadline: float | None,
     ) -> tuple[str, str | None]:
-        lead = str(document.get("lead") or "")
+        if "resource" not in document:
+            self._enrich_metadata(source, [document], deadline=deadline)
+        resource = document.get("resource") or {}
+        lead = truncate_at_word_boundary(
+            str(document.get("lead") or resource.get("description") or ""), max_chars
+        )
         mimetype = document.get("mimetype")
         path = str(document.get("path") or "")
         if not path or (deadline is not None and time.monotonic() >= deadline):
@@ -351,7 +421,7 @@ class KolibriRuntime(IndexedRuntime):
                     )
                 else:
                     text = ""
-            return truncate_at_word_boundary(text, max_chars), mimetype
+            return truncate_at_word_boundary(text or lead, max_chars), mimetype
         except (
             ArticleNotFoundError,
             ArticleTooLargeError,

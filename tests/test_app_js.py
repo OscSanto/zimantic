@@ -18,6 +18,123 @@ def _function_source(source: str, start: str, end: str) -> str:
 
 @unittest.skipUnless(NODE, "node is unavailable")
 class AppSourceStateTests(unittest.TestCase):
+    def test_resource_results_use_human_breadcrumbs_kinds_and_metadata(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/zimantic/");
+const stripBasePath = (path) => path.replace(/^\\/zimantic/, "");
+const t = (text) => text;
+{_function_source(source, "function resultUrlLabel(", "function modifiedClick(")}
+const item = {{
+  path: "node/opaque-id", url: "/zimantic/content/source/node/opaque-id",
+  breadcrumbs: ["Math", "Unit 1", "Counting", "Count with small numbers"],
+  resource: {{
+    kind: "exercise", grade_levels: ["Lower Primary"], duration: 125,
+    language: "English", author: "<img src=x onerror=alert(1)>",
+    assessment_count: 8, topic_position: 2, topic_total: 3,
+    tags: ["numeracy", "arithmetic"], learning_activities: ["Practice"],
+  }},
+}};
+const invalid = {{resource: {{duration: -1, assessment_count: -1, topic_position: 99, topic_total: 3}}}};
+console.log(JSON.stringify({{
+  label: resultUrlLabel(item), details: resourceDetails(item),
+  badge: mediaBadge("application/octet-stream", item.resource.kind),
+  interactive: mediaBadge("application/zip", "html5"),
+  video: mediaBadge("video/mp4"),
+  kolibriVideo: mediaBadge("video/mp4", "video"),
+  otherMedia: ["audio/mpeg", "image/png", "text/plain", "application/octet-stream"]
+    .map((mime) => mediaBadge(mime)),
+  fileLabel: resultUrlLabel({{path: "folder/file.txt"}}),
+  pdf: mediaBadge("application/pdf"), invalid: resourceDetails(invalid),
+  empty: resourceDetails({{}}),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["label"], "Math › Unit 1 › Counting › Count with small numbers")
+        self.assertEqual(payload["badge"], {"icon": "Exercise", "label": "Exercise"})
+        self.assertEqual(payload["interactive"], {"icon": "Interactive", "label": "Interactive"})
+        self.assertEqual(payload["video"], {"icon": "Video", "label": "Video"})
+        self.assertEqual(payload["video"], payload["kolibriVideo"])
+        self.assertEqual(payload["otherMedia"], [
+            {"icon": "Audio", "label": "Audio"},
+            {"icon": "Image", "label": "Image"},
+            {"icon": "Text", "label": "Text"},
+            {"icon": "File", "label": "File"},
+        ])
+        self.assertEqual(payload["fileLabel"], "folder › file.txt")
+        self.assertEqual(payload["pdf"], {"icon": "PDF", "label": "PDF"})
+        self.assertEqual(payload["details"], [
+            "Grade level: Lower Primary", "Duration: 2:05", "Language: English",
+            "Author: <img src=x onerror=alert(1)>", "8 questions",
+            "Position in topic: 2 / 3", "Tags: numeracy, arithmetic",
+            "Learning activities: Practice",
+        ])
+        self.assertEqual(payload["invalid"], [])
+        self.assertEqual(payload["empty"], [])
+
+    def test_result_card_uses_description_fallback_and_clears_stale_metadata(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+class Node {{
+  constructor() {{ this.children = []; this.textContent = ""; this.dataset = {{}}; }}
+  replaceChildren(...children) {{ this.children = children; }}
+  append(...children) {{ this.children.push(...children); }}
+  appendChild(child) {{ this.append(child); }}
+  setAttribute() {{}}
+}}
+const parts = Object.fromEntries(
+  [".result-title", ".result-resource", ".result-snippet"].map((key) => [key, new Node()])
+);
+Object.defineProperty(parts[".result-resource"], "innerHTML", {{
+  set() {{ throw new Error("metadata must not be interpreted as HTML"); }},
+}});
+const node = new Node();
+node.querySelector = (selector) => parts[selector] || null;
+const document = {{createElement: () => new Node()}};
+const resultKey = () => "key";
+const t = (text) => text;
+const setSourceMeta = () => {{}}, setResultUrl = () => {{}}, setResultDebug = () => {{}};
+const previewBlocks = (text) => [text], previewEndsWithPunctuation = () => true;
+const highlight = (text) => text;
+const current = {{streaming: true, terms: []}};
+{_function_source(source, "function resourceDetails(", "function isHtmlMimetype(")}
+{_function_source(source, "function mediaBadge(", "function modifiedClick(")}
+{_function_source(source, "function setResultNode(", "function newResultNode(")}
+setResultNode(node, {{
+  title: "Count", resource: {{
+    kind: "exercise", author: "<script>unsafe()</script>", description: "Public description.",
+  }},
+}});
+const initial = {{
+  details: parts[".result-resource"].textContent,
+  detailsHidden: parts[".result-resource"].hidden,
+  snippet: parts[".result-snippet"].innerHTML,
+  snippetHidden: parts[".result-snippet"].hidden,
+}};
+setResultNode(node, {{title: "Other result", lead: "Extracted body."}});
+console.log(JSON.stringify({{
+  initial, details: parts[".result-resource"].textContent,
+  detailsHidden: parts[".result-resource"].hidden,
+  snippet: parts[".result-snippet"].innerHTML,
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["initial"], {
+            "details": "Author: <script>unsafe()</script>",
+            "detailsHidden": False,
+            "snippet": "<p>Public description.</p>",
+            "snippetHidden": False,
+        })
+        self.assertEqual(payload["details"], "")
+        self.assertTrue(payload["detailsHidden"])
+        self.assertEqual(payload["snippet"], "<p>Extracted body.</p>")
+
     def test_directory_listing_filters_names_and_sorts_folders_first(self):
         page = directory_page("Files", "", "/article/files/", []).decode()
         listing_script = page.split("<script>", 1)[1].split("</script>", 1)[0]
@@ -508,6 +625,8 @@ const relevanceDisabled = $("sortSelect").options[0].disabled;
 submitSearch(true);
 const emptyUrl = currentUrlValue();
 $("question").value = "topic";
+renderSortControls();
+const typedDefault = $("sortSelect").value;
 $("sortSelect").value = "random";
 submitSearch(true);
 renderSortControls();
@@ -520,7 +639,7 @@ $("question").value = "";
 availableBrowseModes.delete("outliers");
 renderSortControls();
 console.log(JSON.stringify({{
-  emptyDefault, relevanceDisabled, emptyUrl, textUrl, textSort, relevanceUrl, searches,
+  emptyDefault, relevanceDisabled, emptyUrl, typedDefault, textUrl, textSort, relevanceUrl, searches,
   fastDefault: $("sortSelect").value,
   semanticHidden: $("sortSelect").options.filter((option) =>
     ["outliers"].includes(option.value)
@@ -537,6 +656,7 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["emptyDefault"], "diverse")
         self.assertTrue(payload["relevanceDisabled"])
         self.assertEqual(payload["emptyUrl"], "/?q=&sort=diverse&collection=files%3Amodules&source=manual")
+        self.assertEqual(payload["typedDefault"], "relevance")
         self.assertEqual(payload["textUrl"], "/?q=topic&sort=random&seed=7&collection=files%3Amodules&source=manual")
         self.assertEqual(payload["textSort"], "random")
         self.assertEqual(payload["relevanceUrl"], "/?q=topic&collection=files%3Amodules&source=manual")

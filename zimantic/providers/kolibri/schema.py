@@ -25,6 +25,31 @@ FILE_TABLE = "content_file"
 LOCAL_FILE_TABLE = "content_localfile"
 LANGUAGE_TABLE = "content_language"
 MIGRATIONS_TABLE = "django_migrations"
+TAG_TABLE = "content_contenttag"
+NODE_TAG_TABLE = "content_contentnode_tags"
+ASSESSMENT_TABLE = "content_assessmentmetadata"
+
+# le-utils label identifiers used by the supported Kolibri release.
+GRADE_LEVEL_LABELS = {
+    "H64ZOHfi": "Basic Skills",
+    "wnarlxKo": "Lower Primary",
+    "eLt0Mbu4": "Lower Secondary",
+    "FOhG0ib": "Preschool",
+    "ZrgBU73s": "Professional",
+    "FYxwbxts": "Tertiary",
+    "BkGYi3lD": "Upper Primary",
+    "ZEjiwvOb": "Upper Secondary",
+    "Z#97dvst": "Work Skills",
+}
+LEARNING_ACTIVITY_LABELS = {
+    "UXADWcXZ": "Create",
+    "#j8L0eq3": "Explore",
+    "mkA1R3NU": "Listen",
+    "VwRCom7G": "Practice",
+    "wA01urpi": "Read",
+    "3dSeJhqs": "Reflect",
+    "UD5UGM0z": "Watch",
+}
 
 REQUIRED_TABLES = frozenset(
     {CHANNEL_TABLE, NODE_TABLE, FILE_TABLE, LOCAL_FILE_TABLE}

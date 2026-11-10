@@ -2069,6 +2069,9 @@
             }
 
             function resultUrlLabel(item) {
+                if (Array.isArray(item.breadcrumbs) && item.breadcrumbs.length) {
+                    return item.breadcrumbs.join(" › ");
+                }
                 const rawUrl = String(item.url || "").trim();
                 const rawPath = String(item.path || "").trim();
                 if (!rawUrl && !rawPath) return "";
@@ -2106,7 +2109,42 @@
                 const label = resultUrlLabel(item);
                 separator.hidden = !label;
                 url.textContent = label;
+                url.title = label;
                 url.hidden = !label;
+            }
+
+            function resourceDetails(item) {
+                const resource = item.resource;
+                if (!resource) return [];
+                const details = [];
+                const add = (label, value) => {
+                    if (value) details.push(`${t(label)}: ${value}`);
+                };
+                add("Grade level", resource.grade_levels?.join(", "));
+                if (Number.isInteger(resource.duration) && resource.duration > 0) {
+                    const hours = Math.floor(resource.duration / 3600);
+                    const minutes = Math.floor((resource.duration % 3600) / 60);
+                    const seconds = String(resource.duration % 60).padStart(2, "0");
+                    add("Duration", hours
+                        ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`
+                        : `${minutes}:${seconds}`);
+                }
+                add("Language", resource.language);
+                add("Author", resource.author);
+                if (Number.isInteger(resource.assessment_count) && resource.assessment_count >= 0) {
+                    details.push(`${resource.assessment_count} ${t(resource.assessment_count === 1 ? "question" : "questions")}`);
+                }
+                if (
+                    Number.isInteger(resource.topic_position) &&
+                    Number.isInteger(resource.topic_total) &&
+                    resource.topic_position > 0 &&
+                    resource.topic_position <= resource.topic_total
+                ) {
+                    add("Position in topic", `${resource.topic_position} / ${resource.topic_total}`);
+                }
+                add("Tags", resource.tags?.join(", "));
+                add("Learning activities", resource.learning_activities?.map(t).join(", "));
+                return details;
             }
 
             function isHtmlMimetype(mimetype) {
@@ -2114,19 +2152,29 @@
                 return mime === "text/html" || mime === "application/xhtml+xml";
             }
 
-            function mediaBadge(mimetype) {
+            function mediaBadge(mimetype, kind = null) {
+                const kinds = {
+                    exercise: "Exercise", html5: "Interactive", h5p: "Interactive",
+                    document: "Document", video: "Video", audio: "Audio", slideshow: "Slideshow",
+                };
+                if (Object.hasOwn(kinds, kind)) {
+                    const label = t(kinds[kind]);
+                    return { icon: label, label };
+                }
                 const mime = String(mimetype || "").toLowerCase();
                 if (!mime || mime === "text/html" || mime === "application/xhtml+xml") return null;
-                if (mime.startsWith("video/")) return { icon: "▶", label: "Video" };
-                if (mime.startsWith("audio/")) return { icon: "♪", label: "Audio" };
-                if (mime.startsWith("image/")) return { icon: "IMG", label: "Image" };
-                if (mime === "application/pdf") return { icon: "PDF", label: "PDF" };
-                if (mime.startsWith("text/")) return { icon: "TXT", label: "Text" };
-                return { icon: "FILE", label: "File" };
+                let label = "File";
+                if (mime.startsWith("video/")) label = "Video";
+                else if (mime.startsWith("audio/")) label = "Audio";
+                else if (mime.startsWith("image/")) label = "Image";
+                else if (mime === "application/pdf") label = "PDF";
+                else if (mime.startsWith("text/")) label = "Text";
+                label = t(label);
+                return { icon: label, label };
             }
 
-            function appendMediaBadge(title, mimetype) {
-                const media = mediaBadge(mimetype);
+            function appendMediaBadge(title, mimetype, kind = null) {
+                const media = mediaBadge(mimetype, kind);
                 if (!media) return;
                 const badge = document.createElement("span");
                 badge.className = "result-media";
@@ -3131,11 +3179,14 @@
                 } else {
                     title.textContent = displayTitle;
                 }
-                appendMediaBadge(title, item.mimetype);
+                appendMediaBadge(title, item.mimetype, item.resource?.kind);
                 setSourceMeta(node, item);
                 setResultUrl(node, item);
+                const details = node.querySelector(".result-resource");
+                details.textContent = resourceDetails(item).join(" · ");
+                details.hidden = !details.textContent;
                 const snippet = node.querySelector(".result-snippet");
-                const lead = item.lead || "";
+                const lead = item.lead || item.resource?.description || "";
                 // While a search is streaming, previews have not been extracted
                 // yet. Show only the title and breadcrumb rows rather than a
                 // placeholder, so each pending result stays roughly 3em tall.
@@ -3176,6 +3227,7 @@
                 node.innerHTML = `<div class="result-body">
   <div class="result-title"></div>
   <div class="result-meta"></div>
+  <div class="result-resource" hidden></div>
   <div class="result-snippet"></div>
 </div>`;
                 setResultNode(node, item);
@@ -3803,7 +3855,10 @@
                         ? !question : !availableBrowseModes.has(option.value);
                     option.disabled = option.hidden;
                 }
-                select.value = current?.browse || (question ? "relevance" : defaultBrowseMode());
+                const startingSearchFromBrowse = question && current?.question === "";
+                select.value = startingSearchFromBrowse
+                    ? "relevance"
+                    : current?.browse || (question ? "relevance" : defaultBrowseMode());
             }
 
             function setSettingsOpen(open) {

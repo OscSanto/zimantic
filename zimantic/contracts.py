@@ -4,11 +4,25 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from .media_types import ordered_media_types
 
 SourceStatus = Literal["ok", "partial", "error", "cancelled"]
+
+
+class ResourceMetadata(TypedDict, total=False):
+    kind: str
+    description: str
+    author: str
+    language: str
+    grade_levels: list[str]
+    duration: int
+    tags: list[str]
+    learning_activities: list[str]
+    assessment_count: int
+    topic_position: int
+    topic_total: int
 
 
 class ResultDocument(TypedDict):
@@ -21,6 +35,8 @@ class ResultDocument(TypedDict):
     path: str
     url: str
     mimetype: str | None
+    breadcrumbs: NotRequired[list[str]]
+    resource: NotRequired[ResourceMetadata]
 
 
 class SourceResultDocument(ResultDocument, total=False):

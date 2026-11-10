@@ -941,7 +941,17 @@ class Search:
                     )
                 )
             old_sources = self.sources
-            changed = ordered != old_sources
+            metadata_tokens = {
+                key: runtime.result_metadata_token
+                for key, runtime in self.runtimes.items()
+                if isinstance(runtime, IndexedRuntime)
+                and runtime.result_metadata_token is not None
+            }
+            changed = (
+                ordered != old_sources
+                or metadata_tokens != getattr(self, "_result_metadata_tokens", {})
+            )
+            self._result_metadata_tokens = metadata_tokens
             old_snapshots = self._collection_snapshots
             snapshots = {
                 key: runtime.snapshot for key, runtime in self.runtimes.items()
