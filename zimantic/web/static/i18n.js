@@ -79,6 +79,7 @@
             "File": "Archivo",
             "Kolibri": "Kolibri",
             "Kiwix": "Kiwix",
+            "Remote Kiwix": "Kiwix remoto",
             "Provider": "Proveedor",
             "Filter by provider": "Filtrar por proveedor",
             "All providers": "Todos los proveedores",

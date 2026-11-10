@@ -14,6 +14,29 @@ from ..media_types import MEDIA_TYPE_ORDER
 from ..providers.config import BUILTIN_PROVIDERS
 
 
+def visible_library_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    library = []
+    hidden_counts: dict[str, int] = {}
+    for source in snapshot.get("library") or []:
+        if source.get("provider") != "kolibri" or source.get("item_count") != 0:
+            library.append(source)
+            continue
+        collection = source.get("collection")
+        if isinstance(collection, Mapping) and collection.get("key"):
+            key = str(collection["key"])
+            hidden_counts[key] = hidden_counts.get(key, 0) + 1
+    collections = []
+    for collection in snapshot.get("collections") or []:
+        hidden = hidden_counts.get(str(collection.get("key") or ""), 0)
+        if hidden:
+            collection = {
+                **collection,
+                "source_count": max(0, int(collection.get("source_count") or 0) - hidden),
+            }
+        collections.append(collection)
+    return {**snapshot, "library": library, "collections": collections}
+
+
 def validate_provider(value: str | None) -> str | None:
     if value is None:
         return None
@@ -229,4 +252,5 @@ __all__ = [
     "validate_language",
     "validate_media_type",
     "validate_provider",
+    "visible_library_snapshot",
 ]

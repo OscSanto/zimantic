@@ -725,6 +725,49 @@ console.log(JSON.stringify([
         )
         self.assertEqual(json.loads(result.stdout), [True, False, False, True, False, True])
 
+    def test_library_filter_options_hide_empty_facets_and_name_remote_kiwix(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const elements = {{
+  libraryProviderFilter: {{options: [
+    {{value: ""}}, {{value: "zim"}}, {{value: "kiwix"}},
+  ]}},
+  libraryMediaFilter: {{options: [
+    {{value: ""}}, {{value: "text"}}, {{value: "video"}},
+  ]}},
+}};
+const $ = (id) => elements[id];
+const t = (text) => text;
+const libraryLanguageOptions = new Set(["old"]);
+let languagesRendered = false;
+const renderLibraryLanguageOptions = () => {{ languagesRendered = true; }};
+{_function_source(source, "function setAvailableLibraryFilterOptions(", "function libraryLanguageName(")}
+{_function_source(source, "function providerLabel(", "function mediaTypeLabels(")}
+setAvailableLibraryFilterOptions({{
+  providers: ["zim"], media_types: ["text"], languages: ["ENG", ""],
+}});
+console.log(JSON.stringify({{
+  providers: elements.libraryProviderFilter.options.map((option) => option.hidden || false),
+  media: elements.libraryMediaFilter.options.map((option) => option.hidden || false),
+  languages: [...libraryLanguageOptions],
+  languagesRendered,
+  kiwix: providerLabel("kiwix"),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "providers": [False, False, True],
+                "media": [False, False, True],
+                "languages": ["eng"],
+                "languagesRendered": True,
+                "kiwix": "Remote Kiwix",
+            },
+        )
+
     def test_library_language_options_use_discovered_codes_and_preserve_selection(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -955,6 +998,48 @@ console.log(JSON.stringify({{
         )
         self.assertEqual(payload["status"], "1 collection · 1 loaded source")
         self.assertEqual(payload["placeholder"], "Filter 1 source")
+
+    def test_library_hides_empty_kolibri_cards_including_cached_collections(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const $ = () => ({{value: ""}});
+const providerLabel = (provider) => provider;
+const librarySearchText = (source) => source.key;
+const collectionByKey = () => null;
+const collections = [
+  {{key: "khan", provider: "kolibri"}},
+  {{key: "files", provider: "files"}},
+];
+let libraryCollections = collections;
+const makeSource = (key, provider, item_count) => ({{
+  key, provider, item_count, searchable: false,
+}});
+const libraryCollectionPages = new Map([
+  ["khan", {{sources: [
+    makeSource("empty", "kolibri", 0),
+    makeSource("math", "kolibri", 2),
+    makeSource("unknown", "kolibri", null),
+  ]}}],
+  ["files", {{sources: [makeSource("file", "files", 0)]}}],
+]);
+{_function_source(source, "function libraryFilterTerms()", "function libraryCardsFor(")}
+{_function_source(source, "function libraryCollectionViews()", "function libraryStateMessage(")}
+const summarize = () => libraryCollectionViews().map((view) => ({{
+  key: view.key, cards: view.members.map((source) => source.key),
+}}));
+const configured = summarize();
+libraryCollections = [collections[1]];
+const cached = summarize();
+console.log(JSON.stringify({{configured, cached}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        khan = {"key": "khan", "cards": ["math", "unknown"]}
+        files = {"key": "files", "cards": ["file"]}
+        self.assertEqual(payload["configured"], [khan, files])
+        self.assertEqual(payload["cached"], [files, khan])
 
     def test_library_scope_reset_clears_all_filters_and_pending_reload(self):
         source = APP_JS.read_text(encoding="utf-8")

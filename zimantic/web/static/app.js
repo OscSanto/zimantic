@@ -280,7 +280,7 @@
                 if (value === "zim") return "ZIM";
                 if (value === "files") return t("Files");
                 if (value === "kolibri") return t("Kolibri");
-                if (value === "kiwix") return t("Kiwix");
+                if (value === "kiwix") return t("Remote Kiwix");
                 return value;
             }
 
@@ -1119,6 +1119,9 @@
                         query,
                     );
                     const members = (state?.sources || []).filter((source) => {
+                        if (source.provider === "kolibri" && source.item_count === 0) {
+                            return false;
+                        }
                         if (provider && source.provider !== provider) return false;
                         if (
                             media &&
@@ -1164,8 +1167,9 @@
                         state,
                         members: state.sources.filter(
                             (source) =>
-                                !language ||
-                                libraryLanguageCodes(source).includes(language),
+                                (source.provider !== "kolibri" || source.item_count !== 0) &&
+                                (!language ||
+                                    libraryLanguageCodes(source).includes(language)),
                         ),
                         collectionMatches: true,
                     });
@@ -1262,6 +1266,29 @@
                     select.appendChild(option);
                 }
                 select.value = selected;
+            }
+
+            function setAvailableLibraryFilterOptions(facets) {
+                if (!facets || typeof facets !== "object") return;
+                for (const [selectId, values] of [
+                    ["libraryProviderFilter", facets.providers],
+                    ["libraryMediaFilter", facets.media_types],
+                ]) {
+                    const select = $(selectId);
+                    if (!select || !Array.isArray(values)) continue;
+                    const available = new Set(values.map((value) => String(value)));
+                    for (const option of select.options) {
+                        if (option.value) option.hidden = !available.has(option.value);
+                    }
+                }
+                if (Array.isArray(facets.languages)) {
+                    libraryLanguageOptions.clear();
+                    for (const value of facets.languages) {
+                        const language = String(value || "").trim().toLocaleLowerCase();
+                        if (language) libraryLanguageOptions.add(language);
+                    }
+                    renderLibraryLanguageOptions();
+                }
             }
 
             function libraryLanguageName(language) {
@@ -5343,6 +5370,7 @@
                 });
                 if (!configResponse.ok) return;
                 const config = await configResponse.json();
+                setAvailableLibraryFilterOptions(config.library_filters);
                 debugMode = Boolean(config.debug);
                 if (Array.isArray(config.browse_modes)) {
                     availableBrowseModes = new Set(config.browse_modes);

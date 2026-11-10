@@ -218,6 +218,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(config["collection_source_limit"], 1000)
         self.assertEqual(config["max_explicit_collection_sources"], 500)
         self.assertEqual(config["providers"], ["zim", "kiwix", "files", "kolibri"])
+        self.assertEqual(
+            config["library_filters"],
+            {
+                "providers": ["zim"],
+                "media_types": ["text"],
+                "languages": ["eng"],
+            },
+        )
         self.assertIn("the", config["stopwords"])
         self.assertGreater(config["max_query_length"], 0)
 
@@ -266,6 +274,76 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(
                 client.get("/library.json", params={"limit": 1001}).status_code, 422
             )
+
+    def test_library_counts_and_paginates_only_nonempty_kolibri_cards(self):
+        snapshot = self.search.listing_snapshot()
+        collection = {
+            "key": "kolibri:khan",
+            "provider": "kolibri",
+            "label": "Khan Academy",
+            "source_count": 8,
+        }
+        snapshot["collections"].append(collection)
+        snapshot["library"] = [
+            {**snapshot["library"][0], "item_count": 0},
+            *[
+                {
+                    "key": f"empty-{index}",
+                    "title": f"Empty {index}",
+                    "provider": "kolibri",
+                    "collection": collection,
+                    "item_count": 0,
+                    "searchable": False,
+                }
+                for index in range(7)
+            ],
+            {
+                "key": "math",
+                "title": "Math",
+                "provider": "kolibri",
+                "collection": collection,
+                "item_count": 2,
+                "searchable": False,
+            },
+        ]
+        with patch.object(self.search, "listing_snapshot", return_value=snapshot):
+            collections = self.client.get(
+                "/collections.json", params={"provider": "kolibri"}
+            )
+            self.assertEqual(collections.status_code, 200)
+            self.assertEqual(collections.json()[0]["source_count"], 1)
+            response = self.client.get(
+                "/library.json", params={"provider": "kolibri", "limit": 1}
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual([source["key"] for source in response.json()], ["math"])
+            self.assertEqual(response.headers["x-total-count"], "1")
+            self.assertEqual(response.headers["x-has-more"], "false")
+            filtered = self.client.get(
+                "/library.json", params={"provider": "kolibri", "q": "Empty"}
+            )
+            self.assertEqual(filtered.json(), [])
+            self.assertEqual(filtered.headers["x-total-count"], "0")
+            other = self.client.get("/library.json", params={"provider": "zim"})
+            self.assertEqual([source["key"] for source in other.json()], ["manual"])
+            snapshot["library"][1]["item_count"] = None
+            unknown = self.client.get(
+                "/library.json", params={"provider": "kolibri", "limit": 1}
+            )
+            self.assertEqual([source["key"] for source in unknown.json()], ["empty-0"])
+            self.assertEqual(unknown.headers["x-total-count"], "2")
+            self.assertEqual(unknown.headers["x-has-more"], "true")
+            more = self.client.get(
+                "/library.json", params={"provider": "kolibri", "limit": 1, "offset": 1}
+            )
+            self.assertEqual([source["key"] for source in more.json()], ["math"])
+            self.assertEqual(more.headers["x-has-more"], "false")
+            collections = self.client.get(
+                "/collections.json", params={"provider": "kolibri"}
+            )
+            self.assertEqual(collections.json()[0]["source_count"], 2)
+        self.assertEqual(collection["source_count"], 8)
+        self.assertEqual(len(snapshot["library"]), 9)
 
     def test_library_filters_zim_sources_by_count_based_media_types(self):
         from types import SimpleNamespace

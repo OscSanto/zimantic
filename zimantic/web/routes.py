@@ -23,6 +23,7 @@ from ..content.store import (
     ArticleUnavailableError,
 )
 from ..indexing.browse import BROWSE_MODES, SEMANTIC_BROWSE_MODES
+from ..media_types import MEDIA_TYPE_ORDER
 from ..providers.config import BUILTIN_PROVIDERS
 from ..search import (
     DEFAULT_SOURCE_FILTER_LIMIT,
@@ -38,6 +39,7 @@ from .listing import (
     validate_language,
     validate_media_type,
     validate_provider,
+    visible_library_snapshot,
 )
 
 _ARTICLE_METHODS = "GET, HEAD, OPTIONS"
@@ -242,7 +244,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     def _capture_listing() -> dict:
         capture = getattr(search_class, "listing_snapshot", None)
         if callable(capture):
-            return capture()
+            return visible_library_snapshot(capture())
         source_of = getattr(search_class, "source_dicts", None)
         library_of = getattr(search_class, "library_dicts", None)
         collection_of = getattr(search_class, "collection_dicts", None)
@@ -250,7 +252,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         if not callable(token_of):
             token_of = getattr(search_class, "snapshot_token", None)
         token = token_of() if callable(token_of) else ("", 0)
-        return {
+        return visible_library_snapshot({
             "sources": source_of() if callable(source_of) else [],
             "library": (
                 library_of() if callable(library_of) else (
@@ -259,7 +261,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             ),
             "collections": collection_of() if callable(collection_of) else [],
             "token": token,
-        }
+        })
 
     def _token_string(token) -> str:
         try:
@@ -460,6 +462,25 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         source_filter_limit = int(
             getattr(search_class, "source_filter_limit", DEFAULT_SOURCE_FILTER_LIMIT)
         )
+        snapshot = _capture_listing()
+        library_sources = snapshot.get("library") or snapshot.get("sources") or []
+        providers = {
+            str(source.get("provider") or "")
+            for source in library_sources
+            if source.get("provider")
+        }
+        media_types = {
+            str(media_type)
+            for source in library_sources
+            for media_type in source.get("media_types") or []
+            if media_type
+        }
+        languages = {
+            language.strip().casefold()
+            for source in library_sources
+            for language in str(source.get("language") or "").split(",")
+            if language.strip()
+        }
         return web_app._json_response(
             request,
             "config",
@@ -481,6 +502,17 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                     getattr(search_class, "max_explicit_collection_sources", 500)
                 ),
                 "providers": list(BUILTIN_PROVIDERS),
+                "library_filters": {
+                    "providers": [
+                        provider for provider in BUILTIN_PROVIDERS if provider in providers
+                    ],
+                    "media_types": [
+                        media_type
+                        for media_type in MEDIA_TYPE_ORDER
+                        if media_type in media_types
+                    ],
+                    "languages": sorted(languages),
+                },
                 "browse_modes": [
                     mode
                     for mode in BROWSE_MODES
