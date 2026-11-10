@@ -296,7 +296,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertIn(b'data-zimantic-action="close"', shell.content)
             self.assertIn(b"window.close()", shell.content)
             self.assertIn(b"history.back()", shell.content)
-            self.assertIn(b'data-zimantic-action="home"', shell.content)
+            self.assertIn(b'data-zimantic-home', shell.content)
             self.assertIn(b'data-zimantic-action="previous"', shell.content)
             self.assertIn(b'data-zimantic-action="next"', shell.content)
             self.assertIn(b'data-zimantic-action="parent-previous"', shell.content)
@@ -338,7 +338,7 @@ class LocalIntegrationTests(unittest.TestCase):
             self.assertNotIn(b'data-zimantic-action="print"', shell.content)
             self.assertLess(
                 shell.content.index(b'data-zimantic-action="parent-previous"'),
-                shell.content.index(b'data-zimantic-action="home"'),
+                shell.content.index(b'data-zimantic-zim-search'),
             )
             self.assertNotIn(b"zimantic-toolbar-brand", shell.content)
             self.assertNotIn(b'>Search</a>', shell.content)
@@ -463,7 +463,7 @@ class LocalIntegrationTests(unittest.TestCase):
             )
             # The MediaWiki first-letter container must not become a link.
             self.assertNotIn(b'href=f"/content/{ZIM_URL}/A"', shell.content)
-            self.assertIn(b">5e Hazards</span>", shell.content)
+            self.assertIn(b">5e Hazards</a>", shell.content)
 
     def test_unindexed_zim_uses_native_fulltext_before_build(self):
         with _temp_dir(self) as tmp:
@@ -782,7 +782,11 @@ class LocalIntegrationTests(unittest.TestCase):
             search = self._open_search(root)
             client = TestClient(create_app(search))
 
-            self.assertEqual(client.get("/search", params={"q": " "}).status_code, 400)
+            self.assertEqual(client.get("/search", params={"q": " "}).status_code, 200)
+            self.assertEqual(
+                client.get("/search", params={"q": "", "sort": "diverse"}).status_code,
+                200,
+            )
             self.assertEqual(
                 client.get("/search", params={"q": "x" * 4097}).status_code,
                 422,
