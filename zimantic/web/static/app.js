@@ -622,18 +622,6 @@
                         search.addEventListener("click", () => searchWithinLibrarySource(source));
                         actions.append(search);
                     }
-                    const collection = collectionFor(source);
-                    if (collection?.key) {
-                        const searchCollection = document.createElement("button");
-                        searchCollection.type = "button";
-                        searchCollection.className = "library-button library-info-action";
-                        searchCollection.textContent = "Search collection";
-                        searchCollection.dataset.i18n = "Search collection";
-                        searchCollection.addEventListener("click", () =>
-                            searchWithinLibraryCollection(collection),
-                        );
-                        actions.append(searchCollection);
-                    }
                     content.appendChild(actions);
                 } else {
                     const unavailable = document.createElement("p");

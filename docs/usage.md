@@ -303,7 +303,7 @@ Each ZIM source with MIME counters is assigned exactly one media type. Classific
 
 If no collection is configured, the page says so and points at a `[[collections]]` entry plus a server restart. Collections that exist but discovered no sources show their discovery state or error instead of appearing unconfigured.
 
-Click a source's title or **Details** for an infobox with its thumbnail, homepage, descriptions, counts, license, attribution, relation, tags, provider, collection, media types, and content-type breakdown. The infobox offers **Search source** for one source and **Search collection** for its whole collection. No filesystem path is shown.
+Click a source's title or **Details** for an infobox with its thumbnail, homepage, descriptions, counts, license, attribution, relation, tags, provider, collection, media types, and content-type breakdown. The infobox offers **Search source** for one source. No filesystem path is shown.
 
 ## Caches
 
