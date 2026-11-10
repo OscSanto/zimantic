@@ -51,6 +51,7 @@ The JSON API provides these endpoints.
   - `/config` exposes `source_filter_limit`, `collection_source_limit`, `max_explicit_collection_sources`, and the configured provider kinds.
   - Failures are operation-scoped: a search result carries its source error, and a content request reports its own failure. Listing does not probe sources and does not persist availability or last-error state.
   - `/health` is read-only and reports index and archive capabilities, per-collection source/searchable counters, entry counts, homepage resolution, embedding state, and search and preview cache statistics.
+  - With `--debug` (or its alias, `--dev`), `/health` also includes a `workers` object. `workers.source_search.active` lists the source-search threads currently working, with source, provider, collection, query, browse mode, and elapsed seconds. `workers.fulltext` reports the native full-text pool backend, broken archive basenames, and each helper's state, current archive basename/query/count/elapsed seconds, process id and restart count (process backend), or archive-cache size (thread backend), plus its last completed request. Full filesystem locators are never included.
 
 To include ranking scores and explanations in both search endpoints, start the server with `zimantic serve --debug` (or its alias, `serve --dev`).
 

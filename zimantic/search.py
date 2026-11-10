@@ -338,6 +338,9 @@ class Search:
         # Identical in-flight queries share one computation.
         self._inflight: dict[Any, Future] = {}
         self._inflight_lock = threading.Lock()
+        # Debug-only live activity for the source-search executor.
+        self._worker_activity: dict[int, dict[str, Any]] = {}
+        self._worker_activity_lock = threading.Lock()
         self._cache_generation = 0
         self.cache = QueryCache(
             _int_config(cfg, "cache_size", DEFAULT_CACHE_SIZE, minimum=0),
@@ -2692,6 +2695,71 @@ class Search:
             if waiters is not None:
                 waiters.release()
 
+    def _begin_source_worker(
+        self, source: SourceInfo, query: str, browse: str | None
+    ) -> None:
+        """Record what one executor thread is searching, for debug /health."""
+        lock = getattr(self, "_worker_activity_lock", None)
+        activities = getattr(self, "_worker_activity", None)
+        if lock is None or activities is None:
+            return
+        activity = {
+            "thread": threading.current_thread().name,
+            "source": source.key,
+            "provider": source.provider,
+            "collection": source.collection_key,
+            "query": str(query)[:200],
+            "browse": browse,
+            "started": time.monotonic(),
+        }
+        with lock:
+            activities[threading.get_ident()] = activity
+
+    def _end_source_worker(self) -> None:
+        lock = getattr(self, "_worker_activity_lock", None)
+        activities = getattr(self, "_worker_activity", None)
+        if lock is None or activities is None:
+            return
+        with lock:
+            activities.pop(threading.get_ident(), None)
+
+    def _source_worker_status(self) -> dict[str, Any]:
+        now = time.monotonic()
+        lock = getattr(self, "_worker_activity_lock", None)
+        activities = getattr(self, "_worker_activity", None)
+        if lock is None or activities is None:
+            return {"worker_count": getattr(self, "source_workers", 0), "active": []}
+        with lock:
+            active = [
+                {
+                    **{key: value for key, value in activity.items()
+                       if key != "started"},
+                    "elapsed_seconds": round(
+                        now - float(activity["started"]), 3
+                    ),
+                }
+                for activity in activities.values()
+            ]
+        active.sort(key=lambda record: record["thread"])
+        return {"worker_count": self.source_workers, "active": active}
+
+    def worker_status(self) -> dict[str, Any]:
+        """Live worker activity for the debug health report.
+
+        The source-search executor and the native full-text helper pool are
+        separate layers: a source thread can be waiting for a full-text helper
+        that is stuck in a native call. Reporting both makes that distinction
+        visible without enabling extra logging.
+        """
+        report: dict[str, Any] = {
+            "source_search": self._source_worker_status(),
+        }
+        pool = getattr(self, "fulltext_pool", None)
+        status_of = getattr(pool, "worker_status", None)
+        if callable(status_of):
+            report["fulltext"] = status_of()
+        return report
+
     def _run_source_task(
         self,
         stop: threading.Event,
@@ -2700,19 +2768,23 @@ class Search:
         browse: str | None = None,
         seed: int = 0,
     ) -> SourceResult:
-        if stop.is_set():
-            return SourceResult(
-                source=source,
-                error="search was cancelled",
-                status="cancelled",
-            )
-        target = self._search_source
-        if getattr(target, "__func__", None) is Search._search_source:
-            if browse is not None:
-                return target(source, *args, browse=browse, seed=seed)
-            return target(source, *args)
-        # Lightweight test doubles still expose the pre-deadline signature.
-        return target(source, *args[:-1])
+        self._begin_source_worker(source, str(args[0]) if args else "", browse)
+        try:
+            if stop.is_set():
+                return SourceResult(
+                    source=source,
+                    error="search was cancelled",
+                    status="cancelled",
+                )
+            target = self._search_source
+            if getattr(target, "__func__", None) is Search._search_source:
+                if browse is not None:
+                    return target(source, *args, browse=browse, seed=seed)
+                return target(source, *args)
+            # Lightweight test doubles still expose the pre-deadline signature.
+            return target(source, *args[:-1])
+        finally:
+            self._end_source_worker()
 
     def _search_source(
         self,

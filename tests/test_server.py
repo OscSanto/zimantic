@@ -1355,6 +1355,42 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(body["indexes"], ["manual"])
         self.assertIn("size", body["cache"])
 
+    def test_health_reports_worker_activity_only_in_debug(self):
+        class WorkerSearch(FakeSearch):
+            def worker_status(self):
+                return {
+                    "fulltext": {"worker_count": 0, "workers": []},
+                    "source_search": {"worker_count": 8, "active": []},
+                }
+
+        client = TestClient(create_app(WorkerSearch()))
+        debug_client = TestClient(create_app(WorkerSearch(), debug=True))
+        self.assertNotIn("workers", client.get("/health").json())
+        self.assertEqual(
+            debug_client.get("/health").json()["workers"]["source_search"],
+            {"worker_count": 8, "active": []},
+        )
+
+    def test_health_debug_merges_workers_into_collected_report(self):
+        class WorkerHealthSearch(FakeSearch):
+            def health(self):
+                return {"status": "ok", "cache": self.cache.stats()}
+
+            def health_version(self):
+                return 1
+
+            def worker_status(self):
+                return {"fulltext": {"worker_count": 1, "workers": []}}
+
+        client = TestClient(create_app(WorkerHealthSearch()))
+        debug_client = TestClient(create_app(WorkerHealthSearch(), debug=True))
+        self.assertNotIn("workers", client.get("/health").json())
+        body = debug_client.get("/health").json()
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(
+            body["workers"], {"fulltext": {"worker_count": 1, "workers": []}}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

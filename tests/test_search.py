@@ -113,6 +113,8 @@ def _bare_search(cfg):
     search._executor = ThreadPoolExecutor(max_workers=2)
     search._inflight = {}
     search._inflight_lock = threading.Lock()
+    search._worker_activity = {}
+    search._worker_activity_lock = threading.Lock()
     search.cache = QueryCache(16)
     search.runtimes = {"": _TestZimRuntime(search)}
     search.collections = {}
@@ -4051,6 +4053,23 @@ class ProductionHardeningTests(unittest.TestCase):
                     )
             finally:
                 search._executor.shutdown(wait=True)
+
+    def test_worker_status_reports_active_source_search(self):
+        search = _bare_search({})
+        source = _zim_source("manual", "Manual")
+        search._begin_source_worker(source, "cards", None)
+        try:
+            active = search.worker_status()["source_search"]["active"]
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["source"], "manual")
+            self.assertEqual(active[0]["query"], "cards")
+            self.assertIn("elapsed_seconds", active[0])
+        finally:
+            search._end_source_worker()
+            search._executor.shutdown(wait=True)
+        self.assertEqual(
+            search.worker_status()["source_search"]["active"], []
+        )
 
     def test_unavailable_native_index_reports_an_error_not_an_empty_ok(self):
         source = _zim_source("manual", "Manual")

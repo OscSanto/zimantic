@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import threading
@@ -44,6 +45,24 @@ class FulltextTimeoutTests(unittest.TestCase):
                 self.assertIsNone(worker._process)
         finally:
             pool.close()
+
+
+class FulltextWorkerStatusTests(unittest.TestCase):
+    def test_idle_process_pool_reports_each_worker(self):
+        pool = FulltextPool(2)
+        self.addCleanup(pool.close)
+        report = pool.worker_status()
+        self.assertEqual(report["backend"], "processes")
+        self.assertEqual(report["worker_count"], 2)
+        self.assertEqual(
+            [worker["id"] for worker in report["workers"]], [1, 2]
+        )
+        self.assertTrue(
+            all(worker["state"] == "idle" for worker in report["workers"])
+        )
+        self.assertTrue(
+            all(worker["pid"] is None for worker in report["workers"])
+        )
 
 
 class FulltextThreadTests(unittest.TestCase):
@@ -121,6 +140,40 @@ class FulltextThreadTests(unittest.TestCase):
             return_value=[{"path": "fixed", "title": "Fixed"}],
         ):
             self.assertEqual(pool.search("/tmp/faulty.zim", "query", 1), ["fixed"])
+
+    def test_worker_status_reports_active_search_without_private_path(self):
+        pool = self.make_pool()
+        worker = pool._all[0]
+        started = threading.Event()
+        finish = threading.Event()
+
+        def blocked(*_):
+            started.set()
+            finish.wait(timeout=5)
+            return []
+
+        with (
+            patch.object(worker._cache, "search_results", side_effect=blocked),
+            ThreadPoolExecutor(1) as caller,
+        ):
+            future = caller.submit(
+                pool.search_results, "/tmp/private/archive.zim", "cards", 5,
+            )
+            try:
+                self.assertTrue(started.wait(timeout=2))
+                report = pool.worker_status()
+                self.assertNotIn("private", json.dumps(report))
+                self.assertEqual(report["workers"][0]["state"], "searching")
+                current = report["workers"][0]["current"]
+                self.assertEqual(current["archive"], "archive.zim")
+                self.assertEqual(current["query"], "cards")
+            finally:
+                finish.set()
+            self.assertIsNotNone(future.result(timeout=2))
+
+        report = pool.worker_status()
+        self.assertEqual(report["workers"][0]["state"], "idle")
+        self.assertEqual(report["workers"][0]["last"]["status"], "ok")
 
 
 class FulltextArchiveCacheTests(unittest.TestCase):

@@ -714,6 +714,24 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     @app.get("/health")
     def health(request: Request):
         health_report = getattr(search_class, "health", None)
+
+        def payload():
+            report = (
+                health_report()
+                if callable(health_report)
+                else {
+                    "status": "ok",
+                    "indexes": search_class.source_keys(),
+                    "sources": len(search_class.source_dicts()),
+                    "cache": search_class.cache.stats(),
+                }
+            )
+            if debug:
+                worker_report = getattr(search_class, "worker_status", None)
+                if callable(worker_report):
+                    report = {**report, "workers": worker_report()}
+            return report
+
         if callable(health_report):
             version_of = getattr(search_class, "health_version", None)
             version = version_of() if callable(version_of) else 0
@@ -721,15 +739,10 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 request,
                 "health",
                 version,
-                health_report,
+                payload,
                 memos,
             )
-        return {
-            "status": "ok",
-            "indexes": search_class.source_keys(),
-            "sources": len(search_class.source_dicts()),
-            "cache": search_class.cache.stats(),
-        }
+        return payload()
 
     def requested_highlight(request: Request) -> str | None:
         value = (request.query_params.get("highlight") or "").strip()

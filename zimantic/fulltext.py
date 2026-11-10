@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
@@ -40,8 +41,79 @@ _WORKER_MODULE = "zimantic.fulltext_worker"
 FULLTEXT_TIMEOUT_SECONDS = 30.0
 
 
-class _Worker:
+class _WorkerActivity:
+    """Per-worker in-flight request used by the debug health report.
+
+    Workers are borrowed by search threads, so status must never wait on the
+    worker's own request lock: a stuck native call would also freeze /health.
+    Only the archive basename, query and elapsed time are published; the full
+    locator remains private.
+    """
+
+    backend = ""
+
+    def _init_activity(self) -> None:
+        self._activity_lock = threading.Lock()
+        self._current_activity: dict[str, object] | None = None
+        self._last_activity: dict[str, object] | None = None
+
+    def begin_activity(self, zim_path: str, query: str, count: int) -> None:
+        activity = {
+            "archive": _archive_name(zim_path),
+            "query": str(query)[:200],
+            "count": int(count),
+            "started": time.monotonic(),
+        }
+        with self._activity_lock:
+            self._current_activity = activity
+
+    def end_activity(self, status: str) -> None:
+        now = time.monotonic()
+        with self._activity_lock:
+            current = self._current_activity
+            self._current_activity = None
+            if current is None:
+                return
+            self._last_activity = {
+                "archive": current["archive"],
+                "query": current["query"],
+                "status": status,
+                "duration_seconds": round(now - float(current["started"]), 3),
+                "finished": now,
+            }
+
+    def activity_status(self) -> dict[str, object]:
+        now = time.monotonic()
+        with self._activity_lock:
+            current = dict(self._current_activity) if self._current_activity else None
+            last = dict(self._last_activity) if self._last_activity else None
+            current_started = (
+                float(current.pop("started")) if current is not None else None
+            )
+            last_finished = (
+                float(last.pop("finished")) if last is not None else None
+            )
+        status: dict[str, object] = {
+            "backend": self.backend,
+            "state": "searching" if current else "idle",
+        }
+        if current is not None and current_started is not None:
+            status["current"] = {
+                **current,
+                "elapsed_seconds": round(now - current_started, 3),
+            }
+        if last is not None and last_finished is not None:
+            status["last"] = {
+                **last,
+                "finished_seconds_ago": round(now - last_finished, 3),
+            }
+        return status
+
+
+class _Worker(_WorkerActivity):
     """One helper process, used by one search thread at a time."""
+
+    backend = "process"
 
     def __init__(self, closed: threading.Event) -> None:
         self._process: subprocess.Popen[str] | None = None
@@ -49,6 +121,8 @@ class _Worker:
         self._process_lock = threading.Lock()
         self._closed = closed
         self._archive_failure = False
+        self._starts = 0
+        self._init_activity()
 
     @property
     def archive_failure(self) -> bool:
@@ -81,7 +155,24 @@ class _Worker:
                     text=True,
                     bufsize=1,
                 )
+                self._starts += 1
             return self._process
+
+    def worker_status(self, worker_id: int) -> dict[str, object]:
+        status = self.activity_status()
+        # Read the process handle without blocking: closing a timed-out helper
+        # can hold the process lock while it waits for termination, and health
+        # must stay responsive enough to show that in-flight call.
+        process = self._process
+        starts = self._starts
+        alive = process is not None and process.poll() is None
+        return {
+            "id": worker_id,
+            **status,
+            "pid": process.pid if alive else None,
+            "alive": alive,
+            "starts": starts,
+        }
 
     def search(
         self,
@@ -215,7 +306,9 @@ class _Worker:
             pass
 
 
-class _ThreadWorker:
+class _ThreadWorker(_WorkerActivity):
+    backend = "thread"
+
     def __init__(self, closed: threading.Event) -> None:
         from .fulltext_worker import ArchiveCache
 
@@ -223,6 +316,15 @@ class _ThreadWorker:
         self._closed = closed
         self._lock = threading.Lock()
         self.archive_failure = False
+        self._init_activity()
+
+    def worker_status(self, worker_id: int) -> dict[str, object]:
+        status = self.activity_status()
+        return {
+            "id": worker_id,
+            **status,
+            "archive_cache_size": len(self._cache.archives),
+        }
 
     def search_results(
         self, zim_path: str, query: str, count: int, version: object = None,
@@ -353,7 +455,13 @@ class FulltextPool:
                 except CancelledError:
                     return None
             else:
-                results = worker.search_results(zim_path, query, count, version)
+                worker.begin_activity(zim_path, query, count)
+                activity_status = "error"
+                try:
+                    results = worker.search_results(zim_path, query, count, version)
+                    activity_status = "ok" if results is not None else "failed"
+                finally:
+                    worker.end_activity(activity_status)
                 archive_failure = worker.archive_failure
         except Exception as error:  # never let helper plumbing fail a search
             logger.warning(
@@ -381,13 +489,38 @@ class FulltextPool:
         return results
 
     def _thread_search(self, worker, zim_path, query, count, version):
+        worker.begin_activity(zim_path, query, count)
+        activity_status = "error"
         try:
+            results = worker.search_results(zim_path, query, count, version)
+            activity_status = "ok" if results is not None else "failed"
             return (
-                worker.search_results(zim_path, query, count, version),
+                results,
                 worker.archive_failure,
             )
         finally:
+            worker.end_activity(activity_status)
             self._idle.put(worker)
+
+    def worker_status(self) -> dict[str, object]:
+        """Read-only breakdown of the native full-text worker pool.
+
+        Debug callers use this to see which archive and query each helper is
+        working on, including helpers whose native call has outlived the soft
+        timeout. Status never waits on a worker's request lock and only exposes
+        archive basenames, never configured directories.
+        """
+        with self._broken_lock:
+            broken = sorted(_archive_name(path) for path in self._broken)
+        return {
+            "backend": self.backend,
+            "worker_count": len(self._all),
+            "broken_archives": broken,
+            "workers": [
+                worker.worker_status(index)
+                for index, worker in enumerate(self._all, 1)
+            ],
+        }
 
     def clear_broken(self) -> None:
         """Retry archives after a reload; an in-place repair may have fixed one."""
