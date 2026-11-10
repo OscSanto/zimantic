@@ -3,7 +3,7 @@
 Rerunning an unfinished build resumes where it stopped. To rebuild, delete both files first.
 
 How a build runs (each step is explained where it happens):
-    1. read entries in the order the ZIM stores them (zim.cluster_order)
+    1. read entries in the order the ZIM stores them (zim.storage_order)
     2. collect a "window" of WINDOW articles, sort it by length, cut it into batches of batch_size
     3. worker threads embed the batches at the same time, sharing one model
     4. meanwhile the main thread already reads the next window
@@ -17,14 +17,14 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 from libzim.reader import Archive
-from .zim import cluster_order, read_entry
+from .zim import read_entry, storage_order
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
     title, lead UNINDEXED, path UNINDEXED, target UNINDEXED, tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS vecs(id INTEGER PRIMARY KEY, v BLOB);  -- float16, dropped once .faiss is written
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
--- meta keys: order = "cluster" or "id" (reading order); next = position in that order to resume from; done
+-- meta keys: order = "storage" or "id" (reading order); next = position in that order to resume from; done
 """
 
 # Articles read per window. Big enough that sorting finds texts of similar length and every worker thread
@@ -95,10 +95,11 @@ def build(zim_path: Path, index_dir, embedder, batch_size: int, workers: int) ->
     start = int(meta.get("next", 0))
     # An unfinished build keeps the order it started with. Builds from before this setting existed read in id
     # order, and their "next" is an entry id, which is also their position in id order.
-    order_name = meta.get("order") or ("id" if start else "cluster")
-    order = cluster_order(zim_path, zim.entry_count) if order_name == "cluster" else None
-    if order is None:
-        order_name = "id"
+    order_name = meta.get("order") or ("id" if start else "storage")
+    if order_name not in ("storage", "id"):  # e.g. "cluster": zimantic's own storage order before libzim 4.1
+        raise SystemExit(f"zimantic: {zim_path.stem} was started in a reading order this version can't resume. "
+                         f"Delete {db_path} and build again")
+    order = storage_order(zim) if order_name == "storage" else None
     with db:
         db.execute("INSERT OR REPLACE INTO meta VALUES ('order', ?)", (order_name,))
 
@@ -140,7 +141,7 @@ def release_memory() -> None:
 def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, workers: int, progress=None):
     """Read entries order[start:stop] and yield (rows, vectors, next_position) one window at a time, in order.
 
-    order: entry ids in reading order (from cluster_order), or None for id order.
+    order: entry ids in reading order (from storage_order), or None for id order.
     rows: every indexable entry of the window, including redirects and title-only pages (no vector).
     vectors: {entry id: vector} for the rows that have a first paragraph.
 

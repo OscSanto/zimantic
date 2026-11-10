@@ -22,7 +22,7 @@ from libzim.reader import Archive
 from zimantic.build import build_settings, embed_windows
 from zimantic.embed import Embedder
 from zimantic.hardware import GB, detect
-from zimantic.zim import cluster_order
+from zimantic.zim import storage_order
 
 COLUMNS = ["Hardware", "Cores / threads", "RAM", "OS", "Workers x threads", "Batch", "Order",
            "Articles/s", "Peak RAM", "Full-ZIM embed time (est.)", "ZIM"]
@@ -54,7 +54,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, help="embedding_workers (default: config.yaml)")
     parser.add_argument("--threads", type=int, help="embed_threads (default: config.yaml)")
     parser.add_argument("--batch", type=int, help="batch_size (default: config.yaml)")
-    parser.add_argument("--order", choices=["cluster", "id"], default="cluster", help="reading order (default cluster)")
+    parser.add_argument("--order", choices=["storage", "id"], default="storage", help="reading order (default storage)")
     args = parser.parse_args()
 
     cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
@@ -67,13 +67,13 @@ def main() -> None:
     path = Path(args.zim) if args.zim.endswith(".zim") else Path(cfg["zim_dir"]) / f"{args.zim}.zim"
     zim = Archive(str(path))
     # A slice of entry ids from a third of the way in (the very start of a ZIM is often unusual pages).
-    # Both orders read the same entries; "cluster" reads them in the order they are stored in the file.
+    # Both orders read the same entries; "storage" reads them in the order they are stored in the file.
     start = zim.entry_count // 3
     stop = min(zim.entry_count, start + args.entries)
     ids = np.arange(start, stop, dtype=np.uint32)
-    order = cluster_order(path, zim.entry_count) if args.order == "cluster" else None
-    order_name = args.order if order is not None or args.order == "id" else "id (cluster order unavailable)"
-    if order is not None:
+    order_name = args.order
+    if order_name == "storage":
+        order = storage_order(zim)
         stored_at = np.empty_like(order)
         stored_at[order] = np.arange(len(order), dtype=np.uint32)  # entry id -> its place in storage order
         ids = ids[np.argsort(stored_at[ids], kind="stable")]

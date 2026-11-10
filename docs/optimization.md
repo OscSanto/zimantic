@@ -113,10 +113,10 @@ decompressed clusters in a small cache (zimantic sets 1 MB, to keep RAM low when
 therefore decompresses many clusters several times: 4,148 cluster switches for 2,284 clusters in the test
 slice.
 
-python-libzim can't list entries in storage order, so zimantic reads each entry's cluster number from the file's
-own entry table ([ZIM format](https://wiki.openzim.org/wiki/ZIM_file_format)). That takes 0.3 s and 3.7 MB for
-930,000 entries. Each cluster is then decompressed exactly once, and the disk is read front to back, which
-helps SD cards and USB drives most.
+libzim 4.1 lists entries in storage order (`Archive.iter_efficient()`), so zimantic reads them in that order.
+Listing takes about 10 s for 930,000 entries, once per build. Each cluster is then decompressed exactly once,
+and the disk is read front to back, which helps SD cards and USB drives most. (The table was measured with
+zimantic's own storage order from before libzim 4.1; libzim's order read as fast in a 20,000-article test.)
 
 | How the ZIM is read | Reading only (articles/s) | Extra RAM |
 |---|---|---|

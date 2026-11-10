@@ -166,7 +166,8 @@ languages may contain mistakes.
 - **Smaller footprint.** Zimantic adds a `.sqlite` and `.faiss` per ZIM and needs more RAM.
 
 ## Requirements
-- Python 3.12, 3.13 or 3.14 (the pinned numpy needs 3.12+; libzim doesn't support 3.15 yet)
+- Python 3.12, 3.13 or 3.14 (the pinned numpy needs 3.12+; onnxruntime doesn't support 3.15 yet)
+- A 64-bit OS (libzim has no 32-bit builds; on a Raspberry Pi, use 64-bit Raspberry Pi OS)
 - About 120 MB for the embedding model, plus your ZIM files
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find the first paragraph)
 - *Searching does not require Kiwix.* To open the articles from the result links, run
