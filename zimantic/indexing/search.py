@@ -205,14 +205,20 @@ def fetch_docs(
 def body_search(
     db: sqlite3.Connection, query: str, limit: int
 ) -> list[tuple[int, float]]:
-    """Return ``(rowid, position)`` body matches in candidate order."""
+    """Return ``(rowid, position)`` body matches ordered by BM25.
+
+    The body table keeps positions and document lengths, so ``bm25()`` ranks
+    real matches instead of returning them in rowid order.  Ties fall back to
+    rowid for deterministic paging.
+    """
     words = _query_words(query)
     if not words:
         return []
     expression = " AND ".join(f'"{word}"' for word in words)
     try:
         rows = db.execute(
-            "SELECT rowid FROM body WHERE body MATCH ? LIMIT ?",
+            "SELECT rowid FROM body WHERE body MATCH ? "
+            "ORDER BY bm25(body), rowid LIMIT ?",
             (expression, max(1, int(limit))),
         ).fetchall()
     except sqlite3.Error:

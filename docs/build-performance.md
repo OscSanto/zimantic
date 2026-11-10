@@ -15,33 +15,37 @@ budget for those too.
 
 Report the index-to-source byte ratio alongside build time and search quality.
 Small, highly compressed text archives can exceed the goal substantially:
-the 6,331,350-byte Community Building ZIM measured 79.1% at reference revision
-`a27dd69`, 56.1% with compact body FTS, and 46.3% with native-only body retrieval.
-None meets the goal; removing body FTS alone is insufficient on this fixture.
+the 6,331,350-byte Community Building ZIM measured 79.1% with contentless
+positional body FTS (the current layout), 56.1% with the former compact layout,
+and 46.3% with native-only body retrieval. None meets the goal; removing body
+FTS alone is insufficient on this fixture.
 
 ## Body FTS alternatives and search quality
 
 The benchmark variants differ only in the body-search channel. Title FTS and
-semantic vectors are the same in every variant. Production indexes use compact Unicode61
-with `remove_diacritics 2`. Production only reads and resumes the active index
-schema and canonical metadata; `build` can reuse compatible vectors from v0
-root-level pairs while rebuilding the active schema. In this comparison, HEAD
-denotes the positional control. The harness reproduces it explicitly; it is not
-the production default.
+semantic vectors are the same in every variant. Production indexes use a
+contentless positional FTS5 body (`content=''`, `detail=full`, `columnsize=1`,
+Unicode61 with `remove_diacritics 2`) ordered by `ORDER BY bm25(body), rowid`.
+It keeps term positions and document lengths so BM25 can order candidates, but
+never stores raw derived or native text. Production only reads and resumes the
+active index schema and canonical metadata; `build` can reuse compatible
+vectors from v0 root-level pairs while rebuilding the active schema.
 
 | Variant | Conventional description | SQLite options |
 |---|---|---|
-| HEAD | Positional contentless FTS5 inverted index | [`content=''`](https://www.sqlite.org/fts5.html#contentless_tables), [`detail=full`](https://www.sqlite.org/fts5.html#the_detail_option), [`columnsize=1`](https://www.sqlite.org/fts5.html#the_columnsize_option); the latter two are defaults |
-| Compact | Non-positional, document-id-only contentless FTS5 inverted index | `content=''`, [`detail=none`](https://www.sqlite.org/fts5.html#the_detail_option), [`columnsize=0`](https://www.sqlite.org/fts5.html#the_columnsize_option) |
+| Contentless positional (production) | Positional contentless FTS5 inverted index with BM25 ordering | [`content=''`](https://www.sqlite.org/fts5.html#contentless_tables), [`detail=full`](https://www.sqlite.org/fts5.html#the_detail_option), [`columnsize=1`](https://www.sqlite.org/fts5.html#the_columnsize_option) |
+| Compact (former default) | Non-positional, document-id-only contentless FTS5 inverted index | `content=''`, [`detail=none`](https://www.sqlite.org/fts5.html#the_detail_option), [`columnsize=0`](https://www.sqlite.org/fts5.html#the_columnsize_option) |
 | Native-only | Archive-native full-text retrieval (Xapian, through libzim) | No SQLite body table; [libzim full-text search](https://libzim.readthedocs.io/en/latest/usage.html#full-text-searching-in-entries) |
 
-HEAD and compact use the same [`unicode61`](https://www.sqlite.org/fts5.html#unicode61_tokenizer)
-tokenizer with `remove_diacritics 2`. The SQLite body query performs exact-token
-Boolean AND matching, not BM25 ordering. Its candidates and native candidates
-are fused by reciprocal rank fusion (RRF). Compact drops positions and stored
-token counts unused by that query; it must use table-level MATCH, and cannot
-support SQLite phrase/NEAR queries, column filters, or normal length-aware BM25
-with this contentless configuration.
+Every SQLite variant uses the same
+[`unicode61`](https://www.sqlite.org/fts5.html#unicode61_tokenizer) tokenizer
+with `remove_diacritics 2`. The body query performs exact-token Boolean AND
+matching, then fuses its candidates with native candidates by reciprocal rank
+fusion (RRF). Compact drops positions and stored token counts, so its matches
+tie at `-0.0` and come back in rowid order; it also cannot support SQLite
+phrase/NEAR queries, column filters, or length-aware BM25. `detail=column`
+stores a column bitmap and document lengths but no positions; it ties compact
+exactly on the larger fixture below, so it is not a middle ground.
 
 In a 48-query provider-only probe, native-only retrieval differs in 32 top-10
 lists: 10 reorder the same results, 22 have different members, and 7 have a
@@ -51,18 +55,22 @@ include semantic retrieval or final HTTP ranking.
 The HTTP comparison uses the [evaluation method](../evaluation/README.md#small-zim-body-index-comparison)
 on the same small archive, real HTTP search and a fixed synthetic query set.
 There are 120 English queries, 41 dev and 79 test; no settings are tuned.
-All variants have identical embedding vectors. Reported results are test-only:
+All variants have identical embedding vectors. These rows use unranked body
+matching, so they isolate the storage layout from BM25 ordering; the production
+combination is measured in the next subsection. Reported results are test-only:
 
-| Mode / variant | #1 | Top 5 | Top 20 | MRR | Fixed / broken at #1 vs HEAD |
+| Mode / variant | #1 | Top 5 | Top 20 | MRR | Fixed / broken at #1 vs positional |
 |---|---:|---:|---:|---:|---:|
-| Hybrid HEAD | 79.7% | 92.4% | 96.2% | 0.854 | baseline |
+| Hybrid contentless positional | 79.7% | 92.4% | 96.2% | 0.854 | baseline |
 | Hybrid compact | 79.7% | 92.4% | 96.2% | 0.854 | 0 / 0 |
 | Hybrid native-only | 75.9% | 87.3% | 93.7% | 0.812 | 0 / 3 |
-| Lexical HEAD | 58.2% | 63.3% | 63.3% | 0.604 | baseline |
+| Lexical contentless positional | 58.2% | 63.3% | 63.3% | 0.604 | baseline |
 | Lexical compact | 58.2% | 63.3% | 63.3% | 0.604 | 0 / 0 |
 | Lexical native-only | 51.9% | 57.0% | 58.2% | 0.539 | 0 / 5 |
 
-Compact matches every stored top-20 list in both modes, including dev queries.
+Compact and positional match every stored top-20 list in both modes, including
+dev queries. On this 3,508-document fixture the two layouts are
+indistinguishable without BM25; the larger fixture below separates them.
 For a deep sentence mentioning Zulip and LaTeX, the expected Slack-alternatives
 question falls from #1 to #8 under native-only hybrid search; without semantic
 retrieval it disappears. The moderator-permissions question likewise drops
@@ -97,22 +105,24 @@ Raw content, positions, and document lengths are separate choices:
 
 | Body layout | Raw text | Positions | Stored token counts | Useful SQLite BM25 |
 |---|---|---|---|---|
-| HEAD contentless | No | Yes | Yes | Yes |
+| Contentless positional (production) | No | Yes | Yes | Yes |
 | Compact contentless | No | No | No | No; the probe returns tied `-0.0` scores |
 | Default stored content | Yes | Yes | Yes | Yes |
 
-HEAD has the information needed for
-[`bm25(body)`](https://www.sqlite.org/fts5.html#the_bm25_function), but its body
-query does not use it. The BM25 experiment changes only candidate ordering:
-`ORDER BY bm25(body), rowid` (SQLite's better scores are more negative), followed
-by the existing RRF and final ranking. It retains the same Boolean AND query;
-this is not a redesign of retrieval or fusion.
+The production body query uses
+[`bm25(body)`](https://www.sqlite.org/fts5.html#the_bm25_function) for candidate
+ordering: `ORDER BY bm25(body), rowid` (SQLite's better scores are more
+negative), followed by the existing RRF and final ranking, with rowid as a
+deterministic tiebreak. It keeps the same Boolean AND query; this is not a
+redesign of retrieval or fusion.
 
-First compare compact against `stored`, holding `unicode61 remove_diacritics 2`
-constant to isolate storage, plus their positional BM25 controls. Separately,
+The BM25 experiment below was run on the small fixture while production still
+used the compact layout, so it measures a candidate-ordering change on an
+unchanged query. It compares compact against stored content with `unicode61
+remove_diacritics 2` held constant, plus positional BM25 controls;
 `stored-default` uses literal `fts5(text)`, including bare default Unicode61.
-Both stored variants match **all 120 compact top-20 lists in both modes**.
-Stored content itself adds no quality here.
+Both stored variants match **all 120 compact top-20 lists in both modes**:
+stored content adds no quality here.
 
 All storage/ranking variants tie at 85.4% hybrid #1 on the 41 dev queries.
 BM25 lowers lexical #1 from 68.3% to 63.4% (0 fixed, 2 broken). On the
@@ -121,32 +131,35 @@ BM25 lowers lexical #1 from 68.3% to 63.4% (0 fixed, 2 broken). On the
 | Mode / body variant | #1 | Top 5 | Top 20 | MRR | Fixed / broken #1 vs compact |
 |---|---:|---:|---:|---:|---:|
 | Hybrid compact / either stored variant | 79.7% | 92.4% | 96.2% | 0.854 | 0 / 0 |
-| Hybrid contentless or stored BM25 | 79.7% | 91.1% | 96.2% | 0.846 | 0 / 0 |
+| Hybrid contentless positional + BM25 (production), or stored BM25 | 79.7% | 91.1% | 96.2% | 0.846 | 0 / 0 |
 | Lexical compact / either stored variant | 58.2% | 63.3% | 63.3% | 0.604 | 0 / 0 |
-| Lexical contentless or stored BM25 | 57.0% | 62.0% | 63.3% | 0.587 | 0 / 1 |
+| Lexical contentless positional + BM25 (production), or stored BM25 | 57.0% | 62.0% | 63.3% | 0.587 | 0 / 1 |
 
-BM25 improves no labelled test answer rank: four hybrid ranks worsen and five
-lexical ranks worsen. For the generated first-sentence query about finding a
-common chat venue, BM25 promotes the chat-rooms tag listing above the actual
-Slack question in the body channel. After fusion, the intended question moves
-from #1 to #3 lexical and #2 to #4 hybrid. The listing contains related material;
-single-answer labels do not judge every alternative's relevance.
+BM25 improves no labelled test answer rank **on this 3,508-document fixture**:
+four hybrid ranks worsen and five lexical ranks worsen. For the generated
+first-sentence query about finding a common chat venue, BM25 promotes the
+chat-rooms tag listing above the actual Slack question in the body channel.
+After fusion, the intended question moves from #1 to #3 lexical and #2 to #4
+hybrid. The listing contains related material; single-answer labels do not judge
+every alternative's relevance. The larger fixture below reverses this
+conclusion, which is why production now ranks by BM25.
 
 A dedicated warm SQL-only sweep on the same physical indexes (48 queries,
 three trials of 20 repetitions, limit 16) measures median body queries at
-**0.0175 ms unranked versus 0.0335 ms BM25** for contentless HEAD; stored content
-is effectively identical at 0.0174/0.0336 ms. That small extra cost does not
-materially change HTTP latency: test hybrid medians are 112-115 ms across the
-storage/BM25 controls. These HTTP timings are single evaluation passes, not
-counterbalanced latency trials. There is no measured BM25 quality improvement
-on this fixture, not evidence that BM25 is generally worse.
+**0.0175 ms unranked versus 0.0335 ms BM25** for contentless positional; stored
+content is effectively identical at 0.0174/0.0336 ms. That small extra cost does
+not materially change HTTP latency: test hybrid medians are 112-115 ms across
+the storage/BM25 controls. These HTTP timings are single evaluation passes, not
+counterbalanced latency trials.
 
 ### Tokenizers and repeated build/runtime measurements
 
 The second stage compares the dev-preferred compact layout across
 [Unicode61](https://www.sqlite.org/fts5.html#unicode61_tokenizer),
 [Porter](https://www.sqlite.org/fts5.html#porter_tokenizer), and
-[ASCII](https://www.sqlite.org/fts5.html#ascii_tokenizer). The
+[ASCII](https://www.sqlite.org/fts5.html#ascii_tokenizer). It was measured
+before the switch to contentless positional; the tokenizer produces the same
+terms in either layout, and the positional row is included in the build table. The
 [trigram](https://www.sqlite.org/fts5.html#the_trigram_tokenizer) control is
 contentless with **full detail**, `columnsize=0`: SQLite rejects query tokens
 longer than three characters with trigram `detail=none`. It is substring
@@ -182,14 +195,14 @@ repetitions each) measure:
 
 | Body variant | Lexical build median | Full build, single observation | Full SQLite MiB | SQLite + FAISS / ZIM | Warm helper-provider median |
 |---|---:|---:|---:|---:|---:|
-| HEAD contentless, full detail | 9.52 s | 28.51 s | 2.56 | 79.1% | 3.62 ms |
+| Contentless positional, full detail | 9.52 s | 28.51 s | 2.56 | 79.1% | 3.62 ms |
 | Compact Unicode61, mode 2 | 9.48 s | 28.63 s | 1.17 | 56.1% | 3.60 ms |
 | Default stored FTS5 / Unicode61 | 9.63 s | 29.59 s | 7.17 | 155.4% | 3.62 ms |
 | Compact Porter | 9.45 s | 28.99 s | 1.07 | 54.5% | 3.59 ms |
 | Compact ASCII | 9.43 s | 28.78 s | 1.19 | 56.3% | 3.67 ms |
 | Contentless trigram, full detail | 9.96 s | 29.25 s | 10.71 | 214.0% | 3.65 ms |
 
-Full-build observations come from the HTTP study; the HEAD-layout observation
+Full-build observations come from the HTTP study; the positional-layout observation
 used BM25, which does not affect building. Do not infer a full-build speedup
 from these single observations. Lexical-build SQLite files omit about 0.10 MiB
 of vector metadata; the sizes above include it and the identical 2.21 MiB FAISS.
@@ -197,11 +210,156 @@ Provider timings exclude embedding, previews and HTTP. Trigram body SQL was
 about 0.194 ms versus compact's 0.067 ms in those provider trials, despite
 similar total provider medians.
 
-Default storage costs about **6.1 times compact's SQLite space** for identical
-results; small build/runtime differences are not compelling. Porter saves
-about 8% of SQLite bytes but loses labelled #1 results. Compact Unicode61 mode 2 is the selected tokenizer, not ASCII or trigram; none
-reaches the advisory 10% total-index goal. Compact is the default for indexes;
-candidate matching and ranking do not change.
+The tokenizer selection is unchanged: Unicode61 `remove_diacritics 2`, not
+ASCII or trigram. Default stored content costs about **6.1 times compact's
+SQLite space** for identical results, and contentless positional costs about
+**3.5 times compact's** while using **70% less space than stored content** at
+the same quality (66.2 MB versus 221.6 MB on the larger fixture below). Porter
+saves about 8% of SQLite bytes but loses labelled #1 results. None of these
+layouts reaches the advisory 10% total-index goal on these fixtures, and the
+body channel is only part of the total: the same cooking index needs about
+24 MB of int8 vectors for 63,608 articles.
+
+### Larger fixture: FTS5 layouts, Tantivy, and Bleve
+
+The Community Building archive is too small, and its synthetic labels too
+sparse, to separate body layouts or engines. A second measurement uses the
+cooking Stack Exchange archive
+(`cooking.stackexchange.com_en_all_2026-07.zim`, 237,005,541 bytes, 63,608
+article bodies) with 1,450 labelled queries: 865 English plus 585 in eleven
+other languages. Each arm is a body-only lexical index built from the same
+extracted text, with zimantic's own extractor and query normalization, in a
+standalone harness (SQLite 3, tantivy-py 0.27, Bleve 2.6, FAISS) rather than
+through the HTTP server. Title and semantic channels are excluded, so absolute
+rates are lower than the HTTP numbers above; compare arms within this table
+only. The archive is English-only, so the 585 non-English queries cannot match
+their own language there.
+
+| Body index | English #1 | Top 20 | Build s | Index MB | % of ZIM |
+|---|---:|---:|---:|---:|---:|
+| FTS5 `detail=none`, `columnsize=0` (compact) | 53.5% | 71.7% | 1.81 | 18.7 | 7.9% |
+| FTS5 `detail=column`, `columnsize=1` | 53.5% | 71.7% | 2.30 | 40.7 | 17.2% |
+| FTS5 `detail=full`, `columnsize=1` (production) | 65.3% | 79.8% | 2.49 | 66.2 | 27.9% |
+| FTS5 stored content, BM25 | 65.3% | 79.8% | 2.61 | 221.6 | 93.5% |
+| Tantivy 0.27, BM25 | 65.5% | 79.5% | 1.79 | 50.7 | 21.4% |
+| Bleve 2.6, BM25 | 54.1% | 67.1% | 4.33 | 61.3 | 25.9% |
+
+Positions, not stored text, carry the gain: contentless positional matches
+stored BM25 on **every top-20 list** at 30% of its bytes. `detail=column` keeps
+document lengths but no positions and ties `detail=none` exactly, so it is not a
+middle ground. The +11.8-point English #1 gain is the reason production moved
+from compact to contentless positional.
+
+Tantivy ties FTS5-BM25 on quality (65.5% versus 65.3% #1) in a smaller index
+with a somewhat faster build. It is not adopted: PyPI publishes `tantivy` wheels
+for x86_64 and aarch64 only, which would break the documented 32-bit armhf
+install path, and the quality difference is inside this sample's noise. Staying
+on SQLite also avoids a second index format, a second query implementation, and
+a build-time dependency.
+
+Bleve's default BM25 returns 54.1% #1 and 67.1% top-20, below compact FTS5
+despite a larger index. Combining several fuzzy term variants with AND recovers
+57.9% / 78.2%, still below exact BM25; combining them with OR collapses quality
+to 12.5% / 53.8%. Bleve is lexical-only, so replacing the current stack means a
+Go sidecar on every platform in addition to FAISS.
+
+Hybrid rows below fuse each lexical arm with the same multilingual-e5-small semantic IVF-SQ8
+arm by reciprocal rank fusion, on the 865 English queries:
+
+| Hybrid lexical arm | #1 | Top 5 | Top 20 | MRR |
+|---|---:|---:|---:|---:|
+| Compact FTS5 | 49.4% | 77.3% | 86.1% | 0.625 |
+| Bleve, BM25 | 48.1% | 74.5% | 83.1% | 0.606 |
+| Bleve, fuzzy AND | 47.6% | 79.1% | 88.0% | 0.617 |
+| Bleve, fuzzy OR | 21.3% | 41.5% | 62.9% | 0.306 |
+| Tantivy, BM25 | 55.7% | 84.9% | 91.7% | 0.695 |
+| Contentless positional FTS5 (production) | 55.5% | 84.7% | 91.8% | 0.694 |
+| Semantic arm alone | 20.6% | 30.1% | 36.6% | 0.247 |
+
+The semantic arm alone is included for scale. Either BM25 engine roughly
+triples its #1 rate and adds about 55 points of top-20 recall, which is what
+justifies the extra body-index bytes. Stored content buys nothing over
+contentless positional, and Tantivy buys nothing over FTS5 here.
+
+### Static embedding models
+
+Embedding dominates build time. multilingual-e5-small int8 runs at about **84 documents/s**
+on the same restricted CPUs, roughly 12.6 minutes for these 63,608 articles,
+while the entire lexical index builds in 1.8-2.6 seconds. Static embedding
+models replace the transformer with one learned vector per token and mean
+pooling, which makes document encoding roughly 400 times cheaper.
+
+Two [Model2Vec](https://github.com/MinishLab/model2vec) models,
+sentence-transformers' static multilingual model, and the English-only
+`e5-small-v2` were measured on the same corpus, queries, lexical arm, and
+IVF-SQ8 layout. `potion-retrieval-32M` is an English retrieval model;
+`potion-multilingual-128M` has multilingual vocabulary and tokenization;
+`static-similarity-mrl-multilingual-v1` is an EmbeddingBag over 105,879
+WordPiece tokens with Matryoshka-truncatable dimensions.
+
+| Embedding model | Dim | Vocabulary | Parameters | fp32 size | English semantic #1 / top 20 | Hybrid + BM25 #1 / top 20 | Misspelled hybrid #1 | Encode docs/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| multilingual-e5-small int8 (production) | 384 | ~250k | ~118M | 118 MB int8 | 20.6% / 36.6% | 55.5% / 91.8% | 58.0% | ~84 |
+| e5-small-v2 int8 (English-only) | 384 | ~30.5k | 33M | 34 MB int8 | 21.7% / 38.3% | 56.1% / 92.5% | 58.0% | ~88 |
+| potion-retrieval-32M | 512 | 63,091 | 32.3M | 129.2 MB | 18.5% / 39.2% | 52.6% / 89.0% | 28.0% | ~35,600 |
+| static-similarity-mrl-multilingual-v1 | 1024 | 105,879 | 108.4M | 433.7 MB | 17.0% / 35.7% | 48.3% / 87.1% | 24.0% | ~17,400 |
+| potion-multilingual-128M | 256 | 500,353 | 128.1M | 512.4 MB | 10.2% / 28.3% | 47.3% / 84.6% | 16.0% | ~31,400 |
+
+`e5-small-v2` is the English-only counterpart to the production model: a third
+of the parameters and int8 bytes, marginally better English quality (+1.1
+points semantic #1, +0.6 hybrid), and identical misspelling behavior. It scores
+about zero on every non-English query set (Spanish 2.4%/3.5%, French
+3.5%/8.2%, everything else 0%), and its IVF-SQ8 recall is lower (63.4% versus
+78.3% top-1 at the same probe count), so it needs a higher `nprobe` or a flat
+index. Its measured throughput is only about 5% higher than the multilingual
+model's, which shows that model size is not the build bottleneck in this
+pipeline.
+
+`potion-retrieval-32M` is close to e5 on English semantic retrieval and only
+2.9 points behind on hybrid #1, while encoding about 420 times faster and using
+a quarter of the fp32 parameters. It still loses the cases that matter for a
+mixed library: misspelled queries (28% versus 58% #1), because averaging fixed
+token vectors gives no contextual correction, and every non-English query set
+because its vocabulary and training are English.
+
+`static-similarity-mrl-multilingual-v1` is the closest multilingual static
+model: it recovers most of e5's English semantic rate (17.0% versus 20.6%, and
+35.7% versus 36.6% top-20) and keeps more cross-language signal than
+`potion-multilingual-128M`. It is still 7.2 points behind on hybrid #1 and loses
+most typo tolerance. Truncating its Matryoshka vectors to 256 dimensions costs
+about one point of hybrid #1 (47.4% / 86.8%) at a quarter of the vector bytes;
+512 dimensions are within 0.1 point of the full 1,024.
+
+The static `docs/s` figures are not measured identically: the two Model2Vec
+models use a vectorized encoder, while the sentence-transformers model was
+mean-pooled per document in numpy. Treat the column as an order of magnitude,
+not a controlled speed ranking.
+
+Semantic #1 / top-20 by query language on this English-only archive (these rows
+test whether the model lands on the right English article from another
+language's phrasing, not retrieval within that language):
+
+| Language | multilingual-e5-small | potion-retrieval-32M | static-similarity-mrl-multilingual-v1 | potion-multilingual-128M |
+|---|---:|---:|---:|---:|
+| English | 20.6% / 36.6% | 18.5% / 39.2% | 17.0% / 35.7% | 10.2% / 28.3% |
+| Spanish | 15.3% / 45.9% | 0.0% / 2.4% | 9.4% / 30.6% | 7.1% / 21.2% |
+| French | 21.2% / 47.1% | 1.2% / 5.9% | 11.8% / 35.3% | 4.7% / 23.5% |
+| Chinese | 4.7% / 36.5% | 0.0% / 0.0% | 8.2% / 41.2% | 3.5% / 14.1% |
+| Hindi | 23.5% / 41.2% | 0.0% / 0.0% | 0.0% / 4.7% | 1.2% / 7.1% |
+| Arabic | 9.4% / 22.4% | 0.0% / 0.0% | 4.7% / 25.9% | 0.0% / 5.9% |
+| German, Italian, Portuguese, Japanese, Russian, Swahili | 1.2-33.3% / 3.5-53.3% | 0.0% / 0.0% | 0.0-13.3% / 1.2-40.0% | 0.0-6.7% / 6.7-33.3% |
+
+Static vectors are unit length and drop into the existing IVF-SQ8 index, but
+they separate worse: on `potion-retrieval-32M`, scanning 6% of clusters matches
+only 81.4% of exact top-1 results, versus 94.2% for the 256-dimensional
+`potion-multilingual-128M` and 91.2% for the 1,024-dimensional
+`static-similarity-mrl-multilingual-v1`. That would need a higher `nprobe` or
+exact flat search to match e5's ANN recall.
+
+Static embeddings are therefore a plausible opt-in profile for English-only,
+build-speed-sensitive libraries, not the default. Even the closest multilingual
+static model remains 7.2 points behind e5 on hybrid #1, keeps only part of its
+cross-language behavior, and trades away typo tolerance.
 
 ## ZIM iteration and resource bounds
 

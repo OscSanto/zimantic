@@ -2,9 +2,9 @@
 
 New indexes use a type-stable ``meta`` table (``value TEXT NOT NULL``) and
 ``STRICT`` ordinary tables.  FTS5 virtual tables cannot be declared ``STRICT``,
-so only ordinary tables carry that modifier.  The body channel is a compact
-contentless FTS5 table: it stores document postings without positions, token
-counts, or raw derived/native text.
+so only ordinary tables carry that modifier.  The body channel is a contentless
+positional FTS5 table: it stores term positions and document lengths so BM25 can
+order candidates, but it never stores raw derived or native text.
 
 Absent keys mean "not known/not applicable"; no key stores SQL ``NULL``.
 Booleans, enums, integers, JSON, fingerprints, and binary probes have exactly
@@ -49,7 +49,7 @@ BUILD_GENERATION = "build_generation"
 BUILD_SCOPE = "build_scope"
 DERIVED_TEXT = "derived_text"
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 META_KEYS = frozenset(
     {
@@ -100,8 +100,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
 -- docs keeps only title/path/final target.  Excerpts and raw body text are
 -- intentionally not stored in the new index.
 CREATE VIRTUAL TABLE IF NOT EXISTS body USING fts5(
-    text, content='', detail=none, columnsize=0, tokenize='{DOCS_TOKENIZER}');
--- body is contentless: it can add postings, never update/delete a row.
+    text, content='', detail=full, columnsize=1, tokenize='{DOCS_TOKENIZER}');
+-- body is contentless: it can add postings, never update/delete a row.  It
+-- keeps term positions and document lengths so bm25(body) can order matches;
+-- raw text is still never stored.
 CREATE TABLE IF NOT EXISTS vecs(
     id INTEGER PRIMARY KEY,
     v BLOB NOT NULL

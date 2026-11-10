@@ -163,17 +163,20 @@ def test_scoped_search_tuning_reaches_semantic_filter_and_ivf_probes(tmp_path):
         schema.decode_bool("true")
 
 
-def test_body_search_matches_compact_index():
+def test_body_search_ranks_positional_index_by_bm25():
     with sqlite3.connect(":memory:") as db:
         schema.ensure_schema(db)
-        assert "body_docsize" not in schema.table_names(db)
+        assert "body_docsize" in schema.table_names(db)
         db.executemany("INSERT INTO body(rowid, text) VALUES (?, ?)", [
-            (9, "CAFÉ \u1ed9 zebra"),
+            (9, "CAF\u00c9 \u1ed9 zebra"),
             (2, "cafe o unrelated"),
             (1, "zebra unrelated"),
+            (3, "zebra zebra zebra " + "filler " * 40),
         ])
         assert body_search(db, "cafe o zebra", 16) == [(9, 1.0)]
-        assert body_search(db, "zebra", 16) == [(1, 1.0), (9, 2.0)]
+        # BM25 ranks the short, focused document above the long, repetitive one
+        # instead of returning matches in rowid order.
+        assert body_search(db, "zebra", 16) == [(1, 1.0), (9, 2.0), (3, 3.0)]
         assert body_search(db, "zebra", 1) == [(1, 1.0)]
         assert body_search(db, "cafe missing", 16) == []
         assert body_search(db, "", 16) == []
@@ -333,7 +336,7 @@ def test_generic_search_finds_title_and_body_without_embeddings_or_native():
         source = _source()
         handle = _handle(locator, source)
         try:
-            assert "body_docsize" not in schema.table_names(handle.db_for_thread())
+            assert "body_docsize" in schema.table_names(handle.db_for_thread())
             result = search(
                 source,
                 handle,

@@ -92,7 +92,7 @@ Embedding. Zimantic embeds titles and temporary excerpts with [multilingual-e5-s
 
 Storage. Each ZIM gets an immutable generation under `index_dir/<provider>/<collection-slug>-<hash>/<source-slug>-<hash>/generations/<build-generation>/` (`index.sqlite`, optional `index.faiss`, and a `lease`), plus one shared catalog:
 
-- `index.sqlite`: titles, paths, redirect targets, title postings, and a separate compact contentless FTS5 body index (`detail=none`, `columnsize=0`, `unicode61 remove_diacritics 2`). The `vecs` table exists in every generation but is empty once a full build writes `index.faiss`; a fast build leaves it empty too. Raw excerpts and raw derived text are not stored.
+- `index.sqlite`: titles, paths, redirect targets, title postings, and a separate contentless positional FTS5 body index (`detail=full`, `columnsize=1`, `unicode61 remove_diacritics 2`) whose matches are BM25-ordered. The `vecs` table exists in every generation but is empty once a full build writes `index.faiss`; a fast build leaves it empty too. Raw excerpts and raw derived text are not stored.
 - `index.faiss`: the vectors (the only place finished embeddings are stored), in one of two layouts depending on article count. A fast or empty-semantic build has no `index.faiss`.
 - `staging-fast.sqlite` / `staging-full.sqlite` (when present): resumable private staging files. They are not published generations and are removed after a successful build or a fatal failure.
 - `catalog.sqlite` (beside `index_dir`, not inside it): a provider-neutral `sources` table keyed by canonical source key, with the metadata used by `/sources` and `/library.json` (title, description, language, creator, publisher, date, provider ID, category, normalized tags, item count, license, origin, attribution, relation, MIME counts, homepage, native full-text capability, and the icon as a BLOB). It stores the absolute archive path only as a private indexed locator, never as source identity. It contains metadata and icons only, never vectors. It is a disposable cache: the ZIM files are the source of truth, and deleting it makes the next scan rebuild it. A warm catalog lets `serve` list sources without opening every archive; the startup scan opens each added, resized, or failing ZIM to refresh its row, and the first scan after deleting the catalog opens every archive. After that, archives and their libzim `Searcher` objects are opened lazily on first use. A missing or unreadable `zim_dir` (for example an unmounted USB drive) is an error that keeps the last catalog, rather than being mistaken for a library from which every ZIM disappeared. While the directory is unavailable, the served `/sources` and `/library.json` lists are empty; the catalog rows stay on disk for the next successful scan once the directory is back. An unreadable subdirectory is logged as an error and its sources are omitted, but the rest of the library stays available.
@@ -101,9 +101,9 @@ The logical source key uses the provider, collection, and root-relative archive 
 
 Only the active index schema and canonical metadata are served or resumed.
 `build` can reuse vectors from recognized v0 root-level pairs as described
-above; other index schemas, including positional body indexes, are rebuilt.
-Interrupted builds resume only within the active schema. Cross-model embedding
-probes allow vector reuse between compatible model exports.
+above; older index schemas, including the former compact body layout, are
+rebuilt. Interrupted builds resume only within the active schema. Cross-model
+embedding probes allow vector reuse between compatible model exports.
 
 | ZIM size | Vector index | Why |
 |---|---|---|

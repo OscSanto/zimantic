@@ -303,8 +303,9 @@ Caches are disabled; all variants use the same model, thread budget and
 query set. This intentionally overrides the multi-ZIM/multilingual release
 scope below: it is a quick qualitative smoke comparison, not a release gate.
 
-HEAD is the positional control. Production indexes use compact Unicode61 with
-`remove_diacritics 2`.
+`head` is the positional contentless layout and `compact` the former
+production default. Production now uses the positional layout with
+`unicode61 remove_diacritics 2` and BM25 candidate ordering.
 
 For storage/BM25 selection, then tokenizers on the preferred layout:
 

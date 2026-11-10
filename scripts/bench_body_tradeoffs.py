@@ -37,11 +37,11 @@ ALL_VARIANTS = (
     *(f"compact-{tokenizer}" for tokenizer in TOKENIZERS if tokenizer != "trigram"),
     *(f"bm25-{tokenizer}" for tokenizer in TOKENIZERS),
 )
-# Keep the historical positional control independent of the production default.
+# The production body layout, mirrored so a schema change fails this guard.
 BODY_SCHEMA = """CREATE VIRTUAL TABLE IF NOT EXISTS body USING fts5(
-    text, content='', tokenize='unicode61 remove_diacritics 2');"""
+    text, content='', detail=full, columnsize=1, tokenize='unicode61 remove_diacritics 2');"""
 COMPACT_BODY_SCHEMA = BODY_SCHEMA.replace(
-    "content='',", "content='', detail=none, columnsize=0,"
+    "detail=full, columnsize=1", "detail=none, columnsize=0"
 )
 QUERIES = [
     "moderation", "spam", "community", "conflict", "volunteers", "reputation",
@@ -189,7 +189,7 @@ def variant_patches(variant, metrics=None):
             ]
             changed = BODY_SCHEMA.replace("unicode61 remove_diacritics 2", tokenizer)
             if variant == "trigram":
-                changed = changed.replace("content='',", "content='', columnsize=0,")
+                changed = changed.replace("columnsize=1", "columnsize=0")
             stack.enter_context(patch.object(
                 schema, "SCHEMA", schema.SCHEMA.replace(BODY_SCHEMA, changed)
             ))
