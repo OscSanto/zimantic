@@ -3205,11 +3205,7 @@
                     const label = document.createElement("span");
                     label.className = "result-title-text";
                     label.textContent = displayTitle;
-                    const action = document.createElement("span");
-                    action.className = "result-open";
-                    action.textContent = t(isHtmlMimetype(item.mimetype) ? "Open article" : "Open");
-                    action.setAttribute("aria-hidden", "true");
-                    link.append(label, action);
+                    link.appendChild(label);
                     title.appendChild(link);
                 } else {
                     title.textContent = displayTitle;
@@ -4568,6 +4564,7 @@
                 const link = target?.closest(".result-title a[href], a.result-thumb[href]");
                 if (!link) {
                     if (
+                        !matchMedia("(max-width: 480px)").matches ||
                         modifiedClick(event) ||
                         target?.closest("a, button, input, select, textarea, details, [contenteditable]") ||
                         window.getSelection()?.toString()

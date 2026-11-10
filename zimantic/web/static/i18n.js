@@ -24,7 +24,6 @@
             "Close ZIM details": "Cerrar los detalles del ZIM",
             "Close source details": "Cerrar los detalles de la fuente",
             "Close article": "Cerrar artículo",
-            "Open article": "Abrir artículo",
             "Article": "Artículo",
             "Online link": "Enlace en línea",
             "This link points to an online site. It is not cached in your offline library, so opening it may require an internet connection.":

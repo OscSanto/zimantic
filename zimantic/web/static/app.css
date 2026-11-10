@@ -445,10 +445,6 @@ ol.results {
     flex: 1;
     min-width: 0;
 }
-.result-linked {
-    cursor: pointer;
-}
-.result-linked:hover,
 .result-linked:focus-within {
     border-color: var(--accent);
 }
@@ -479,14 +475,6 @@ ol.results {
     border-radius: 4px;
     outline: 2px solid var(--accent);
     outline-offset: 3px;
-}
-.result-open {
-    border: 1px solid currentColor;
-    border-radius: 6px;
-    flex-shrink: 0;
-    font-size: 0.8rem;
-    font-weight: 500;
-    padding: 5px 8px;
 }
 .result-media {
     border: 1px solid var(--border);
@@ -1159,6 +1147,12 @@ summary {
     }
 }
 @media (max-width: 480px) {
+    .result-linked {
+        cursor: pointer;
+    }
+    .result-linked:hover {
+        border-color: var(--accent);
+    }
     .site-header {
         align-items: flex-start;
     }

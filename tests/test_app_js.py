@@ -158,7 +158,7 @@ console.log(JSON.stringify({{
             "snippet": "<p>Public description.</p>",
             "snippetHidden": False,
             "linked": True,
-            "link": ["Count", "Open article"],
+            "link": ["Count"],
             "thumb": {
                 "tag": "a",
                 "href": "/content/manual/count",
@@ -176,12 +176,13 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["titleChildren"], 0)
         self.assertTrue(payload["thumbnailRemoved"])
 
-    def test_result_card_taps_open_the_title_link_but_preserve_controls_and_selection(self):
+    def test_result_card_taps_open_only_on_mobile_but_preserve_controls_and_selection(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 const location = new URL("http://example.test/?q=teaching");
-let selection = "", handler;
+let selection = "", handler, mobile = true;
 const window = {{getSelection: () => ({{toString: () => selection}})}};
+const matchMedia = () => ({{matches: mobile}});
 const $ = () => ({{addEventListener: (_name, fn) => {{ handler = fn; }}}});
 let opened = 0, forwarded = 0, prevented = 0;
 const openArticleModal = () => {{ opened++; }};
@@ -220,6 +221,11 @@ handler(event("title", {{ctrlKey: true}}));
 handler(event("thumbnail", {{ctrlKey: true}}));
 handler(event("title", {{button: 1}}));
 const ignored = counts();
+mobile = false;
+handler(event("snippet"));
+handler(event("padding"));
+const desktopIgnored = counts();
+mobile = true;
 handler(event("title"));
 const titleTap = counts();
 handler(event("thumbnail"));
@@ -230,7 +236,7 @@ const pdf = counts();
 link.dataset.mimetype = "text/html";
 link.href = "https://other.example/article";
 handler(event("title"));
-console.log(JSON.stringify({{cardTaps, ignored, titleTap, thumbnailTap, pdf, external: counts()}}));
+console.log(JSON.stringify({{cardTaps, ignored, desktopIgnored, titleTap, thumbnailTap, pdf, external: counts()}}));
 """
         result = subprocess.run(
             [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
@@ -238,6 +244,7 @@ console.log(JSON.stringify({{cardTaps, ignored, titleTap, thumbnailTap, pdf, ext
         self.assertEqual(json.loads(result.stdout), {
             "cardTaps": [2, 2, 2],
             "ignored": [2, 2, 2],
+            "desktopIgnored": [2, 2, 2],
             "titleTap": [3, 2, 3],
             "thumbnailTap": [4, 2, 4],
             "pdf": [4, 3, 4],
