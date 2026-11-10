@@ -4,7 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -566,6 +566,416 @@ class BodyBudgetTests(unittest.TestCase):
             self.assertEqual(budget.reserved, 0)
 
 
+def _stage_threads():
+    return [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("zimantic-stage-")
+    ]
+
+
+class _GatePipeline:
+    """Preparation-stage stand-in that blocks before returning a future."""
+
+    def __init__(self, limit):
+        self.max_pending_per_build = limit
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def submit(self, _rows, *, cancel_event=None):
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("preparation was not released")
+        future = Future()
+        future.set_result({})
+        return future
+
+
+class StageOverlapTests(unittest.TestCase):
+    def test_reading_advances_while_preparation_is_blocked(self):
+        limit = 3
+        positions = []
+        reached = threading.Event()
+
+        class TrackingProducer(Producer):
+            def entry_at(self, index):
+                positions.append(index)
+                if len(positions) >= limit:
+                    reached.set()
+                return super().entry_at(index)
+
+        rows = [
+            EntryRecord(i, f"T{i}", "excerpt", f"p{i}", None, "body")
+            for i in range(limit + 3)
+        ]
+        pipeline = _GatePipeline(limit)
+        with tempfile.TemporaryDirectory() as tmp:
+            with ThreadPoolExecutor(max_workers=1) as reader:
+                build = reader.submit(
+                    _build,
+                    TrackingProducer(rows),
+                    tmp,
+                    {"batch_size": 1, "embedding_pipeline": pipeline},
+                    embedder=_Embedder(),
+                )
+                try:
+                    self.assertTrue(pipeline.started.wait(timeout=2))
+                    self.assertTrue(reached.wait(timeout=2))
+                    self.assertEqual(positions, list(range(limit)))
+                    directory = IndexLocator(tmp).source_directory(
+                        "files", "files:test", "files:test:manual-0123"
+                    )
+                    db = sqlite3.connect(directory / "staging-full.sqlite")
+                    try:
+                        self.assertEqual(
+                            db.execute("SELECT COUNT(*) FROM docs").fetchone()[0], 0
+                        )
+                    finally:
+                        db.close()
+                finally:
+                    pipeline.release.set()
+                locator = build.result(timeout=5)
+            self.assertEqual(
+                [row[0] for row in _docs(locator, _source())],
+                list(range(limit + 3)),
+            )
+        self.assertEqual(_stage_threads(), [])
+
+    def test_reading_advances_while_writer_is_blocked(self):
+        limit = 3
+        positions = []
+        reached = threading.Event()
+        save_started = threading.Event()
+        release_save = threading.Event()
+
+        class TrackingProducer(Producer):
+            def entry_at(self, index):
+                positions.append(index)
+                if len(positions) >= limit:
+                    reached.set()
+                return super().entry_at(index)
+
+        original_save_rows = build_module._save_rows
+
+        def blocking_save(db, rows, next_entry, vectors, **kwargs):
+            save_started.set()
+            if not release_save.wait(timeout=5):
+                raise TimeoutError("writer was not released")
+            return original_save_rows(db, rows, next_entry, vectors, **kwargs)
+
+        rows = [
+            EntryRecord(i, f"T{i}", "excerpt", f"p{i}", None, "body")
+            for i in range(limit + 3)
+        ]
+        pipeline = build_module.EmbeddingPipeline(_Embedder(), workers=2)
+        try:
+            with (
+                tempfile.TemporaryDirectory() as tmp,
+                ThreadPoolExecutor(max_workers=1) as reader,
+                patch.object(build_module, "_save_rows", side_effect=blocking_save),
+                patch.object(
+                    build_module,
+                    "_write_faiss",
+                    side_effect=_write_fake_faiss,
+                ),
+            ):
+                build = reader.submit(
+                    _build,
+                    TrackingProducer(rows),
+                    tmp,
+                    {"batch_size": 1, "embedding_pipeline": pipeline},
+                    embedder=_Embedder(),
+                )
+                try:
+                    self.assertTrue(save_started.wait(timeout=2))
+                    self.assertTrue(reached.wait(timeout=2))
+                    self.assertEqual(positions, list(range(limit)))
+                finally:
+                    release_save.set()
+                locator = build.result(timeout=5)
+                self.assertEqual(
+                    [row[0] for row in _docs(locator, _source())],
+                    list(range(limit + 3)),
+                )
+        finally:
+            release_save.set()
+            pipeline.close()
+        self.assertEqual(_stage_threads(), [])
+
+    def test_slow_first_window_commits_every_window_in_order(self):
+        save_order = []
+        original_save_rows = build_module._save_rows
+
+        def recording_save(db, rows, next_entry, vectors, **kwargs):
+            save_order.append(next_entry)
+            return original_save_rows(db, rows, next_entry, vectors, **kwargs)
+
+        class SlowFirstEmbedder(_Embedder):
+            def __init__(self):
+                self.slow_started = threading.Event()
+                self.release_slow = threading.Event()
+                self.later_finished = threading.Event()
+
+            def embed(self, texts):
+                if texts and texts[0].startswith("passage: T0"):
+                    self.slow_started.set()
+                    if not self.release_slow.wait(timeout=5):
+                        raise TimeoutError("slow batch was not released")
+                if texts and texts[0].startswith("passage: T4"):
+                    self.later_finished.set()
+                return super().embed(texts)
+
+        rows = [
+            EntryRecord(i, f"T{i}", "excerpt", f"p{i}", None, "body")
+            for i in range(5)
+        ]
+        embedder = SlowFirstEmbedder()
+        pipeline = build_module.EmbeddingPipeline(
+            embedder, workers=2, max_pending_per_build=8
+        )
+        try:
+            with (
+                tempfile.TemporaryDirectory() as tmp,
+                ThreadPoolExecutor(max_workers=1) as reader,
+                patch.object(build_module, "_save_rows", side_effect=recording_save),
+                patch.object(
+                    build_module,
+                    "_write_faiss",
+                    side_effect=_write_fake_faiss,
+                ),
+            ):
+                build = reader.submit(
+                    _build,
+                    Producer(rows),
+                    tmp,
+                    {"batch_size": 1, "embedding_pipeline": pipeline},
+                    embedder=embedder,
+                )
+                try:
+                    self.assertTrue(embedder.slow_started.wait(timeout=2))
+                    self.assertTrue(embedder.later_finished.wait(timeout=2))
+                    self.assertEqual(save_order, [])
+                finally:
+                    embedder.release_slow.set()
+                locator = build.result(timeout=5)
+                self.assertEqual(save_order, [1, 2, 3, 4, 5])
+                self.assertEqual(
+                    [row[0] for row in _docs(locator, _source())],
+                    list(range(5)),
+                )
+        finally:
+            embedder.release_slow.set()
+            pipeline.close()
+
+    def test_interrupt_keeps_only_committed_windows_and_resumes(self):
+        first_committed = threading.Event()
+        original_save_rows = build_module._save_rows
+
+        def signalling_save(db, rows, next_entry, vectors, **kwargs):
+            result = original_save_rows(db, rows, next_entry, vectors, **kwargs)
+            if next_entry == 1:
+                first_committed.set()
+            return result
+
+        class SlowSecondEmbedder(_Embedder):
+            def __init__(self):
+                self.release_slow = threading.Event()
+
+            def embed(self, texts):
+                if (
+                    texts
+                    and texts[0].startswith("passage: T1")
+                    and not self.release_slow.wait(timeout=5)
+                ):
+                    raise TimeoutError("slow batch was not released")
+                return super().embed(texts)
+
+        rows = [
+            EntryRecord(i, f"T{i}", "excerpt", f"p{i}", None, "body")
+            for i in range(4)
+        ]
+        embedder = SlowSecondEmbedder()
+        pipeline = build_module.EmbeddingPipeline(
+            embedder, workers=2, max_pending_per_build=8
+        )
+        stop_event = threading.Event()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with (
+                    ThreadPoolExecutor(max_workers=1) as reader,
+                    patch.object(
+                        build_module, "_save_rows", side_effect=signalling_save
+                    ),
+                ):
+                    build = reader.submit(
+                        _build,
+                        Producer(rows),
+                        tmp,
+                        {
+                            "batch_size": 1,
+                            "embedding_pipeline": pipeline,
+                            "interrupt_event": stop_event,
+                        },
+                        embedder=embedder,
+                    )
+                    try:
+                        self.assertTrue(first_committed.wait(timeout=2))
+                        stop_event.set()
+                        with self.assertRaises(KeyboardInterrupt):
+                            build.result(timeout=2)
+                    finally:
+                        embedder.release_slow.set()
+                directory = IndexLocator(tmp).source_directory(
+                    "files", "files:test", "files:test:manual-0123"
+                )
+                db = sqlite3.connect(directory / "staging-full.sqlite")
+                try:
+                    meta = dict(db.execute("SELECT key, value FROM meta"))
+                    self.assertEqual(meta[NEXT], "1")
+                    self.assertNotIn(DONE, meta)
+                    self.assertEqual(
+                        [row[0] for row in db.execute("SELECT rowid FROM docs")],
+                        [0],
+                    )
+                finally:
+                    db.close()
+
+                resumed_pipeline = build_module.EmbeddingPipeline(
+                    _Embedder(), workers=2
+                )
+                try:
+                    with (
+                        patch.object(
+                            build_module, "_save_rows", side_effect=original_save_rows
+                        ),
+                        patch.object(
+                            build_module,
+                            "_write_faiss",
+                            side_effect=_write_fake_faiss,
+                        ),
+                    ):
+                        locator = _build(
+                            Producer(rows),
+                            tmp,
+                            {
+                                "batch_size": 1,
+                                "embedding_pipeline": resumed_pipeline,
+                            },
+                            embedder=_Embedder(),
+                        )
+                finally:
+                    resumed_pipeline.close()
+                self.assertEqual(
+                    [row[0] for row in _docs(locator, _source())],
+                    list(range(4)),
+                )
+        finally:
+            embedder.release_slow.set()
+            pipeline.close()
+        self.assertEqual(_stage_threads(), [])
+
+    def test_empty_and_title_only_builds_never_touch_the_model(self):
+        class ExplodingEmbedder(_Embedder):
+            def truncate(self, *_args, **_kwargs):
+                raise AssertionError("model truncate was called")
+
+            def encode(self, *_args, **_kwargs):
+                raise AssertionError("model encode was called")
+
+            def embed(self, *_args, **_kwargs):
+                raise AssertionError("model embed was called")
+
+            def embed_encoded(self, *_args, **_kwargs):
+                raise AssertionError("model embed_encoded was called")
+
+        rows = [
+            EntryRecord(1, "Title only", "", "title", None, ""),
+            EntryRecord(2, "Another title", "", "another", None, ""),
+        ]
+        pipeline = build_module.EmbeddingPipeline(ExplodingEmbedder(), workers=2)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                locator = _build(
+                    Producer(rows),
+                    tmp,
+                    {"batch_size": 2, "embedding_pipeline": pipeline},
+                    embedder=ExplodingEmbedder(),
+                )
+                self.assertEqual(_meta(locator, _source())[DONE], "full")
+                self.assertEqual(
+                    [row[0] for row in _docs(locator, _source())], [1, 2]
+                )
+        finally:
+            pipeline.close()
+
+    def test_stage_errors_propagate_without_publishing_or_leaking_reservations(self):
+        rows = [
+            EntryRecord(i, f"T{i}", "excerpt", f"p{i}", None, "body")
+            for i in range(4)
+        ]
+
+        class FailingPipeline:
+            max_pending_per_build = 2
+
+            def submit(self, _rows, *, cancel_event=None):
+                raise RuntimeError("preparation failed")
+
+        class FailingEmbedder(_Embedder):
+            def embed(self, _texts):
+                raise RuntimeError("inference failed")
+
+        def writer_failure(_db, _rows, _next, _vectors, **_kwargs):
+            raise RuntimeError("writer failed")
+
+        expected = {
+            "reader": "parse failed",
+            "preparation": "preparation failed",
+            "inference": "inference failed",
+            "writer": "writer failed",
+        }
+        for name, message in expected.items():
+            with self.subTest(stage=name):
+                budget = build_module.BodyBudget(4096)
+                producer = Producer(rows, fail_at=0 if name == "reader" else None)
+                embedder = FailingEmbedder() if name == "inference" else _Embedder()
+                if name == "preparation":
+                    pipeline = FailingPipeline()
+                    close_pipeline = None
+                else:
+                    pipeline = build_module.EmbeddingPipeline(embedder, workers=2)
+                    close_pipeline = pipeline
+                save_patch = (
+                    patch.object(build_module, "_save_rows", side_effect=writer_failure)
+                    if name == "writer"
+                    else patch.object(
+                        build_module, "_write_faiss", side_effect=_write_fake_faiss
+                    )
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    try:
+                        with save_patch, self.assertRaisesRegex(RuntimeError, message):
+                            _build(
+                                producer,
+                                tmp,
+                                {
+                                    "batch_size": 1,
+                                    "body_budget": budget,
+                                    "embedding_pipeline": pipeline,
+                                },
+                                embedder=embedder,
+                            )
+                    finally:
+                        if close_pipeline is not None:
+                            close_pipeline.close()
+                    self.assertEqual(budget.reserved, 0)
+                    self.assertIsNone(IndexLocator(tmp).paths(_source()))
+                    directory = IndexLocator(tmp).source_directory(
+                        "files", "files:test", "files:test:manual-0123"
+                    )
+                    self.assertFalse((directory / "staging-full.sqlite").exists())
+                    self.assertEqual(_stage_threads(), [])
+
+
 class TempIndexFileTests(unittest.TestCase):
     @unittest.skipIf(
         os.name == "nt", "Windows does not expose POSIX permission bits"
@@ -829,6 +1239,44 @@ class EmbeddingPipelineTests(unittest.TestCase):
         self.assertEqual(set(result), set(range(10)))
         for i, length in enumerate(lengths):
             self.assertEqual(result[i][0], length)
+
+    def test_cpu_small_batches_can_enqueue_a_read_window_while_workers_are_busy(self):
+        from zimantic.__main__ import _embedding_queue_size
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class SmallBatchEmbedder(_Embedder):
+            def encode(self, texts):
+                return [[int(text.split("\n")[-1])] * 256 for text in texts]
+
+            def embed_encoded(self, inputs):
+                started.set()
+                if not release.wait(timeout=5):
+                    raise TimeoutError("test did not release model calls")
+                return np.array([[tokens[0], 1] for tokens in inputs], dtype=np.float32)
+
+        rows = [EntryRecord(i, "T", str(i), str(i)) for i in range(32)]
+        pipeline = build_module.EmbeddingPipeline(
+            SmallBatchEmbedder(), workers=8, token_budget=256,
+            queue_size=_embedding_queue_size({"batch_size": 32}, 8, "cpu"),
+        )
+        try:
+            with ThreadPoolExecutor(max_workers=1) as reader:
+                submitted = reader.submit(pipeline.submit, rows)
+                try:
+                    future = submitted.result(timeout=2)
+                    self.assertTrue(started.wait(timeout=2))
+                    self.assertFalse(future.done())
+                finally:
+                    release.set()
+            result = future.result(timeout=2)
+            self.assertEqual(set(result), set(range(32)))
+            for entry_id, vector in result.items():
+                self.assertEqual(vector[0], entry_id)
+        finally:
+            release.set()
+            pipeline.close()
 
     def test_fixed_shape_requests_coalesce_without_mixing_source_ids(self):
         started = threading.Event()

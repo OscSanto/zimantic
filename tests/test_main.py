@@ -241,11 +241,13 @@ class BuildWorkerTests(unittest.TestCase):
         build_module = importlib.import_module("zimantic.indexing.pipeline")
         barrier = threading.Barrier(2)
         built = []
+        stage_split = []
 
         def fake_build(producer, _locator, _embedder, cfg, **_kwargs):
             barrier.wait(timeout=2)
             cfg["progress_callback"](5, 10)
             built.append(Path(producer.path).name)
+            stage_split.append(cfg["_stage_split"])
             return _build_report()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,6 +288,7 @@ class BuildWorkerTests(unittest.TestCase):
                 main_module.main()
 
         self.assertEqual(set(built), {"first.zim", "second.zim"})
+        self.assertEqual(stage_split, [False, False])
         self.assertEqual(
             {call.args for call in progress.return_value.advance.call_args_list},
             {(0, 5, 10), (1, 5, 10)},
@@ -386,16 +389,69 @@ class BuildWorkerTests(unittest.TestCase):
             main_module._build_tasks(
                 [("one", runtime, object())], config, args, argparse.ArgumentParser()
             )
+            embedder.assert_not_called()
             pipeline.call_args.args[0].embed(["text"])
             embedder.assert_called_once_with(
                 config["model_dir"], threads=2, device=None, batch_tokens=1000
             )
         self.assertEqual(pipeline.call_args.kwargs["workers"], 3)
+        self.assertEqual(pipeline.call_args.kwargs["queue_size"], 32)
         self.assertEqual(pipeline.call_args.kwargs["token_budget"], 1000)
         self.assertIs(
             build.call_args.args[3]["embedding_pipeline"], pipeline.return_value
         )
+        self.assertTrue(build.call_args.args[3]["_stage_split"])
         pipeline.return_value.close.assert_called_once()
+
+    def test_cpu_embedding_queue_fits_a_read_window_without_changing_gpu_bounds(self):
+        import zimantic.__main__ as main_module
+
+        cases = [
+            ("CPUExecutionProvider", 32, 8, 32),
+            ("CPUExecutionProvider", 256, 2, 256),
+            ("CPUExecutionProvider", 4, 8, 16),
+            ("MIGraphXExecutionProvider", 256, 4, 8),
+        ]
+        for provider, window, workers, expected in cases:
+            with (
+                self.subTest(provider=provider, window=window, workers=workers),
+                patch("zimantic.embed.resolve_providers", return_value=([provider], None)),
+            ):
+                self.assertEqual(
+                    main_module._embedding_queue_size({"batch_size": window}, workers),
+                    expected,
+                )
+
+    def test_legacy_build_forwards_the_cpu_batch_budget(self):
+        import zimantic.__main__ as main_module
+
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / name for name in ("first.zim", "second.zim")]
+            for path in paths:
+                path.write_bytes(b"ZIM\x04")
+            config = {
+                "zim_dir": tmp,
+                "index_dir": str(Path(tmp) / "indexes"),
+                "model_dir": "/unused/model",
+                "batch_size": 32,
+                "embedding_batch_tokens": 256,
+                "onnx_build_workers": 8,
+                "embed_device": "cpu",
+            }
+            parser = main_module._make_parser()
+            args = parser.parse_args(["build", "--workers", "2", *map(str, paths)])
+            with (
+                patch.object(build_module, "EmbeddingPipeline") as pipeline,
+                patch.object(build_module, "build_index", return_value=_build_report()),
+                patch.object(main_module, "_build_producer_for_zim", return_value=object()),
+                patch.object(build_module, "_AllFilesProgress"),
+                patch("zimantic.embed.Embedder") as embedder,
+            ):
+                main_module._run_build(args, config, parser)
+        embedder.assert_not_called()
+        self.assertEqual(pipeline.call_args.kwargs["token_budget"], 256)
+        self.assertEqual(pipeline.call_args.kwargs["queue_size"], 32)
 
 
 class ModelCommandTests(unittest.TestCase):

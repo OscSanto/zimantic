@@ -132,7 +132,7 @@ Stable files. `build --wait-stable` polls source sizes until they stop changing 
 
 Build lock. Every build takes an advisory lock at `<index_dir>/../.build.lock` (beside `catalog.sqlite`), so a manual build, a `systemd.path` trigger, and a timer cannot write the same indexes at once. A second build waits by default. `--no-wait-lock` exits with status 75 (`EX_TEMPFAIL`) immediately, which the IIAB units use to skip a trigger without marking it failed. `--lock-timeout` bounds the wait. The kernel releases the lock when the process exits, so a killed build leaves no stale lock. Run manual builds as the same user as the server: a lock or index owned by another user (for example after `sudo zimantic build`) produces a `cannot open the build lock` error that names the file to fix.
 
-Workers and batching. The desktop profile reads/commits windows of 32 rows (mobile 8, supercomputer 128). Within each window, final capped inputs are encoded once, sorted by token length, and split into calls bounded by `embedding_batch_tokens` (default 1,000 **padded** tokens). A single longer input runs alone. Independent sources can be read concurrently with `--workers N` or `build_workers`. Full CLI builds overlap reading with a bounded shared embedding pipeline, even for one source: at most `onnx_build_workers` model calls run at once and each source has bounded read-ahead scaled to the pool size, so a slow earlier window does not leave the other workers idle. Automatic embedding concurrency uses physical cores where detected, CPU affinity/cgroup limits, available RAM and `onnx_build_threads` (desktop default **1**, mobile **2**, supercomputer **8**, bounded by usable cores; the Pi 5/500 preset explicitly uses **3**). `onnx_query_threads` controls **serving/query embedding only**. Increase build threads only after benchmarking: extra intra-call synchronization reduces the independent worker budget when several workers fit in RAM. If RAM limits the pool to one worker, per-call parallelism can still help. The RAM allowance is conservative, not an OOM guarantee for arbitrary models. Tune `batch_size` and `embedding_batch_tokens` first; worker/thread settings are [advanced overrides](#advanced-resource-overrides). Builds targeting the same `index_dir` are serialized by the build lock.
+Workers and batching. The desktop profile reads/commits windows of 32 rows (mobile 8, supercomputer 128). Within each window, final capped inputs are encoded once, sorted by token length, and split into calls bounded by `embedding_batch_tokens` (default 1,000 **padded** tokens). A single longer input runs alone. Independent sources can be read concurrently with `--workers N` or `build_workers`. Full CLI builds overlap reading with a bounded shared embedding pipeline, even for one source: at most `onnx_build_workers` model calls run at once and each source has bounded read-ahead scaled to the pool size, so a slow earlier window does not leave the other workers idle. When one source is actively building, its reader, embedding preparation, and ordered SQLite writer also run as separate bounded stages; commits stay in source order and one in-flight-window budget covers all stages. With several concurrent source builds, source-level overlap is retained instead because extra per-source stage threads added CPU contention on the tested desktop. Fast builds and vector-reuse builds keep their synchronous paths. Automatic embedding concurrency uses physical cores where detected, CPU affinity/cgroup limits, available RAM and `onnx_build_threads` (desktop default **1**, mobile **2**, supercomputer **8**, bounded by usable cores; the Pi 5/500 preset explicitly uses **3**). `onnx_query_threads` controls **serving/query embedding only**. Increase build threads only after benchmarking: extra intra-call synchronization reduces the independent worker budget when several workers fit in RAM. If RAM limits the pool to one worker, per-call parallelism can still help. The RAM allowance is conservative, not an OOM guarantee for arbitrary models. Tune `batch_size` and `embedding_batch_tokens` first; worker/thread settings are [advanced overrides](#advanced-resource-overrides). Builds targeting the same `index_dir` are serialized by the build lock.
 
 Query threads. Every profile now uses the same automatic budget: at most four usable physical cores, leaving one for other work (minimum one thread). This gives three on an unconstrained four-core Pi 5/500 and one under a one-CPU quota. One thread is not a good blanket serving default: longer queries benefited substantially from parallelism. More than four can help near-limit queries but hurt typical short searches; override `onnx_query_threads` for that workload. These are balanced defaults, not a universal optimum for every model or device.
 
@@ -165,6 +165,30 @@ The source-thread ceiling of eight preserves the desktop baseline and the source
 `max_concurrent_searches` is separate: it admits user requests, not source tasks or helpers. Profile ceilings of 2/4/8 are trimmed by usable CPU threads and one slot per 256 MiB available RAM, with a minimum of one. This is a conservative admission heuristic, not a per-request allocation. Requests share the source/native pools, so their capacities are not multiplied by the admitted-user count. A positive explicit admission limit overrides this estimate.
 
 Old names remain deprecated config aliases: `embed_threads` → `onnx_query_threads`, `search_workers` → `source_query_threads`, `fulltext_workers` → `libzim_search_processes`, `build_embed_threads` → `onnx_build_threads`, and `embedding_workers` → `onnx_build_workers`. A legacy key warns once when loading a config. If both names are present, the new name wins regardless of order; if that value is invalid, its automatic/profile fallback wins rather than reviving the old value.
+
+## CPU build tuning
+
+On the tested i5-13600KF desktop with multilingual-e5-small int8, smaller model
+calls beat larger batches. This CPU-only configuration retains the normal
+32-row read window:
+
+```toml
+embed_device = "cpu"
+model_dir = "model/int8"
+batch_size = 32
+embedding_batch_tokens = 256
+onnx_build_threads = 1
+```
+
+Leave `onnx_build_workers` automatic as a starting point: it selected eight
+workers on this desktop. More workers and multithreaded calls were not faster
+enough to justify their extra CPU use here. CPU queues admit at least one read
+window, so small calls do not prevent source reading from overlapping inference.
+GPU queue bounds are unchanged.
+
+These settings are not universal defaults, especially for GPUs and small ARM
+hosts. See [CPU int8 throughput tuning](build-performance.md#cpu-int8-throughput-tuning)
+for repeated complete-build results and numerical checks.
 
 ## GPU acceleration
 

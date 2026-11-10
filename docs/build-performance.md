@@ -283,6 +283,8 @@ GPU took **11.6% less wall time** (1.13x throughput) on this workload, including
 against CPU with the same larger read windows and token budget. No GPU run
 compiled new shapes or fell back to CPU. Per-source report durations overlap;
 do not sum them to compare complete commands.
+This shared-token-budget comparison is not the fastest CPU configuration:
+the subsequent CPU-specific tuning below is faster than this GPU result.
 
 The improvements are shape-isolated compiled caches, a bounded resident
 session pool, and coalescing already queued compatible requests. With the
@@ -305,6 +307,162 @@ retrieval-quality measurements.
 SQLite plus FAISS occupies 141.8% of the original CMake archive and 121.6% of
 the C++ archive for both backends. Neither meets the advisory index-size goal;
 the throughput improvement does not come from dropping content or vectors.
+
+## CPU int8 throughput tuning
+
+The same desktop and int8 model benefited from a **256-token model-call
+budget**, retaining the default 32-row read window. Eight embedding workers
+with one thread each remained preferable to more workers or multithreaded
+calls. This is measured tuning for this host and model, not a universal change
+to the default token budget.
+
+Profiling revealed a pipeline limit when using smaller calls: a 32-row window
+could require 32 requests, but the eight-worker queue held only 16. Submitting a
+window blocked source reading, then the workers ran out of work while reading
+caught up. CPU queues now hold at least one read window, while retaining the
+worker-based minimum. Model loading stays lazy, GPU queue bounds are unchanged,
+and row windows and the shared body-text budget remain bounded. Legacy
+multi-ZIM builds also forward the configured token budget to the shared pool.
+
+On the Python Enhancement Proposals archive
+(`peps.python_en_all_2025-09.zim`), smaller calls initially increased model-call
+count from 228 to 715 and slowed the build. A queue trace measured **2.000 s
+blocked on submission**; the corrected queue reduced that to **0.075 s**.
+The profiled build returned from 9.92 s to 8.54 s, matching the original
+large-batch profile at 8.52 s. The regression was lost overlap, not extra model
+computation; total process CPU time was lower with smaller calls.
+
+Three fresh-process forced rebuilds of CMake + C++, including command startup
+and complete publication, measured:
+
+| CPU int8 configuration | Full-command wall seconds | Median |
+|---|---|---:|
+| Original defaults: 32-row windows, 1,000 tokens, 16 queued batches | 51.791 / 52.127 / 52.519 | 52.127 s |
+| Tuned: 32-row windows, 256 tokens, corrected 32-batch queue | 41.151 / 42.379 / 42.607 | 42.379 s |
+
+That is **18.7% less wall time** (1.23x throughput) for the same 6,871
+documents. Increasing the read window to 256 rows was slower than retaining
+32 rows. The tuned CPU observations also beat the earlier 47.049 s GPU median,
+but GPU was not rerun in these CPU-only trials.
+
+The PEP archive no longer regresses. With the corrected queue in both
+configurations, alternating three-run checks measured:
+
+| PEP build token budget | Full-command wall seconds | Median |
+|---|---|---:|
+| 1,000 tokens | 9.743 / 9.487 / 9.700 | 9.700 s |
+| 256 tokens | 9.197 / 9.234 / 9.361 | 9.234 s |
+
+Both publish 714 documents with no body truncation. These timings include
+startup; they measure indexing the PEP archive, not execution of Python code.
+
+CMake/C++ document rows, vector IDs, and all 596,366 lexical body postings
+remain identical. Vectors are finite and normalized within float16 storage
+tolerance. Against the earlier 1,024-token CPU reference, corresponding-vector
+cosine means are 0.997883/0.997890 and minima 0.994248/0.993637 for CMake/C++.
+Int8 batch-neighbour effects are therefore not bit-identical results; no
+labelled retrieval-quality improvement is claimed. SQLite plus FAISS remains
+about 141.8%/121.6% of the respective archives, still above the advisory goal.
+
+See the [CPU configuration example](usage.md#cpu-build-tuning). Global defaults
+remain unchanged so this CPU-specific budget does not become a GPU or ARM
+recommendation.
+
+## Reader, preparation, and writer stage split
+
+A full build with one active source can now overlap three stages without
+changing batching geometry:
+
+```text
+source reader (provider thread)
+    -> bounded read-window queue
+    -> preparation/submission worker
+    -> bounded prepared-window queue with embedding futures
+    -> ordered SQLite writer (its own staging connection)
+```
+
+The reader keeps `entry_at()`, `modified_at()`, and derived-text extraction in
+the thread that owns the producer and its caches. The preparation worker removes
+body text and submits the existing token batches without waiting for inference.
+The writer processes windows FIFO, awaits that window's future, calls the
+existing `_save_rows()` transaction, advances progress, and only then releases
+that window's body reservation and permit. One `max_pending_per_build` permit
+budget covers every in-flight window across all three queues, and the existing
+shared body-byte budget is unchanged. Commit order, canonical row/vector IDs,
+resume checkpoints, and publication order remain source order.
+
+The staged path is used when one source is actively building. When several
+source builds already run concurrently, source-level overlap fills the shared
+inference pool and the existing coupled per-source path is retained; adding two
+more threads per source measured about 1.5% slower on the two-archive workload
+below. Fast builds and vector-reuse builds also keep their existing synchronous
+paths. A vector-reuse build may use the original staging connection, so it is
+not moved across threads.
+
+### Complete-build measurements
+
+Fresh-process forced rebuilds, same host and configuration as the CPU tuning
+above (`batch_size = 32`, `embedding_batch_tokens = 256`,
+`onnx_build_workers = 8`, `onnx_build_threads = 1`). Warm filesystem and model
+cache; no system caches dropped; no tests or other CPU benchmarks ran during
+timing. Each row is the median of its listed runs; command startup and complete
+publication are included. The coupled-path control is the same working tree with
+only the staged route disabled.
+
+| Workload | Coupled path | Staged path | Default policy after measurement |
+|---|---:|---:|---:|
+| CMake + C++, 6,871 documents | 42.373 s (6 runs) | 43.030 s (6 runs) | 42.780 s (3 runs) |
+| PEP, 714 documents | 9.555 s (6 runs) | 8.632 s (6 runs) | 8.738 s (3 runs) |
+
+The staged path is **9.7% faster** on the single-source PEP build (about 1.11x
+throughput) and about **1.5% slower** on the two-archive bulk build. With the
+adaptive policy the bulk workload remains at the existing 42.4–42.8 s range and
+PEP stays about 8.5–8.7 s. The previously documented tuned medians were 42.379 s
+and 9.234 s; absolute values move with host state, so compare rows within this
+table rather than treating small cross-table differences as gains.
+
+Raw wall seconds, in run order:
+
+```text
+CMake + C++ coupled: 42.003 / 42.655 / 42.920 / 42.354 / 41.991 / 42.391
+CMake + C++ staged:  42.572 / 42.812 / 43.238 / 42.822 / 44.189 / 44.687
+CMake + C++ default: 42.668 / 43.808 / 42.780
+PEP coupled:          9.116 /  9.597 /  9.639 /  9.512 /  9.509 /  9.600
+PEP staged:           8.560 /  8.682 /  8.568 /  8.641 /  8.691 /  8.622
+PEP default:          8.728 /  8.738 /  8.845
+```
+
+The bulk profile explains the limit. On a 42.61 s staged run, inference calls
+summed **311.7 s of worker time** across eight workers (about 39 s per worker),
+while ordered `_save_rows()` calls summed **8.1 s**. The writer spent 46.9 s
+waiting on futures, overlapped with reading and preparation; the coupled control
+spent about 27.0 s blocked in queue insertion from its reader threads. Moving
+that wait to a writer frees the reader, but it cannot reduce the inference work
+that dominates this workload. The single-source PEP build has enough
+reading/preparation/commit work outside inference to benefit.
+
+### Output integrity and GPU smoke
+
+For both CMake and C++, the coupled and staged builds produced identical
+document rows, lexical body postings, vector IDs, and document/body digests,
+with zero body truncation and all `vecs` rows emptied after FAISS publication.
+Corresponding staged-vs-coupled vectors from `index.faiss` had mean cosine 1.0
+and minimum 0.9999998 after the existing float16 round-trip; vectors were finite
+and unit length within float16 tolerance. These are numerical equivalence
+checks, not labelled retrieval-quality measurements.
+
+One warm MIGraphX smoke build using `run_gpu.sh`, `gpu-throughput` settings, and
+the production shape-isolated cache published 2,001 + 4,870 documents with no
+body truncation in 50.125 s. That single observation includes container startup
+and is not a GPU regression or speedup claim; with two concurrent sources the
+adaptive policy keeps the coupled path, so it does not exercise the split.
+
+A separate single-source PEP A/B used the same wrapper, settings, and cache,
+with four runs each: coupled 17.845 / 18.011 / 18.046 / 17.367 s (median
+17.93 s) versus staged 19.456 / 18.219 / 17.531 / 17.214 s (median 17.88 s).
+That is neutral within this small sample, not a GPU speedup. MIGraphX runs remain
+serialized, provider selection is unchanged, and no concurrent MIGraphX
+execution was introduced.
 
 ## Measurements: November 7, 2026
 

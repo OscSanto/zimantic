@@ -57,6 +57,17 @@ class _LazyEmbedder:
         return getattr(self._value, "fingerprint", "") if self._value is not None else ""
 
 
+def _embedding_queue_size(cfg: dict, workers: int, device: str | None = None) -> int:
+    """Keep a CPU read window from blocking behind its own small model calls."""
+    from .embed import CPU_PROVIDER, resolve_providers
+
+    providers, _warning = resolve_providers(device or cfg.get("embed_device"))
+    size = max(2, workers * 2)
+    if providers[0] == CPU_PROVIDER:
+        size = max(size, int(cfg.get("batch_size", 32)))
+    return size
+
+
 def _graceful_interrupt(_signum: int, _frame) -> None:
     """Turn SIGTERM (a systemd stop) into KeyboardInterrupt.
 
@@ -1258,13 +1269,22 @@ def _build_tasks(
         embedding_pipeline = EmbeddingPipeline(
             embedder,
             workers=embedding_workers,
-            queue_size=max(2, embedding_workers * 2),
+            queue_size=_embedding_queue_size(
+                cfg, embedding_workers, getattr(args, "device", None)
+            ),
             token_budget=token_budget,
         )
 
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     build_cfg["interrupt_event"] = _BUILD_STOP_EVENT
+    # When several source builds already run concurrently, source-level overlap
+    # fills the shared inference pool; per-source stage threads only add CPU
+    # contention.  A single active source uses the reader/preparer/writer split.
+    concurrent_sources = (
+        1 if workers == 1 or len(tasks) == 1 else min(workers, len(tasks))
+    )
+    build_cfg["_stage_split"] = concurrent_sources == 1
     locator = IndexLocator(cfg["index_dir"])
     overall = _AllFilesProgress(len(tasks))
 
@@ -1528,11 +1548,15 @@ def _run_positional_zim_build(
             embedding_pipeline = EmbeddingPipeline(
                 embedder,
                 workers=min(embedding_workers, workers),
-                queue_size=max(2, workers * 2),
+                queue_size=_embedding_queue_size(
+                    cfg, workers, getattr(args, "device", None)
+                ),
+                token_budget=int(cfg.get("embedding_batch_tokens", 1000)),
             )
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     build_cfg["interrupt_event"] = _BUILD_STOP_EVENT
+    build_cfg["_stage_split"] = not (workers > 1 and len(zims) > 1)
     locator = IndexLocator(cfg["index_dir"])
     failures: list[tuple[Path, BaseException]] = []
     interrupted = False

@@ -13,15 +13,16 @@ import os
 import secrets
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 import uuid
 from collections.abc import Mapping
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from threading import Thread
 from typing import Any
 
@@ -68,6 +69,10 @@ class SnapshotChangedError(BuildError):
 
 class PartialEnrichmentError(BuildError):
     """A requested derived operation was incomplete; available channels published."""
+
+
+class _StageStopped(Exception):
+    """Internal signal that one source's staged workers are shutting down."""
 
 
 @dataclass(frozen=True)
@@ -146,7 +151,12 @@ class EmbeddingPipeline:
             thread.start()
         self._closed = False
 
-    def submit(self, rows: list[EntryRecord]) -> Future:
+    def submit(
+        self,
+        rows: list[EntryRecord],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> Future:
         if self._closed:
             raise RuntimeError("embedding pipeline is closed")
         future = Future()
@@ -171,9 +181,27 @@ class EmbeddingPipeline:
                     future.set_result(vectors)
 
         for ids, inputs in batches:
+            if cancel_event is not None and cancel_event.is_set():
+                if not future.done():
+                    future.set_exception(_StageStopped())
+                raise _StageStopped()
             batch_future = Future()
             batch_future.add_done_callback(finished)
-            self._requests.put(_EmbeddingRequest(ids, inputs, batch_future))
+            request = _EmbeddingRequest(ids, inputs, batch_future)
+            # A full queue only blocks this source's preparation stage, never
+            # its reader.  Timed insertion keeps cancellation responsive when
+            # inference is blocked.
+            while True:
+                try:
+                    self._requests.put(request, timeout=0.05)
+                    break
+                except Full:
+                    if self._closed:
+                        raise RuntimeError("embedding pipeline is closed")
+                    if cancel_event is not None and cancel_event.is_set():
+                        if not future.done():
+                            future.set_exception(_StageStopped())
+                        raise _StageStopped()
         return future
 
     def close(self, *, wait: bool = True) -> None:
@@ -261,12 +289,20 @@ class BodyBudget:
         with self._condition:
             return self._reserved
 
-    def reserve(self, size: int) -> int:
+    def reserve(
+        self,
+        size: int,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> int:
         """Block until ``size`` bytes are available.
 
         A caller that already holds reservations and then waits here can stall
         every other build.  The indexing loop therefore tries
         :meth:`try_reserve` first and flushes/drains before blocking.
+
+        ``cancel_event`` lets a source abandon the wait when one of its own
+        stages fails, without waking unrelated builds.
         """
         requested = max(0, int(size))
         with self._condition:
@@ -281,9 +317,12 @@ class BodyBudget:
                     )
                     self._warned = True
                 self.capacity = requested
-            self._condition.wait_for(
-                lambda: self._reserved == 0 or self._reserved + requested <= self.capacity
-            )
+            while not (
+                self._reserved == 0 or self._reserved + requested <= self.capacity
+            ):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _StageStopped()
+                self._condition.wait(timeout=0.05)
             self._reserved += requested
             return requested
 
@@ -653,6 +692,452 @@ def _prepare_build_state(
         raise
 
 
+def _read_entry(
+    producer: EntryProducer,
+    index: int,
+    *,
+    fast: bool,
+    max_body_text_bytes: int,
+    derived_stage: Any | None,
+    derived_metadata: dict[str, Any] | None,
+    derived_refs: dict[int, list[tuple[str, int, str]]] | None,
+) -> tuple[EntryRecord | None, int | None]:
+    """Read one source entry and apply derived text in the reader thread.
+
+    Providers and derived-text caches may own thread-affine resources, so this
+    stays in the thread that created the producer.  Staged workers only receive
+    immutable row snapshots and per-window reference snapshots.
+    """
+    row = producer.entry_at(index)
+    modified_at = getattr(producer, "modified_at", None)
+    modified_value = modified_at(index) if callable(modified_at) else None
+    if modified_value is not None and (
+        isinstance(modified_value, bool) or not isinstance(modified_value, int)
+    ):
+        raise TypeError("producer modified_at() must return an integer or None")
+    if row is not None and derived_stage is not None and not fast:
+        try:
+            from .derived import compose_body
+
+            inputs = ()
+            if hasattr(producer, "derived_text_inputs"):
+                inputs = producer.derived_text_inputs(index)
+            outcome = derived_stage.process(index, row.body, inputs)
+            contributed = [
+                (contribution.operation, contribution.text)
+                for contribution in outcome.contributions
+            ]
+            if contributed:
+                body, body_truncated, _used = compose_body(
+                    row.body, contributed, max_body_text_bytes
+                )
+                row = row._replace(
+                    body=body,
+                    body_truncated=row.body_truncated or body_truncated,
+                )
+            if derived_metadata is not None:
+                states = derived_metadata.setdefault("operations", {})
+                priority = {
+                    "off": 0,
+                    "not_checked": 1,
+                    "ready": 2,
+                    "partial": 3,
+                    "unavailable": 4,
+                }
+                for operation, state in outcome.states.items():
+                    previous = states.get(operation, "off")
+                    if priority.get(str(state), 0) >= priority.get(
+                        str(previous), 0
+                    ):
+                        states[operation] = state
+                    if state in {"partial", "unavailable"}:
+                        derived_metadata["partial"] = True
+                contributors = derived_metadata.setdefault(
+                    "contributors", []
+                )
+                for contribution in outcome.contributions:
+                    if contribution.operation not in contributors:
+                        contributors.append(contribution.operation)
+                    if derived_refs is not None and contribution.cache_key:
+                        refs = derived_refs.setdefault(row.id, [])
+                        refs.append(
+                            (
+                                contribution.operation,
+                                len(refs),
+                                contribution.cache_key,
+                            )
+                        )
+                if outcome.errors:
+                    derived_metadata["partial"] = True
+                    derived_metadata.setdefault("errors", []).extend(
+                        outcome.errors[:20]
+                    )
+                    for message in outcome.errors[:3]:
+                        logger.warning(
+                            "%s: derived text row %d: %s",
+                            _producer_attr(producer, "key", "source"),
+                            index,
+                            message,
+                        )
+        except Exception as error:
+            if derived_metadata is not None:
+                derived_metadata["partial"] = True
+                derived_metadata.setdefault("errors", []).append(
+                    f"derived stage failed: {error}"
+                )
+    return row, modified_value
+
+
+@dataclass
+class _IndexWindow:
+    """One ordered read window moving through preparation and writing."""
+
+    rows: list[EntryRecord]
+    modified: dict[int, int | None]
+    next_entry: int
+    reserved: int
+    derived_refs: dict[int, list[tuple[str, int, str]]] | None
+    has_permit: bool = True
+    future: Future | None = None
+    released: bool = False
+
+
+class _StageController:
+    """Private per-source reader/preparer/writer overlap.
+
+    The reader owns provider access and derived extraction.  A preparation
+    worker submits embedding batches without waiting for inference, and an
+    ordered writer owns its own staging SQLite connection.  A single permit
+    budget bounds all in-flight windows across every stage.
+    """
+
+    def __init__(
+        self,
+        *,
+        embedding_pipeline: EmbeddingPipeline,
+        body_budget: BodyBudget,
+        db_path: Path,
+        fast: bool,
+        progress: Any | None,
+        interrupt_event: threading.Event | None,
+        max_in_flight: int,
+    ) -> None:
+        self.embedding_pipeline = embedding_pipeline
+        self.body_budget = body_budget
+        self.db_path = db_path
+        self.fast = fast
+        self.progress = progress
+        self.interrupt_event = interrupt_event
+        self.max_in_flight = max(1, int(max_in_flight))
+        self.cancel_event = threading.Event()
+        # The extra slots admit the single end-of-stream sentinel without
+        # blocking; permits still bound the number of real windows.
+        self.read_queue: Queue[_IndexWindow | None] = Queue(
+            maxsize=self.max_in_flight + 2
+        )
+        self.prepared_queue: Queue[_IndexWindow | None] = Queue(
+            maxsize=self.max_in_flight + 2
+        )
+        self._permits = threading.Semaphore(self.max_in_flight)
+        self._error_lock = threading.Lock()
+        self._release_lock = threading.Lock()
+        self._error: BaseException | None = None
+        self._executor = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix=f"zimantic-stage-{id(self):x}",
+        )
+        self._prep_future: Future | None = None
+        self._write_future: Future | None = None
+
+    def start(self) -> None:
+        self._write_future = self._executor.submit(self._write)
+        self._write_future.add_done_callback(self._stage_finished)
+        self._prep_future = self._executor.submit(self._prepare)
+        self._prep_future.add_done_callback(self._stage_finished)
+
+    def _stage_finished(self, future: Future) -> None:
+        error = future.exception()
+        if error is not None:
+            self.record_error(error)
+
+    @property
+    def error(self) -> BaseException | None:
+        with self._error_lock:
+            return self._error
+
+    def record_error(self, error: BaseException) -> None:
+        if isinstance(error, _StageStopped):
+            return
+        with self._error_lock:
+            if self._error is None:
+                self._error = error
+        self.cancel_event.set()
+
+    def check_stop(self) -> None:
+        if self.cancel_event.is_set():
+            raise _StageStopped()
+        if self.interrupt_event is not None and self.interrupt_event.is_set():
+            error = KeyboardInterrupt()
+            self.record_error(error)
+            raise error
+
+    def acquire_permit(self) -> None:
+        while not self._permits.acquire(timeout=0.05):
+            self.check_stop()
+
+    def release_permit(self) -> None:
+        self._permits.release()
+
+    def release_window(self, window: _IndexWindow) -> None:
+        with self._release_lock:
+            if window.released:
+                return
+            window.released = True
+        if window.reserved:
+            self.body_budget.release(window.reserved)
+        if window.has_permit:
+            self._permits.release()
+
+    def submit_read(self, window: _IndexWindow) -> None:
+        try:
+            self._put(self.read_queue, window)
+        except BaseException:
+            self.release_window(window)
+            raise
+
+    def _put(
+        self, queue: Queue[_IndexWindow | None], item: _IndexWindow | None
+    ) -> None:
+        while True:
+            try:
+                queue.put(item, timeout=0.05)
+                return
+            except Full:
+                self.check_stop()
+
+    def finish_read(self) -> None:
+        self.read_queue.put_nowait(None)
+
+    def join(self) -> None:
+        self._executor.shutdown(wait=True)
+        for future in (self._prep_future, self._write_future):
+            if future is not None:
+                error = future.exception()
+                if error is not None:
+                    self.record_error(error)
+
+    def drain_pending(self) -> None:
+        for queue in (self.read_queue, self.prepared_queue):
+            while True:
+                try:
+                    item = queue.get_nowait()
+                except Empty:
+                    break
+                if isinstance(item, _IndexWindow):
+                    self.release_window(item)
+
+    def _prepare(self) -> None:
+        while True:
+            try:
+                window = self.read_queue.get(timeout=0.05)
+            except Empty:
+                self.check_stop()
+                continue
+            if window is None:
+                self.prepared_queue.put_nowait(None)
+                return
+            if self.cancel_event.is_set():
+                self.release_window(window)
+                continue
+            handed_off = False
+            try:
+                embedding_rows = [
+                    row._replace(body="", body_truncated=False)
+                    for row in window.rows
+                ]
+                window.future = self.embedding_pipeline.submit(
+                    embedding_rows, cancel_event=self.cancel_event
+                )
+                self._put(self.prepared_queue, window)
+                handed_off = True
+            finally:
+                if not handed_off:
+                    self.release_window(window)
+
+    def _await_vectors(self, window: _IndexWindow) -> dict[int, Any]:
+        if window.future is None:
+            return {}
+        while True:
+            self.check_stop()
+            try:
+                return window.future.result(timeout=0.05)
+            except TimeoutError:
+                continue
+
+    def _write(self) -> None:
+        db = _open_database(self.db_path)
+        try:
+            while True:
+                try:
+                    window = self.prepared_queue.get(timeout=0.05)
+                except Empty:
+                    self.check_stop()
+                    continue
+                if window is None:
+                    return
+                if self.cancel_event.is_set():
+                    self.release_window(window)
+                    continue
+                try:
+                    vectors = self._await_vectors(window)
+                    _save_rows(
+                        db,
+                        window.rows,
+                        window.next_entry,
+                        vectors,
+                        fast=self.fast,
+                        derived_refs=window.derived_refs,
+                        modified=window.modified,
+                    )
+                    if self.progress is not None:
+                        self.progress.advance(window.next_entry)
+                finally:
+                    self.release_window(window)
+        finally:
+            db.close()
+
+
+def _index_entries_staged(
+    producer: EntryProducer,
+    db: sqlite3.Connection,
+    start: int,
+    batch_size: int,
+    *,
+    embedding_pipeline: EmbeddingPipeline,
+    body_budget: BodyBudget,
+    max_body_text_bytes: int,
+    fast: bool,
+    derived_stage: Any | None,
+    derived_metadata: dict[str, Any] | None,
+    derived_refs: dict[int, list[tuple[str, int, str]]] | None,
+    db_path: Path,
+    progress=None,
+    interrupt_event: threading.Event | None = None,
+) -> None:
+    """Read, prepare, embed, and commit windows with independent stages."""
+    count = int(_producer_attr(producer, "count", 0) or 0)
+    # The writer owns writes from here on; leave the caller's connection with
+    # no outstanding transaction before another connection starts.
+    db.commit()
+    controller = _StageController(
+        embedding_pipeline=embedding_pipeline,
+        body_budget=body_budget,
+        db_path=db_path,
+        fast=fast,
+        progress=progress,
+        interrupt_event=interrupt_event,
+        max_in_flight=embedding_pipeline.max_pending_per_build,
+    )
+    controller.start()
+
+    batch: list[EntryRecord] = []
+    batch_modified: dict[int, int | None] = {}
+    window_refs: dict[int, list[tuple[str, int, str]]] = {}
+    reserved = 0
+    window_open = False
+
+    def ensure_window() -> None:
+        nonlocal window_open
+        if not window_open:
+            controller.acquire_permit()
+            window_open = True
+
+    def flush(next_entry: int) -> None:
+        nonlocal batch, batch_modified, window_refs, reserved, window_open
+        rows = batch
+        modified = batch_modified
+        refs = window_refs
+        reservation = reserved
+        has_permit = window_open
+        batch = []
+        batch_modified = {}
+        window_refs = {}
+        reserved = 0
+        window_open = False
+        controller.submit_read(
+            _IndexWindow(
+                rows,
+                modified,
+                next_entry,
+                reservation,
+                refs or None,
+                has_permit=has_permit,
+            )
+        )
+
+    def abort_reader_window() -> None:
+        nonlocal batch, batch_modified, window_refs, reserved, window_open
+        if reserved:
+            body_budget.release(reserved)
+            reserved = 0
+        if window_open:
+            controller.release_permit()
+            window_open = False
+        batch = []
+        batch_modified = {}
+        window_refs = {}
+
+    index = start
+    try:
+        while index < count:
+            if interrupt_event is not None and interrupt_event.is_set():
+                raise KeyboardInterrupt
+            ensure_window()
+            row, modified_value = _read_entry(
+                producer,
+                index,
+                fast=fast,
+                max_body_text_bytes=max_body_text_bytes,
+                derived_stage=derived_stage,
+                derived_metadata=derived_metadata,
+                derived_refs=derived_refs,
+            )
+            if row is not None:
+                batch_modified[row.id] = modified_value
+                if row.body and not fast:
+                    size = len(row.body.encode("utf-8", "ignore"))
+                    reservation = body_budget.try_reserve(size)
+                    if reservation is None:
+                        if batch:
+                            flush(index)
+                        ensure_window()
+                        reservation = body_budget.reserve(
+                            size, cancel_event=controller.cancel_event
+                        )
+                    reserved += reservation
+                batch.append(row)
+                if derived_refs is not None and row.id in derived_refs:
+                    window_refs[row.id] = list(derived_refs[row.id])
+            index += 1
+            if len(batch) >= batch_size:
+                flush(index)
+        if batch or window_open:
+            flush(count)
+    finally:
+        reader_error = sys.exc_info()[1]
+        if reader_error is not None:
+            controller.record_error(reader_error)
+        abort_reader_window()
+        controller.finish_read()
+        controller.join()
+        controller.drain_pending()
+        stage_error = controller.error or reader_error
+        if interrupt_event is not None and interrupt_event.is_set():
+            raise KeyboardInterrupt
+        if stage_error is not None:
+            raise stage_error
+
+
 def _index_entries(
     producer: EntryProducer,
     db: sqlite3.Connection,
@@ -670,8 +1155,30 @@ def _index_entries(
     progress=None,
     token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
     reuse_vectors=None,
+    db_path: Path | None = None,
+    stage_split: bool = True,
     interrupt_event: threading.Event | None = None,
 ) -> None:
+    if stage_split and embedding_pipeline is not None and reuse_vectors is None:
+        if db_path is None:
+            raise BuildError("staged embedding builds require the staging database path")
+        _index_entries_staged(
+            producer,
+            db,
+            start,
+            batch_size,
+            embedding_pipeline=embedding_pipeline,
+            body_budget=body_budget,
+            max_body_text_bytes=max_body_text_bytes,
+            fast=fast,
+            derived_stage=derived_stage,
+            derived_metadata=derived_metadata,
+            derived_refs=derived_refs,
+            db_path=db_path,
+            progress=progress,
+            interrupt_event=interrupt_event,
+        )
+        return
     pending_embeddings: list[
         tuple[Future, list[EntryRecord], int, int, dict[int, int | None]]
     ] = []
@@ -766,86 +1273,15 @@ def _index_entries(
         try:
             if interrupt_event is not None and interrupt_event.is_set():
                 raise KeyboardInterrupt
-            row = producer.entry_at(index)
-            modified_at = getattr(producer, "modified_at", None)
-            modified_value = modified_at(index) if callable(modified_at) else None
-            if modified_value is not None and (
-                isinstance(modified_value, bool) or not isinstance(modified_value, int)
-            ):
-                raise TypeError("producer modified_at() must return an integer or None")
-            if row is not None and derived_stage is not None and not fast:
-                try:
-                    from .derived import compose_body
-
-                    inputs = ()
-                    if hasattr(producer, "derived_text_inputs"):
-                        inputs = producer.derived_text_inputs(index)
-                    outcome = derived_stage.process(index, row.body, inputs)
-                    contributed = [
-                        (contribution.operation, contribution.text)
-                        for contribution in outcome.contributions
-                    ]
-                    if contributed:
-                        body, body_truncated, _used = compose_body(
-                            row.body, contributed, max_body_text_bytes
-                        )
-                        row = row._replace(
-                            body=body,
-                            body_truncated=row.body_truncated or body_truncated,
-                        )
-                    if derived_metadata is not None:
-                        states = derived_metadata.setdefault("operations", {})
-                        priority = {
-                            "off": 0,
-                            "not_checked": 1,
-                            "ready": 2,
-                            "partial": 3,
-                            "unavailable": 4,
-                        }
-                        for operation, state in outcome.states.items():
-                            previous = states.get(operation, "off")
-                            if priority.get(str(state), 0) >= priority.get(
-                                str(previous), 0
-                            ):
-                                states[operation] = state
-                            if state in {"partial", "unavailable"}:
-                                derived_metadata["partial"] = True
-                        contributors = derived_metadata.setdefault(
-                            "contributors", []
-                        )
-                        for contribution in outcome.contributions:
-                            if contribution.operation not in contributors:
-                                contributors.append(contribution.operation)
-                            if (
-                                derived_refs is not None
-                                and contribution.cache_key
-                            ):
-                                refs = derived_refs.setdefault(row.id, [])
-                                refs.append(
-                                    (
-                                        contribution.operation,
-                                        len(refs),
-                                        contribution.cache_key,
-                                    )
-                                )
-                        if outcome.errors:
-                            derived_metadata["partial"] = True
-                            derived_metadata.setdefault("errors", []).extend(
-                                outcome.errors[:20]
-                            )
-                            for message in outcome.errors[:3]:
-                                logger.warning(
-                                    "%s: derived text row %d: %s",
-                                    _producer_attr(producer, "key", "source"),
-                                    index,
-                                    message,
-                                )
-                except Exception as error:
-                    if derived_metadata is not None:
-                        derived_metadata["partial"] = True
-                        derived_metadata.setdefault("errors", []).append(
-                            f"derived stage failed: {error}"
-                        )
+            row, modified_value = _read_entry(
+                producer,
+                index,
+                fast=fast,
+                max_body_text_bytes=max_body_text_bytes,
+                derived_stage=derived_stage,
+                derived_metadata=derived_metadata,
+                derived_refs=derived_refs,
+            )
             if row is not None:
                 batch_modified[row.id] = modified_value
                 if row.body and not fast:
@@ -1336,6 +1772,8 @@ def build_index(
                     cfg, "embedding_batch_tokens", DEFAULT_EMBEDDING_BATCH_TOKENS
                 )),
                 reuse_vectors=reuse_vectors,
+                db_path=state.build_db_path,
+                stage_split=bool(cfg.get("_stage_split", True)),
                 interrupt_event=cfg.get("interrupt_event"),
             )
             progress.close()
@@ -1358,7 +1796,13 @@ def build_index(
             if reuse_vectors is not None:
                 fingerprint = reuse_vectors.fingerprint
                 model_probes = reuse_vectors.probes
-            elif not fast and embedder is not None:
+            elif (
+                not fast
+                and embedder is not None
+                and state.db.execute("SELECT COUNT(*) FROM vecs").fetchone()[0]
+            ):
+                # An index with no vectors has nothing to reuse; keep title-only
+                # and empty builds from initializing the model just for probes.
                 try:
                     from ..embed import embed_model_probes, serialize_model_probes
 
