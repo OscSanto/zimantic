@@ -1335,8 +1335,20 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["expandedCollection"], "/?q=q&collection=zim%3Alibrary")
 
     def test_deep_search_retains_discovery_only_for_the_same_broadly_searched_query(self):
+        self._check_deep_search_discovery("q")
+
+    def test_browse_source_selections_retain_other_sources(self):
+        for browse in ("random", "rare", "recency", "diverse", "outliers"):
+            with self.subTest(browse=browse):
+                self._check_deep_search_discovery(
+                    "", browse, 331061536 if browse == "random" else 0
+                )
+
+    def _check_deep_search_discovery(self, question, browse=None, seed=0):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
+const question = {json.dumps(question)}, browse = {json.dumps(browse)}, seed = {seed};
+const BROWSE_LABELS = {{[browse]: browse}};
 let selectedSourceKeys = new Set();
 let selectedCollectionKey = null;
 let sourceFilterShowAll = false, sourceFilterShowOther = false;
@@ -1382,8 +1394,10 @@ const consumeStream = async () => {{
 {_function_source(source, "function sourceFilterLayout(", "function sourceFilterControlKey(")}
 {_function_source(source, "async function runSearch(", "async function loadPage(")}
 {_function_source(source, "async function loadPage(", "function applySourceSelection(")}
+const scopedSearch = (question, selected, page = 0, scope, collection = null) =>
+    runSearch(question, selected, page, scope, collection, browse, seed);
 const broad = {{
-    question: "q", searchAll: true,
+    question, browse, seed, searchAll: true,
     outcomes: new Map(["a", "b", "c"].map((key) => [key, outcome(key)])),
     counts: {{a: 5, b: 4, c: 3}},
 }};
@@ -1397,22 +1411,31 @@ const summarize = () => {{
     }};
 }};
 (async () => {{
-    await runSearch("q", ["a"]);
+    await scopedSearch(question, ["a"]);
     const first = summarize();
-    await runSearch("q", ["a", "b"]);
+    await scopedSearch(question, ["a", "b"]);
     const expanded = summarize();
-    await runSearch("q", ["b"]);
+    await scopedSearch(question, ["b"]);
     const narrowed = summarize();
-    await runSearch("other query", ["b"]);
+    const changedOrder = sourceDiscovery(
+        question, current, browse === "random" ? "rare" : "random", seed,
+    );
+    const changedSeed = browse === "random"
+        ? sourceDiscovery(question, current, browse, seed + 1)
+        : null;
+    await scopedSearch("other query", ["b"]);
     const changed = summarize();
-    await runSearch("other query", ["a", "b"]);
+    await scopedSearch("other query", ["a", "b"]);
     const direct = summarize();
-    await runSearch("other query", [], 0, [], "zim:library");
+    await scopedSearch("other query", [], 0, [], "zim:library");
     current.searchKeys = ["a", "b", "c"];
     await loadPage(1);
-    await runSearch("other query", ["b"], 0, ["b"], "zim:library");
+    await scopedSearch("other query", ["b"], 0, ["b"], "zim:library");
     await loadPage(1);
-    console.log(JSON.stringify({{first, expanded, narrowed, changed, direct, requests, broadCounts: broad.counts}}));
+    console.log(JSON.stringify({{
+        first, expanded, narrowed, changed, direct, requests,
+        changedOrder, changedSeed, broadCounts: broad.counts,
+    }}));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
         result = subprocess.run(
@@ -1425,6 +1448,8 @@ const summarize = () => {{
         self.assertEqual(payload["expanded"]["counts"], {"a": 20, "b": 20, "c": 3})
         self.assertEqual(payload["narrowed"]["counts"], {"a": 5, "b": 20, "c": 3})
         self.assertTrue(payload["narrowed"]["discovery"])
+        self.assertIsNone(payload["changedOrder"])
+        self.assertIsNone(payload["changedSeed"])
         self.assertEqual(payload["changed"]["counts"], {"b": 20})
         self.assertFalse(payload["changed"]["discovery"])
         self.assertEqual(payload["direct"]["counts"], {"a": 20, "b": 20})

@@ -1596,8 +1596,13 @@
                 return [...new Set(selectionValues(selectedSources))];
             }
 
-            function sourceDiscovery(question, search) {
-                if (!search || search.question !== question) return null;
+            function sourceDiscovery(question, search, browse = null, seed = 0) {
+                if (
+                    !search ||
+                    search.question !== question ||
+                    (search.browse || null) !== browse ||
+                    (search.seed || 0) !== seed
+                ) return null;
                 if (!search.searchAll) return search.discovery || null;
                 return {
                     outcomes: new Map(search.outcomes),
@@ -3906,8 +3911,8 @@
                 ];
                 setSelectedSources(requested);
                 selectedCollectionKey = collectionKey || null;
-                const discovery = question && (scopeKeys.length || selectedCollectionKey)
-                    ? sourceDiscovery(question, current)
+                const discovery = scopeKeys.length || selectedCollectionKey
+                    ? sourceDiscovery(question, current, browse, seed)
                     : null;
                 current = {
                     question,
