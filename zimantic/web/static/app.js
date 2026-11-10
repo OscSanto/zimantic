@@ -2544,15 +2544,7 @@
             }
 
             function rememberSearchResult(link) {
-                if (!current || !link) return false;
-                const articleUrl = readModalUrl(link.href);
-                if (!articleUrl) return false;
-                if (!articleResultLinks().includes(link)) return false;
-                activeSearchResult = {
-                    page: current.page,
-                    url: articleUrlValue(articleUrl),
-                };
-                return true;
+                return link ? rememberSearchResultUrl(link.href) : false;
             }
 
             function rememberSearchResultUrl(url, page = current?.page) {
@@ -3238,9 +3230,18 @@
                 // empty slot would stretch a pending row well past 3em.
                 if (item.url && !pendingPreview) {
                     if (!thumb) {
-                        thumb = document.createElement("div");
+                        thumb = document.createElement("a");
                         thumb.className = "result-thumb";
                         node.appendChild(thumb);
+                    }
+                    thumb.href = item.url;
+                    thumb.target = "_blank";
+                    thumb.rel = "noopener";
+                    thumb.setAttribute("aria-label", displayTitle);
+                    if (item.mimetype) {
+                        thumb.dataset.mimetype = item.mimetype;
+                    } else {
+                        delete thumb.dataset.mimetype;
                     }
                     thumb.dataset.url = item.url;
                 } else if (thumb) {
@@ -4539,7 +4540,7 @@
 
             $("results").addEventListener("click", (event) => {
                 const target = event.target instanceof Element ? event.target : null;
-                const link = target?.closest(".result-title a[href]");
+                const link = target?.closest(".result-title a[href], a.result-thumb[href]");
                 if (!link) {
                     if (
                         modifiedClick(event) ||

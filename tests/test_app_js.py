@@ -79,7 +79,8 @@ console.log(JSON.stringify({{
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 class Node {{
-  constructor() {{
+  constructor(tagName = "") {{
+    this.tagName = tagName; this.attributes = {{}};
     this.children = []; this.textContent = ""; this.dataset = {{}};
     this.classes = new Set();
     this.classList = {{toggle: (name, enabled) =>
@@ -88,7 +89,8 @@ class Node {{
   replaceChildren(...children) {{ this.children = children; }}
   append(...children) {{ this.children.push(...children); }}
   appendChild(child) {{ this.append(child); }}
-  setAttribute() {{}}
+  setAttribute(name, value) {{ this.attributes[name] = value; }}
+  remove() {{ node.children = node.children.filter((child) => child !== this); }}
 }}
 const parts = Object.fromEntries(
   [".result-title", ".result-resource", ".result-snippet"].map((key) => [key, new Node()])
@@ -97,8 +99,10 @@ Object.defineProperty(parts[".result-resource"], "innerHTML", {{
   set() {{ throw new Error("metadata must not be interpreted as HTML"); }},
 }});
 const node = new Node();
-node.querySelector = (selector) => parts[selector] || null;
-const document = {{createElement: () => new Node()}};
+node.querySelector = (selector) => parts[selector] ||
+  (selector === ".result-thumb"
+    ? node.children.find((child) => child.className === "result-thumb") : null);
+const document = {{createElement: (name) => new Node(name)}};
 const resultKey = () => "key";
 const t = (text) => text;
 const setSourceMeta = () => {{}}, setResultUrl = () => {{}}, setResultDebug = () => {{}};
@@ -121,14 +125,27 @@ const initial = {{
   snippetHidden: parts[".result-snippet"].hidden,
   linked: node.classes.has("result-linked"),
   link: parts[".result-title"].children[0].children.map((child) => child.textContent),
+  thumb: {{
+    tag: node.querySelector(".result-thumb").tagName,
+    href: node.querySelector(".result-thumb").href,
+    label: node.querySelector(".result-thumb").attributes["aria-label"],
+    mime: node.querySelector(".result-thumb").dataset.mimetype,
+  }},
+}};
+setResultNode(node, {{title: "Updated", url: "/content/manual/updated", lead: "Updated body."}});
+const updatedThumb = {{
+  href: node.querySelector(".result-thumb").href,
+  label: node.querySelector(".result-thumb").attributes["aria-label"],
+  mime: node.querySelector(".result-thumb").dataset.mimetype || null,
 }};
 setResultNode(node, {{title: "Other result", lead: "Extracted body."}});
 console.log(JSON.stringify({{
-  initial, details: parts[".result-resource"].textContent,
+  initial, updatedThumb, details: parts[".result-resource"].textContent,
   detailsHidden: parts[".result-resource"].hidden,
   snippet: parts[".result-snippet"].innerHTML,
   linked: node.classes.has("result-linked"),
   titleChildren: parts[".result-title"].children.length,
+  thumbnailRemoved: !node.querySelector(".result-thumb"),
 }}));
 """
         result = subprocess.run(
@@ -142,12 +159,22 @@ console.log(JSON.stringify({{
             "snippetHidden": False,
             "linked": True,
             "link": ["Count", "Open article"],
+            "thumb": {
+                "tag": "a",
+                "href": "/content/manual/count",
+                "label": "Count",
+                "mime": "text/html",
+            },
+        })
+        self.assertEqual(payload["updatedThumb"], {
+            "href": "/content/manual/updated", "label": "Updated", "mime": None,
         })
         self.assertEqual(payload["details"], "")
         self.assertTrue(payload["detailsHidden"])
         self.assertEqual(payload["snippet"], "<p>Extracted body.</p>")
         self.assertFalse(payload["linked"])
         self.assertEqual(payload["titleChildren"], 0)
+        self.assertTrue(payload["thumbnailRemoved"])
 
     def test_result_card_taps_open_the_title_link_but_preserve_controls_and_selection(self):
         source = APP_JS.read_text(encoding="utf-8")
@@ -164,7 +191,9 @@ const openArticleModal = () => {{ opened++; }};
 class Element {{
   constructor(kind) {{ this.kind = kind; }}
   closest(selector) {{
-    if (selector === ".result-title a[href]") return this.kind === "title" ? link : null;
+    if (selector === ".result-title a[href], a.result-thumb[href]") {{
+      return this.kind === "title" || this.kind === "thumbnail" ? link : null;
+    }}
     if (selector === ".result") return card;
     return this.kind === "control" ? this : null;
   }}
@@ -180,7 +209,7 @@ const link = {{
 const card = {{querySelector: () => link}};
 const counts = () => [opened, forwarded, prevented];
 handler(event("snippet"));
-handler(event("thumbnail"));
+handler(event("padding"));
 const cardTaps = counts();
 handler(event("control"));
 selection = "selected preview text";
@@ -188,17 +217,20 @@ handler(event("snippet"));
 selection = "";
 handler(event("snippet", {{ctrlKey: true}}));
 handler(event("title", {{ctrlKey: true}}));
+handler(event("thumbnail", {{ctrlKey: true}}));
 handler(event("title", {{button: 1}}));
 const ignored = counts();
 handler(event("title"));
 const titleTap = counts();
+handler(event("thumbnail"));
+const thumbnailTap = counts();
 link.dataset.mimetype = "application/pdf";
 handler(event("snippet"));
 const pdf = counts();
 link.dataset.mimetype = "text/html";
 link.href = "https://other.example/article";
 handler(event("title"));
-console.log(JSON.stringify({{cardTaps, ignored, titleTap, pdf, external: counts()}}));
+console.log(JSON.stringify({{cardTaps, ignored, titleTap, thumbnailTap, pdf, external: counts()}}));
 """
         result = subprocess.run(
             [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
@@ -207,8 +239,9 @@ console.log(JSON.stringify({{cardTaps, ignored, titleTap, pdf, external: counts(
             "cardTaps": [2, 2, 2],
             "ignored": [2, 2, 2],
             "titleTap": [3, 2, 3],
-            "pdf": [3, 3, 3],
-            "external": [3, 3, 3],
+            "thumbnailTap": [4, 2, 4],
+            "pdf": [4, 3, 4],
+            "external": [4, 3, 4],
         })
 
     def test_directory_listing_filters_names_and_sorts_folders_first(self):
