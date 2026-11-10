@@ -346,6 +346,70 @@ class BuildWorkerTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 130)
 
+    def test_build_interrupt_signals_workers_before_closing_embedding_pipeline(self):
+        import zimantic.__main__ as main_module
+
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
+        runtime = types.SimpleNamespace(entry_producer=lambda *_args, **_kwargs: object())
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / name for name in ("first.zim", "second.zim")]
+            for path in paths:
+                path.write_bytes(b"ZIM\x04")
+            cfg = {
+                "index_dir": str(Path(tmp) / "indexes"),
+                "model_dir": "/unused/model",
+                "onnx_build_workers": 1,
+            }
+            for positional in (False, True):
+                for workers in (1, 2):
+                    with self.subTest(positional=positional, workers=workers):
+                        stop_event = threading.Event()
+                        started = threading.Event()
+                        args = types.SimpleNamespace(
+                            workers=workers, fast=False, force=False,
+                            paths=paths, list=False, wait_stable=False,
+                        )
+
+                        def fake_build(
+                            _producer, _locator, _embedder, config,
+                            stop_event=stop_event, started=started, workers=workers,
+                            **_kwargs,
+                        ):
+                            self.assertIs(config["interrupt_event"], stop_event)
+                            started.set()
+                            if workers == 1:
+                                raise KeyboardInterrupt
+                            return _build_report()
+
+                        def interrupt(_futures, started=started):
+                            self.assertTrue(started.wait(timeout=2))
+                            raise KeyboardInterrupt
+
+                        def close(*, wait, stop_event=stop_event):
+                            self.assertFalse(wait)
+                            self.assertTrue(stop_event.is_set())
+
+                        with (
+                            patch.object(main_module, "_BUILD_STOP_EVENT", stop_event),
+                            patch.object(main_module, "_build_producer_for_zim"),
+                            patch.object(main_module, "as_completed", side_effect=interrupt),
+                            patch.object(main_module, "_embedding_queue_size", return_value=2),
+                            patch.object(build_module, "EmbeddingPipeline") as pipeline,
+                            patch.object(build_module, "build_index", side_effect=fake_build),
+                            self.assertRaises(KeyboardInterrupt),
+                        ):
+                            pipeline.return_value.close.side_effect = close
+                            if positional:
+                                main_module._run_positional_zim_build(
+                                    cfg, args, argparse.ArgumentParser()
+                                )
+                            else:
+                                main_module._build_tasks(
+                                    [("one", runtime, object()), ("two", runtime, object())],
+                                    cfg, args, argparse.ArgumentParser(),
+                                )
+                        self.assertTrue(stop_event.is_set())
+
     def test_lazy_embedder_does_not_load_until_used(self):
         import zimantic.__main__ as main_module
 

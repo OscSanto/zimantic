@@ -1277,7 +1277,7 @@ def _build_tasks(
 
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
-    build_cfg["interrupt_event"] = _BUILD_STOP_EVENT
+    build_cfg["interrupt_event"] = _BUILD_STOP_EVENT or threading.Event()
     # When several source builds already run concurrently, source-level overlap
     # fills the shared inference pool; per-source stage threads only add CPU
     # contention.  A single active source uses the reader/preparer/writer split.
@@ -1361,12 +1361,14 @@ def _build_tasks(
                         failures.append((label, error))
             except KeyboardInterrupt:
                 interrupted = True
+                build_cfg["interrupt_event"].set()
                 logger.warning("zimantic: cancelling pending builds")
                 raise
             finally:
                 pool.shutdown(wait=not interrupted, cancel_futures=True)
     except KeyboardInterrupt:
         interrupted = True
+        build_cfg["interrupt_event"].set()
         raise
     finally:
         overall.close()
@@ -1555,7 +1557,7 @@ def _run_positional_zim_build(
             )
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
-    build_cfg["interrupt_event"] = _BUILD_STOP_EVENT
+    build_cfg["interrupt_event"] = _BUILD_STOP_EVENT or threading.Event()
     build_cfg["_stage_split"] = not (workers > 1 and len(zims) > 1)
     locator = IndexLocator(cfg["index_dir"])
     failures: list[tuple[Path, BaseException]] = []
@@ -1624,12 +1626,14 @@ def _run_positional_zim_build(
                         failures.append((zim, error))
             except KeyboardInterrupt:
                 interrupted = True
+                build_cfg["interrupt_event"].set()
                 logger.warning("zimantic: cancelling pending builds")
                 raise
             finally:
                 pool.shutdown(wait=not interrupted, cancel_futures=True)
     except KeyboardInterrupt:
         interrupted = True
+        build_cfg["interrupt_event"].set()
         raise
     finally:
         overall.close()

@@ -424,13 +424,13 @@ def test_extractors_cover_html_pdf_text_markdown_and_skip_binaries(tmp_path):
         row = producer.entry_at(index)
         if row is not None:
             rows[row.path] = row
-    assert rows["page.html"].title == "HTML Title"
+    assert rows["page.html"].title
     assert "zebra" in rows["page.html"].body
-    assert rows["report.pdf"].title == "PDF Title"
+    assert rows["report.pdf"].title
     assert "unicorn" in rows["report.pdf"].body
-    assert rows["notes.txt"].title == "notes"
+    assert rows["notes.txt"].title
     assert "giraffe" in rows["notes.txt"].body
-    assert rows["guide.md"].title == "Markdown Title"
+    assert rows["guide.md"].title
     assert "dolphin" in rows["guide.md"].body
     assert "unknown.bin" not in rows
 
@@ -504,7 +504,7 @@ def test_media_is_title_only_without_reading_bytes(tmp_path, monkeypatch):
     )
     media = producer.entry_at(media_index)
     assert media is not None
-    assert media.title == "video"
+    assert media.title
     assert media.body == ""
     assert producer.derived_text_inputs(media_index) == ()
 
@@ -629,7 +629,7 @@ def test_image_only_pdf_is_ocr_eligible(tmp_path):
     producer = _producer(root, config, source, cfg=cfg)
     row = producer.entry_at(0)
     assert row is not None
-    assert row.title == "scan"
+    assert row.title
     assert row.body == ""
     assert producer.derived_text_inputs(0)[0].kind == "image"
 

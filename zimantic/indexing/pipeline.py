@@ -8,6 +8,7 @@ inside the writer/loader functions).
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import secrets
@@ -143,13 +144,23 @@ class EmbeddingPipeline:
         self._requests: Queue[_EmbeddingRequest | None] = Queue(
             maxsize=max(1, int(queue_size))
         )
+        self._submit_condition = threading.Condition()
+        self._closed = False
+        self._cancelled = False
         self._threads = [
             Thread(target=self._run, name=f"zimantic-embed-{index}", daemon=True)
             for index in range(workers)
         ]
         for thread in self._threads:
             thread.start()
-        self._closed = False
+        # Join native inference before interpreter teardown destroys ORT state.
+        atexit.register(self.close)
+
+    def _check_open(self) -> None:
+        if self._closed:
+            if self._cancelled:
+                raise KeyboardInterrupt
+            raise RuntimeError("embedding pipeline is closed")
 
     def submit(
         self,
@@ -157,8 +168,8 @@ class EmbeddingPipeline:
         *,
         cancel_event: threading.Event | None = None,
     ) -> Future:
-        if self._closed:
-            raise RuntimeError("embedding pipeline is closed")
+        with self._submit_condition:
+            self._check_open()
         future = Future()
         batches = _embedding_batches(self._embedder, rows, self.token_budget)
         if not batches:
@@ -188,43 +199,52 @@ class EmbeddingPipeline:
             batch_future = Future()
             batch_future.add_done_callback(finished)
             request = _EmbeddingRequest(ids, inputs, batch_future)
-            # A full queue only blocks this source's preparation stage, never
-            # its reader.  Timed insertion keeps cancellation responsive when
-            # inference is blocked.
-            while True:
-                try:
-                    self._requests.put(request, timeout=0.05)
-                    break
-                except Full:
-                    if self._closed:
-                        raise RuntimeError("embedding pipeline is closed")
+            # Serialize insertion with close so no request can miss cancellation.
+            with self._submit_condition:
+                while True:
+                    self._check_open()
                     if cancel_event is not None and cancel_event.is_set():
                         if not future.done():
                             future.set_exception(_StageStopped())
                         raise _StageStopped()
+                    try:
+                        self._requests.put_nowait(request)
+                        break
+                    except Full:
+                        self._submit_condition.wait(timeout=0.05)
         return future
 
     def close(self, *, wait: bool = True) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if not wait:
-            while True:
-                try:
-                    request = self._requests.get_nowait()
-                except Empty:
-                    break
-                if request is not None and not request.future.done():
-                    request.future.set_exception(KeyboardInterrupt())
-            return
-        for _ in self._threads:
-            self._requests.put(None)
-        for thread in self._threads:
-            thread.join()
+        with self._submit_condition:
+            already_closed = self._closed
+            if not already_closed:
+                self._cancelled = not wait
+                self._closed = True
+                if self._cancelled:
+                    while True:
+                        try:
+                            request = self._requests.get_nowait()
+                        except Empty:
+                            break
+                        if request is not None:
+                            request.future.set_exception(KeyboardInterrupt())
+                self._submit_condition.notify_all()
+        if wait:
+            if not already_closed:
+                for _ in self._threads:
+                    self._requests.put(None)
+            for thread in self._threads:
+                thread.join()
+            atexit.unregister(self.close)
 
     def _run(self) -> None:
         while True:
-            request = self._requests.get()
+            try:
+                request = self._requests.get(timeout=0.05)
+            except Empty:
+                if self._cancelled:
+                    return
+                continue
             if request is None:
                 return
             requests = [request]
@@ -243,6 +263,8 @@ class EmbeddingPipeline:
                         stop_after_batch = True
                         break
                     requests.append(queued)
+            with self._submit_condition:
+                self._submit_condition.notify_all()
             groups = {}
             for pending in requests:
                 shape = (
@@ -251,8 +273,12 @@ class EmbeddingPipeline:
                 )
                 groups.setdefault(shape, []).append(pending)
             for group in groups.values():
-                self._run_group(group)
-            if stop_after_batch:
+                if self._cancelled:
+                    for pending in group:
+                        pending.future.set_exception(KeyboardInterrupt())
+                else:
+                    self._run_group(group)
+            if stop_after_batch or self._cancelled:
                 return
 
     def _run_group(self, requests: list[_EmbeddingRequest]) -> None:
@@ -972,6 +998,8 @@ class _StageController:
             try:
                 return window.future.result(timeout=0.05)
             except TimeoutError:
+                if window.future.done():
+                    return window.future.result()
                 continue
 
     def _write(self) -> None:
@@ -1229,9 +1257,13 @@ def _index_entries(
             embedding_rows = (
                 reuse_vectors.missing_rows(rows) if reuse_vectors else rows
             )
-            future = embedding_pipeline.submit([
-                row._replace(body="", body_truncated=False) for row in embedding_rows
-            ])
+            future = embedding_pipeline.submit(
+                [
+                    row._replace(body="", body_truncated=False)
+                    for row in embedding_rows
+                ],
+                cancel_event=interrupt_event,
+            )
         except BaseException:
             body_budget.release(reserved)
             raise
@@ -1247,8 +1279,19 @@ def _index_entries(
             pending_embeddings.pop(0)
         )
         try:
+            while True:
+                if interrupt_event is not None and interrupt_event.is_set():
+                    raise KeyboardInterrupt
+                try:
+                    vectors = future.result(timeout=0.05)
+                    break
+                except TimeoutError:
+                    if future.done():
+                        vectors = future.result()
+                        break
+                    continue
             truncated_rows += _save_rows(
-                db, pending_rows, pending_next, future.result(),
+                db, pending_rows, pending_next, vectors,
                 fast=fast, derived_refs=derived_refs,
                 modified=pending_modified,
             )
@@ -1292,7 +1335,9 @@ def _index_entries(
                             flush(index)
                         while pending_embeddings:
                             drain_one()
-                        reservation = body_budget.reserve(size)
+                        reservation = body_budget.reserve(
+                            size, cancel_event=interrupt_event
+                        )
                     reserved += reservation
                 batch.append(row)
             if len(batch) >= batch_size:
@@ -1611,6 +1656,7 @@ def build_index(
     ):
         raise ValueError("max_body_text_bytes must be a positive integer")
     source = producer.source
+    interrupt_event = cfg.get("interrupt_event")
     state: _BuildState | None = None
     progress = None
     completed = False
@@ -1889,6 +1935,12 @@ def build_index(
             if state.db is not None:
                 state.db.close()
                 state.db = None
+            if not completed and (
+                isinstance(error, KeyboardInterrupt)
+                or (interrupt_event is not None and interrupt_event.is_set())
+            ):
+                logger.debug("%s: index build interrupted; staging preserved", source.key)
+                raise KeyboardInterrupt from None
             if completed:
                 logger.warning(
                     "%s: partial enrichment published (%s); the available "
@@ -1898,9 +1950,7 @@ def build_index(
                 )
                 logger.debug("partial enrichment error for %s: %s", source.key, error)
                 raise
-            resumable = isinstance(error, KeyboardInterrupt)
-            if not resumable:
-                _clear_staging(state.build_db_path, state.build_faiss_path)
+            _clear_staging(state.build_db_path, state.build_faiss_path)
             if state.publish_upgrade:
                 logger.warning(
                     "%s: index build failed (%s); the previous published "

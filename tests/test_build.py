@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -312,6 +314,48 @@ class BuildPipelineTests(unittest.TestCase):
             )
 
         self.assertTrue(producer.closed)
+
+    def test_shutdown_error_preserves_committed_work_without_failure_warning(self):
+        stop_event = threading.Event()
+        rows = [EntryRecord(i, f"T{i}", "e", f"p{i}", None, "body") for i in range(4)]
+
+        class InterruptedProducer(Producer):
+            def entry_at(self, index):
+                if index == 2:
+                    stop_event.set()
+                    raise RuntimeError("embedding pipeline is closed")
+                return super().entry_at(index)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(build_module.logger, "warning") as warning,
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                _build(
+                    InterruptedProducer(rows),
+                    tmp,
+                    {"batch_size": 2, "interrupt_event": stop_event},
+                    embedder=_Embedder(),
+                )
+            warning.assert_not_called()
+            directory = IndexLocator(tmp).source_directory(
+                "files", "files:test", "files:test:manual-0123"
+            )
+            db = sqlite3.connect(directory / "staging-full.sqlite")
+            try:
+                meta = dict(db.execute("SELECT key, value FROM meta"))
+                self.assertEqual(meta[NEXT], "2")
+                self.assertNotIn(DONE, meta)
+            finally:
+                db.close()
+            resumed = Producer(rows)
+            with (
+                patch.object(resumed, "entry_at", wraps=resumed.entry_at) as read,
+                patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss),
+            ):
+                locator = _build(resumed, tmp, {"batch_size": 2}, embedder=_Embedder())
+            self.assertEqual([call.args[0] for call in read.call_args_list], [2, 3])
+            self.assertEqual(len(_docs(locator, _source())), 4)
 
     def test_resume_requires_order_fingerprint_and_rejects_changed_order(self):
         batch_size = build_module.FAST_BUILD_BATCH_SIZE
@@ -768,6 +812,12 @@ class StageOverlapTests(unittest.TestCase):
             pipeline.close()
 
     def test_interrupt_keeps_only_committed_windows_and_resumes(self):
+        self._check_interrupted_resume(stage_split=True)
+
+    def test_interrupt_while_awaiting_inference_without_stage_split(self):
+        self._check_interrupted_resume(stage_split=False)
+
+    def _check_interrupted_resume(self, *, stage_split):
         first_committed = threading.Event()
         original_save_rows = build_module._save_rows
 
@@ -815,6 +865,7 @@ class StageOverlapTests(unittest.TestCase):
                             "batch_size": 1,
                             "embedding_pipeline": pipeline,
                             "interrupt_event": stop_event,
+                            "_stage_split": stage_split,
                         },
                         embedder=embedder,
                     )
@@ -1217,6 +1268,133 @@ class EmbeddingPipelineTests(unittest.TestCase):
             self.assertEqual(pipeline.submit([rows[0]._replace(excerpt="")]).result(), {})
         finally:
             pipeline.close()
+
+    def test_nonblocking_close_cancels_queued_and_blocked_submissions(self):
+        started = threading.Event()
+        release = threading.Event()
+        third_encoded = threading.Event()
+        calls = []
+
+        class BlockingEmbedder(_Embedder):
+            def encode(self, texts):
+                if texts[0].startswith("passage: T2"):
+                    third_encoded.set()
+                return super().encode(texts)
+
+            def embed_encoded(self, inputs):
+                calls.append(inputs)
+                started.set()
+                if not release.wait(timeout=5):
+                    raise TimeoutError("test did not release inference")
+                return super().embed_encoded(inputs)
+
+        rows = [EntryRecord(i, f"T{i}", "excerpt", f"p{i}") for i in range(3)]
+        pipeline = build_module.EmbeddingPipeline(BlockingEmbedder(), queue_size=1)
+        try:
+            active = pipeline.submit(rows[:1])
+            self.assertTrue(started.wait(timeout=2))
+            queued = pipeline.submit(rows[1:2])
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                blocked = pool.submit(pipeline.submit, rows[2:])
+                try:
+                    self.assertTrue(third_encoded.wait(timeout=2))
+                    pipeline.close(wait=False)
+                    with self.assertRaises(KeyboardInterrupt):
+                        queued.result(timeout=2)
+                    with self.assertRaises(KeyboardInterrupt):
+                        blocked.result(timeout=2)
+                    with self.assertRaises(KeyboardInterrupt):
+                        pipeline.submit(rows[:1])
+                    self.assertFalse(active.done())
+                finally:
+                    release.set()
+        finally:
+            release.set()
+            pipeline.close()
+        self.assertEqual(set(active.result(timeout=2)), {0})
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(any(thread.is_alive() for thread in pipeline._threads))
+
+    def test_model_timeout_is_not_treated_as_an_unfinished_future(self):
+        class TimingOutEmbedder(_Embedder):
+            def embed(self, _texts):
+                raise TimeoutError("model timed out")
+
+        for stage_split in (False, True):
+            with self.subTest(stage_split=stage_split):
+                embedder = TimingOutEmbedder()
+                pipeline = build_module.EmbeddingPipeline(embedder)
+                stop_event = threading.Event()
+                try:
+                    with (
+                        tempfile.TemporaryDirectory() as tmp,
+                        ThreadPoolExecutor(max_workers=1) as pool,
+                    ):
+                        build = pool.submit(
+                            _build,
+                            Producer([EntryRecord(0, "title", "excerpt", "path")]),
+                            tmp,
+                            {
+                                "embedding_pipeline": pipeline,
+                                "interrupt_event": stop_event,
+                                "_stage_split": stage_split,
+                            },
+                            embedder=embedder,
+                        )
+                        try:
+                            with self.assertRaisesRegex(TimeoutError, "model timed out"):
+                                build.result(timeout=2)
+                        finally:
+                            stop_event.set()
+                finally:
+                    pipeline.close()
+
+    def test_process_exit_finishes_active_inference(self):
+        script = """
+import sys
+import threading
+import time
+from pathlib import Path
+from zimantic.indexing.pipeline import EmbeddingPipeline
+from zimantic.indexing.types import EntryRecord
+
+started = threading.Event()
+
+class Embedder:
+    def truncate(self, text, prefix=""):
+        return text
+
+    def encode(self, texts):
+        return [[1] for _ in texts]
+
+    def embed_encoded(self, inputs):
+        started.set()
+        time.sleep(0.2)
+        Path(sys.argv[1]).write_text("finished")
+        return [[1.0] for _ in inputs]
+
+pipeline = EmbeddingPipeline(Embedder())
+pipeline.submit([EntryRecord(0, "title", "excerpt", "path")])
+assert started.wait(timeout=5)
+if len(sys.argv) > 2:
+    pipeline.close(wait=False)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for close in (False, True):
+                with self.subTest(close=close):
+                    marker = Path(tmp) / f"inference-finished-{close}"
+                    result = subprocess.run(
+                        [
+                            sys.executable, "-c", script, str(marker),
+                            *(["close"] if close else []),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(marker.read_text(), "finished")
 
     def test_fixed_shape_batches_fill_the_provider_capacity(self):
         calls = []

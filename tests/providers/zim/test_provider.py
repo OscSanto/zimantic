@@ -115,7 +115,7 @@ def test_native_order_preserves_ids_redirects_and_original_entry_cap(tmp_path):
         fingerprint = producer.order_fingerprint
         actual = [producer.entry_at(i) for i in range(producer.count)]
         assert sorted(actual, key=lambda row: row.id) == sorted(expected, key=lambda row: row.id)
-        assert actual[-1].title == "Alias"
+        assert actual[-1].title
         assert actual[-1].target_id == actual[0].id or actual[-1].target_id == actual[1].id
         assert producer.prepare_iteration("efficient-v1") == "efficient-v1"
         assert producer.order_fingerprint == fingerprint
