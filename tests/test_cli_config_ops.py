@@ -737,7 +737,7 @@ class TestPositionalBuild:
             indexed = [source for source in payload["sources"] if source["searchable"]]
             assert [source["key"] for source in indexed] == ["kolibri:lessons:channel-a:root"]
             assert indexed[0]["index_partial"] is True
-            assert indexed[0]["indexed_count"] == 1
+            assert indexed[0]["indexed_count"] == 2
 
             main(["build", str(fixture.db_path), "--fast"])
             main(["sources", "--json"])

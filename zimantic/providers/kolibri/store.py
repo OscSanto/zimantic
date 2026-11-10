@@ -14,10 +14,10 @@ import os
 import posixpath
 import secrets
 import stat as stat_module
-from urllib.parse import quote
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from ...content.serving import HEAD_READ_BYTES, MAX_ICON_BYTES
 from ...content.store import (
@@ -46,6 +46,7 @@ from .schema import (
     HTML5_PRESETS,
     KOLIBRI_ONLY_PRESETS,
     SUPPORTED_HTML5_PRESETS,
+    TOPIC_KIND,
     FileRow,
     FileSelection,
     display_title,
@@ -72,7 +73,7 @@ def _title_for_asset(name: str, fallback: str) -> str:
 
 @dataclass(frozen=True)
 class _Target:
-    kind: str  # file | metadata | html5
+    kind: str  # file | metadata | html5 | external
     node_id: str | None
     node_title: str
     path: str
@@ -199,7 +200,9 @@ class KolibriContentStore:
                 and scope.lft <= node.lft <= scope.rght
             )
         if scope.kind == "ungrouped":
-            return node.parent_id == scope.parent_id and node.kind != "topic"
+            if node.kind == "topic":
+                return node.id == scope.parent_id
+            return node.parent_id == scope.parent_id
         return scope.kind in {"root", "collapsed"}
 
     def _selection(self, db, node: Any) -> tuple[FileSelection, tuple[FileRow, ...]]:
@@ -264,6 +267,15 @@ class KolibriContentStore:
             f"{quote(node_id, safe='')}"
         )
 
+    def _external_topic_url(self, node_id: str) -> str | None:
+        server_url = getattr(self.config, "server_url", None)
+        if not server_url:
+            return None
+        return (
+            f"{str(server_url).rstrip('/')}/learn/#/topics/t/"
+            f"{quote(node_id, safe='')}/folders"
+        )
+
     def _node_target(
         self,
         node_id: str,
@@ -271,6 +283,32 @@ class KolibriContentStore:
         requested: str,
     ) -> _Target:
         node, db = self._node(node_id)
+        if node.kind == TOPIC_KIND:
+            db.close()
+            if asset:
+                raise ArticleNotFoundError("article not found")
+            external_url = self._external_topic_url(node.id)
+            if external_url is not None:
+                return _Target(
+                    "external",
+                    node_id,
+                    node.title,
+                    requested,
+                    node.title,
+                    "text/html",
+                    external_url=external_url,
+                )
+            metadata = self._metadata_page(node)
+            return _Target(
+                "metadata",
+                node_id,
+                node.title,
+                requested,
+                node.title,
+                "text/plain",
+                metadata=metadata,
+                size=len(metadata),
+            )
         try:
             selection, _files = self._selection(db, node)
         finally:
@@ -504,6 +542,8 @@ class KolibriContentStore:
         self, path: str | None, *, head_only: bool, max_bytes: int
     ) -> ArticleData:
         target = self._target(path)
+        if target.kind == "external":
+            raise ArticleNotFoundError("article is served by Kolibri")
         if target.kind == "file":
             return self._read_file(target, head_only=head_only, max_bytes=max_bytes)
         limit = max(0, int(max_bytes))
@@ -543,6 +583,8 @@ class KolibriContentStore:
         self, path: str, *, start: int, end: int, max_bytes: int
     ) -> ContentRange:
         target = self._target(path)
+        if target.kind == "external":
+            raise ArticleNotFoundError("article is served by Kolibri")
         file = target.file
         if target.kind == "metadata":
             data = target.metadata

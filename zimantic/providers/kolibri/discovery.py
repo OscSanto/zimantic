@@ -109,6 +109,11 @@ def kolibri_node_path(node_id: str) -> str:
     return f"node/{encode_component(node_id)}"
 
 
+def title_key(value: Any) -> str:
+    """Normalize a title for topic/child de-duplication."""
+    return str(value or "").strip().casefold()
+
+
 def parse_node_path(path: str) -> tuple[str, str]:
     """Return ``(node_id, asset_path)`` for a synthetic content path."""
     text = str(path)
@@ -286,11 +291,43 @@ def load_node(db, node_id: str, channel_id: str) -> NodeRow | None:
     return NodeRow.from_row(row) if row is not None else None
 
 
+def load_topics(
+    db, channel_id: str, node_ids: Iterable[str]
+) -> dict[str, NodeRow]:
+    """Return topic rows for the requested ids in one bounded batch."""
+    ids = list(dict.fromkeys(str(node_id) for node_id in node_ids))
+    topics: dict[str, NodeRow] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        rows = db.execute(
+            f"SELECT * FROM {NODE_TABLE} WHERE channel_id = ? AND kind = 'topic' "
+            f"AND id IN ({placeholders})",
+            (channel_id, *chunk),
+        ).fetchall()
+        for row in rows:
+            topics[str(row["id"])] = NodeRow.from_row(row)
+    return topics
+
+
 def load_root_node(db, channel: ChannelRow) -> NodeRow | None:
     if not channel.root_id:
         return None
     node = load_node(db, channel.root_id, channel.id)
     if node is None or node.kind != "topic":
+        return None
+    return node
+
+
+def scope_topic_node(db, channel: ChannelRow, scope: SourceScope) -> NodeRow | None:
+    """Return the topic row that represents a source, or ``None``."""
+    if scope.kind == "topic":
+        node = load_node(db, scope.node_id or "", channel.id)
+    else:
+        node = load_root_node(db, channel)
+    if node is None or not node.available or node.coach_content:
         return None
     return node
 
@@ -418,8 +455,12 @@ def candidate_nodes(
 def count_items(db, channel: ChannelRow, scope: SourceScope) -> int:
     where, params = _scope_sql(scope)
     row = db.execute(
-        f"SELECT COUNT(*) FROM {NODE_TABLE} n WHERE {where} "
-        f"AND {_eligible_sql('n')} AND {_node_has_item_sql('n')}",
+        f"SELECT COUNT(DISTINCT n.parent_id) FROM {NODE_TABLE} n "
+        f"JOIN {NODE_TABLE} p ON p.id = n.parent_id "
+        "AND p.channel_id = n.channel_id "
+        f"WHERE {where} AND {_eligible_sql('n')} AND {_node_has_item_sql('n')} "
+        "AND p.kind = 'topic' AND COALESCE(p.available, 0) = 1 "
+        "AND COALESCE(p.coach_content, 0) = 0",
         params,
     ).fetchone()
     return int(row[0] if row else 0)
@@ -475,6 +516,9 @@ def classify_scope(
 
 
 def first_browsable_path(db, channel: ChannelRow, scope: SourceScope) -> str | None:
+    topic = scope_topic_node(db, channel, scope)
+    if topic is not None:
+        return kolibri_node_path(topic.id)
     nodes, _ = candidate_nodes(db, channel, scope, limit=256)
     files = load_files_for_nodes(db, (node.id for node in nodes))
     for node in nodes:
@@ -768,6 +812,9 @@ __all__ = [
     "load_files_for_nodes",
     "load_node",
     "load_root_node",
+    "load_topics",
     "parse_node_path",
+    "scope_topic_node",
     "select_node_files",
+    "title_key",
 ]

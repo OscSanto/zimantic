@@ -198,5 +198,10 @@ def test_kolibri_server_url_links_viewer_only_presets(tmp_path):
         name="kolibri", path=str(tmp_path), server_url="http://host:8080/"
     )
     assert store._external_url("abc") == "http://host:8080/learn/#/topics/c/abc"
+    assert (
+        store._external_topic_url("abc")
+        == "http://host:8080/learn/#/topics/t/abc/folders"
+    )
     store.config = KolibriConfig(name="kolibri", path=str(tmp_path))
     assert store._external_url("abc") is None
+    assert store._external_topic_url("abc") is None

@@ -108,23 +108,42 @@ class MetadataReader:
         node_ids: Iterable[str],
         *,
         include_position: bool = True,
+        include_topics: bool = False,
     ) -> dict[str, NodeMetadata]:
         ids = list(dict.fromkeys(node_ids))
         result = {}
         for start in range(0, len(ids), BATCH_SIZE):
             chunk = ids[start : start + BATCH_SIZE]
-            result.update(self._load_batch(scope, chunk, include_position))
+            result.update(
+                self._load_batch(
+                    scope,
+                    chunk,
+                    include_position,
+                    include_topics=include_topics,
+                )
+            )
         return result
 
     def _load_batch(
-        self, scope: SourceScope, ids: list[str], include_position: bool
+        self,
+        scope: SourceScope,
+        ids: list[str],
+        include_position: bool,
+        *,
+        include_topics: bool = False,
     ) -> dict[str, NodeMetadata]:
         placeholders = ",".join("?" for _ in ids)
         where, params = _scope_sql(scope)
+        eligibility = (
+            "AND COALESCE(n.available, 0) = 1 "
+            "AND COALESCE(n.coach_content, 0) = 0 "
+            if include_topics
+            else f"AND {_eligible_sql()} "
+        )
         rows = self.db.execute(
             f"SELECT n.* FROM {NODE_TABLE} n "
             f"WHERE n.id IN ({placeholders}) AND n.channel_id = ? "
-            f"AND {where} AND {_eligible_sql()}",
+            f"AND {where} {eligibility}",
             (*ids, self.channel.id, *params),
         ).fetchall()
         if not rows:

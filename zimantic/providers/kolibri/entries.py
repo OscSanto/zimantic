@@ -1,7 +1,8 @@
 """Bounded :class:`EntryProducer` for one Kolibri source.
 
-Only leaf content nodes with local files, and exercises with a public
-description, become result items.  Topic nodes are grouping.  Row ids are a
+Each available topic with locally usable children becomes one result row.
+Child items become redirect rows whose title and extracted text point back to
+that topic, so searching a child title returns the topic.  Row ids are a
 deterministic positive 63-bit mapping of ``(channel_id, node_id)``; collisions
 fail the build rather than merging documents.
 """
@@ -41,6 +42,8 @@ from .discovery import (
     SourceScope,
     candidate_nodes,
     load_files_for_nodes,
+    load_topics,
+    title_key,
 )
 from .html5 import Html5Archive, Html5LimitError, Html5ZipError
 from .metadata import BATCH_SIZE, MetadataReader
@@ -48,6 +51,7 @@ from .schema import (
     EXERCISE_KIND,
     HTML5_PRESETS,
     SUPPORTED_HTML5_PRESETS,
+    TOPIC_KIND,
     FileRow,
     FileSelection,
     media_family,
@@ -65,6 +69,14 @@ def row_id_for(channel_id: str, node_id: str) -> int:
     ).digest()
     value = int.from_bytes(digest[:8], "big") & MAX_ROW_ID
     return value or 1
+
+
+def _selection_paths(selection: FileSelection) -> tuple[str, ...]:
+    files = (
+        ([selection.primary] if selection.primary is not None else [])
+        + list(associated_captions(selection))
+    )
+    return tuple(storage_relative_path(file) for file in files)
 
 
 def _int_setting(cfg: Mapping[str, Any] | None, key: str, default: int) -> int:
@@ -104,6 +116,8 @@ class _ManifestItem:
     primary_mtime: int | None
     caption_signatures: tuple[tuple[str, int | None, int | None], ...] = ()
     metadata_text: str = ""
+    target_node_id: str | None = None
+    path_members: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -301,9 +315,15 @@ class KolibriEntryProducer:
                     f"{self.traversal_timeout:g}-second limit"
                 )
             files = load_files_for_nodes(db, (node.id for node in nodes))
-            items: list[_ManifestItem] = []
+            grouped: dict[str, list[_ManifestItem]] = {}
+            parent_order: list[str] = []
             errors: list[str] = []
             for node in nodes:
+                if not node.parent_id:
+                    continue
+                if node.parent_id not in grouped:
+                    grouped[node.parent_id] = []
+                    parent_order.append(node.parent_id)
                 selection = select_primary(
                     files.get(node.id, ()), node.kind, node.lang_id
                 )
@@ -339,7 +359,7 @@ class KolibriEntryProducer:
                     (caption.local_file_id, *self._storage_signature(caption))
                     for caption in captions
                 )
-                items.append(
+                grouped[node.parent_id].append(
                     _ManifestItem(
                         node,
                         selection,
@@ -347,8 +367,52 @@ class KolibriEntryProducer:
                         size,
                         mtime,
                         caption_signatures,
+                        path_members=_selection_paths(selection),
                     )
                 )
+
+            topics = load_topics(db, self.channel.id, parent_order)
+            items: list[_ManifestItem] = []
+            row_limit_hit = False
+            for parent_id in parent_order:
+                topic = topics.get(parent_id)
+                if topic is None or not topic.available or topic.coach_content:
+                    continue
+                children = grouped.get(parent_id, ())
+                if len(items) >= self.max_entries:
+                    row_limit_hit = True
+                    break
+                path_members = tuple(
+                    dict.fromkeys(
+                        path
+                        for child in children
+                        for path in child.path_members
+                    )
+                )
+                items.append(
+                    _ManifestItem(
+                        topic,
+                        FileSelection(None),
+                        "text",
+                        None,
+                        None,
+                        path_members=path_members,
+                    )
+                )
+                # Child rows are searchable aliases, not separate results.
+                topic_title = title_key(topic.title)
+                for child in children:
+                    if topic_title and title_key(child.node.title) == topic_title:
+                        continue
+                    if len(items) >= self.max_entries:
+                        row_limit_hit = True
+                        break
+                    items.append(
+                        replace(child, target_node_id=topic.id)
+                    )
+                if row_limit_hit:
+                    break
+            truncated = truncated or row_limit_hit
             if not self.fast:
                 reader = MetadataReader(db, self.channel)
                 db.set_progress_handler(
@@ -366,6 +430,7 @@ class KolibriEntryProducer:
                         self.scope,
                         (item.node.id for item in chunk),
                         include_position=False,
+                        include_topics=True,
                     )
                     for offset, item in enumerate(chunk, start):
                         details = metadata.get(item.node.id)
@@ -430,6 +495,7 @@ class KolibriEntryProducer:
                     "metadata_text": item.metadata_text,
                     "available": item.node.available,
                     "coach_content": item.node.coach_content,
+                    "target_node_id": item.target_node_id,
                     "family": item.family,
                     "primary": (
                         None
@@ -477,12 +543,10 @@ class KolibriEntryProducer:
         return (home, database)
 
     def entry_paths(self, index: int) -> tuple[str, ...]:
-        selection = self._items[index].selection
-        files = (
-            ([selection.primary] if selection.primary is not None else [])
-            + list(associated_captions(selection))
-        )
-        return tuple(storage_relative_path(file) for file in files)
+        item = self._items[index]
+        if item.path_members:
+            return item.path_members
+        return _selection_paths(item.selection)
 
     def _read_native_document(
         self, primary: FileRow | None
@@ -583,10 +647,29 @@ class KolibriEntryProducer:
         # Match the content store's reversible component encoder.
         from .discovery import kolibri_node_path
 
-        path = kolibri_node_path(node.id)
+        target_node_id = item.target_node_id
+        target_id = (
+            row_id_for(self.channel.id, target_node_id)
+            if target_node_id is not None
+            else None
+        )
+        path = kolibri_node_path(target_node_id or node.id)
         title = node.title or "Untitled"
+        if node.kind == TOPIC_KIND:
+            if self.fast:
+                return EntryRecord(row_id, title, "", path, None, "", False)
+            description = item.metadata_text or str(node.description or "").strip()
+            body, truncated = truncate_utf8(
+                description, self.max_body_text_bytes
+            )
+            excerpt = truncate_at_word_boundary(
+                description, self.max_preview_chars
+            )
+            return EntryRecord(
+                row_id, title, excerpt, path, None, body, truncated
+            )
         if self.fast:
-            return EntryRecord(row_id, title, "", path, None, "", False)
+            return EntryRecord(row_id, title, "", path, target_id, "", False)
         description = item.metadata_text or str(node.description or "").strip()
         if item.selection.primary is None:
             if node.kind == EXERCISE_KIND and description:
@@ -597,9 +680,9 @@ class KolibriEntryProducer:
                     description, self.max_preview_chars
                 )
                 return EntryRecord(
-                    row_id, title, excerpt, path, None, body, truncated
+                    row_id, title, excerpt, path, target_id, body, truncated
                 )
-            return None
+            return EntryRecord(row_id, title, "", path, target_id, "", False)
         excerpt, body_text, body_truncated = self._read_native_document(
             item.selection.primary
         )
@@ -614,9 +697,11 @@ class KolibriEntryProducer:
         truncated = truncated or body_truncated
         if not excerpt_text and not combined:
             # Media and HTML5 bundles still need a searchable/title result.
-            return EntryRecord(row_id, title, "", path, None, "", False)
+            return EntryRecord(
+                row_id, title, "", path, target_id, "", False
+            )
         return EntryRecord(
-            row_id, title, excerpt_text, path, None, combined, truncated
+            row_id, title, excerpt_text, path, target_id, combined, truncated
         )
 
     # -- producer contract -------------------------------------------------

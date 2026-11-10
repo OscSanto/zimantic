@@ -26,7 +26,7 @@ from .helpers import (
 )
 
 
-def test_topics_are_not_rows_and_extracted_text_is_searchable(tmp_path):
+def test_topic_entry_and_child_alias_are_searchable(tmp_path):
     fixture = make_two_channel_fixture(tmp_path)
     index_dir = tmp_path / "indexes"
     runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
@@ -36,20 +36,89 @@ def test_topics_are_not_rows_and_extracted_text_is_searchable(tmp_path):
             item for item in runtime.library_sources() if item.key == topic_key
         )
         producer = runtime.entry_producer(source, fast=False)
-        assert producer.count == 1
-        row = producer.entry_at(0)
-        assert row is not None
-        assert row.title
-        assert row.path == "node/doc-1"
-        assert row.id == row_id_for("channel-a", "doc-1")
-        assert "zebra" in row.body
+        assert producer.count == 2
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        topic = rows[0]
+        assert topic.title == "Topic One"
+        assert topic.path == "node/topic-1"
+        assert topic.target_id is None
+        assert topic.id == row_id_for("channel-a", "topic-1")
+        document = rows[1]
+        assert document.title == "PDF One"
+        assert document.path == "node/topic-1"
+        assert document.target_id == topic.id
+        assert document.id == row_id_for("channel-a", "doc-1")
+        assert "zebra" in document.body
 
         locator = build_sources(runtime, index_dir)
         meta = _meta(locator, source)
         assert meta["truncated"] == "0"
         assert _body_hits(locator, source, "zebra")
         docs = _docs(locator, source)
-        assert docs
+        assert {row[2] for row in docs} == {"node/topic-1"}
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_topic_row_links_to_kolibri_and_same_title_child_is_folded(tmp_path):
+    fixture = KolibriFixture(tmp_path)
+    fixture.add_channel("channel-a", "Channel A", "root-a")
+    fixture.add_node(
+        "root-a",
+        "channel-a",
+        "Course",
+        kind="topic",
+        lft=1,
+        rght=6,
+        level=0,
+    )
+    fixture.add_node(
+        "same-title",
+        "channel-a",
+        "Course",
+        kind="document",
+        parent_id="root-a",
+        lft=2,
+        rght=3,
+    )
+    fixture.add_document("same-title", "same title body", extension="txt")
+    fixture.add_node(
+        "different-title",
+        "channel-a",
+        "Different",
+        kind="document",
+        parent_id="root-a",
+        lft=4,
+        rght=5,
+    )
+    fixture.add_document("different-title", "different title body", extension="txt")
+    fixture.close()
+    index_dir = tmp_path / "indexes"
+    config = kolibri_config(fixture, server_url="http://localhost:8085")
+    runtime, batch, _ = open_runtime(index_dir, config)
+    try:
+        source = runtime.library_sources()[0]
+        assert source.item_count == 1
+        producer = runtime.entry_producer(source, fast=False)
+        assert producer.count == 2
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        assert rows[0].title == "Course"
+        assert rows[0].path == "node/root-a"
+        assert rows[0].target_id is None
+        assert rows[1].title == "Different"
+        assert rows[1].path == "node/root-a"
+        assert rows[1].target_id == rows[0].id
+
+        store = runtime.content_store(source)
+        try:
+            entry = store.resolve("node/root-a")
+            assert entry.external_url == (
+                "http://localhost:8085/learn/#/topics/t/root-a/folders"
+            )
+            assert entry.mimetype == "text/html"
+        finally:
+            store.close()
     finally:
         runtime.close()
         batch.close()
@@ -138,14 +207,17 @@ def test_exercise_without_file_gets_metadata_description(tmp_path):
     try:
         source = runtime.library_sources()[0]
         producer = runtime.entry_producer(source, fast=False)
-        row = producer.entry_at(0)
-        assert row is not None
-        assert "public exercise description" in row.body
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        topic = next(item for item in rows if item.title == "Channel A")
+        alias = next(item for item in rows if item.title == "Exercise One")
+        assert alias.path == topic.path
+        assert alias.target_id == topic.id
+        assert "public exercise description" in alias.body
         store = runtime.content_store(source)
         try:
-            data = store.read(row.path, head_only=False, max_bytes=1 << 20)
+            data = store.read(alias.path, head_only=False, max_bytes=1 << 20)
             assert data.mimetype == "text/plain"
-            assert b"public exercise description" in data.content
+            assert b"Channel A" in data.content
         finally:
             store.close()
     finally:
@@ -194,7 +266,8 @@ def test_ambiguous_primary_mapping_is_skipped_with_an_error(tmp_path):
     try:
         source = runtime.library_sources()[0]
         producer = runtime.entry_producer(source, fast=False)
-        assert producer.count == 0
+        assert producer.count == 1
+        assert producer.entry_at(0).path == "node/root-a"
         assert any("ambiguous" in error for error in producer.errors)
         store = runtime.content_store(source)
         try:
@@ -229,6 +302,7 @@ def test_captions_are_absent_by_default_and_indexed_when_enabled(tmp_path):
         source = runtime.library_sources()[0]
         off = runtime.entry_producer(source, fast=False)
         assert off.derived_text_inputs(0) == ()
+        assert [item.kind for item in off.derived_text_inputs(1)] == []
         locator = IndexLocator(index_dir)
         build_index(off, locator, None, {"batch_size": 1}, fast=False)
         assert _body_hits(locator, source, "caption") == []
@@ -256,7 +330,7 @@ def test_captions_are_absent_by_default_and_indexed_when_enabled(tmp_path):
             cfg=cfg,
             snapshot_factory=runtime._manager.acquire,
         )
-        assert [item.kind for item in on.derived_text_inputs(0)] == ["captions"]
+        assert [item.kind for item in on.derived_text_inputs(1)] == ["captions"]
         build_index(
             on,
             locator,
@@ -267,7 +341,7 @@ def test_captions_are_absent_by_default_and_indexed_when_enabled(tmp_path):
         hits = _body_hits(locator, source, "zebra")
         assert hits
         docs = _docs(locator, source)
-        assert len(docs) == 1
+        assert {row[2] for row in docs} == {"node/root-a"}
     finally:
         runtime.close()
         batch.close()
@@ -341,7 +415,8 @@ def test_descriptive_metadata_is_searchable_and_invalidates_the_build(tmp_path):
         source = next(item for item in runtime.library_sources() if item.key.endswith(":unit"))
         producer = runtime.entry_producer(source, fast=False)
         rows = [producer.entry_at(index) for index in range(producer.count)]
-        row = next(item for item in rows if item.path == "node/count")
+        row = next(item for item in rows if item.title == "Count with small numbers")
+        assert row.target_id is not None
         for text in ("Khan Academy", "Lower Primary", "numeracy", "Practice", "Counting", "Questions: 8"):
             assert text in row.body
         locator = build_sources(runtime, index_dir)

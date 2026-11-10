@@ -113,43 +113,26 @@ def test_search_enriches_existing_indexes_and_streams_metadata(tmp_path, fast):
         with TestClient(create_app(search)) as client:
             response = client.get("/search", params={"q": "Count with small numbers"})
             assert response.status_code == 200
-            result = next(doc for doc in response.json() if doc["path"] == "node/count")
-            assert result["breadcrumbs"] == [
-                "Math", "Unit 1", "Counting", "Count with small numbers",
-            ]
-            assert result["resource"] == {
-                "kind": "exercise",
-                "description": "Practice counting small groups of objects.",
-                "author": "Updated author",
-                "language": "English",
-                "duration": 125,
-                "grade_levels": ["Lower Primary"],
-                "learning_activities": ["Practice", "Read"],
-                "tags": ["arithmetic", "numeracy"],
-                "assessment_count": 8,
-                "topic_position": 2,
-                "topic_total": 2,
-            }
-            assert result["lead"]
+            result = next(doc for doc in response.json() if doc["path"] == "node/topic")
+            assert result["title"] == "Counting"
+            assert result["breadcrumbs"] == ["Math", "Unit 1", "Counting"]
+            assert result["resource"] == {"kind": "topic"}
             assert str(fixture.home) not in response.text
             events = list(search.stream_search("small numbers", limit=10))
             pages = [event["results"] for event in events if event.get("results")]
             assert pages
             assert all(
-                doc["resource"]["kind"] == "exercise" and doc["breadcrumbs"][2] == "Counting"
-                for page in pages for doc in page if doc["path"] == "node/count"
+                doc["resource"]["kind"] == "topic" and doc["breadcrumbs"][2] == "Counting"
+                for page in pages for doc in page if doc["path"] == "node/topic"
             )
             fixture.db.execute(
                 "UPDATE content_contentnode SET description = 'New description' WHERE id = 'count'"
             )
             fixture.db.commit()
-            assert search.search_page("Count with small numbers")["results"][0][
-                "resource"
-            ]["description"]
             search.reload()
             updated = search.search_page("Count with small numbers")["results"][0]
-            assert updated["resource"]["description"]
-            assert updated["lead"]
+            assert updated["path"] == "node/topic"
+            assert updated["title"] == "Counting"
     finally:
         search.close()
         fixture.dispose()

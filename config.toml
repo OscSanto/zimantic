@@ -333,6 +333,10 @@ port = 8090
 # max_html5_zip_member_bytes = 268435456
 # max_html5_zip_total_bytes = 1073741824
 # html5_zip_timeout_seconds = 10
+# Each content topic is one search result and child titles act as redirects to
+# it. Optional running Kolibri server: topic results link to its learn page and
+# viewer-only presets (such as exercises) redirect there. Example:
+# server_url = "http://localhost:8085"
 # Optional overrides for non-standard installations:
 # database_path = "/library/kolibri/db.sqlite3"
 # storage = "/library/kolibri/content/storage"

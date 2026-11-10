@@ -64,7 +64,12 @@ def test_live_wal_is_read_without_modifying_the_installation(tmp_path):
                 item for item in runtime.library_sources() if item.key == key
             )
             producer = runtime.entry_producer(source, fast=False)
-            assert "uncommitted-wal-marker" in producer.entry_at(0).body
+            marker = next(
+                producer.entry_at(index)
+                for index in range(producer.count)
+                if producer.entry_at(index).title == "PDF One"
+            )
+            assert "uncommitted-wal-marker" in marker.body
             assert _installation_signatures(fixture) == before
 
             writer.execute(
@@ -74,7 +79,12 @@ def test_live_wal_is_read_without_modifying_the_installation(tmp_path):
             writer.commit()
             assert runtime.refresh(wait=True)
             producer = runtime.entry_producer(source, fast=False)
-            assert "second-wal-marker" in producer.entry_at(0).body
+            marker = next(
+                producer.entry_at(index)
+                for index in range(producer.count)
+                if producer.entry_at(index).title == "PDF One"
+            )
+            assert "second-wal-marker" in marker.body
         finally:
             runtime.close()
             batch.close()

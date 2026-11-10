@@ -61,14 +61,15 @@ def test_channel_is_collection_and_topics_are_sources(tmp_path):
             assert topic.title
             assert topic.item_count == 1
             assert "text" in topic.media_types
-            assert topic.homepage == "node/doc-1"
+            assert topic.homepage == "node/topic-1"
             video = by_key[kolibri_node_source_key("kolibri", "channel-a", "topic-2")]
             assert "video" in video.media_types
 
             keys_b = {source.key for source in runtime_b.library_sources()}
             assert keys_b == {kolibri_root_key("kolibri", "channel-b")}
             root = runtime_b.library_sources()[0]
-            assert root.item_count == 2
+            assert root.item_count == 1
+            assert root.homepage == "node/root-b"
             assert set(root.media_types) == {"text", "audio"}
         finally:
             runtime_a.close()

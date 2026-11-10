@@ -301,8 +301,6 @@ button.source-filter-option {
     padding: 3px 10px;
 }
 button.source-filter-option.ok {
-    border-color: var(--ok-border);
-    color: var(--ok);
     cursor: pointer;
 }
 button.source-filter-option.err {

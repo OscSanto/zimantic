@@ -298,7 +298,7 @@ class KolibriRuntime(IndexedRuntime):
                     lambda: int(time.monotonic() >= deadline), 1000
                 )
             metadata = MetadataReader(db, kolibri_source.channel).load(
-                kolibri_source.scope, by_node
+                kolibri_source.scope, by_node, include_topics=True
             )
             preview_chars = self._search_limits(source).preview_chars
             for node_id, details in metadata.items():
