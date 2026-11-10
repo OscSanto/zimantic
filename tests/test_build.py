@@ -17,6 +17,7 @@ from index_helpers import docs as _docs
 from index_helpers import meta as _meta
 
 from zimantic.contracts import SourceInfo
+from zimantic.indexing import derived as derived_module
 from zimantic.indexing import pipeline as build_module
 from zimantic.indexing.locator import IndexLocator
 from zimantic.indexing.schema import (
@@ -144,6 +145,72 @@ class BuildPipelineTests(unittest.TestCase):
             self.assertIsNotNone(lease.faiss_path)
             lease.close()
             self.assertEqual(_body_hits(locator, source, "Alpha"), [(0,)])
+
+    def test_fast_build_does_not_replace_a_complete_full_generation(self):
+        rows = [EntryRecord(1, "Alpha", "excerpt", "a", None, "Alpha body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss):
+                locator = _build(Producer(rows), tmp, embedder=_Embedder())
+            first = locator.paths(_source())
+            assert first is not None
+            try:
+                generation = first.generation
+            finally:
+                first.close()
+
+            locator = _build(Producer(rows), tmp, fast=True)
+            meta = _meta(locator, _source())
+            self.assertEqual(meta[DONE], "full")
+            lease = locator.paths(_source())
+            assert lease is not None
+            try:
+                self.assertEqual(lease.generation, generation)
+                self.assertIsNotNone(lease.faiss_path)
+            finally:
+                lease.close()
+
+    def test_fast_build_replaces_a_partially_enriched_full_generation(self):
+        class _PartialProducer(Producer):
+            def derived_text_inputs(self, index):
+                return [SimpleNamespace(kind="image", mimetype="image/png", size=1)]
+
+        operations = derived_module.SourceDerivedOperations(ocr="tesseract")
+        source_key = _source().key
+
+        class _MissingStage(derived_module.DerivedTextStage):
+            def __init__(self):
+                super().__init__(operations=operations, engines={})
+
+        rows = [EntryRecord(1, "Alpha", "excerpt", "a", None, "Alpha body")]
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(build_module, "_write_faiss", side_effect=_write_fake_faiss),
+                self.assertRaises(build_module.PartialEnrichmentError),
+            ):
+                _build(
+                    _PartialProducer(rows),
+                    tmp,
+                    {
+                        "derived_stage": _MissingStage(),
+                        "derived_source_operations": {source_key: operations},
+                    },
+                    embedder=_Embedder(),
+                )
+
+            locator = IndexLocator(tmp)
+            meta = _meta(locator, _source())
+            self.assertEqual(meta[DONE], "full")
+            self.assertIn('"partial":true', meta["derived_text"])
+
+            locator = _build(Producer(rows), tmp, fast=True)
+            meta = _meta(locator, _source())
+            self.assertEqual(meta[DONE], "fast")
+            lease = locator.paths(_source())
+            assert lease is not None
+            try:
+                self.assertIsNone(lease.faiss_path)
+            finally:
+                lease.close()
 
     def test_body_after_the_first_thousand_characters_is_searchable(self):
         body = ("filler " * 300) + "needleword appears late"

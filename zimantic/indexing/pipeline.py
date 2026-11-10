@@ -546,23 +546,21 @@ def _prepare_build_state(
         producer_fingerprint = producer.fingerprint
         fingerprint_matches = current_fingerprint == producer_fingerprint
         if (
-            done == index_schema.DONE_FULL
-            and not partial_enrichment
+            not partial_enrichment
             and fingerprint_matches
+            and (done == index_schema.DONE_FULL or fast)
         ):
-            logger.info("%s: already built (use --force to rebuild)", source.key)
-            return None
-        if (
-            done == index_schema.DONE_FAST
-            and fast
-            and not partial_enrichment
-            and fingerprint_matches
-        ):
-            logger.info(
-                "%s: already indexed for title/full-text search "
-                "(use --force to rebuild)",
-                source.key,
-            )
+            # A full index already contains everything a fast build produces,
+            # so --fast must not downgrade it. Only a full build may replace a
+            # complete fast generation.
+            if done == index_schema.DONE_FULL:
+                logger.info("%s: already built (use --force to rebuild)", source.key)
+            else:
+                logger.info(
+                    "%s: already indexed for title/full-text search "
+                    "(use --force to rebuild)",
+                    source.key,
+                )
             return None
         if not fingerprint_matches and not force:
             logger.info(

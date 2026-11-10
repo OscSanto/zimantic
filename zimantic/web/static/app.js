@@ -2957,17 +2957,33 @@
 
             function bindArticleFrameLoad(frame = $("articleModalFrame")) {
                 if (!frame) return;
+                const frameLocation = () => {
+                    // A captured page can move this frame somewhere we cannot
+                    // read. Only a definite about:blank result below is treated
+                    // as a discarded document.
+                    try {
+                        return frame.contentWindow?.location?.href || "";
+                    } catch (_) {
+                        return "";
+                    }
+                };
                 frame.addEventListener("load", () => {
                     const modal = $("articleModal");
                     const activeFrame = $("articleModalFrame");
-                    if (
-                        frame !== activeFrame ||
-                        modal.hidden ||
-                        !activeFrame.src ||
-                        activeFrame.src === "about:blank"
-                    ) {
+                    if (frame !== activeFrame || modal.hidden) return;
+                    // iOS WebKit can discard an iframe document while traversing
+                    // joint session history, leaving the modal visible over an
+                    // empty frame and without a popstate event. Once this frame
+                    // has shown an article, an about:blank load means the
+                    // browser walked back out of it, so close the modal instead
+                    // of leaving a blank screen.
+                    const frameUrl = frameLocation();
+                    if (frameUrl === "about:blank" || frameUrl === "about:srcdoc") {
+                        if (frame.__zimanticArticleLoaded) closeArticleModal();
                         return;
                     }
+                    if (!activeFrame.src || activeFrame.src === "about:blank") return;
+                    frame.__zimanticArticleLoaded = true;
                     postArticleModalNavigation();
                 });
             }
@@ -3915,13 +3931,17 @@
                 collectionKey = null,
                 browse = null,
                 seed = 0,
+                { preserveSourceFilterOther = false } = {},
             ) {
                 question = question.trim();
                 if (!question && !browse) browse = defaultBrowseMode();
                 if (browse !== "random") seed = 0;
                 setSettingsOpen(false);
                 sourceFilterShowAll = false;
-                sourceFilterShowOther = false;
+                // Selecting a source mid-search re-runs the search, but the
+                // expanded Other disclosure belongs to the reader's filter
+                // browsing, not to the query, so keep it open.
+                if (!preserveSourceFilterOther) sourceFilterShowOther = false;
                 if (requestController) requestController.abort();
                 if (pageController) pageController.abort();
                 cancelStreamRender();
@@ -4218,6 +4238,7 @@
                 collectionKey = null,
                 browse = current?.browse || null,
                 seed = current?.seed || 0,
+                options = {},
             ) {
                 const requested = [...new Set(selectionValues(selectedSources))];
                 const scopeKeys = [...new Set(selectionValues(
@@ -4252,6 +4273,7 @@
                     collectionKey,
                     browse,
                     seed,
+                    options,
                 );
             }
 
@@ -4535,6 +4557,9 @@
                     0,
                     nextScope,
                     selectedCollectionKey,
+                    current?.browse || null,
+                    current?.seed || 0,
+                    { preserveSourceFilterOther: !collectionKey },
                 );
             });
 

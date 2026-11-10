@@ -608,7 +608,7 @@ console.log(JSON.stringify({{empty, browsing, paged, modal, query, rare, searche
         self.assertEqual(payload["query"], "/?q=topic&sort=random&seed=7&source=manual")
         self.assertEqual(payload["rare"], "/?q=&sort=rare&collection=files%3Amodules")
         self.assertEqual(
-            payload["searches"], [["", ["other"], 0, ["other"], None, "random", 7]]
+            payload["searches"], [["", ["other"], 0, ["other"], None, "random", 7, {}]]
         )
         self.assertEqual(payload["pages"], [1])
         self.assertIsNone(payload["queryState"]["browse"])
@@ -1653,6 +1653,107 @@ const summarize = () => {{
             [["a"], ["a", "b"], ["b"], ["b"], ["a", "b"], [], [], ["b"], ["b"]],
         )
         self.assertEqual(payload["broadCounts"], {"a": 5, "b": 4, "c": 3})
+
+    def test_selecting_source_keeps_expanded_other_category_open(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const question = "q";
+const BROWSE_LABELS = {{}};
+let selectedSourceKeys = new Set();
+let selectedCollectionKey = null;
+let sourceFilterShowAll = false, sourceFilterShowOther = true;
+let requestController = null, pageController = null;
+let lastStreamRenderAt = 0, searchSequence = 0, activeSearchResult = null;
+const thumbnailCache = new Map();
+const PAGE_SIZE = 10, SOURCE_FILTER_LIMIT = 10, SOURCE_FILTER_QUERY_LIMIT = 30;
+const STREAM_FIRST_BYTE_TIMEOUT = 1000, STREAM_TOTAL_TIMEOUT = 1000;
+const STREAM_IDLE_TIMEOUT = 1000, BUSY_RETRY_LIMIT = 0;
+const window = {{scrollTo() {{}}}};
+const document = {{body: {{classList: {{add() {{}}, toggle() {{}}}}}}}};
+class Node {{
+  constructor() {{
+    this.value = ""; this.hidden = false; this.disabled = false;
+    this.textContent = ""; this.innerHTML = ""; this.handlers = {{}}; this.dataset = {{}};
+  }}
+  addEventListener(name, handler) {{ this.handlers[name] = handler; }}
+  querySelectorAll() {{ return []; }}
+  focus() {{}}
+  setAttribute() {{}}
+}}
+const elements = new Map();
+const $ = (id) => {{
+  if (!elements.has(id)) elements.set(id, new Node());
+  return elements.get(id);
+}};
+const escapeHtml = (text) => text;
+const appPath = (path) => path;
+const setSettingsOpen = () => {{}};
+const cancelStreamRender = () => {{}};
+const cancelThumbnails = () => {{}};
+const queryTerms = (question) => [question];
+const announceSearchStatus = () => {{}};
+const renderScopeLine = () => {{}};
+const renderSourceFilters = () => {{}};
+const renderResults = () => {{}};
+const renderSortControls = () => {{}};
+const renderSourceSelectionSummary = () => {{}};
+const syncPage = () => {{}};
+const sourceFilterControlKey = () => "";
+const defaultBrowseMode = () => "relevance";
+const commitAutoSearchHistory = () => {{}};
+const makeStateUrl = () => "/";
+const activeSources = () => [{{key: "a"}}, {{key: "b"}}, {{key: "c"}}];
+const requests = [];
+const fetch = async (url) => {{
+  requests.push(new URL(url, "http://example.test").searchParams.getAll("source"));
+  return {{ok: true, json: async () => [], headers: new Map()}};
+}};
+const consumeStream = async () => {{
+  current.outcomes = new Map([...selectedSourceKeys].map((key) => [key, {{
+    source: {{key, provider: "zim"}}, status: "ok",
+  }}]));
+  current.counts = Object.fromEntries([...selectedSourceKeys].map((key) => [key, 20]));
+  current.completed = current.sourcesTotal = selectedSourceKeys.size;
+  return false;
+}};
+const history = {{state: null, pushState() {{}}, replaceState() {{}}}};
+{_function_source(source, "function selectionValues(", "function sourceFilterLayout(")}
+{_function_source(source, "async function runSearch(", "async function loadPage(")}
+{_function_source(source, "function applySourceSelection(", "function makeStateUrl(")}
+const outcome = (key) => ({{source: {{key, provider: "zim"}}, status: "ok"}});
+let current = {{
+  question, browse: null, seed: 0, searchAll: true, searchKeys: [], scopeKeys: [],
+  searchCollection: null,
+  outcomes: new Map(["a", "b", "c"].map((key) => [key, outcome(key)])),
+  counts: {{a: 5, b: 4, c: 3}}, completed: 3, sourcesTotal: 3,
+  streaming: false, page: 0, pageItems: [], total: 0, discovery: null,
+}};
+{_function_source(source, '$("sourceFilterOptions").addEventListener("click"', '$("results").addEventListener("click"')}
+const clickSource = (key) => $("sourceFilterOptions").handlers.click({{
+  target: {{closest: () => ({{dataset: {{source: key}}, disabled: false}})}},
+}});
+(async () => {{
+  clickSource("a");
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterSelection = {{
+    showOther: sourceFilterShowOther, showAll: sourceFilterShowAll,
+    selected: [...selectedSourceKeys], requests: [...requests],
+  }};
+  await runSearch("q", ["a"], 0, ["a"], null, null, 0);
+  const afterSearch = {{showOther: sourceFilterShowOther}};
+  console.log(JSON.stringify({{afterSelection, afterSearch}}));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], encoding="utf-8", capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["afterSelection"]["showOther"])
+        self.assertFalse(payload["afterSelection"]["showAll"])
+        self.assertEqual(payload["afterSelection"]["selected"], ["a"])
+        self.assertEqual(payload["afterSelection"]["requests"], [["a"]])
+        self.assertFalse(payload["afterSearch"]["showOther"])
 
     def test_scope_helpers_search_only_selected_sources(self):
         source = APP_JS.read_text(encoding="utf-8")

@@ -634,6 +634,110 @@ console.log(JSON.stringify({{
         self.assertTrue(payload["modalOpen"])
         self.assertTrue(payload["inert"])
 
+    def test_blank_modal_frame_after_a_real_article_closes_the_modal(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        payload = _run_node(f"""
+const attached = [], messages = [];
+let navigationPosts = 0, closeCalls = 0;
+const classes = {{add() {{}}, remove() {{}}}};
+class Frame {{
+  constructor(src = "") {{
+    this.src = src;
+    this.handlers = {{}};
+    this.contentWindow = {{
+      location: {{href: "about:blank"}},
+      postMessage: (data) => messages.push(data),
+    }};
+  }}
+  cloneNode() {{ return new Frame(this.src); }}
+  removeAttribute(name) {{ if (name === "src") this.src = ""; }}
+  addEventListener(name, fn) {{ this.handlers[name] = fn; }}
+  replaceWith(fresh) {{
+    attached.push(fresh.src);
+    elements.articleModalFrame = fresh;
+  }}
+  focus() {{}}
+}}
+const elements = {{
+  articleModal: {{hidden: true}}, articleModalFrame: new Frame(),
+}};
+const $ = (id) => elements[id];
+const wrap = {{inert: false}};
+const document = {{
+  activeElement: {{}}, querySelector: () => wrap,
+  documentElement: {{classList: classes}}, body: {{classList: classes}},
+}};
+const location = new URL("http://example.test/?q=teaching");
+const appPath = (path) => path;
+let activeLibraryArticleUrl = null, modalPreviousFocus = null;
+let activeModalUrl = null, previousModalArticleUrl = null;
+let pendingModalArticleUrl = null, pendingModalNavigation = null;
+let activeParentNavigation = null, parentNavigationSequence = 0;
+const hideExternalLinkNotice = () => {{}};
+const postArticleModalNavigation = () => {{ navigationPosts++; }};
+const closeArticleModal = () => {{
+  closeCalls++;
+  elements.articleModal.hidden = true;
+}};
+const window = {{addEventListener() {{}}}};
+{_section(source, "function articleUrlValue(", "// The modal loads a trusted")}
+{_section(source, "function showArticleModal(", "function modalStateEntry(")}
+{_section(source, "function bindArticleFrameLoad(", "function hideArticleModal(")}
+const one = "http://example.test/content/manual/One";
+const two = "http://example.test/content/manual/Two";
+showArticleModal(one, "search");
+const first = elements.articleModalFrame;
+// The first blank load belongs to a fresh frame; it must not close the modal.
+first.handlers.load();
+const afterFreshBlank = {{closeCalls, navigationPosts}};
+// A real article load arms the recovery for this browsing context.
+first.contentWindow.location.href = one;
+first.handlers.load();
+const afterRealLoad = {{closeCalls, navigationPosts}};
+// Walking history out of the iframe discards its document without a popstate.
+first.contentWindow.location.href = "about:blank";
+first.handlers.load();
+const afterBackedOut = {{closeCalls, navigationPosts}};
+// Reopening replaces the frame, so a stale blank load is ignored.
+showArticleModal(two, "follow");
+const second = elements.articleModalFrame;
+first.handlers.load();
+const afterStale = {{closeCalls, navigationPosts}};
+second.contentWindow.location.href = two;
+second.handlers.load();
+second.contentWindow.location.href = "about:blank";
+second.handlers.load();
+console.log(JSON.stringify({{
+  afterFreshBlank, afterRealLoad, afterBackedOut, afterStale,
+  finalCloseCalls: closeCalls, navigationPosts, messages, attached,
+  staleIgnored: second !== first,
+}}));
+""")
+        self.assertEqual(payload["afterFreshBlank"], {
+            "closeCalls": 0,
+            "navigationPosts": 0,
+        })
+        self.assertEqual(payload["afterRealLoad"], {
+            "closeCalls": 0,
+            "navigationPosts": 1,
+        })
+        self.assertEqual(payload["afterBackedOut"], {
+            "closeCalls": 1,
+            "navigationPosts": 1,
+        })
+        self.assertEqual(payload["afterStale"], {
+            "closeCalls": 1,
+            "navigationPosts": 1,
+        })
+        self.assertEqual(payload["finalCloseCalls"], 2)
+        self.assertEqual(payload["navigationPosts"], 2)
+        self.assertTrue(payload["staleIgnored"])
+        self.assertEqual(payload["messages"], [])
+        self.assertEqual(payload["attached"], [
+            "http://example.test/content/manual/One",
+            "http://example.test/content/manual/Two",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
