@@ -2391,7 +2391,7 @@
 
             function showArticleModal(articleUrl, navigationKind = "manual", parentUrl = null) {
                 const modal = $("articleModal");
-                const frame = $("articleModalFrame");
+                let frame = $("articleModalFrame");
                 if (!modal || !frame) return;
                 const wasHidden = modal.hidden;
                 const fixedParentUrl = readModalUrl(parentUrl);
@@ -2419,17 +2419,9 @@
                         activeParentNavigation = null;
                         parentNavigationSequence++;
                     }
-                    if (!wasHidden && frame.contentWindow) {
-                        // An already-open shell can replace its own document
-                        // without adding another joint-history entry for the
-                        // iframe. The first load still uses src.
-                        frame.contentWindow.postMessage({
-                            type: "zimantic-shell-navigate",
-                            url: articleUrl,
-                        }, "*");
-                    } else {
-                        frame.src = articleUrl;
-                    }
+                    // A fresh browsing context keeps child-frame history and
+                    // late messages from the previous article out of Back/Forward.
+                    frame = replaceArticleFrame(articleUrl);
                 }
                 modal.hidden = false;
                 document.documentElement.classList.add("modal-open");
@@ -2976,20 +2968,27 @@
                 frame.addEventListener("load", () => {
                     const modal = $("articleModal");
                     const activeFrame = $("articleModalFrame");
-                    if (modal.hidden || !activeFrame.src || activeFrame.src === "about:blank") {
+                    if (
+                        frame !== activeFrame ||
+                        modal.hidden ||
+                        !activeFrame.src ||
+                        activeFrame.src === "about:blank"
+                    ) {
                         return;
                     }
                     postArticleModalNavigation();
                 });
             }
 
-            function replaceArticleFrame() {
+            function replaceArticleFrame(articleUrl = null) {
                 const old = $("articleModalFrame");
                 if (!old) return;
                 const fresh = old.cloneNode(false);
                 fresh.removeAttribute("src");
-                old.replaceWith(fresh);
+                if (articleUrl) fresh.src = articleUrl;
                 bindArticleFrameLoad(fresh);
+                old.replaceWith(fresh);
+                return fresh;
             }
 
             function hideArticleModal() {
@@ -3185,6 +3184,7 @@
 
             function setResultNode(node, item) {
                 node.dataset.key = resultKey(item);
+                node.classList.toggle("result-linked", Boolean(item.url));
                 const title = node.querySelector(".result-title");
                 title.replaceChildren();
                 let displayTitle = item.title || "(untitled)";
@@ -3194,7 +3194,14 @@
                     link.target = "_blank";
                     link.rel = "noopener";
                     if (item.mimetype) link.dataset.mimetype = item.mimetype;
-                    link.textContent = displayTitle;
+                    const label = document.createElement("span");
+                    label.className = "result-title-text";
+                    label.textContent = displayTitle;
+                    const action = document.createElement("span");
+                    action.className = "result-open";
+                    action.textContent = t(isHtmlMimetype(item.mimetype) ? "Open article" : "Open");
+                    action.setAttribute("aria-hidden", "true");
+                    link.append(label, action);
                     title.appendChild(link);
                 } else {
                     title.textContent = displayTitle;
@@ -4533,7 +4540,18 @@
             $("results").addEventListener("click", (event) => {
                 const target = event.target instanceof Element ? event.target : null;
                 const link = target?.closest(".result-title a[href]");
-                if (!link || modifiedClick(event)) return;
+                if (!link) {
+                    if (
+                        modifiedClick(event) ||
+                        target?.closest("a, button, input, select, textarea, details, [contenteditable]") ||
+                        window.getSelection()?.toString()
+                    ) {
+                        return;
+                    }
+                    target?.closest(".result")?.querySelector(".result-title a[href]")?.click();
+                    return;
+                }
+                if (modifiedClick(event)) return;
                 if (new URL(link.href, location.href).origin !== location.origin) return;
                 if (!isHtmlMimetype(link.dataset.mimetype)) return;
                 event.preventDefault();

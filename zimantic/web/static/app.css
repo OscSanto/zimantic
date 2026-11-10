@@ -445,17 +445,48 @@ ol.results {
     flex: 1;
     min-width: 0;
 }
+.result-linked {
+    cursor: pointer;
+}
+.result-linked:hover,
+.result-linked:focus-within {
+    border-color: var(--accent);
+}
 .result-title {
+    align-items: center;
+    display: flex;
     font-size: 1.02rem;
     font-weight: 600;
+    gap: 6px;
 }
 .result-title a {
-    color: var(--text);
+    align-items: center;
+    color: var(--accent);
+    display: flex;
+    flex: 1;
+    gap: 12px;
+    justify-content: space-between;
+    min-height: 44px;
+    min-width: 0;
     text-decoration: none;
 }
-.result-title a:hover {
-    color: var(--accent);
+.result-title-text {
+    overflow-wrap: anywhere;
     text-decoration: underline;
+    text-underline-offset: 0.15em;
+}
+.result-title a:focus-visible {
+    border-radius: 4px;
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+}
+.result-open {
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    font-weight: 500;
+    padding: 5px 8px;
 }
 .result-media {
     border: 1px solid var(--border);

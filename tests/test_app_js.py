@@ -79,7 +79,12 @@ console.log(JSON.stringify({{
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
 class Node {{
-  constructor() {{ this.children = []; this.textContent = ""; this.dataset = {{}}; }}
+  constructor() {{
+    this.children = []; this.textContent = ""; this.dataset = {{}};
+    this.classes = new Set();
+    this.classList = {{toggle: (name, enabled) =>
+      enabled ? this.classes.add(name) : this.classes.delete(name)}};
+  }}
   replaceChildren(...children) {{ this.children = children; }}
   append(...children) {{ this.children.push(...children); }}
   appendChild(child) {{ this.append(child); }}
@@ -101,10 +106,11 @@ const previewBlocks = (text) => [text], previewEndsWithPunctuation = () => true;
 const highlight = (text) => text;
 const current = {{streaming: true, terms: []}};
 {_function_source(source, "function resourceDetails(", "function isHtmlMimetype(")}
+{_function_source(source, "function isHtmlMimetype(", "function mediaBadge(")}
 {_function_source(source, "function mediaBadge(", "function modifiedClick(")}
 {_function_source(source, "function setResultNode(", "function newResultNode(")}
 setResultNode(node, {{
-  title: "Count", resource: {{
+  title: "Count", url: "/content/manual/count", mimetype: "text/html", resource: {{
     kind: "exercise", author: "<script>unsafe()</script>", description: "Public description.",
   }},
 }});
@@ -113,12 +119,16 @@ const initial = {{
   detailsHidden: parts[".result-resource"].hidden,
   snippet: parts[".result-snippet"].innerHTML,
   snippetHidden: parts[".result-snippet"].hidden,
+  linked: node.classes.has("result-linked"),
+  link: parts[".result-title"].children[0].children.map((child) => child.textContent),
 }};
 setResultNode(node, {{title: "Other result", lead: "Extracted body."}});
 console.log(JSON.stringify({{
   initial, details: parts[".result-resource"].textContent,
   detailsHidden: parts[".result-resource"].hidden,
   snippet: parts[".result-snippet"].innerHTML,
+  linked: node.classes.has("result-linked"),
+  titleChildren: parts[".result-title"].children.length,
 }}));
 """
         result = subprocess.run(
@@ -130,10 +140,76 @@ console.log(JSON.stringify({{
             "detailsHidden": False,
             "snippet": "<p>Public description.</p>",
             "snippetHidden": False,
+            "linked": True,
+            "link": ["Count", "Open article"],
         })
         self.assertEqual(payload["details"], "")
         self.assertTrue(payload["detailsHidden"])
         self.assertEqual(payload["snippet"], "<p>Extracted body.</p>")
+        self.assertFalse(payload["linked"])
+        self.assertEqual(payload["titleChildren"], 0)
+
+    def test_result_card_taps_open_the_title_link_but_preserve_controls_and_selection(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/?q=teaching");
+let selection = "", handler;
+const window = {{getSelection: () => ({{toString: () => selection}})}};
+const $ = () => ({{addEventListener: (_name, fn) => {{ handler = fn; }}}});
+let opened = 0, forwarded = 0, prevented = 0;
+const openArticleModal = () => {{ opened++; }};
+{_function_source(source, "function isHtmlMimetype(", "function mediaBadge(")}
+{_function_source(source, "function modifiedClick(", "function articleUrlValue(")}
+{_function_source(source, '$("results").addEventListener("click"', '$("libraryGrid").addEventListener("click"')}
+class Element {{
+  constructor(kind) {{ this.kind = kind; }}
+  closest(selector) {{
+    if (selector === ".result-title a[href]") return this.kind === "title" ? link : null;
+    if (selector === ".result") return card;
+    return this.kind === "control" ? this : null;
+  }}
+}}
+const event = (kind, extra = {{}}) => ({{
+  target: new Element(kind), button: 0,
+  preventDefault() {{ prevented++; }}, ...extra,
+}});
+const link = {{
+  href: "http://example.test/content/manual/One", dataset: {{mimetype: "text/html"}},
+  click() {{ forwarded++; handler(event("title")); }},
+}};
+const card = {{querySelector: () => link}};
+const counts = () => [opened, forwarded, prevented];
+handler(event("snippet"));
+handler(event("thumbnail"));
+const cardTaps = counts();
+handler(event("control"));
+selection = "selected preview text";
+handler(event("snippet"));
+selection = "";
+handler(event("snippet", {{ctrlKey: true}}));
+handler(event("title", {{ctrlKey: true}}));
+handler(event("title", {{button: 1}}));
+const ignored = counts();
+handler(event("title"));
+const titleTap = counts();
+link.dataset.mimetype = "application/pdf";
+handler(event("snippet"));
+const pdf = counts();
+link.dataset.mimetype = "text/html";
+link.href = "https://other.example/article";
+handler(event("title"));
+console.log(JSON.stringify({{cardTaps, ignored, titleTap, pdf, external: counts()}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(json.loads(result.stdout), {
+            "cardTaps": [2, 2, 2],
+            "ignored": [2, 2, 2],
+            "titleTap": [3, 2, 3],
+            "pdf": [3, 3, 3],
+            "external": [3, 3, 3],
+        })
 
     def test_directory_listing_filters_names_and_sorts_folders_first(self):
         page = directory_page("Files", "", "/article/files/", []).decode()

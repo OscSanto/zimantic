@@ -550,6 +550,90 @@ console.log(JSON.stringify({{sameOrigin, crossOrigin: location.href}}));
         self.assertEqual(payload["sameOrigin"], "http://example.test/library")
         self.assertEqual(payload["crossOrigin"], "http://example.test/?q=q")
 
+    def test_modal_article_changes_discard_child_history_and_stale_frame_events(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        payload = _run_node(f"""
+const attached = [], messages = [];
+let navigationPosts = 0;
+const classes = {{add() {{}}, remove() {{}}}};
+class Frame {{
+  constructor(src = "") {{
+    this.src = src;
+    this.handlers = {{}};
+    this.contentWindow = {{postMessage: (data) => messages.push(data)}};
+  }}
+  cloneNode() {{ return new Frame(this.src); }}
+  removeAttribute(name) {{ if (name === "src") this.src = ""; }}
+  addEventListener(name, fn) {{ this.handlers[name] = fn; }}
+  replaceWith(fresh) {{
+    attached.push(fresh.src);
+    elements.articleModalFrame = fresh;
+  }}
+  focus() {{}}
+}}
+const elements = {{
+  articleModal: {{hidden: true}}, articleModalFrame: new Frame(),
+}};
+const $ = (id) => elements[id];
+const wrap = {{inert: false}};
+const document = {{
+  activeElement: {{}}, querySelector: () => wrap,
+  documentElement: {{classList: classes}}, body: {{classList: classes}},
+}};
+const location = new URL("http://example.test/?q=teaching");
+const appPath = (path) => path;
+let activeModalUrl = null, activeLibraryArticleUrl = null, modalPreviousFocus = null;
+let previousModalArticleUrl = null, pendingModalArticleUrl = null, pendingModalNavigation = null;
+let activeParentNavigation = null, parentNavigationSequence = 0;
+const hideExternalLinkNotice = () => {{}};
+const postArticleModalNavigation = () => {{ navigationPosts++; }};
+const window = {{addEventListener(_name, fn) {{ this.message = fn; }}}};
+{_section(source, "function articleUrlValue(", "// The modal loads a trusted")}
+{_section(source, "function showArticleModal(", "function modalStateEntry(")}
+{_section(source, "function bindArticleFrameLoad(", "function hideArticleModal(")}
+{_section(source, 'window.addEventListener("message", (event) => {', "function setResultNode(")}
+const one = "http://example.test/content/manual/One";
+const two = "http://example.test/content/manual/Two";
+showArticleModal(one, "search");
+const first = elements.articleModalFrame;
+first.handlers.load();
+showArticleModal(two, "follow");
+const second = elements.articleModalFrame;
+first.handlers.load();
+window.message({{
+  source: first.contentWindow,
+  data: {{type: "zimantic-article-ready", url: one}},
+}});
+const afterStale = {{url: activeModalUrl, navigationPosts}};
+second.handlers.load();
+// Restoring the previous top-level entry must create a new browsing context,
+// not traverse the old iframe's independently restored session history.
+showArticleModal(one, "search");
+const restored = elements.articleModalFrame;
+showArticleModal(one, "search");
+console.log(JSON.stringify({{
+  attached, afterStale, navigationPosts, messages,
+  fresh: first !== second && second !== restored && first !== restored,
+  unchanged: elements.articleModalFrame === restored,
+  modalOpen: !elements.articleModal.hidden, inert: wrap.inert,
+}}));
+""")
+        self.assertEqual(payload["attached"], [
+            "http://example.test/content/manual/One",
+            "http://example.test/content/manual/Two",
+            "http://example.test/content/manual/One",
+        ])
+        self.assertEqual(payload["afterStale"], {
+            "url": "http://example.test/content/manual/Two",
+            "navigationPosts": 1,
+        })
+        self.assertEqual(payload["navigationPosts"], 2)
+        self.assertEqual(payload["messages"], [])
+        self.assertTrue(payload["fresh"])
+        self.assertTrue(payload["unchanged"])
+        self.assertTrue(payload["modalOpen"])
+        self.assertTrue(payload["inert"])
+
 
 if __name__ == "__main__":
     unittest.main()
