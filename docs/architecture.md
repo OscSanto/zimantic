@@ -5,14 +5,14 @@ one local content route.
 
 ## Providers
 
-- **ZIM** collections use `[[collections]]` entries with `type = "zim"`.
-- **Files** collections index and serve a configured directory tree. Child
+- ZIM collections use `[[collections]]` entries with `type = "zim"`.
+- Files collections index and serve a configured directory tree. Child
   source links stay within the collection. Hidden and excluded paths are not
   served.
-- **Kolibri** collections read a supported v0.19.5 SQLite installation through
+- Kolibri collections read a supported v0.19.5 SQLite installation through
   private, read-only snapshots. Each channel is a collection; topics are
   sources. Captions, OCR, and ASR are independent build-time options.
-- **Kiwix** collections search remote books through the `kiwix-serve` API and
+- Kiwix collections search remote books through the `kiwix-serve` API and
   return external links. They do not serve local content.
 - The library and source APIs expose `provider`, `collection`, `media_types`,
   `indexed_count`, `truncated`, and `body_truncated_count`. ZIM, Files, and
@@ -62,7 +62,7 @@ budget with independent archive/searcher handles per slot. It requires
 GIL-releasing reader bindings; each worker caches at most four
 `(path, version)` pairs. Native search objects do not escape their worker.
 The thread backend never reuses a timed-out slot until its native call returns.
-Closing it rejects new work and cancels pending jobs, but cannot interrupt a
+Closing it rejects further work and cancels pending jobs, but cannot interrupt a
 running native call or promise immediate interpreter exit. Both backends avoid
 unrequested snippets when the binding supports `include_snippets=False`.
 
@@ -86,19 +86,19 @@ There are two reasons to retain the process boundary:
 
 ### Process/thread comparison, November 8, 2026
 
-The comparison used Python 3.13.12, libzim 4.1.0, and Linux with 20 available
-logical CPUs. Each configuration had three fresh-process trials, warmed
+The comparison uses Python 3.13.12, libzim 4.1.0, and Linux with 20 available
+logical CPUs. Each configuration has three fresh-process trials, warmed
 caches, 192 searches per measured trial, and a result limit of 16. The
-12-query mix included common terms, `"new york"`, and a nonexistent term.
-The single-archive workload used `wikipedia_en_top_mini_2026-09.zim`; the
-four-archive workload added `wikipedia_en_geography_maxi_2026-07.zim`,
+12-query mix includes common terms, `"new york"`, and a nonexistent term.
+The single-archive workload uses `wikipedia_en_top_mini_2026-09.zim`; the
+four-archive workload includes `wikipedia_en_geography_maxi_2026-07.zim`,
 `wikisource_en_all_nopic_2026-09.zim`, and
 `libretexts.org_en_stats_2026-01.zim`.
 
-The process variant used the existing helper pool. The thread variant shared
-one locked searcher per archive and wrote unbuffered begin/end breadcrumbs
-containing the thread ID and archive basename. Plain threads performed
-similarly. Results agreed across variants. These are native-search
+The process variant uses the existing helper pool. The thread variant shares
+one locked searcher per archive and writes unbuffered begin/end breadcrumbs
+containing the thread ID and archive basename. Plain threads perform
+similarly. Results agree across variants. These are native-search
 microbenchmarks, not end-to-end web latency or whole-server memory targets.
 
 | Workload | Workers | Processes: searches/s | Threads with breadcrumbs: searches/s |
@@ -109,27 +109,27 @@ microbenchmarks, not end-to-end web latency or whole-server memory targets.
 | Four ZIMs | 4 | 176 | 45 |
 
 Values are medians across the trials. For four ZIMs and four workers,
-processes had a 63 ms p95 search duration versus 265 ms for threads.
+processes have a 63 ms p95 search duration versus 265 ms for threads.
 Durations include backend waits but exclude time queued in the source
 executor. Sampled peak proportional memory (PSS), including the benchmark
-process and its helpers, was approximately 488 MiB versus 266 MiB.
-First-search latency was approximately 50 ms versus 27 ms, with warm OS
+process and its helpers, is approximately 488 MiB versus 266 MiB.
+First-search latency is approximately 50 ms versus 27 ms, with warm OS
 caches; this is not cold server startup.
 
-Breadcrumbs plus `faulthandler` successfully identified the Hawaii archive
-and crashing thread, but the threaded process still died with SIGABRT.
+Breadcrumbs plus `faulthandler` identify the Hawaii archive
+and crashing thread, but the threaded process dies with SIGABRT.
 Diagnostics are not crash containment. Cheap startup discovery and checksum
 validation alone cannot prove that every native search query is safe.
 
 ### Worker budget
 
 `Search` owns one helper pool shared by every ZIM collection. Runtimes borrow
-it, including newly discovered runtimes after reload; closing a collection
+it, including runtimes discovered after reload; closing a collection
 does not close the shared pool. Server shutdown stops its helpers and cancels
 queued source work without allowing the closed pool to spawn replacements.
 Slots are configured even when startup discovery has no usable ZIM sources;
 subprocesses start only when native search first uses those slots.
-Each helper still caches at most four archive/searcher pairs. Deployment
+Each helper caches at most four archive/searcher pairs. Deployment
 budgets must include helpers, not just the server's own RSS.
 
 `libzim_search_processes` is an independent global setting, not a multiplier per
@@ -152,7 +152,7 @@ at eight, while `onnx_query_threads` budgets threads inside a query embedding
 from usable physical cores, leaving one and capped at four. These are separate
 from native subprocess memory and user-request admission. Profile selection
 and build budgeting use the same affinity/cgroup-aware hardware detector.
-Normal configs omit these counts; old names remain deprecated aliases.
+Normal configs omit these counts; deprecated names are accepted as aliases.
 See [advanced resource overrides](usage.md#advanced-resource-overrides).
 
 Resource kills must not masquerade as archive corruption. Native fatal
@@ -168,17 +168,17 @@ helpers for checksum and query probes, without delaying startup.
 
 ### Constrained worker/budget comparison, November 8, 2026
 
-[`run_native.py`](../tests/benchmarks/run_native.py) ran 132 full-workload trials
+[`run_native.py`](../tests/benchmarks/run_native.py) runs 132 full-workload trials
 over the same four archives and query mix, with eight source threads, 96
-warm-up searches and 96 measured searches per trial. Each configuration had
-two fresh systemd user services. CPUQuota simulated 1, 2, 4, or 8 usable
-CPUs; MemoryMax ranged from 256 MiB to 2 GiB, with swap disabled.
-The services were isolated and collected after each run; host caches were
-not dropped. This simulates resource budgets, not Raspberry Pi instruction
+warm-up searches and 96 measured searches per trial. Each configuration has
+two fresh systemd user services. CPUQuota simulates 1, 2, 4, or 8 usable
+CPUs; MemoryMax ranges from 256 MiB to 2 GiB, with swap disabled.
+The harness isolates and collects the services after each run; it does not
+drop host caches. This simulates resource budgets, not Raspberry Pi instruction
 speed, storage, or complete web-server performance.
 
 The [native-only matrix](../tests/benchmarks/results/native-workers-2026-11-08.json)
-used the initial four-helper automatic ceiling:
+uses a four-helper automatic ceiling:
 
 | CPU quota | MemoryMax | 1 helper: searches/s | 2 helpers | 4 helpers | 8 helpers |
 |---|---:|---:|---:|---:|---:|
@@ -190,15 +190,15 @@ used the initial four-helper automatic ceiling:
 | 8 CPUs | 2 GiB | 49 | 93 | 175 | 294 |
 
 Values are medians of successful trials. Extra helpers beyond the CPU quota
-provided no benefit or reduced throughput, while increasing memory.
-Eight helpers on eight CPUs did improve throughput substantially, so the
-automatic ceiling increased from four to eight, bounded by CPU, source-thread
+provide no benefit or reduce throughput, while increasing memory.
+Eight helpers on eight CPUs improve throughput substantially. The automatic
+budget therefore allows up to eight helpers, bounded by CPU, source-thread
 capacity, and memory rather than an unconditional eight-process default.
-Counts above eight remain explicit overrides, not a measured recommendation.
+Counts above eight are explicit overrides, not a measured recommendation.
 
 The [headroom matrix](../tests/benchmarks/results/native-budgets-2026-11-08.json)
-then retained 256 MiB of touched anonymous memory to simulate server/model
-residency and checked the revised automatic budget:
+retains 256 MiB of touched anonymous memory to simulate server/model
+residency and checks the automatic budget:
 
 | CPU quota | MemoryMax | Automatic helpers | Searches/s | Median peak cgroup memory |
 |---|---:|---:|---:|---:|
@@ -208,20 +208,20 @@ residency and checked the revised automatic budget:
 | 8 CPUs | 1 GiB | 5 | 211 | 756 MiB |
 | 8 CPUs | 2 GiB | 8 | 289 | 1,020 MiB |
 
-All automatic trials completed. Two helpers also worked at 2 CPUs/512 MiB
-(93 searches/s), but their approximately 466 MiB cgroup peak left little
+All automatic trials complete. Two helpers also work at 2 CPUs/512 MiB
+(93 searches/s), but their approximately 466 MiB cgroup peak leaves little
 room for variable model work, previews, and indexes. The conservative
-automatic budget keeps one there. Four/eight helpers failed at 512 MiB,
-and eight failed at 1 GiB with the resident allocation.
+automatic budget keeps one there. Four/eight helpers fail at 512 MiB,
+and eight fail at 1 GiB with the resident allocation.
 
-Sharing also improved utilization at the same total helper count. On
+Sharing also improves utilization at the same total helper count. On
 8 CPUs/2 GiB with the resident allocation, one shared eight-helper pool
-managed 295 searches/s versus 197 for four per-collection two-helper pools.
-The old per-collection allocation failed under smaller limits. Native-only
-OOM counters confirmed killed helpers without blacklisting any archive.
-When the service itself was killed before completing, the report preserves
+manages 295 searches/s versus 197 for four per-collection two-helper pools.
+Per-collection allocation fails under smaller limits. Native-only
+OOM counters confirm killed helpers without blacklisting any archive.
+When the service itself is killed before completing, the report preserves
 that failure rather than inventing throughput or memory measurements.
-Successful result digests agreed across both matrices.
+Successful result digests agree across both matrices.
 
 Cgroup peaks include all memory charged to the service, but warm cached
 archive pages may remain charged elsewhere. Process-tree PSS is recorded
@@ -230,14 +230,14 @@ arbitrary archives, models, or concurrent article reads fit the same limits.
 
 ### Other limits containing four
 
-The old native process ceiling was a heuristic, not a requirement of libzim
-or Python. It is now centralized in the automatic budget and has no duplicate
-standalone-pool ceiling. Other fours measure different work and should not
-be changed together:
+The native process ceiling is a heuristic, not a requirement of libzim
+or Python. It is centralized in the automatic budget and has no duplicate
+standalone-pool ceiling. Other fours measure different work and must not
+change together:
 
-| Setting or limit | Meaning | Current rationale |
+| Setting or limit | Meaning | Rationale |
 |---|---|---|
-| `MAX_CACHED_ARCHIVES = 4` | Archive/searcher pairs cached by each helper | Bounds retained handles and memory; the four-archive workload does not establish an optimum for larger libraries, so this LRU cap is not retuned |
+| `MAX_CACHED_ARCHIVES = 4` | Archive/searcher pairs cached by each helper | Bounds retained handles and memory; the four-archive workload does not establish an optimum for larger libraries, so this LRU cap stays fixed |
 | `max_concurrent_searches = 4` on desktop | Admitted user searches, not native processes | Bounds model work, previews, and request backlog; configurable and separate from this benchmark |
 | Query embedding threads capped at four across profiles | ONNX threads per query | Short-query synchronization tradeoff; `onnx_query_threads` overrides it, and [embedding measurements](usage.md#build-behavior-and-locking) are separate |
 | Automatic build worker CPU/RAM divisors of four | Approximately four CPU threads/four GiB per source build | A build resource heuristic, not a four-worker maximum; unrelated to the native-search pool |
@@ -245,7 +245,7 @@ be changed together:
 ### Reader GIL/thread comparison, November 9, 2026
 
 The [raw results and median summaries](../tests/benchmarks/results/native-threads-2026-11-09.json)
-contain 81 successful fresh-service trials. Every repeated batch returned the
+contain 81 successful fresh-service trials. Every repeated batch returns the
 same path/title digest. The workload covers astronomy and medicine Wikipedia
 archives and Cooking Stack Exchange, twelve fixed queries, and sixteen hits.
 Each trial warms 144 searches, then repeats the 144-search batch for at least
@@ -257,12 +257,12 @@ has `CPUQuota=2000%`, `MemoryMax=8192M`; the Pi-like service has
 512 MiB allocation to represent server/model headroom. This is a CPU-time/RAM
 budget proxy, not ARM/Pi clock or storage emulation.
 
-The controlled baseline uses unchanged python-libzim `57555c2` and zimantic
-`cb261c5`, rebuilt against the same patched native libzim `ad888b4` stack as
-the updated variants: libzim 9.8.2, Xapian 1.4.31, ICU 78.3, Python 3.13.12,
+The controlled baseline uses python-libzim `57555c2` and zimantic
+`cb261c5`, built against the same patched native libzim `ad888b4` stack as
+the measured variants: libzim 9.8.2, Xapian 1.4.31, ICU 78.3, Python 3.13.12,
 Cython 3.3.1 and GCC 16. The native database-lock correction is present in
-both controlled variants. Separate original-installed-binding trials remain
-in the report; they used older native dependencies and gave similar baseline
+both controlled variants. Separate installed-binding trials in the report
+use earlier native dependencies and give similar baseline
 throughput. Installed distribution metadata alone does not identify a
 `PYTHONPATH`-overridden extension; the report records source provenance.
 
@@ -273,15 +273,15 @@ One search is one query against one archive, not an entire user request.
 
 | Profile | Variant | Searches/s | CPU ms/search | CPU cores used | Peak PSS MiB | p95 ms |
 |---|---|---:|---:|---:|---:|---:|
-| Desktop | Unchanged reader, processes | 315 | 23.898 | 7.48 | 1,484 | 50.42 |
-| Desktop | Updated reader, processes | 7,543 | 0.703 | 5.30 | 644 | 1.83 |
-| Desktop | Updated reader, threads | 9,197 | 0.574 | 5.25 | 562 | 1.40 |
-| Four-CPU/2 GiB proxy | Unchanged reader, processes | 183 | 21.137 | 3.85 | 1,069 | 46.87 |
-| Four-CPU/2 GiB proxy | Updated reader, processes | 5,373 | 0.665 | 3.58 | 596 | 1.48 |
-| Four-CPU/2 GiB proxy | Updated reader, threads | 7,904 | 0.449 | 3.54 | 556 | 0.99 |
+| Desktop | Baseline reader, processes | 315 | 23.898 | 7.48 | 1,484 | 50.42 |
+| Desktop | GIL-releasing reader, processes | 7,543 | 0.703 | 5.30 | 644 | 1.83 |
+| Desktop | GIL-releasing reader, threads | 9,197 | 0.574 | 5.25 | 562 | 1.40 |
+| Four-CPU/2 GiB proxy | Baseline reader, processes | 183 | 21.137 | 3.85 | 1,069 | 46.87 |
+| Four-CPU/2 GiB proxy | GIL-releasing reader, processes | 5,373 | 0.665 | 3.58 | 596 | 1.48 |
+| Four-CPU/2 GiB proxy | GIL-releasing reader, threads | 7,904 | 0.449 | 3.54 | 556 | 0.99 |
 
-Avoiding discarded snippets dominates the improvement: the updated process
-backend also benefits. Against updated processes on the identical stack,
+Avoiding discarded snippets dominates the gain: the GIL-releasing process
+backend also benefits. Against GIL-releasing processes on the identical stack,
 threads add 22% desktop throughput and 47% Pi-proxy throughput, while using
 less CPU per search and less memory. This is not a 29-43x pure GIL speedup.
 
@@ -298,19 +298,19 @@ These are the best tested native-search settings, not a global optimum:
 | `libzim_search_processes` | `8` | `4` |
 | `source_query_threads` | `8` | `4` |
 
-Threads remain opt-in and require the patched binding and native mutex fix.
-These overrides do not retune ONNX, FAISS, previews, request admission or build
+Threads are opt-in and require the patched binding and native mutex fix.
+These overrides do not change ONNX, FAISS, previews, request admission or build
 workers. Full-server model/index residency is not measured. OS caches remain
 warm, file pages can be charged outside the service cgroup, and PSS is sampled,
 so neither the 2 GiB limit nor this reserve proves whole-server Pi viability.
 
 ### Snippet prefetch comparison, November 9, 2026
 
-The [snippet runner](../tests/benchmarks/run_snippets.py) compared HEAD
-`5637b72`'s deferred previews with fetching native snippets or identical HTML
-leads for the first four candidates per source. It also checked fetching all
+The [snippet runner](../tests/benchmarks/run_snippets.py) compares deferred previews
+with fetching native snippets or identical HTML
+leads for the first four candidates per source. It also checks fetching all
 sixteen native snippets. These are benchmark-only alternatives; production
-search and its defaults are unchanged.
+search and its defaults stay fixed.
 
 The three archives and twelve queries are the same as the reader comparison
 above. Every query searches all three archives, ranks their candidates with
@@ -326,7 +326,7 @@ The [single-client report](../tests/benchmarks/results/snippets-single-client-20
 uses four native/source workers, a four-CPU/2 GiB quota, and 512 MiB of
 simulated residency. Values below are medians of the three process-backend
 trials. The miss case never reuses previews; the hit case has every displayed
-path cached, but still bypasses the finalized-query cache.
+path cached, but bypasses the finalized-query cache.
 
 | Strategy | Miss queries/s | CPU ms/query | Miss p50 ms | Miss p95 ms | Search/rank p50 ms | Cached-preview p50 ms |
 |---|---:|---:|---:|---:|---:|---:|
@@ -358,7 +358,7 @@ Here selective prefetch wins substantially: native snippets yield 3.5x
 process-backend throughput, and identical HTML leads yield 3.4x. This is
 parallel preview work, not free text already retrieved by the search query.
 Native snippet generation runs outside the GIL; normal HTML preview traversal
-still executes Python. Moving that traversal into separate helper processes
+executes Python. Moving that traversal into separate helper processes
 also scales, whereas moving it into native-worker threads does not.
 
 The [single-archive control](../tests/benchmarks/results/snippets-one-source-2026-11-09.json)
@@ -378,11 +378,11 @@ characters with selective native reuse and 498 with all-native reuse, versus
 opening-text previews. They must not be stored in the existing query-independent
 preview cache without changing its key.
 
-**Recommendation:** retain deferred previews as the default; do not restore
+Recommendation: retain deferred previews as the default; do not restore
 unconditional native snippets. Selective worker-side work is promising for
 uncached concurrent searches. A more targeted follow-up would send only
 displayed, cache-missing paths to preview workers after ranking, preserving the
-current lead text without speculative reads. That alternative has not been
+existing lead text without speculative reads. That alternative is not
 benchmarked here.
 
 These are native-only search/preview pipeline results, not full hybrid-search
@@ -403,7 +403,7 @@ limits, and Kolibri snapshot/HTML5-zip limits. Global limits include body size,
 derived-cache size, search deadlines, and listing size.
 
 Index truncation uses `truncated` and `indexed_count`. Body-text truncation uses
-`body_truncated_count`. A truncated source still serves all permitted content.
+`body_truncated_count`. A truncated source serves all permitted content.
 See [limitations](limitations.md) for operational constraints and
 [benchmark instructions](../tests/benchmarks/README.md) for the Raspberry Pi 4
 measurement procedure.

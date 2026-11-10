@@ -87,7 +87,7 @@
             "All languages": "Todos los idiomas",
             "Media type": "Tipo de medio",
             "Filter by media type": "Filtrar por tipo de medio",
-            "All Media": "Todos los medios",
+            "All media": "Todos los medios",
             "Filtered by": "Filtrado por",
             "Reset all filters": "Restablecer todos los filtros",
             "Text": "Texto",

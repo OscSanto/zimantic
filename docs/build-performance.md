@@ -1,7 +1,7 @@
 # Build performance and search quality
 
 This document records index-size, retrieval-quality, build-time, memory, and
-query-latency measurements for the current index pipeline.
+query-latency measurements for the index pipeline.
 
 ## Advisory index size goal
 
@@ -15,17 +15,17 @@ budget for those too.
 
 Report the index-to-source byte ratio alongside build time and search quality.
 Small, highly compressed text archives can exceed the goal substantially:
-the 6,331,350-byte Community Building ZIM measured 79.1% at HEAD `a27dd69`,
-56.1% with compact body FTS, and 46.3% with native-only body retrieval.
+the 6,331,350-byte Community Building ZIM measured 79.1% at reference revision
+`a27dd69`, 56.1% with compact body FTS, and 46.3% with native-only body retrieval.
 None meets the goal; removing body FTS alone is insufficient on this fixture.
 
 ## Body FTS alternatives and search quality
 
 The benchmark variants differ only in the body-search channel. Title FTS and
 semantic vectors are the same in every variant. Production indexes use compact Unicode61
-with `remove_diacritics 2`. Production only reads and resumes the current index
+with `remove_diacritics 2`. Production only reads and resumes the active index
 schema and canonical metadata; `build` can reuse compatible vectors from v0
-root-level pairs while rebuilding the current schema. In this comparison, HEAD
+root-level pairs while rebuilding the active schema. In this comparison, HEAD
 denotes the positional control. The harness reproduces it explicitly; it is not
 the production default.
 
@@ -43,14 +43,14 @@ token counts unused by that query; it must use table-level MATCH, and cannot
 support SQLite phrase/NEAR queries, column filters, or normal length-aware BM25
 with this contentless configuration.
 
-In a 48-query provider-only probe, native-only retrieval differed in 32 top-10
-lists: 10 reordered the same results, 22 had different members, and 7 had a
+In a 48-query provider-only probe, native-only retrieval differs in 32 top-10
+lists: 10 reorder the same results, 22 have different members, and 7 have a
 different first result. These are not relevance-failure counts. The probe did not
 include semantic retrieval or final HTTP ranking.
 
 The HTTP comparison uses the [evaluation method](../evaluation/README.md#small-zim-body-index-comparison)
 on the same small archive, real HTTP search and a fixed synthetic query set.
-There are 120 English queries, 41 dev and 79 test; no settings were tuned.
+There are 120 English queries, 41 dev and 79 test; no settings are tuned.
 All variants have identical embedding vectors. Reported results are test-only:
 
 | Mode / variant | #1 | Top 5 | Top 20 | MRR | Fixed / broken at #1 vs HEAD |
@@ -77,7 +77,7 @@ fragments, but the native index does not match them in the target documents.
 The native index does find the underlying articles for other terms, including
 Zulip and DARPANet. These losses are not proof that native retrieval intrinsically
 lacks the article text; a native-only approach also needs compatible query
-handling. That follow-up was not tuned on these test queries.
+handling. This document does not tune that follow-up on these test queries.
 
 Treat the rates as a small-ZIM smoke comparison: labels are synthetic and
 incomplete, generated sentences can be awkward or include profiles, and
@@ -102,8 +102,8 @@ Raw content, positions, and document lengths are separate choices:
 | Default stored content | Yes | Yes | Yes | Yes |
 
 HEAD has the information needed for
-[`bm25(body)`](https://www.sqlite.org/fts5.html#the_bm25_function), but its current
-body query does not use it. The BM25 experiment changes only candidate ordering:
+[`bm25(body)`](https://www.sqlite.org/fts5.html#the_bm25_function), but its body
+query does not use it. The BM25 experiment changes only candidate ordering:
 `ORDER BY bm25(body), rowid` (SQLite's better scores are more negative), followed
 by the existing RRF and final ranking. It retains the same Boolean AND query;
 this is not a redesign of retrieval or fusion.
@@ -133,10 +133,10 @@ from #1 to #3 lexical and #2 to #4 hybrid. The listing contains related material
 single-answer labels do not judge every alternative's relevance.
 
 A dedicated warm SQL-only sweep on the same physical indexes (48 queries,
-three trials of 20 repetitions, limit 16) measured median body queries at
+three trials of 20 repetitions, limit 16) measures median body queries at
 **0.0175 ms unranked versus 0.0335 ms BM25** for contentless HEAD; stored content
-was effectively identical at 0.0174/0.0336 ms. That small extra cost does not
-materially change HTTP latency: test hybrid medians were 112-115 ms across the
+is effectively identical at 0.0174/0.0336 ms. That small extra cost does not
+materially change HTTP latency: test hybrid medians are 112-115 ms across the
 storage/BM25 controls. These HTTP timings are single evaluation passes, not
 counterbalanced latency trials. There is no measured BM25 quality improvement
 on this fixture, not evidence that BM25 is generally worse.
@@ -151,10 +151,11 @@ The second stage compares the dev-preferred compact layout across
 contentless with **full detail**, `columnsize=0`: SQLite rejects query tokens
 longer than three characters with trigram `detail=none`. It is substring
 retrieval, not the same word-token compact layout, and cannot match terms shorter
-than three characters. Query normalization remains unchanged in this comparison.
+than three characters. Query normalization is the same in this comparison.
 
-Unicode61 `remove_diacritics 2` was retained before inspecting test results.
-Bare Unicode61 and ASCII tied on English dev; Porter and trigram worsened #1.
+Unicode61 `remove_diacritics 2` is the reference setting, chosen before test-result
+inspection. Bare Unicode61 and ASCII tied on English dev; Porter and
+trigram worsened #1.
 Held-out results:
 
 | Body tokenizer | Hybrid #1 / MRR | Hybrid fixed / broken #1 | Lexical #1 / MRR | Lexical fixed / broken #1 |
@@ -177,7 +178,7 @@ one of its two lost hybrid targets is a generated user-profile label.
 
 On the same four-logical-CPU, warm-cache host, rotated fresh-process lexical
 builds (three per variant) and 48-query provider trials (three processes, three
-repetitions each) measured:
+repetitions each) measure:
 
 | Body variant | Lexical build median | Full build, single observation | Full SQLite MiB | SQLite + FAISS / ZIM | Warm helper-provider median |
 |---|---:|---:|---:|---:|---:|
@@ -200,13 +201,13 @@ Default storage costs about **6.1 times compact's SQLite space** for identical
 results; small build/runtime differences are not compelling. Porter saves
 about 8% of SQLite bytes but loses labelled #1 results. Compact Unicode61 mode 2 is the selected tokenizer, not ASCII or trigram; none
 reaches the advisory 10% total-index goal. Compact is the default for indexes;
-candidate matching and ranking remain unchanged.
+candidate matching and ranking do not change.
 
 ## ZIM iteration and resource bounds
 
 ZIM builds use `iter_efficient()` from python-libzim 4.1.0 or later. This
 iterator follows storage order; its exact order is not part of the public
-contract. Older bindings use entry-ID order, which may be slower.
+contract. Earlier python-libzim versions use entry-ID order, which can be slower.
 `iter_by_path()` and `iter_by_title()` do not follow storage order. The build
 records the selected order and its digest. Resume preserves ID order after an
 upgrade and rejects a different order or an incomplete manifest instead of
@@ -221,7 +222,7 @@ holds.
 Automatic worker selection respects CPU affinity, physical cores when
 available, parent and leaf cgroup memory limits, and available RAM. A bounded
 shared model pool limits concurrent embedding work. Low-memory arena
-reclamation remains enabled. These limits do not guarantee that an arbitrary
+reclamation is enabled. These limits do not guarantee that an arbitrary
 model fits in memory and do not replace measurements on Raspberry Pi hardware.
 
 ## Token batches and progress
@@ -231,7 +232,7 @@ at word boundaries, encoded once, sorted by capped token length, and grouped
 into model calls with at most **1,000 padded input tokens** by default
 (`embedding_batch_tokens`). Useful-token sums underestimate the workspace
 needed for padding. One input that exceeds the batch budget runs alone and
-remains capped by the model's per-input limit.
+stays capped by the model's per-input limit.
 
 Fast builds commit at least 256 rows per window, independent of the selected
 profile's `batch_size`; these title/path-only rows need no embedding workspace,
@@ -246,7 +247,7 @@ verifies that later work finishes while an earlier batch is blocked, without
 committing out of order.
 Equal token budgets make workspace sizes and scheduling more even,
 not identical-cost: attention depends on sequence length and call overhead
-still matters. Increase the token budget for GPU throughput.
+also matters. Increase the token budget for GPU throughput.
 
 Readable non-redirect entries form the article phase in native storage order.
 Redirects and assets follow as a separate phase. Article progress advances only
@@ -271,8 +272,8 @@ FAISS writing, publication, model/session loading, and command startup are all
 included. GPU timing also includes container startup.
 
 These are fresh-process, warm-filesystem and warm-compiled-cache builds, not
-reused-vector or persistent-process timings. No system caches were dropped.
-After tuning, repeated alternating runs gave:
+reused-vector or persistent-process timings. The procedure drops no system caches.
+After tuning, repeated alternating runs give:
 
 | Backend | Full-command wall seconds, three runs | Median |
 |---|---|---:|
@@ -281,17 +282,17 @@ After tuning, repeated alternating runs gave:
 
 GPU took **11.6% less wall time** (1.13x throughput) on this workload, including
 against CPU with the same larger read windows and token budget. No GPU run
-compiled new shapes or fell back to CPU. Per-source report durations overlap;
+compiled additional shapes or fell back to CPU. Per-source report durations overlap;
 do not sum them to compare complete commands.
 This shared-token-budget comparison is not the fastest CPU configuration:
-the subsequent CPU-specific tuning below is faster than this GPU result.
+the CPU-specific tuning below is faster than this GPU result.
 
 The improvements are shape-isolated compiled caches, a bounded resident
 session pool, and coalescing already queued compatible requests. With the
 256-token model limit, the 1,024-token budget needs four fixed shapes:
 `4x256`, `8x128`, `16x64`, and `32x32`. A separate warm CMake profile spent
-6.535 seconds loading sessions and 8.740 seconds in GPU calls. Small ZIMs still
-favored CPU int8 in separate smoke runs: warm disk caches do not eliminate
+6.535 seconds loading sessions and 8.740 seconds in GPU calls. Small ZIMs
+favor CPU int8 in separate smoke runs: warm disk caches do not eliminate
 session-loading overhead. This is not a universal GPU speedup or a search
 latency result. See [GPU setup and settings](usage.md#gpu-acceleration).
 
@@ -310,30 +311,30 @@ the throughput improvement does not come from dropping content or vectors.
 
 ## CPU int8 throughput tuning
 
-The same desktop and int8 model benefited from a **256-token model-call
-budget**, retaining the default 32-row read window. Eight embedding workers
-with one thread each remained preferable to more workers or multithreaded
-calls. This is measured tuning for this host and model, not a universal change
-to the default token budget.
+On the same desktop and int8 model, a 256-token model-call
+budget with the default 32-row read window is fastest in this measurement.
+Eight embedding workers with one thread each are preferable to more workers or
+multithreaded calls. This is measured tuning for this host and model, not a
+universal default for every host or model.
 
-Profiling revealed a pipeline limit when using smaller calls: a 32-row window
-could require 32 requests, but the eight-worker queue held only 16. Submitting a
-window blocked source reading, then the workers ran out of work while reading
-caught up. CPU queues now hold at least one read window, while retaining the
-worker-based minimum. Model loading stays lazy, GPU queue bounds are unchanged,
-and row windows and the shared body-text budget remain bounded. Legacy
-multi-ZIM builds also forward the configured token budget to the shared pool.
+Profiling shows a pipeline limit with smaller calls: a 32-row window
+can require 32 requests, but the eight-worker queue holds only 16. Submitting a
+window blocks source reading, then the workers run out of work while reading
+catches up. CPU queues hold at least one read window, while retaining the
+worker-based minimum. Model loading stays lazy, GPU queue bounds do not change,
+and row windows and the shared body-text budget stay bounded. Multi-ZIM
+builds also forward the configured token budget to the shared pool.
 
 On the Python Enhancement Proposals archive
-(`peps.python_en_all_2025-09.zim`), smaller calls initially increased model-call
-count from 228 to 715 and slowed the build. A queue trace measured **2.000 s
-blocked on submission**; the corrected queue reduced that to **0.075 s**.
-The profiled build returned from 9.92 s to 8.54 s, matching the original
-large-batch profile at 8.52 s. The regression was lost overlap, not extra model
-computation; total process CPU time was lower with smaller calls.
+(`peps.python_en_all_2025-09.zim`), smaller calls increase the model-call
+count from 228 to 715 and slow the build. A queue trace measures **2.000 s
+blocked on submission** without the one-window bound and **0.075 s** with it.
+The profiled build returns from 9.92 s to 8.54 s, matching the original
+large-batch profile at 8.52 s. The regression is lost overlap, not extra model
+computation; total process CPU time is lower with smaller calls.
 
 Three fresh-process forced rebuilds of CMake + C++, including command startup
-and complete publication, measured:
+and complete publication, measure:
 
 | CPU int8 configuration | Full-command wall seconds | Median |
 |---|---|---:|
@@ -342,11 +343,11 @@ and complete publication, measured:
 
 That is **18.7% less wall time** (1.23x throughput) for the same 6,871
 documents. Increasing the read window to 256 rows was slower than retaining
-32 rows. The tuned CPU observations also beat the earlier 47.049 s GPU median,
-but GPU was not rerun in these CPU-only trials.
+32 rows. The tuned CPU observations also beat the 47.049 s GPU median,
+but GPU is not rerun in these CPU-only trials.
 
-The PEP archive no longer regresses. With the corrected queue in both
-configurations, alternating three-run checks measured:
+The PEP archive does not regress. With the corrected queue in both
+configurations, alternating three-run checks measure:
 
 | PEP build token budget | Full-command wall seconds | Median |
 |---|---|---:|
@@ -357,20 +358,20 @@ Both publish 714 documents with no body truncation. These timings include
 startup; they measure indexing the PEP archive, not execution of Python code.
 
 CMake/C++ document rows, vector IDs, and all 596,366 lexical body postings
-remain identical. Vectors are finite and normalized within float16 storage
-tolerance. Against the earlier 1,024-token CPU reference, corresponding-vector
+stay identical. Vectors are finite and normalized within float16 storage
+tolerance. Against the 1,024-token CPU reference, corresponding-vector
 cosine means are 0.997883/0.997890 and minima 0.994248/0.993637 for CMake/C++.
 Int8 batch-neighbour effects are therefore not bit-identical results; no
-labelled retrieval-quality improvement is claimed. SQLite plus FAISS remains
-about 141.8%/121.6% of the respective archives, still above the advisory goal.
+labelled retrieval-quality improvement is claimed. SQLite plus FAISS is
+about 141.8%/121.6% of the respective archives, above the advisory goal.
 
 See the [CPU configuration example](usage.md#cpu-build-tuning). Global defaults
-remain unchanged so this CPU-specific budget does not become a GPU or ARM
+stay fixed so this CPU-specific budget does not become a GPU or ARM
 recommendation.
 
 ## Reader, preparation, and writer stage split
 
-A full build with one active source can now overlap three stages without
+A full build with one active source can overlap three stages without
 changing batching geometry:
 
 ```text
@@ -388,15 +389,15 @@ The writer processes windows FIFO, awaits that window's future, calls the
 existing `_save_rows()` transaction, advances progress, and only then releases
 that window's body reservation and permit. One `max_pending_per_build` permit
 budget covers every in-flight window across all three queues, and the existing
-shared body-byte budget is unchanged. Commit order, canonical row/vector IDs,
+shared body-byte budget is the same. Commit order, canonical row/vector IDs,
 resume checkpoints, and publication order remain source order.
 
 The staged path is used when one source is actively building. When several
 source builds already run concurrently, source-level overlap fills the shared
-inference pool and the existing coupled per-source path is retained; adding two
-more threads per source measured about 1.5% slower on the two-archive workload
-below. Fast builds and vector-reuse builds also keep their existing synchronous
-paths. A vector-reuse build may use the original staging connection, so it is
+inference pool and the existing coupled per-source path applies; adding two
+more threads per source measures about 1.5% slower on the two-archive workload
+below. Fast builds and vector-reuse builds also use their existing synchronous
+paths. A vector-reuse build may use the existing staging connection, so it is
 not moved across threads.
 
 ### Complete-build measurements
@@ -404,20 +405,20 @@ not moved across threads.
 Fresh-process forced rebuilds, same host and configuration as the CPU tuning
 above (`batch_size = 32`, `embedding_batch_tokens = 256`,
 `onnx_build_workers = 8`, `onnx_build_threads = 1`). Warm filesystem and model
-cache; no system caches dropped; no tests or other CPU benchmarks ran during
+cache; no system caches dropped; no tests or other CPU benchmarks run during
 timing. Each row is the median of its listed runs; command startup and complete
 publication are included. The coupled-path control is the same working tree with
 only the staged route disabled.
 
-| Workload | Coupled path | Staged path | Default policy after measurement |
+| Workload | Coupled path | Staged path | Default policy |
 |---|---:|---:|---:|
 | CMake + C++, 6,871 documents | 42.373 s (6 runs) | 43.030 s (6 runs) | 42.780 s (3 runs) |
 | PEP, 714 documents | 9.555 s (6 runs) | 8.632 s (6 runs) | 8.738 s (3 runs) |
 
 The staged path is **9.7% faster** on the single-source PEP build (about 1.11x
 throughput) and about **1.5% slower** on the two-archive bulk build. With the
-adaptive policy the bulk workload remains at the existing 42.4–42.8 s range and
-PEP stays about 8.5–8.7 s. The previously documented tuned medians were 42.379 s
+adaptive policy the bulk workload stays in the 42.4–42.8 s range and
+PEP stays about 8.5–8.7 s. The tuned medians elsewhere in this document are 42.379 s
 and 9.234 s; absolute values move with host state, so compare rows within this
 table rather than treating small cross-table differences as gains.
 
@@ -433,56 +434,56 @@ PEP default:          8.728 /  8.738 /  8.845
 ```
 
 The bulk profile explains the limit. On a 42.61 s staged run, inference calls
-summed **311.7 s of worker time** across eight workers (about 39 s per worker),
-while ordered `_save_rows()` calls summed **8.1 s**. The writer spent 46.9 s
+sum **311.7 s of worker time** across eight workers (about 39 s per worker),
+while ordered `_save_rows()` calls sum **8.1 s**. The writer spends 46.9 s
 waiting on futures, overlapped with reading and preparation; the coupled control
-spent about 27.0 s blocked in queue insertion from its reader threads. Moving
+spends about 27.0 s blocked in queue insertion from its reader threads. Moving
 that wait to a writer frees the reader, but it cannot reduce the inference work
 that dominates this workload. The single-source PEP build has enough
 reading/preparation/commit work outside inference to benefit.
 
 ### Output integrity and GPU smoke
 
-For both CMake and C++, the coupled and staged builds produced identical
+For both CMake and C++, the coupled and staged builds produce identical
 document rows, lexical body postings, vector IDs, and document/body digests,
 with zero body truncation and all `vecs` rows emptied after FAISS publication.
-Corresponding staged-vs-coupled vectors from `index.faiss` had mean cosine 1.0
-and minimum 0.9999998 after the existing float16 round-trip; vectors were finite
+Corresponding staged-vs-coupled vectors from `index.faiss` have mean cosine 1.0
+and minimum 0.9999998 after the existing float16 round-trip; vectors are finite
 and unit length within float16 tolerance. These are numerical equivalence
 checks, not labelled retrieval-quality measurements.
 
 One warm MIGraphX smoke build using `run_gpu.sh`, `gpu-throughput` settings, and
-the production shape-isolated cache published 2,001 + 4,870 documents with no
+the production shape-isolated cache publishes 2,001 + 4,870 documents with no
 body truncation in 50.125 s. That single observation includes container startup
 and is not a GPU regression or speedup claim; with two concurrent sources the
 adaptive policy keeps the coupled path, so it does not exercise the split.
 
-A separate single-source PEP A/B used the same wrapper, settings, and cache,
+A separate single-source PEP A/B uses the same wrapper, settings, and cache,
 with four runs each: coupled 17.845 / 18.011 / 18.046 / 17.367 s (median
 17.93 s) versus staged 19.456 / 18.219 / 17.531 / 17.214 s (median 17.88 s).
-That is neutral within this small sample, not a GPU speedup. MIGraphX runs remain
-serialized, provider selection is unchanged, and no concurrent MIGraphX
-execution was introduced.
+That is neutral within this small sample, not a GPU speedup. MIGraphX runs stay
+serialized, provider selection does not change, and no concurrent MIGraphX
+execution is used.
 
 ## Measurements: November 7, 2026
 
 Linux x86-64, Intel i5-13600KF, 31.2 GiB RAM; CPU affinity restricted to CPUs
 0–3 (two physical/four logical cores) for every run. These are **not Raspberry Pi results**. Local filesystem
-cache was warm; no system caches were dropped on the shared host.
+cache is warm; the procedure drops no system caches on the shared host.
 
 Complete `communitybuilding.stackexchange.com_en_all_2026-08.zim`:
 **6,331,350 bytes**, 3,706 entries, 3,508 indexed rows, 1,504 vectors.
 Default multilingual-e5-small int8 model, 256-token inputs, 32-row windows.
-Before source revision: `3c4349b`. Archive SHA-256:
+Source revision: `3c4349b`. Archive SHA-256:
 `33ba5516c9eb1fcb3da26fbd552cf6a3dda66f956469cf9e7f55e36abedcd424`.
 Model graph SHA-256:
 `f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193`.
-python-libzim **4.1.0 was held constant** for the comparison; a preliminary
-4.0.0 baseline was excluded. Build times include source reading, extraction,
+python-libzim **4.1.0 is constant** for the comparison; the preliminary
+4.0.0 baseline is excluded. Build times include source reading, extraction,
 embedding, SQLite/body postings, FAISS writing, and generation publication;
 model loading/warm-up and quality evaluation are excluded.
 
-| Metric | Baseline | Current pipeline |
+| Metric | Baseline | Measured pipeline |
 |---|---:|---:|
 | Median build time, two runs | 43.77 s | 23.93 s |
 | Articles/s | 34.4 | 62.8 |
@@ -493,18 +494,18 @@ model loading/warm-up and quality evaluation are excluded.
 | Recall@10 | 70% | 75% |
 | MRR@10 | 0.4933 | 0.5113 |
 
-The current pipeline is **1.83× faster and uses 47% less peak RSS** in this
-measurement. Baseline runs took 43.661/43.875 s; current runs took
-23.792/24.071 s. A separate run took 23.914 s and confirmed the same quality
+The measured pipeline is **1.83× faster and uses 47% less peak RSS** in this
+measurement. Baseline runs: 43.661/43.875 s; measured runs:
+23.792/24.071 s. A separate run at 23.914 s confirms the same quality
 metrics using the published FAISS index.
 
 Revision `e0670ea` uses a two-window read-ahead limit. A run with read-ahead
-scaled to worker count took 23.559 s with 475.9 MB peak RSS; vectors, postings,
-and query rankings matched that revision. This single run is not a median and
+scaled to worker count takes 23.559 s with 475.9 MB peak RSS; vectors, postings,
+and query rankings match that revision. This single run is not a median and
 does not establish a general speedup.
 
 With the same native order, row window, sorting and 3×1 workers, fixed
-**eight-text** calls took 26.716/26.396 s (median 26.56 s), with 647.4 MB
+eight-text calls take 26.716/26.396 s (median 26.56 s), with 647.4 MB
 peak RSS. Token budgeting is **1.11× faster** and uses **27% less peak RSS**
 than that ablation here. This separates its benefit from concurrent calls,
 but does not reproduce every condition in the comparison.
@@ -524,14 +525,14 @@ single-query serving.
 
 `onnx_build_threads` controls build calls and automatic embedding-worker
 sizing. `onnx_query_threads` controls query serving. These settings are independent.
-The former names remain deprecated configuration aliases.
+Deprecated names are accepted as configuration aliases.
 
-The following tuning used the same 6.33 MB archive and model. Desktop affinity
-was CPUs 0–7: **four physical/eight logical cores**. The Pi was a **Pi 500,
-four ARM Cortex-A76 cores, 8 GB RAM**, upgraded to zimantic 1.0.0 and libzim
-4.1.0 before benchmarking. Its affinity was CPUs 0–2, leaving one core available
-for other work, and benchmarks ran at lower priority. No caches were dropped.
-ONNX Runtime was 1.31.0 on desktop and 1.31.1 on Pi; compare configurations
+The following tuning uses the same 6.33 MB archive and model. Desktop affinity
+is CPUs 0–7: **four physical/eight logical cores**. The Pi is a **Pi 500,
+four ARM Cortex-A76 cores, 8 GB RAM**, with zimantic 1.0.0 and libzim
+4.1.0. Its affinity is CPUs 0–2, leaving one core available
+for other work, and benchmarks run at lower priority. No caches are dropped.
+ONNX Runtime is 1.31.0 on desktop and 1.31.1 on Pi; compare configurations
 within each machine, not cross-platform accuracy gains.
 
 ### Embedding-stage sweep
@@ -569,19 +570,19 @@ reads, extraction, embeddings, SQLite/body postings and FAISS publication:
 | Pi 500 | 1 × 3 | 117.16 | 365.8 |
 | Pi 500 | 3 × 1 | 115.28 | 471.0 |
 
-Desktop parallel calls gave **25% higher throughput** (20% less wall time),
+Desktop parallel calls give **25% higher throughput** (20% less wall time),
 justifying the desktop build default of one thread per call. On Pi, the gain
-was only **1.6%**, costing **29% more RSS**. The Pi 5/500 preset therefore uses
+is only **1.6%**, costing **29% more RSS**. The Pi 5/500 preset therefore uses
 three build threads and one automatic model worker: approximately 105 MB less
 RAM for a two-second difference on this archive. The Pi 5 recommendation is
 based on the Pi 500's same CPU class, not a separate Pi 5 measurement.
 
-Within each machine, all four runs had **bit-identical vectors and vector
+Within each machine, all four runs have **bit-identical vectors and vector
 ids**, identical lexical postings/title/path/redirect rows, and identical
-query rankings. Desktop recall@1/@5/@10 was 40%/60%/75%, MRR@10 0.5113;
-Pi was 50%/70%/75%, MRR@10 0.5631. The differing platform results are not a
-thread-policy accuracy improvement. Pi temperature reached 49.1°C;
-`vcgencmd get_throttled` remained `0x0`.
+query rankings. Desktop recall@1/@5/@10 is 40%/60%/75%, MRR@10 0.5113;
+Pi is 50%/70%/75%, MRR@10 0.5631. The differing platform results are not a
+thread-policy accuracy improvement. Pi temperature reaches 49.1°C;
+`vcgencmd get_throttled` stays `0x0`.
 
 ### Query latency
 
@@ -600,19 +601,19 @@ milliseconds with the affinities above:
 | 19 | 2.63 | 3.60 | 14.62 | — | — | — |
 
 An additional desktop control with all 14 physical/20 logical cores available
-confirmed the tradeoff: four threads took 1.60/2.39/13.20 ms, eight took
-1.66/2.64/11.72 ms, and the former default of 19 took 2.57/3.50/12.30 ms.
+confirms the tradeoff: four threads take 1.60/2.39/13.20 ms, eight take
+1.66/2.64/11.72 ms, and the former default of 19 takes 2.57/3.50/12.30 ms.
 Three threads were fastest on the shortest input (1.42 ms), but slower on the
 long input (15.56 ms). Choose a desktop automatic cap of **four usable physical
 cores, leaving one available** (minimum one thread), favoring typical short
 searches; this yields **three on a four-core Pi**. Override to eight for a
 near-limit-query workload. A blanket one-thread serving default is not supported.
 
-Every profile now uses the same automatic query-thread rule above. Build
-profiles retain two threads on mobile and eight on supercomputer, bounded by
-usable cores; build and serving settings remain separate. Pi Zero 2 W and
-large-core servers were **not** benchmarked here; the results do not set
-optima for those devices. A RAM-limited single model worker can still benefit from intra-call
+Every profile uses the same automatic query-thread rule above. Build
+profiles keep two threads on mobile and eight on supercomputer, bounded by
+usable cores; build and serving settings remain separate. This document does
+not benchmark Pi Zero 2 W or large-core servers; the results do not set
+optima for those devices. A RAM-limited single model worker can benefit from intra-call
 parallelism, as the Pi 1×1 versus 1×2 sweep illustrates.
 
 ## Reproduce
@@ -628,7 +629,7 @@ taskset -c 0-3 uv run python scripts/bench_build.py \
   --reference /tmp/zimantic-before
 ```
 
-For the before checkout, pass `--source-root /path/to/before-checkout
+For the baseline checkout, pass `--source-root /path/to/before-checkout
 --threads 4 --order id` to the same harness, omit `--reference`, and choose
 `--output /tmp/zimantic-before`. The archive and installed dependencies must be
 identical. `--fixed-batch 8` performs the fixed-size ablation on the port.
@@ -647,17 +648,17 @@ taskset -c 0-2 python scripts/bench_threads.py \
 
 ## HTML parser comparison: November 7, 2026
 
-Text extraction prefers **selectolax's Lexbor HTML5 parser** for both body
+Text extraction prefers selectolax's Lexbor HTML5 parser for both body
 indexing and previews, falling back to stdlib `HTMLParser` when Lexbor cannot
 be imported. Block priorities, hidden/navigation filtering,
-boilerplate removal, primary-language selection and text caps remain unchanged.
-The small, marker-gated meta-refresh scan still uses stdlib `HTMLParser`.
-Existing indexes are not automatically rewritten.
+boilerplate removal, primary-language selection and text caps do not change.
+The small, marker-gated meta-refresh scan uses stdlib `HTMLParser`.
+Existing indexes are not rewritten automatically.
 
 Automatic selectolax installation excludes known 32-bit machine names, using
 the same platform marker as libzim. Other machines require selectolax even
 when no compatible wheel is published, which may require a source build.
-A separately installed selectolax is still used on any platform;
+A separately installed selectolax is used on any platform;
 `pip install 'zimantic[lexbor]'` explicitly opts in on excluded machines.
 Platform markers cannot distinguish every interpreter bitness or
 libc/OS-version/ABI wheel constraint.
@@ -695,20 +696,20 @@ eight largest corpus inputs, with all backends imported and inputs loaded
 before measuring additional post-exec `VmHWM`. It includes native allocations,
 but is not whole-application RSS or a concurrency/OOM guarantee.
 
-All native alternatives exactly matched **240/242 real body and preview
-outputs**, and none returned empty text for a page where stdlib parsing found
-text. The two differences were improvements: Lexbor recovered useful opening
-paragraphs from a resource-directory page and removed repeated
-copyright/webmaster footer text from another legacy document.
-The production Lexbor extractor was checked against the measured prototype:
+All native alternatives match **240/242 real body and preview
+outputs**, and none return empty text for a page where stdlib parsing finds
+text. The two differences are improvements: Lexbor recovers useful opening
+paragraphs from a resource-directory page and removes repeated
+copyright/webmaster footer text from another document.
+The production Lexbor extractor matches the measured prototype:
 body and preview hashes match on all 250 real/stress pages, as do the preserved
 stdlib baseline's hashes against the original baseline.
 
-A **blinded, source-based AI review** covered those two disagreements, four
-random nonempty real pages and all eight stress cases. Lexbor was preferred or
+A **blinded, source-based AI review** covers those two disagreements, four
+random nonempty real pages and all eight stress cases. Lexbor is preferred or
 tied in all 14. lxml-backed variants lost prose after malformed navigation;
 lxml DOM also lost prose beyond its default nesting-depth limit. All backends
-still produce a noisy dot-leader preview for one Wikisource table of contents:
+produce a noisy dot-leader preview for one Wikisource table of contents:
 that requires an extraction-policy fix, not another parser. This small,
 disagreement-enriched review is not a human user study, an estimate of defect
 prevalence, or proof of universal quality equivalence.

@@ -2,7 +2,7 @@
 
 ## Files and directories
 
-The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). If the XDG config is missing, Zimantic uses profile defaults; it does not search the current directory. Relative global path overrides (`model_dir`, `index_dir`) resolve under the data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. On Windows, the default config remains `config.toml` in the current directory.
+The installed CLI is separate from configuration and runtime data. On XDG platforms, configuration is read from `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); ZIMs, models, and indexes default under `$XDG_DATA_HOME/zimantic` (normally `~/.local/share/zimantic`). If the XDG config is missing, Zimantic uses profile defaults; it does not search the current directory. Relative global path overrides (`model_dir`, `index_dir`) resolve under the data directory. Relative provider `path`/`database_path`/`storage` values resolve against the directory containing the active config file, even through a symlink. On Windows, the default config is `config.toml` in the current directory.
 
 ```
 ~/.local/share/zimantic/
@@ -62,7 +62,7 @@ max_catalog_entries = 50000
 Provider `path` values, including `database_path` and `storage`, resolve once
 against the directory holding the active config file, even through a symlink.
 CLI path operands resolve against the working directory. The resolved choice is
-kept when an ad-hoc ZIM build saves a collection entry, so it still points at the
+kept when an ad-hoc ZIM build saves a collection entry, so it points at the
 same files on the next invocation. Do not put global scalar keys after a table
 header; after `[[collections]]` or `[derived_text]` a key belongs to that table.
 Unknown global keys are fatal configuration errors.
@@ -71,7 +71,7 @@ Provider limits default in the provider and can be overridden per entry
 (`max_sources`, `max_entries`, `max_file_bytes`, `traversal.max_visited_entries`,
 `traversal.traversal_timeout_seconds`, Kiwix `catalog_limit`/`max_catalog_entries`, and the
 Kolibri snapshot/HTML5 zip limits). `max_sources` and `max_entries` bound
-discovery and indexing, not serving: a permitted file remains browsable even
+discovery and indexing, not serving: a permitted file stays browsable even
 when indexing was capped. Exceeding `max_sources` collapses a files/Kolibri
 collection to one source with a distinct key and a warning; exceeding
 `max_entries` marks the source truncated. Rebuild the index when the source
@@ -102,13 +102,13 @@ index_dir/<provider>/<collection>-<digest>/<source>-<digest>/
 ```
 
 SQLite must be 3.37 or newer for the STRICT catalog and index schemas, and the
-SQLite build must provide FTS5; Zimantic checks the version early instead of
-deferring a failure to the first query. A sufficiently new SQLite build can
-still be compiled without FTS5. `catalog.sqlite` beside `index_dir` is the
+SQLite build must provide FTS5; Zimantic checks the version early rather than
+deferring a failure to the first query. A SQLite build at a sufficient version can
+be compiled without FTS5. `catalog.sqlite` beside `index_dir` is the
 private cache for ZIM archive metadata and Files root-document summaries.
 Kolibri does not write it, and Kiwix has no persistent local catalog. A
-catalog with an unsupported schema is rebuilt by source discovery. Old
-provider-specific tables are not removed automatically; to reclaim their space,
+catalog with an unsupported schema is rebuilt by source discovery. Provider-specific
+tables that are not part of the active schema are not removed automatically; to reclaim their space,
 stop Zimantic and delete the disposable catalog and any SQLite sidecars.
 Use one schema version for a catalog at a time. Index
 identity is logical (`provider`, `collection key`, `source key`), never an
@@ -156,7 +156,7 @@ sources = [
 Use exact keys from `/sources`. Extraction/search budgets must be positive;
 `min_cosine_similarity` must be between -1 and 1. Cache quotas accept zero:
 `cache_size = 0` disables admission for that source, `cache_bytes = 0` means
-count-only caching, and `max_derived_cache_bytes_per_source = 0` disables new
+count-only caching, and `max_derived_cache_bytes_per_source = 0` disables creation of
 derived-preview artifacts without removing searchable text. A mixed-source
 query-cache entry counts in full against each participating source's quota.
 Raising a scoped quota cannot raise the shared cache's global ceiling.
@@ -270,9 +270,9 @@ max_file_bytes = 268435456
 
 Source keys use the configured `name` and root-relative identifiers, never the absolute path. The collection key is `files:<name>`; collection granularity uses `files:<name>:root`, a collapsed collection uses `files:<name>:collapsed`, a child uses `files:<name>:dir-<slug>-<digest>`, and loose root files use the reserved `files:<name>:__loose__`. The configured name is part of the key, so a different name has a different identity and index.
 
-All sources in one files collection share the collection-relative serving namespace. A child page can link to `../shared/style.css` and it resolves under the same source key; search results and library membership still belong to the source that indexed the item. Hidden paths, configured excludes, symlinks, and paths outside the configured root are never served. Unknown extensions are served as attachments with `X-Content-Type-Options: nosniff`; SVG opened directly is sandboxed with a restrictive CSP.
+All sources in one files collection share the collection-relative serving namespace. A child page can link to `../shared/style.css` and it resolves under the same source key; search results and library membership belong to the source that indexed the item. Hidden paths, configured excludes, symlinks, and paths outside the configured root are never served. Unknown extensions are served as attachments with `X-Content-Type-Options: nosniff`; SVG opened directly is sandboxed with a restrictive CSP.
 
-`include` selects native documents for indexing by default. Scoped `index_include` and `index_exclude` can change indexing selection without changing serving permissions. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless enabled by the collection's `derived_text` defaults (see [Derived text](collections.md#derived-text)). Files whose extension is missing or unknown get a bounded MIME probe: the built-in signatures and `puremagic` are used for the prefix, and `lsar` identifies archive containers. This keeps extensionless media and servable “other” assets visible in the library content-type filters.
+`include` selects native documents for indexing by default. Scoped `index_include` and `index_exclude` can change indexing selection without changing serving permissions. Permitted image, audio, and video files are title-searchable by filename without reading their bytes. Captions, OCR, and ASR stay off unless enabled by the collection's `derived_text` defaults (see [Derived text](collections.md#derived-text)). Files whose extension is missing or unknown get a bounded MIME probe: the built-in signatures and `puremagic` are used for the prefix, and `lsar` identifies archive containers. This keeps extensionless media and servable “other” assets visible in the library media-type filters.
 
 `zimantic build` with no positional paths builds configured files collections as well as ZIM collections, using the same index generations, embeddings, and lock as ZIM builds. `zimantic build /library/www/html/modules` also selects this configured collection; a subdirectory or file builds cumulative partial coverage without indexing unrelated sibling sources. See [positional builds](usage.md#commands) for automatic registration and coverage semantics. Serving does not require an index: permitted files remain browsable even when indexing was capped or skipped.
 
@@ -280,7 +280,7 @@ With `secure_browsing = true`, the `/content/` shell sandboxes the article ifram
 
 ### Kolibri installations
 
-A `type = "kolibri"` collection reads a local Kolibri installation directly; Kolibri does not need to be running. The supported target is **Kolibri v0.19.5** with its installed SQLite schema. Older releases and other layouts are reported as unsupported rather than guessed from a channel export database. An IIAB-style installation looks like this:
+A `type = "kolibri"` collection reads a local Kolibri installation directly; Kolibri does not need to be running. The supported target is **Kolibri v0.19.5** with its installed SQLite schema. Other releases and layouts are reported as unsupported rather than guessed from a channel export database. An IIAB-style installation looks like this:
 
 ```toml
 [[collections]]
@@ -312,40 +312,40 @@ Discover the exact key first (for example from `/sources`). Captions can use
 existing `.vtt`/`.srt` tracks and embedded text tracks; ASR transcribes
 audio/video when captions did not provide usable text.
 
-The provider **never writes to Kolibri**. It copies the installed database through a private, owner-only, SQLite-consistent snapshot outside the installation and storage roots; committed WAL data is included, and a concurrently changing source causes a bounded retry or a fail-closed diagnostic instead of a torn read. Snapshots are shared across a channel discovery batch, removed after their last reader, and capped by the configured size, disk, and time budgets. A failed refresh keeps the last complete published batch and reports the error. The installation database and its WAL/SHM/journal sidecars are not modified, migrated, vacuumed, or checkpointed.
+The provider **never writes to Kolibri**. It copies the installed database through a private, owner-only, SQLite-consistent snapshot outside the installation and storage roots; committed WAL data is included, and a concurrently changing source causes a bounded retry or a fail-closed diagnostic rather than a torn read. Snapshots are shared across a channel discovery batch, removed after their last reader, and capped by the configured size, disk, and time budgets. A failed refresh keeps the last complete published batch and reports the error. The installation database and its WAL/SHM/journal sidecars are not modified, migrated, vacuumed, or checkpointed.
 
-Search results use human-readable channel/topic breadcrumbs and resource kinds instead of opaque node paths and generic file badges. When populated, cards also show grade level, duration, language, author, tags, learning activities, assessment question count, and position within the topic. Existing and fast indexes gain these display details directly from the snapshot; description fallbacks cover resources with no extractable preview, including interactive bundles. A normal build additionally indexes the descriptive metadata for body and semantic search; fast builds remain title-only. Restart or explicitly reload the server to refresh the snapshot and cached result metadata after editing Kolibri content. No running Kolibri server is needed for metadata, and resource positions are not presented as lesson numbers.
+Search results use human-readable channel/topic breadcrumbs and resource kinds instead of opaque node paths and generic file badges. When populated, cards also show grade level, duration, language, author, tags, learning activities, assessment question count, and position within the topic. A title or fast index reads these display details directly from the snapshot; description fallbacks cover resources with no extractable preview, including interactive bundles. A normal build additionally indexes the descriptive metadata for body and semantic search; fast builds remain title-only. Restart or explicitly reload the server to refresh the snapshot and cached result metadata after editing Kolibri content. No running Kolibri server is needed for metadata, and resource positions are not presented as lesson numbers.
 
 Keep the installation, storage, and private snapshot directory on local filesystems. The snapshot copy is validated before and after reading, but a stalled kernel or filesystem cannot provide a hard real-time bound. Content fingerprints use selected database rows and storage-file size/mtime signatures. These identify many content updates but do not prove that the bytes are identical. A same-size write that restores the timestamp can evade detection. Keep installed content immutable or use an external snapshot when strong consistency is required.
 
-Set `database_path` and `storage` only when the active database or content directory is non-standard. The provider reads SQLite installations only: if `options.ini` declares PostgreSQL, the collection is unsupported. Zimantic does not read a separate SQLite file in that installation. Absolute configured paths stay private runtime locators and never appear in source keys, API payloads, or normal logs. `zimantic build` with no positional paths builds configured Kolibri channels along with ZIM and files collections. HTML5 serving supports the `html5_zip` preset (entry `index.html` at the zip root) with bounded streaming, path confinement, duplicate/symlink rejection, and zip-bomb limits; other viewer-dependent presets such as H5P or IMSCP are reported explicitly as unsupported. Set `server_url` (for example `"http://localhost:8080"`) to a running Kolibri server and the content viewer redirects Perseus exercises and those unsupported presets to Kolibri's learn page (`<server_url>/learn/#/topics/c/<node_id>`); without it, exercises with a description show that text and the rest stay unsupported. As with files collections, the browser can still be asked by untrusted app HTML to contact external URLs.
+Set `database_path` and `storage` only when the active database or content directory is non-standard. The provider reads SQLite installations only: if `options.ini` declares PostgreSQL, the collection is unsupported. Zimantic does not read a separate SQLite file in that installation. Absolute configured paths stay private runtime locators and never appear in source keys, API payloads, or normal logs. `zimantic build` with no positional paths builds configured Kolibri channels along with ZIM and files collections. HTML5 serving supports the `html5_zip` preset (entry `index.html` at the zip root) with bounded streaming, path confinement, duplicate/symlink rejection, and zip-bomb limits; other viewer-dependent presets such as H5P or IMSCP are reported explicitly as unsupported. Set `server_url` (for example `"http://localhost:8080"`) to a running Kolibri server and the content viewer redirects Perseus exercises and those unsupported presets to Kolibri's learn page (`<server_url>/learn/#/topics/c/<node_id>`); without it, exercises with a description show that text and the rest stay unsupported. As with files collections, untrusted app HTML can ask the browser to contact external URLs.
 
 ### Reusing v0 ZIM indexes
 
 First update the configuration to use `[[collections]]`; v0's `zim_dir` and
 `kiwix_server` settings are not migrated automatically. Keep `index_dir`
-pointing at the old indexes and run `zimantic build`, then `zimantic serve`.
+pointing at the v0 indexes and run `zimantic build`, then `zimantic serve`.
 For a complete root-level v0 `<name>.sqlite` / `<name>.faiss` pair, a full
 build reuses compatible vectors, scans the ZIM to rebuild title and body search,
-and embeds any newly eligible articles. It publishes a current generation and
-leaves the old pair untouched. If new vectors are needed, the old FAISS index
-is loaded into memory to append them. A current full generation takes precedence
-over the old pair. `serve` does not migrate indexes; `build --fast` does not
+and embeds any eligible articles without vectors. It publishes a generation and
+leaves the v0 pair untouched. If the build needs vectors, the v0 FAISS index
+is loaded into memory to append them. A full generation takes precedence
+over the v0 pair. `serve` does not migrate indexes; `build --fast` does not
 load FAISS or migrate vectors, and `build --force` rebuilds from scratch.
 
 Reuse requires matching source size, vector IDs and document paths, and either
 the same model fingerprint or matching model probes. v0 did not record a source
 content digest: matching filename, size, IDs, and paths cannot detect every
-same-size content replacement or verify the old extraction settings. Use
+same-size content replacement or verify the prior extraction settings. Use
 `build --force` if the original ZIM, index, or build settings are uncertain.
 Missing, incomplete, incompatible, or unrecognized pairs are rebuilt normally.
-Once the new generation is verified, old root-level files can be removed manually.
+After you verify the published generation, you can remove the v0 root-level files manually.
 
 ### Copying finished indexes to another machine
 
-Embeddings live only in `index.faiss`. Its row IDs refer to `docs.rowid` in the matching `index.sqlite`, which holds titles, paths, the title and body full-text indexes, derived-text cache references, and build metadata. Copy the pair plus the source's `current` manifest; a `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and body lexical search only. A full index whose `.faiss` is missing still serves lexical results, but a later full build requires `--force` to replace it.
+Embeddings live only in `index.faiss`. Its row IDs refer to `docs.rowid` in the matching `index.sqlite`, which holds titles, paths, the title and body full-text indexes, derived-text cache references, and build metadata. Copy the pair plus the source's `current` manifest; a `.faiss` copied without its `.sqlite` is unusable, and a `.sqlite` copied without its `.faiss` provides title and body lexical search only. A full index whose `.faiss` is missing serves lexical results, but a later full build requires `--force` to replace it.
 
-Copying a subset is safe: each source generation is independent. Keep the same canonical source key and the same ZIM bytes on the target, and copy the generation plus its `current` manifest. A ZIM in another collection subfolder has a different key and needs a rebuild. New content at the same relative path invalidates the index. The target must use the same embedding model, or an export whose probe embeddings match it (for example FP32 and int8 exports of the same encoder); otherwise `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
+Copying a subset is safe: each source generation is independent. Keep the same canonical source key and the same ZIM bytes on the target, and copy the generation plus its `current` manifest. A ZIM in another collection subfolder has a different key and needs a rebuild. Different content at the same relative path invalidates the index. The target must use the same embedding model, or an export whose probe embeddings match it (for example FP32 and int8 exports of the same encoder); otherwise `serve` ignores those vectors and falls back to title and full-text search. The target does not need the GPU used to build them: vector search runs on the CPU.
 
 To copy two completed source generations:
 

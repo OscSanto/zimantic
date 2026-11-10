@@ -40,6 +40,6 @@ family, MIME type, and scenario.
 | Native PDF text | `documents/text.pdf` | selectable `native pdf zebra text layer` |
 | Ambiguous sidecar | `video/shared.mp4` + `video/shared.webm` + `video/shared.srt` | reported, attached to neither file |
 
-The sidecar source used to mux `video/embedded.mp4` lives in the generator, not
+The sidecar source that muxes `video/embedded.mp4` lives in the generator, not
 beside the video, so the embedded scenario does not accidentally become a
 sidecar scenario.

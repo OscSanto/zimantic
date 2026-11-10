@@ -72,7 +72,7 @@ uv run python tests/benchmarks/run_native.py \
 `--limits` accepts CPU-quota:RAM-MiB pairs, such as `1:512 2:1024`.
 Each trial caps CPU time, sets `MemoryMax` and `MemorySwapMax=0`, disables
 core dumps, and limits service runtime to 90 seconds. `--legacy` also measures
-two helpers per collection, reproducing the old multiplicative budget.
+two helpers per collection, reproducing the per-collection multiplicative budget.
 Trials run sequentially and their transient units are collected.
 
 The fixed 12-query mix has a 16-hit limit, eight source threads, one 96-search
@@ -92,7 +92,7 @@ CPU milliseconds per request, and average utilized CPU cores. Run several
 fresh-service repetitions. `PYTHONPATH` and `LD_LIBRARY_PATH` are forwarded
 explicitly into the transient service so local binding/native builds also
 reach process helpers. The report records native dependency versions and the
-loaded binding path; different dependency versions are a before/after caveat,
+loaded binding path; different dependency versions are a version-comparison caveat,
 not evidence of a pure GIL speedup.
 
 For a four-core/2 GiB resource proxy use `--limits 4:2048`; for this 20-thread
@@ -111,8 +111,8 @@ physical page used by the archive. PSS is reported separately.
 See the [native-only matrix](results/native-workers-2026-11-08.json),
 [resident-headroom matrix](results/native-budgets-2026-11-08.json), and
 [interpretation and limit audit](../../docs/architecture.md#constrained-workerbudget-comparison-november-8-2026).
-The native-only matrix records the initial four-helper automatic ceiling;
-the headroom matrix uses the revised eight-helper ceiling. Additional
+The native-only matrix records a four-helper automatic ceiling;
+the headroom matrix uses an eight-helper ceiling. Additional
 [short failure-report validation](results/native-oom-2026-11-08.json)
 retains systemd's termination result when the probe cannot finish.
 
@@ -126,7 +126,7 @@ Absolute binding paths are removed; source revisions and native dependency
 versions identify each stack. The installed distribution version may differ
 from a locally overridden binding.
 
-The main updated-stack command was:
+The main measured-stack command is:
 
 ```sh
 uv run python tests/benchmarks/run_native.py \
@@ -142,11 +142,11 @@ uv run python tests/benchmarks/run_native.py \
 Set `PYTHONPATH` to the built reader-binding directory and `LD_LIBRARY_PATH`
 to the patched native library and its dependencies before invoking the runner.
 The controlled baseline exports zimantic `cb261c5`, copies this same runner
-into it, and uses an unchanged python-libzim `57555c2` build linked against
+into it, and uses a python-libzim `57555c2` build linked against
 that identical native stack. It runs only `--backends processes`, with
-`--workers 4 8`; other main-matrix options are unchanged. The final Pi-budget
+`--workers 4 8`; other main-matrix options are the same. The Pi-budget
 confirmation uses `--workers 4 --limits 4:2048 --source-workers 4` for both
-the controlled baseline and updated backends.
+the controlled baseline and GIL-releasing backends.
 
 The [analysis and native-search profile overrides](../../docs/architecture.md#reader-gilthread-comparison-november-9-2026)
 separate snippet suppression from threading gains and describe resource,
@@ -154,7 +154,7 @@ memory-accounting, and whole-server limitations.
 
 ## Fetching snippets during search
 
-`run_snippets.py` compares the current deferred previews with native snippets
+`run_snippets.py` compares deferred previews with native snippets
 or identical HTML leads prefetched for the first N candidates **per source**:
 
 ```sh
@@ -169,8 +169,8 @@ uv run python tests/benchmarks/run_snippets.py \
 
 Set `PYTHONPATH` and `LD_LIBRARY_PATH` to the patched binding/native builds as
 above. Both backends need snippet suppression; threads additionally require
-the native mutex fix. Production search behavior is not changed by this runner.
-`deferred` uses the unchanged production `FulltextPool`; the eager variants
+the native mutex fix. This runner does not change production search behavior.
+`deferred` uses the production `FulltextPool`; the eager variants
 replace only its worker cache/entry point, retaining its scheduling and JSON IPC.
 
 Every query searches all supplied archives for 16 candidates each, ranks with

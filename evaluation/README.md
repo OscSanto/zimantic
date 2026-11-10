@@ -5,7 +5,7 @@ of the target article in the first 20 results for Zimantic and Kiwix search
 on configured ZIM files.
 
 Unit tests (`tests/`) check code behavior. This evaluation measures ranking
-quality. A ranking rule can pass its tests and still reduce search quality,
+quality. A ranking rule can pass its tests and reduce search quality,
 especially for languages with few queries. Use this evaluation for ranking
 and indexing work.
 
@@ -107,7 +107,7 @@ python evaluation/compare.py evaluation/results/main.json evaluation/results/my-
 `run.py` uses the Zimantic API. It reads `/sources?provider=zim`
 and `/config`, and requires the selected source to be **searchable**.
 Every result must carry a canonical source key; hits from another source are
-ignored and reported in a warning. Historical endpoints and source-name aliases
+ignored and reported in a warning. Deprecated endpoints and source-name aliases
 are not supported.
 
 The server caps how many results it keeps per query (`max_results` in `/config`, 100 by default) and how
@@ -119,7 +119,7 @@ Useful options for `run.py`: `--zims`, `--suites`, `--sets`, `--langs` (run a su
 results file), `--results-dir` (write the results somewhere other than `evaluation/results`). Results
 are saved as `<results-dir>/<label>.json`.
 
-Current servers expose canonical source keys rather than archive filenames.
+Servers expose canonical source keys rather than archive filenames.
 Every Zimantic run requires exactly one `--zims` name and its `--source-key`.
 Map the query file's ZIM name explicitly:
 
@@ -139,15 +139,14 @@ Record any index difference with the comparison.
 
 ### Diversity and representative browsing
 
-This section records the four-way experiment before the controls were
-consolidated. Current production code exposes one adaptive **Diversity** order,
+This section records the four-way experiment behind the unified control. Production code exposes one adaptive Diversity order,
 which is also the empty-query default: semantic MMR for items with usable
-embeddings, lexical diversity otherwise. The historical variant names below
-are not separate current controls.
+embeddings, lexical diversity otherwise. The four variants below are comparison
+controls, not separate production controls.
 
-`diversity.py` compares four variants: original **Diversity**, original
-**Representative**, corrected **Diversity**, and **Semantic diversity**. Capture
-the baseline before changing ranking, then reuse the same output directory:
+`diversity.py` compares four variants: Diversity, Representative,
+corrected Diversity, and Semantic diversity. Capture the baseline, then reuse
+the same output directory:
 
 ```bash
 # Use the same four archive paths, model and output directory for every phase.
@@ -157,24 +156,24 @@ uv run python evaluation/diversity.py --phase baseline \
          /path/to/communitybuilding.stackexchange.com_en_all_2025-08.zim \
          /path/to/alpinelinux_en_all_nopic_2025-09.zim \
          /path/to/alcohol.stackexchange.com_en_all_2025-06.zim
-# After the lexical fixes: repeat with --phase lexical.
-# After adding Semantic diversity: repeat with --phase semantic.
+# For the lexical order, repeat with --phase lexical.
+# For the semantic order, repeat with --phase semantic.
 ```
 
-For the original baseline, use ranking code from commit
-`9e40f8de20de605e2553434530ee84953002e90c` with this harness. On current code,
-the historical phases are rejected rather than silently measuring a different
-algorithm. The separate corrected lexical and semantic orders are available
-at `bc8c8f2`. To measure the unified order, use `--phase adaptive` with the same
-arguments; this writes `adaptive.json` and includes it in the comparison.
-It can also create fresh pools when no historical run exists.
+The baseline phase uses ranking code from commit
+`9e40f8de20de605e2553434530ee84953002e90c` with this harness. The harness
+rejects a phase whose ranking code does not match, rather than silently
+measuring a different algorithm. The separate corrected lexical and semantic
+orders are at `bc8c8f2`. To measure the unified order, use `--phase adaptive`
+with the same arguments; this writes `adaptive.json` and includes it in the
+comparison. It can also create fresh pools when no baseline run exists.
 
-The consolidation rerun reproduced all eight semantic query top-20 lists
-unchanged. These archives are fully embedded; mixed/partial indexes and
+The adaptive order and the four-way run produce identical top-20 lists for all
+eight semantic queries. These archives are fully embedded; mixed/partial indexes and
 fast-mode lexical fallback are covered separately by regression tests.
 
-The harness builds isolated indexes, freezes the original hybrid query pools,
-and records model, index, ranking-code and pool hashes. Later phases must use
+The harness builds isolated indexes, freezes the hybrid query pools,
+and records model, index, ranking-code and pool hashes. Every phase uses
 identical inputs. It writes `baseline.json`, `lexical.json`, `semantic.json`,
 `comparison.json`, and `qualitative.json` with top-five article excerpts.
 These are ignored local outputs, not changes to the configured library.
@@ -190,12 +189,12 @@ There is deliberately no single composite "diversity quality" number:
 | Title repetition, lower better | Same nearest-neighbor measure using non-stopword title-word Jaccard overlap |
 | Centrality | Mean similarity to each selected item's source centroid; a representativeness guardrail, not an article-quality judgement |
 | Source balance | Source counts and normalized source entropy; equal exposure is desirable for unscoped browsing, not necessarily for a focused query |
-| Query relevance retention | Fraction of the original hybrid top 20 still present, plus mean original relevance rank; a regression proxy, not labelled relevance |
+| Query relevance retention | Fraction of the baseline hybrid top 20 retained, plus mean baseline relevance rank; a regression proxy, not labelled relevance |
 
 Reference coverage across the whole corpus is useful for empty queries.
 It must **not** be maximized for a focused query: adding unrelated topics can
-improve that number while making search worse. Query comparisons instead
-consider repetition together with relevance retention and the actual articles.
+raise that number while making search worse. Query comparisons consider
+repetition together with relevance retention and the actual articles.
 
 #### Four-way comparison, 2026-11-09
 
@@ -210,12 +209,12 @@ alone. Eight mixed-source queries used identical frozen candidate pools:
 `community`, `online community`, `moderation`, `water`, `beer`, `linux`,
 `software`, and `installation`. All quality measures use the top 20. Numbers
 below are macro averages across scopes or queries. Warm time is the median
-across cases of two warm repetitions after one initial repetition.
+across cases of two warm repetitions after one warm-up repetition.
 
 | Empty-query browsing | Coverage ↑ | Semantic repetition ↓ | Title repetition ↓ | Centrality | Warm ms |
 |---|---:|---:|---:|---:|---:|
-| Original Diversity | 0.8667 | 0.8640 | 0.0110 | 0.9019 | 24,532.7 |
-| Original Representative | 0.8932 | 0.9618 | 0.4466 | 0.9556 | 1.72 |
+| Diversity | 0.8667 | 0.8640 | 0.0110 | 0.9019 | 24,532.7 |
+| Representative | 0.8932 | 0.9618 | 0.4466 | 0.9556 | 1.72 |
 | Corrected Diversity | 0.8879 | 0.8670 | **0.0000** | 0.9065 | 39.07 |
 | Semantic diversity | 0.8914 | **0.8547** | 0.0880 | 0.9074 | 30.14 |
 
@@ -227,8 +226,8 @@ than either lexical variant.
 
 | Nonempty queries | Semantic repetition ↓ | Title repetition ↓ | Original top 20 retained ↑ | Mean original rank ↓ | Warm ms |
 |---|---:|---:|---:|---:|---:|
-| Original Diversity | 0.9156 | 0.3344 | 14.4% | 48.23 | 6.82 |
-| Original Representative | 0.9507 | 0.5029 | 8.8% | 64.99 | 0.19 |
+| Diversity | 0.9156 | 0.3344 | 14.4% | 48.23 | 6.82 |
+| Representative | 0.9507 | 0.5029 | 8.8% | 64.99 | 0.19 |
 | Corrected Diversity | **0.8717** | **0.0177** | 23.1% | 43.04 | 2.56 |
 | Semantic diversity | 0.8942 | 0.3524 | **81.3%** | **13.19** | 2.03 |
 
@@ -243,44 +242,44 @@ the top five in browsing and the `community`, `linux`, and `beer` queries.
 
 | Variant | Browse user-profile pages | Extra identical titles for `community` | First result for `linux` |
 |---|---:|---:|---|
-| Original Diversity | 0 | 7 | Alpine Install: from a disc to a old computer single only boot |
-| Original Representative | 15 | 5 | User ccleve |
+| Diversity | 0 | 7 | Alpine Install: from a disc to a old computer single only boot |
+| Representative | 15 | 5 | User ccleve |
 | Corrected Diversity | 1 | 0 | Alpine Linux in a chroot |
 | Semantic diversity | 3 | 1 | Alpine Linux in a chroot |
 
-Original Diversity favored long titles and repeated matching articles across
-the two Community Building editions. Corrected Diversity no longer privileges
-long titles or sources with larger matching pools, checks overlap globally,
+Diversity favors long titles and repeated matching articles across
+the two Community Building editions. Corrected Diversity does not privilege
+long titles or sources with larger matching pools. It checks overlap globally,
 keeps relevance order on novelty ties, and postpones stopword-only titles.
 Incremental maximum-overlap updates and stopping at the required browse
-prefix remove the previous cubic full-sample ranking cost.
+prefix avoid the cubic full-sample ranking cost.
 
-An initial semantic trial using query cosine alone put an unrelated beer-site
-user profile first for `linux`. The final query objective averages query cosine
+A query objective that uses query cosine alone puts an unrelated beer-site
+user profile first for `linux`. The semantic diversity objective averages query cosine
 with max-normalized hybrid relevance, then uses equal-weight MMR against
-maximum similarity to already selected items. This retains existing title
+maximum similarity to already selected items. This keeps existing title
 boosts and profile penalties. Its first Linux results cover chroots, iSCSI,
 hardening, speech synthesis, voicemail, and bootstrapping. Corrected lexical
 Diversity starts well too, but later includes Community Building navigation
-pages simply because their titles add novel words.
+pages because their titles add novel words.
 
 For browsing, Semantic diversity mixes central candidates with a deterministic
 random sample, balances source exposure, and considers redundancy across
-sources. It replaces most repeated profiles with distinct material, but still
-starts with **User Richard** and retains three profile pages. Both semantic
+sources. It selects distinct material in place of most repeated profiles, but can
+start with **User Richard** and retain three profile pages. Both semantic
 browsing modes select **Setting up the build environment 1.7**, whose excerpt
-explicitly calls it obsolete. Content quality/freshness is not solved by
-centrality or diversity, and no content-type exclusions were added here.
-Representative was unchanged and still the default at the time of these
-measurements; it has since been removed in favor of adaptive Diversity.
+explicitly calls it obsolete. Content quality and freshness are separate from
+centrality or diversity, and this comparison does not add media-type
+exclusions. Adaptive Diversity is the production default; Representative is a
+comparison variant.
 
 These are English, small-corpus, unsupervised smoke benchmarks, not a release
 gate or an independent relevance evaluation. Coverage and semantic repetition
 use the same embeddings as the algorithms and can reward boilerplate;
-the profile-page examples demonstrate why qualitative review matters.
+the profile-page examples show why qualitative review matters.
 Timings exclude model loading, query retrieval/embedding, previews, and HTTP,
 and were measured on a shared host without confidence intervals. Existing
-vectors suffice for the new sort; production indexes need no rebuild.
+vectors suffice for the adaptive sort; production indexes need no rebuild.
 
 ### Small-ZIM body-index comparison
 
@@ -290,7 +289,7 @@ uv run python scripts/bench_body_quality.py \
   --output /tmp/body-quality
 ```
 
-The harness uses this runner and `compare.py`, the unchanged dev/test split,
+The harness uses this runner and `compare.py`, the same dev/test split,
 and real HTTP search with previews and final ranking. It compares HEAD,
 compact contentless FTS5, and native-only body retrieval in both normal hybrid
 search and a semantic-disabled diagnostic. It reuses the 20 labelled Community
@@ -360,7 +359,7 @@ harness, not the probe-overlap counts. See the
 `results/v0.1.0-lite.json` (Zimantic `a043177`, 2026-10-10) and
 `results/kiwix-serve.json` are reference runs. Reproduce them with these inputs:
 
-- **ZIM files** (from [library.kiwix.org](https://library.kiwix.org); names must match exactly):
+- ZIM files (from [library.kiwix.org](https://library.kiwix.org); names must match exactly):
   `wikipedia_en_medicine_maxi_2026-04.zim`, `wikipedia_en_astronomy_maxi_2025-11.zim`,
   `cooking.stackexchange.com_en_all_2026-07.zim`, `ted_mul_ocean_2026-09.zim`,
   `wikibooks_en_all_nopic_2026-01.zim`
@@ -383,7 +382,7 @@ harness, not the probe-overlap counts. See the
   | `model.onnx` | `f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193` |
   | `sentencepiece.bpe.model` | `cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865` |
 
-- **Indexes** built from those ZIMs with that model by the version being tested, with default build
+- Indexes built from those ZIMs with that model by the version being tested, with default build
   settings. An index built by one model and searched with another gives meaningless results without an
   error, so rebuild after changing the model.
 - Config: use defaults except for paths and port. Record other settings.
@@ -400,7 +399,7 @@ search settings:
 - Tune on dev, report on test. Look only at `--split dev` while trying settings, then report
   `--split test` once. If you tune again after seeing test results, say so.
 - Run everything: every ZIM and every language, with `--by zim lang set`, not only English.
-- **Report fixed / broken counts** and results by language and ZIM, not only averages. Call out anything
+- Report fixed and broken counts and results by language and ZIM, not only averages. Call out anything
   that got worse.
 - If a run filters results (for example, with a score cutoff), report how often
   queries return fewer results than requested or no results.
@@ -420,7 +419,7 @@ and distorts the timings.
    ```bash
    python evaluation/make_queries.py generate --zim zims/<name>.zim --n 200
    ```
-   Use `--lang` if the ZIM's text isn't English, and `--seed` for a different sample.
+   Use `--lang` if the ZIM text is not English, and `--seed` for a different sample.
 2. Optionally add hand-written queries as `queries/<name>/hand.en.jsonl`. These matter most: real
    questions, descriptions without the name, misspellings. Ids must be unique within the ZIM.
 3. Check every answer exists in the ZIM:
@@ -454,10 +453,10 @@ group by the codes in the files.
   25 queries, ±10 for 100, and ±5 for 400. A 5-point score difference in a
   25-query set is inconclusive.
 - **Look at fixed / broken**, not only averages.
-- **Look at every language**, not only English. Zimantic's biggest advantage over Kiwix is outside English.
-- **Top 20 is the ceiling** for any reranking: a reranker can only reorder what the first stage found.
-- Kiwix can't search some ZIMs. kiwix-serve refuses multi-language ("mul") ZIMs such as TED; the
-  report lists them as unsupported instead of scoring them 0%.
+- Look at every language, not only English. Zimantic's biggest advantage over Kiwix is outside English.
+- Top 20 is the ceiling for any reranking: a reranker can only reorder what the first stage found.
+- Kiwix cannot search some ZIMs. kiwix-serve refuses multi-language ("mul") ZIMs such as TED; the
+  report lists them as unsupported rather than scoring them 0%.
 
 ## Limitations
 

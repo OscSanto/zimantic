@@ -9,12 +9,12 @@ the index.
 
 | Dependency | Enables | Without it |
 |---|---|---|
-| `ffmpeg` and `ffprobe` | Embedded text-caption extraction and audio decoding for `whisper.cpp` | Sidecar `.srt`/`.vtt` captions still work; embedded tracks and whisper.cpp ASR are unavailable |
+| `ffmpeg` and `ffprobe` | Embedded text-caption extraction and audio decoding for `whisper.cpp` | Sidecar `.srt`/`.vtt` captions work; embedded tracks and whisper.cpp ASR are unavailable |
 | `tesseract` plus trained language data | `ocr = "tesseract"` on images and image-only PDF pages | OCR is unavailable |
 | `whisper-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | `asr = "whisper"` with `asr_engine = "whisper.cpp"` or `"auto"` | That backend is unavailable; `auto` falls through to another installed engine |
 | `whisper-ctranslate2` from [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `asr = "whisper"` with `asr_engine = "faster-whisper"` | That backend is unavailable; it is the fastest option on CUDA GPUs |
-| `lsar` (from `unar`) | Archive-container detection for files with a missing or unknown extension | Built-in signatures and `puremagic` are still used |
-| `kiwix-serve` | A remote `type = "kiwix"` collection | Remote Kiwix sources are unavailable; local ZIM, files, and Kolibri sources still work |
+| `lsar` (from `unar`) | Archive-container detection for files with a missing or unknown extension | Built-in signatures and `puremagic` remain available |
+| `kiwix-serve` | A remote `type = "kiwix"` collection | Remote Kiwix sources are unavailable; local ZIM, files, and Kolibri sources work |
 | GPU ONNX Runtime wheel | Accelerated embedding during `build` and `serve` | Zimantic warns and embeds on the CPU; see [GPU acceleration](usage.md#gpu-acceleration) |
 
 On Debian or Ubuntu:
@@ -181,8 +181,8 @@ derived_text = { ocr = "tesseract", ocr_languages = ["fra"] }
 
 OCR reads the same trained-data files as the `tesseract` command. List the
 languages globally or override them for a collection or exact source. Use the
-installed trained-data names: French is normally `fra`, not `fre`. Codes pass
-through unchanged; Zimantic does not translate aliases or install language data.
+installed trained-data names: French is normally `fra`, not `fre`. Zimantic
+passes codes through without translation and does not install language data.
 For the example above, install `tesseract-ocr-fra`. Collection defaults are
 supported for files and Kolibri collections; ZIM embedded-media enrichment is
 not implemented.
@@ -194,4 +194,4 @@ ocr_languages = ["eng"]   # codes from `tesseract --list-langs`
 
 PDF OCR uses the bundled PyMuPDF dependency; only the `tesseract` executable
 and its language data are external. The `max_ocr_pages`, `max_ocr_pixels`, and
-`max_ocr_output_bytes` caps still apply.
+`max_ocr_output_bytes` caps apply.
