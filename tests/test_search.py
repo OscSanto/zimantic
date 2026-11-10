@@ -102,6 +102,7 @@ def _bare_search(cfg):
     search._reload_lock = threading.Lock()
     search._closed = False
     search.source_timeout = 12
+    search.partial_cache_seconds = cfg.get("partial_cache_seconds", 60.0)
     search.candidate_count = cfg.get("candidate_count", 16)
     search.page_size = cfg.get("page_size", 10)
     search.preview_limit = cfg.get("preview_limit", search.page_size)
@@ -2508,13 +2509,178 @@ class GracefulDegradationTests(unittest.TestCase):
 
             events = list(search.stream_search("tire change", limit=1))
             self.assertEqual(events[-1]["type"], "done")
-            self.assertIsNotNone(search.cache.get(search._cache_key("tire change", None)))
+            cached_pool = search.cache.get(search._cache_key("tire change", None))
+            self.assertIsNotNone(cached_pool)
+            self.assertNotIn("expires_at", cached_pool)
 
             with patch.object(search, "_search_source", side_effect=AssertionError("cache miss")):
                 cached = _search_results(search, "tire change", limit=1)
             self.assertEqual(cached[0]["title"], "Tire Change")
             search._executor.shutdown(wait=True)
 
+    def test_deadline_partial_result_is_cached_briefly(self):
+        search = _bare_search({})
+        self.addCleanup(search._executor.shutdown, wait=True)
+        scope = {
+            "status": "partial",
+            "requested": 2,
+            "scheduled": 2,
+            "completed": 1,
+            "limit_reason": "deadline",
+        }
+        doc = {
+            "id": "manual:tire",
+            "source_key": "manual",
+            "title": "Tire",
+            "path": "tire",
+        }
+
+        search._finalize_search(
+            "tire",
+            [],
+            0,
+            10,
+            False,
+            10,
+            {},
+            0,
+            "partial",
+            scope,
+            pool=[doc],
+        )
+
+        cached = search.cache.get("partial")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["scope"]["status"], "partial")
+        self.assertGreater(cached["expires_at"], time.monotonic())
+        self.assertIs(search._cached_for_generation("partial", 0), cached)
+
+        # Once its short TTL elapses, the partial pool is treated as a miss so
+        # the next request can finish the sources that were still running.
+        cached["expires_at"] = time.monotonic() - 1
+        self.assertIsNone(search._cached_for_generation("partial", 0))
+
+    def test_partial_result_cache_can_be_disabled(self):
+        search = _bare_search({"partial_cache_seconds": 0})
+        self.addCleanup(search._executor.shutdown, wait=True)
+        scope = {
+            "status": "partial",
+            "requested": 2,
+            "scheduled": 2,
+            "completed": 1,
+            "limit_reason": "deadline",
+        }
+        doc = {
+            "id": "manual:tire",
+            "source_key": "manual",
+            "title": "Tire",
+            "path": "tire",
+        }
+
+        search._finalize_search(
+            "tire",
+            [],
+            0,
+            10,
+            False,
+            10,
+            {},
+            0,
+            "partial",
+            scope,
+            pool=[doc],
+        )
+
+        self.assertIsNone(search.cache.get("partial"))
+
+    def test_empty_partial_result_is_not_cached(self):
+        # Pinning an empty partial page would hide matches from every source
+        # that did not finish before the deadline.
+        search = _bare_search({})
+        self.addCleanup(search._executor.shutdown, wait=True)
+        scope = {
+            "status": "partial",
+            "requested": 2,
+            "scheduled": 2,
+            "completed": 1,
+            "limit_reason": "deadline",
+        }
+
+        search._finalize_search(
+            "tire",
+            [],
+            0,
+            10,
+            False,
+            10,
+            {},
+            0,
+            "partial-empty",
+            scope,
+            pool=[],
+        )
+
+        self.assertIsNone(search.cache.get("partial-empty"))
+
+    def test_deadline_partial_stream_is_reused_without_recomputing(self):
+        sources = [_zim_source("quick", "Quick"), _zim_source("slow", "Slow")]
+        search = _bare_search({})
+        self.addCleanup(search.close)
+        search.semantic = False
+        search.search_timeout_seconds = 1.0
+        search.sources = {source.key: source for source in sources}
+        release = threading.Event()
+        calls = []
+
+        def fake_source_search(source, *_args):
+            calls.append(source.key)
+            if source.key == "slow":
+                release.wait(timeout=5)
+            doc = {
+                "id": f"{source.key}:page",
+                "source_key": source.key,
+                "source": source.title,
+                "title": source.title,
+                "lead": "",
+                "path": "page",
+                "url": None,
+                "source_rank": 1,
+            }
+            return SourceResult(source=source, items=[doc], fulltext=[(0, doc)])
+
+        search._search_source = fake_source_search
+        cache_key = search._cache_key("tire", None)
+        try:
+            with (
+                patch.object(
+                    search,
+                    "_enrich_pool",
+                    lambda results, query, pool, limit: pool,
+                ),
+                patch.object(search, "_hydrate_results", lambda docs, *_args: None),
+            ):
+                events = list(search.stream_search("tire", limit=1))
+            self.assertEqual(events[-1]["type"], "done")
+            self.assertEqual(events[-1]["scope"]["status"], "partial")
+            self.assertIsNotNone(search.cache.get(cache_key))
+
+            with (
+                patch.object(
+                    search,
+                    "_search_source",
+                    side_effect=AssertionError("cache miss"),
+                ),
+                patch.object(search, "_hydrate_results", lambda docs, *_args: None),
+            ):
+                cached_events = list(search.stream_search("tire", limit=1))
+            self.assertEqual(cached_events[-1]["type"], "done")
+            self.assertEqual(
+                [event["type"] for event in cached_events].count("done"), 1
+            )
+            self.assertEqual(calls.count("quick"), 1)
+        finally:
+            release.set()
+            search._executor.shutdown(wait=True)
 
     def test_cached_source_counts_match_the_stream(self):
         with _temp_dir(self) as tmp:

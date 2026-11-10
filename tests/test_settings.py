@@ -382,6 +382,16 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(cfg["slot_wait_seconds"], 3.5)
             self.assertFalse(any("unknown config key" in message for message in warnings))
 
+    def test_partial_cache_seconds_is_a_known_float_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("partial_cache_seconds = 15.5\n", encoding="utf-8")
+            warnings = []
+            with patch.object(settings, "profile_for_hardware", return_value="desktop"):
+                cfg = load_config(path, warn=warnings.append)
+            self.assertEqual(cfg["partial_cache_seconds"], 15.5)
+            self.assertFalse(any("unknown config key" in message for message in warnings))
+
     def test_empty_file_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

@@ -363,7 +363,7 @@ Click a source's title or **Details** for an infobox with its thumbnail, homepag
 
 ## Caches
 
-Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` (32 MiB per cache by default). A ranked pool is keyed by the normalized query, the expanded source keys of the resolved scope, and the publication generation. Paging reuses the same pool. Replacing an index without changing source keys, changing collection membership, or changing discovery metadata invalidates the affected generation, so stale results and previews are not served.
+Exact queries use small LRU caches controlled by `cache_size` and `cache_bytes` (32 MiB per cache by default). A ranked pool is keyed by the normalized query, the expanded source keys of the resolved scope, and the publication generation. Paging reuses the same pool. When a search reaches its deadline, the partial pool is reused for `partial_cache_seconds` (60 by default) so reloading the same query does not repeat a timed-out fan-out. Replacing an index without changing source keys, changing collection membership, or changing discovery metadata invalidates the affected generation, so stale results and previews are not served.
 
 For large libraries, `source_query_threads` controls source-query fan-out through one shared thread pool. It defaults to at most eight usable logical CPU threads, independently of the memory profile. `max_stream_ranks` limits completion-spaced intermediate ranking passes. Timed snapshots are additionally emitted about every 700 ms so a slow query keeps updating, and the final result ranks every source. A lower `max_stream_ranks` reduces CPU use on small devices. Profiles retain 16 completion-spaced passes on desktops and 8 on low-memory devices.
 

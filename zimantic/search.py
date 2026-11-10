@@ -96,6 +96,10 @@ DEFAULT_MAX_STREAM_RANKS = 16
 # source finished since the last one), and a lightweight progress event keeps
 # the status line moving when nothing has completed yet.
 DEFAULT_STREAM_UPDATE_INTERVAL = 0.7
+# A search that reaches its deadline still returns a useful partial pool.
+# Reusing that pool briefly makes a page reload much cheaper without pinning an
+# incomplete answer for long; the next attempt can complete the missing sources.
+DEFAULT_PARTIAL_CACHE_SECONDS = 60.0
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
@@ -315,6 +319,13 @@ class Search:
         )
         self.slot_wait_seconds = _float_config(
             cfg, "slot_wait_seconds", SLOT_WAIT_SECONDS, 0.0, 120.0
+        )
+        self.partial_cache_seconds = _float_config(
+            cfg,
+            "partial_cache_seconds",
+            DEFAULT_PARTIAL_CACHE_SECONDS,
+            0.0,
+            math.inf,
         )
         self.max_stream_ranks = _int_config(
             cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS
@@ -2045,12 +2056,27 @@ class Search:
         if not pending.done():
             pending.set_result(value)
 
+    @staticmethod
+    def _cache_entry_fresh(cached: Any, *, now: float | None = None) -> bool:
+        """True when a cache value has no TTL or its TTL has not elapsed."""
+        if not isinstance(cached, dict):
+            return False
+        expires_at = cached.get("expires_at")
+        if expires_at is None:
+            return True
+        try:
+            expires_at = float(expires_at)
+        except (TypeError, ValueError):
+            return False
+        return (time.monotonic() if now is None else now) < expires_at
+
     def _cached_for_generation(self, key: Any, generation: int) -> Any | None:
         cached = self.cache.get(key)
         if (
             cached is not None
             and isinstance(cached, dict)
             and cached.get("generation") == generation
+            and self._cache_entry_fresh(cached)
         ):
             return cached
         return None
@@ -2088,6 +2114,7 @@ class Search:
                 cached is not None
                 and isinstance(cached, dict)
                 and cached.get("generation") == generation
+                and self._cache_entry_fresh(cached)
             ):
                 return cached, None
 
@@ -2233,6 +2260,8 @@ class Search:
         paths cannot drift; it returns the page state used by the ``done`` event
         and the value stored in the query cache. The live owner passes its last
         ranked pool so the final page does not pay for one more ranking pass.
+        Partial pools get a short TTL so a reload reuses them instead of
+        repeating a deadline-limited fan-out.
         """
         if pool is None:
             pool = self._rank_results(source_results, query, pool_target, deadline=deadline)
@@ -2259,13 +2288,30 @@ class Search:
             ],
             "scope": dict(scope),
         }
+        partial = scope.get("status") == "partial"
+        partial_ttl = float(
+            getattr(self, "partial_cache_seconds", DEFAULT_PARTIAL_CACHE_SECONDS)
+        )
+        # Do not pin an empty partial pool: it would hide matches from sources
+        # that did not finish before the deadline. Results that did arrive are
+        # worth reusing briefly so a page reload is not another full fan-out.
+        cache_partial = bool(partial and pool and partial_ttl > 0)
+        if cache_partial:
+            cache_value["expires_at"] = time.monotonic() + partial_ttl
         with self._state_lock:
             current_generation = self._cache_generation
+        cancelled = any(
+            result.status == "cancelled" for result in source_results
+        )
+        complete_cacheable = (
+            not partial
+            and (deadline is None or time.monotonic() < deadline)
+            and not cancelled
+        )
         if (
             cacheable
             and current_generation == generation
-            and (deadline is None or time.monotonic() < deadline)
-            and not any(result.status == "cancelled" for result in source_results)
+            and (cache_partial or complete_cacheable)
         ):
             self.cache.put(
                 cache_key, cache_value,
@@ -2635,7 +2681,6 @@ class Search:
                 cache_key,
                 scope,
                 pool=None if unranked or (query and sort and sort != "relevance") else pool,
-                cacheable=not deadline_hit,
                 deadline=deadline,
                 sort=sort,
                 seed=seed,

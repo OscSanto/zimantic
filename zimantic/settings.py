@@ -90,6 +90,10 @@ _COMMON = {
     # Monotonic deadline for one admitted search: source scheduling, ranking,
     # and bounded preview work all share it.
     "search_timeout_seconds": 30.0,
+    # A search that reaches its deadline still returns the pool it ranked so
+    # far. Keep that partial pool briefly so reloading the same query does not
+    # repeat the whole fan-out. Complete pools are unaffected.
+    "partial_cache_seconds": 60.0,
     # Seconds a search waits for one of max_concurrent_searches before the
     # server reports busy. Keep this above a typical cold-search duration on
     # slow hardware so two overlapping requests queue instead of failing.

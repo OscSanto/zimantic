@@ -123,7 +123,7 @@ See [Architecture](architecture.md) for the provider model.
 | Derived-text workers | `"auto"` | memory/CPU-derived; unavailable if none fits |
 | Discovery time per provider | 10 s startup budget | serving starts before optional/remote discovery completes |
 | Entries/traversal time | 1,000,000 / 300 s | per-provider bounded walk |
-| Search timeout | `search_timeout_seconds` (30 s) | admitted search scheduling, ranking, and previews |
+| Search timeout | `search_timeout_seconds` (30 s) | admitted search scheduling, ranking, and previews; the partial pool is reused for `partial_cache_seconds` (60 s) |
 | Listing page size | `page_size`, maximum 200 | collection/source/library JSON |
 
 A provider that reaches a limit logs once and degrades; indexing truncation never

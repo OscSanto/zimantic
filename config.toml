@@ -191,6 +191,11 @@ port = 8090
 # Monotonic deadline for one admitted search (scheduling, ranking and bounded
 # previews). Default 30; must be positive.
 # search_timeout_seconds = 30
+# A search that reaches its deadline returns the results ranked so far. Keep
+# that partial pool for this many seconds so reloading the same query is fast
+# instead of repeating the whole fan-out. Complete results are unaffected.
+# Default 60; set to 0 to disable partial-result caching.
+# partial_cache_seconds = 60
 # Source chips shown per collection group in the search filter before "Other".
 # source_filter_limit = 10
 # Sources loaded per library collection page (up to 1000).
