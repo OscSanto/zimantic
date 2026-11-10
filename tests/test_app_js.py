@@ -1847,6 +1847,147 @@ console.log(JSON.stringify({{full, display, collection}}));
         self.assertEqual(payload["display"], "/?q=q&source=a")
         self.assertEqual(payload["collection"], "/?q=q&collection=files%3Amedia")
 
+    def test_source_filter_status_waits_for_a_finished_search_before_reporting_none(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+class Node {{
+  constructor() {{
+    this.children = []; this.dataset = {{}}; this.hidden = false;
+    this.textContent = ""; this.classList = {{remove() {{}}}};
+  }}
+  replaceChildren(...children) {{ this.children = children; }}
+  contains() {{ return false; }}
+  querySelectorAll() {{ return []; }}
+}}
+const elements = new Map();
+const $ = (id) => {{
+  if (!elements.has(id)) elements.set(id, new Node());
+  return elements.get(id);
+}};
+const document = {{activeElement: null, createElement: () => new Node()}};
+const t = (text) => text;
+let sourceFilterShowOther = false;
+let current = {{streaming: true, sourcesTotal: 2}};
+let layout = {{
+  query: "", matching: [], outcomes: [], groups: [], visible: [],
+  showOther: false, otherOutcomes: [],
+}};
+const sourceFilterLayout = () => layout;
+const sourceFilterControlKey = () => "";
+const sourceFilterButton = () => new Node();
+{_function_source(source, "function renderSourceFilters()", "function renderSourceSelectionSummary()")}
+const status = () => $("sourceFilterStatus").textContent;
+renderSourceFilters();
+const streaming = status();
+current.streaming = false;
+renderSourceFilters();
+const finishedEmpty = status();
+layout.outcomes = [{{source: {{key: "a"}}}}];
+renderSourceFilters();
+const reported = status();
+layout.outcomes = [];
+current.sourcesTotal = 0;
+renderSourceFilters();
+const noSources = status();
+layout.query = "zzz";
+renderSourceFilters();
+const noMatch = status();
+console.log(JSON.stringify({{streaming, finishedEmpty, reported, noSources, noMatch}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["streaming"], "")
+        self.assertEqual(payload["finishedEmpty"], "No sources returned results.")
+        self.assertEqual(payload["reported"], "")
+        self.assertEqual(payload["noSources"], "")
+        self.assertEqual(payload["noMatch"], "No matching sources.")
+
+    def test_source_scope_panel_waits_for_started_sources(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+class Node {{
+  constructor() {{
+    this.children = []; this.dataset = {{}}; this.hidden = false;
+    this.textContent = ""; this.classList = {{remove() {{}}, add() {{}}}};
+  }}
+  replaceChildren(...children) {{ this.children = children; }}
+  contains() {{ return false; }}
+  querySelectorAll() {{ return []; }}
+}}
+const elements = new Map();
+const $ = (id) => {{
+  if (!elements.has(id)) elements.set(id, new Node());
+  return elements.get(id);
+}};
+const document = {{activeElement: null, createElement: () => new Node()}};
+const t = (text) => text;
+let sourceFilterShowOther = false;
+let selectedSourceKeys = new Set(["a"]);
+let selectedCollectionKey = null;
+let current = {{
+  streaming: true, sourcesTotal: 0, searchKeys: ["a"], searchAll: false,
+  outcomes: new Map(), counts: {{}}, discovery: null,
+}};
+const layout = {{
+  query: "", matching: [], outcomes: [], groups: [], visible: [],
+  showOther: false, otherOutcomes: [],
+}};
+const sourceFilterLayout = () => layout;
+const sourceFilterControlKey = () => "";
+const sourceFilterButton = () => new Node();
+const sourceDisplayName = (key) => key;
+const collectionDisplayName = (key) => key;
+{_function_source(source, "function renderSourceFilters()", "function renderSourceSelectionSummary()")}
+{_function_source(source, "function renderScopeLine()", "function renderFilterLine(")}
+const snapshot = () => ({{
+  filtersHidden: $("sourceFilters").hidden,
+  toolbarHidden: $("sourceFilterToolbar").hidden,
+  scopeHidden: $("scopeLine").hidden,
+  resetHidden: $("scopeLineReset").hidden,
+  scopeText: $("scopeLineText").textContent,
+}});
+renderSourceFilters();
+renderScopeLine();
+const loading = snapshot();
+current.sourcesTotal = 2;
+renderSourceFilters();
+renderScopeLine();
+const started = snapshot();
+console.log(JSON.stringify({{loading, started}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["loading"],
+            {
+                "filtersHidden": True,
+                "toolbarHidden": True,
+                "scopeHidden": True,
+                "resetHidden": True,
+                "scopeText": "",
+            },
+        )
+        self.assertEqual(
+            payload["started"],
+            {
+                "filtersHidden": False,
+                "toolbarHidden": True,
+                "scopeHidden": False,
+                "resetHidden": False,
+                "scopeText": "Searching only in: a",
+            },
+        )
+
     def test_source_filter_layout_is_bounded_per_collection_group(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""

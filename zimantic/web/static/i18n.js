@@ -158,7 +158,7 @@
             "of": "de",
             "Filter": "Filtrar",
             "No matching sources.": "Ninguna fuente coincide.",
-            "No sources have reported yet.": "Aún no ha respondido ninguna fuente.",
+            "No sources returned results.": "Ninguna fuente devolvió resultados.",
             "No searchable sources.": "No hay fuentes que se puedan buscar.",
             "No sources are available to search.":
                 "No hay fuentes disponibles para buscar.",

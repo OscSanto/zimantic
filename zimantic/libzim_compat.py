@@ -27,8 +27,8 @@ def get_entry_by_id(archive: Any, entry_id: int) -> Any:
 
 def search_results(
     search: Any, start: int, count: int, *, archive: Any = None,
-    include_snippets: bool = True,
-) -> list[dict[str, str]]:
+    include_snippets: bool = True, include_index: bool = False,
+) -> list[dict[str, Any]]:
     getter = getattr(search, "get_results", None)
     if getter is None:
         getter = search.getResults
@@ -44,10 +44,28 @@ def search_results(
         else:
             path = getattr(result, "path", result)
             title = getattr(result, "title", "")
-        if not title and path and archive is not None:
+        entry = None
+        if path and archive is not None and (not title or include_index):
             try:
-                title = archive.get_entry_by_path(path).title
+                entry = archive.get_entry_by_path(path)
             except (KeyError, RuntimeError, ValueError):
-                pass
-        results.append({"path": str(path), "title": str(title or "")})
+                entry = None
+            if not title and entry is not None:
+                try:
+                    title = entry.title
+                except (AttributeError, KeyError, RuntimeError, ValueError):
+                    pass
+        item: dict[str, Any] = {"path": str(path), "title": str(title or "")}
+        if include_index and entry is not None:
+            # The entry id lets the server map a native hit back to its
+            # immutable index row without scanning the unindexed path column.
+            index = getattr(entry, "_index", None)
+            if index is None:
+                index = getattr(entry, "index", None)
+            if index is not None:
+                try:
+                    item["index"] = int(index)
+                except (TypeError, ValueError):
+                    pass
+        results.append(item)
     return results

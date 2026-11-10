@@ -528,7 +528,7 @@ class FulltextFailureTests(unittest.TestCase):
         source = _zim_source("manual", "Manual")
         search.fulltext_pool = types.SimpleNamespace(
             search_results=lambda *_args: [
-                {"path": "article", "title": "Article"}
+                {"path": "article", "title": "Article", "index": 5}
             ],
             close=lambda: None,
         )
@@ -555,6 +555,7 @@ class FulltextFailureTests(unittest.TestCase):
 
         self.assertEqual(result.fulltext[0][1]["path"], "article")
         self.assertEqual(result.fulltext[0][1]["title"], "Article")
+        self.assertEqual(result.fulltext[0][1]["_rowid"], 5)
         self.assertIsNone(index.archive)
 
 
@@ -1575,6 +1576,7 @@ class SearchContractTests(unittest.TestCase):
 
         self.assertEqual(docs[0]["title"], "Final title")
         self.assertEqual(docs[0]["path"], "C")
+        self.assertEqual(docs[0]["_rowid"], 2)
 
     def test_document_hydration_batches_large_rowid_sets(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
@@ -1615,6 +1617,7 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(len(selects), 3)
         self.assertEqual(len(docs), 1801)
         self.assertEqual(docs[1801]["path"], "path-1801")
+        self.assertEqual(docs[1801]["_rowid"], 1801)
 
     def test_semantic_results_below_cosine_threshold_are_ignored_when_lexical_matches_exist(self):
         db = sqlite3.connect(":memory:", check_same_thread=False)
@@ -1847,6 +1850,9 @@ class SearchContractTests(unittest.TestCase):
             {"Tire", "Tire Changes", "Tiredness"},
         )
         by_title = {item["title"]: item for item in suggestions}
+        self.assertTrue(
+            all(not key.startswith("_") for item in suggestions for key in item)
+        )
         self.assertEqual(by_title["Tire Changes"]["path"], "Tire_Changes")
         self.assertEqual(by_title["Tire Changes"]["id"], encode_document_id("manual", "Tire_Changes"))
         self.assertEqual(
@@ -2941,6 +2947,36 @@ class BrowseSearchTests(unittest.TestCase):
         self.assertEqual(first["results"] + second["results"], whole["results"][:4])
         self.assertNotEqual(whole["results"], reshuffled["results"])
         self.assertEqual(relevance, cached_relevance)
+
+    def test_text_recency_sort_reuses_hydrated_rowids_without_path_scans(self):
+        search = self.make_search()
+        search.semantic = False
+        db = search.indexes["manual"].db
+        db.execute("UPDATE docs SET modified = rowid * 10")
+        statements = []
+        db.set_trace_callback(statements.append)
+        try:
+            page = search.search_page("topic", sort="recency", limit=5)
+        finally:
+            db.set_trace_callback(None)
+
+        self.assertTrue(page["results"])
+        self.assertFalse(
+            any("WHERE path IN" in statement for statement in statements)
+        )
+        modified = {
+            row[0]: (row[1] or 0)
+            for row in db.execute("SELECT path, modified FROM docs")
+        }
+        order = [modified[doc["path"]] for doc in page["results"]]
+        self.assertEqual(order, sorted(order, reverse=True))
+        self.assertTrue(
+            all(
+                not key.startswith("_")
+                for doc in page["results"]
+                for key in doc
+            )
+        )
 
     def test_diversity_scores_the_global_pool_without_source_size_bias(self):
         search = self.make_search()

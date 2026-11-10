@@ -256,4 +256,10 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(
             [doc["source_rank"] for doc in results], [1, 1, 2, 2]
         )
-        self.assertTrue(all("_browse_order" not in doc for doc in results))
+        self.assertTrue(
+            all(
+                not key.startswith("_")
+                for doc in results
+                for key in doc
+            )
+        )

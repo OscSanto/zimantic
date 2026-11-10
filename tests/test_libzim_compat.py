@@ -61,11 +61,17 @@ def test_versioned_entry_lookup_and_search_results():
         ][start:start + count]
     )
     titles = SimpleNamespace(get_entry_by_path=lambda path: SimpleNamespace(title=path.title()))
+    indexed = SimpleNamespace(
+        get_entry_by_path=lambda path: SimpleNamespace(title=path.title(), _index=7)
+    )
     assert search_results(old_search, 0, 1) == [{"path": "alpha", "title": ""}]
     assert search_results(old_search, 0, 1, archive=titles) == [
         {"path": "alpha", "title": "Alpha"}
     ]
     assert search_results(new_search, 0, 1) == [{"path": "alpha", "title": "Alpha"}]
+    assert search_results(
+        old_search, 0, 1, archive=indexed, include_index=True
+    ) == [{"path": "alpha", "title": "Alpha", "index": 7}]
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,8 @@
 
 Protocol: one JSON request per line on stdin, one JSON response per line on
 stdout. A request is ``{"path": ..., "query": ..., "count": ...}``; a response
-is ``{"results": [{"path": ..., "title": ...}, ...]}`` or ``{"error": "..."}``.
+is ``{"results": [{"path": ..., "title": ..., "index": ...}, ...]}`` or
+``{"error": "..."}``.
 The parent treats a missing response (the process aborted) as an unsafe archive.
 """
 
@@ -12,6 +13,7 @@ import json
 import logging
 import sys
 from collections import OrderedDict
+from typing import Any
 
 from libzim.reader import Archive
 from libzim.search import Query, Searcher
@@ -32,7 +34,7 @@ class ArchiveCache:
 
     def search_results(
         self, path: str, query: str, count: int, version: object = None,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         if isinstance(version, list):
             version = tuple(version)
         cache_key = (path, version)
@@ -50,7 +52,7 @@ class ArchiveCache:
         search = searcher.search(Query().set_query(query))
         return search_results(
             search, 0, max(0, int(count)), archive=archive,
-            include_snippets=False,
+            include_snippets=False, include_index=True,
         )
 
     def clear(self) -> None:

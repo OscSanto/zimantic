@@ -1821,7 +1821,13 @@
                 const toolbar = $("sourceFilterToolbar");
                 const options = $("sourceFilterOptions");
                 const status = $("sourceFilterStatus");
-                if (!current) {
+                // Before the stream's `started` event, the source scope is not
+                // known yet. Showing an empty filter panel alongside
+                // "Searching for …" is just noise.
+                const scopeLoading = Boolean(
+                    current?.streaming && !current.sourcesTotal,
+                );
+                if (!current || scopeLoading) {
                     panel.hidden = true;
                     panel.classList.remove("empty-selection");
                     toolbar.hidden = true;
@@ -1910,9 +1916,11 @@
                 if (!layout.matching.length) {
                     status.textContent = layout.query
                         ? t("No matching sources.")
-                        : layout.outcomes.length
+                        : current.streaming ||
+                            layout.outcomes.length ||
+                            !current.sourcesTotal
                           ? ""
-                          : t("No sources have reported yet.");
+                          : t("No sources returned results.");
                 } else if (
                     layout.query &&
                     layout.matching.length > visibleMatching
@@ -1988,6 +1996,12 @@
                 const text = $("scopeLineText");
                 const reset = $("scopeLineReset");
                 if (!line || !text) return;
+                if (current?.streaming && !current.sourcesTotal) {
+                    line.hidden = true;
+                    reset.hidden = true;
+                    text.textContent = "";
+                    return;
+                }
                 const collectionKey =
                     selectedCollectionKey || current?.searchCollection || null;
                 const selected = [...selectedSourceKeys];
@@ -3794,6 +3808,7 @@
                         if (typeof event.all_sources === "boolean") {
                             current.searchAll = event.all_sources;
                         }
+                        renderSourceFilters();
                         renderScopeLine();
                         $("status").textContent =
                             `Searching ${current.sourcesTotal} source${current.sourcesTotal === 1 ? "" : "s"}…`;

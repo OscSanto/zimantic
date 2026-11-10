@@ -148,7 +148,9 @@ class LibzimRuntimeApiTests(unittest.TestCase):
             results = pool.search_results(str(self.zim_path), "brakes", 10)
         finally:
             pool.close()
-        self.assertIn({"path": "Beta", "title": "Beta"}, results)
+        beta = next(result for result in results if result["path"] == "Beta")
+        self.assertEqual(beta["title"], "Beta")
+        self.assertIsInstance(beta.get("index"), int)
 
     def test_threaded_fulltext_returns_the_same_titles_as_processes(self):
         from zimantic.fulltext import FulltextPool

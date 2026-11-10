@@ -293,17 +293,19 @@ def _search_locked(
                     path = str(result.get("path") or "")
                     if not path:
                         continue
-                    fulltext_hits.append(
-                        (
-                            rank,
-                            result_doc(
-                                source,
-                                path,
-                                str(result.get("title") or path),
-                                web_base_path=ctx.web_base_path,
-                            ),
-                        )
+                    doc = result_doc(
+                        source,
+                        path,
+                        str(result.get("title") or path),
+                        web_base_path=ctx.web_base_path,
                     )
+                    rowid = result.get("index")
+                    if rowid is not None:
+                        try:
+                            doc["_rowid"] = int(rowid)
+                        except (TypeError, ValueError):
+                            pass
+                    fulltext_hits.append((rank, doc))
         elif fulltext_pool is not None:
             native_paths = fulltext_pool.search(
                 index.zim_path or "",
@@ -488,13 +490,17 @@ def fetch_docs(
         path for path, identifiers in path_ids.items() if len(identifiers) > 1
     }
     docs: dict[int, dict[str, Any]] = {}
-    for rowid, (_final_id, row) in resolved_rows.items():
+    for rowid, (final_id, row) in resolved_rows.items():
         _, title, path, _ = row
         if str(path) in ambiguous:
             continue
-        docs[rowid] = result_doc(
+        doc = result_doc(
             source, str(path), title, web_base_path=web_base_path
         )
+        # Keep the final rowid private: result ordering can resolve matched
+        # paths back to rows without scanning the unindexed docs.path column.
+        doc["_rowid"] = final_id
+        docs[rowid] = doc
     return docs
 
 

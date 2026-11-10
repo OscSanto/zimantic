@@ -1939,7 +1939,11 @@ class Search:
                 if doc_id in seen_ids:
                     continue
                 seen_ids.add(doc_id)
-                suggestions.append(doc)
+                suggestions.append({
+                    key: value
+                    for key, value in doc.items()
+                    if not key.startswith("_")
+                })
         return suggestions[:limit]
 
     def search_page(

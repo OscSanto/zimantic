@@ -27,6 +27,7 @@ import threading
 import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
+from typing import Any
 
 from .diagnostics import sanitize_public_text
 
@@ -191,8 +192,8 @@ class _Worker(_WorkerActivity):
         query: str,
         count: int,
         version: object = None,
-    ) -> list[dict[str, str]] | None:
-        """Return result paths and titles, or None when the worker cannot answer."""
+    ) -> list[dict[str, Any]] | None:
+        """Return result paths, titles, and ids, or None when unavailable."""
         with self._lock:
             self._archive_failure = False
             process: subprocess.Popen[str] | None = None
@@ -328,7 +329,7 @@ class _ThreadWorker(_WorkerActivity):
 
     def search_results(
         self, zim_path: str, query: str, count: int, version: object = None,
-    ) -> list[dict[str, str]] | None:
+    ) -> list[dict[str, Any]] | None:
         with self._lock:
             self.archive_failure = False
             if self._closed.is_set():
@@ -418,8 +419,8 @@ class FulltextPool:
         query: str,
         count: int,
         version: object = None,
-    ) -> list[dict[str, str]] | None:
-        """Return result paths and titles from one native worker."""
+    ) -> list[dict[str, Any]] | None:
+        """Return result paths, titles, and ids from one native worker."""
         if self._closed.is_set() or self.is_broken(zim_path):
             return None
         try:

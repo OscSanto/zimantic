@@ -543,7 +543,11 @@ def rank_browse_results(
         if doc["id"] in seen:
             continue
         seen.add(doc["id"])
-        output = {key: value for key, value in doc.items() if key != "_browse_order"}
+        output = {
+            key: value
+            for key, value in doc.items()
+            if not key.startswith("_")
+        }
         output["ranking"] = {
             **doc["ranking"],
             "final_score": doc["score"],
