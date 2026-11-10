@@ -959,6 +959,55 @@ def _content_shell(
     )
 
 
+def _external_content_shell(url: str, title: str | None = None) -> Response:
+    """Hand an external content URL to the host page for a top-level redirect.
+
+    A running Kolibri server sends ``X-Frame-Options: DENY`` and its own CSP,
+    so it cannot be framed inside the article modal.  The shell is same-origin
+    with the host, though, so it can ask the host to navigate the whole page
+    instead of trapping the external document in the iframe.  A direct visit
+    falls back to a normal replace, and the link works without scripts.
+    """
+    target = str(url)
+    label = html_escape(str(title or "content"), quote=True)
+    target_attr = html_escape(target, quote=True)
+    script_target = json.dumps(target).replace("<", "\\u003c")
+    html = (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{label}</title>\n"
+        "</head>\n<body>\n"
+        f'<p>Opening <a href="{target_attr}" target="_top" '
+        f'rel="noopener noreferrer">{label}</a>…</p>\n'
+        "<script>\n"
+        "(() => {\n"
+        f"  const target = {script_target};\n"
+        "  if (window.top === window) {\n"
+        "    window.location.replace(target);\n"
+        "    return;\n"
+        "  }\n"
+        "  try {\n"
+        '    window.parent.postMessage(\n'
+        '      { type: "zimantic-external-redirect", url: target },\n'
+        "      window.location.origin,\n"
+        "    );\n"
+        "  } catch (_) {\n"
+        "    window.location.replace(target);\n"
+        "  }\n"
+        "})();\n"
+        "</script>\n"
+        "</body>\n</html>"
+    )
+    return Response(
+        content=html.encode("utf-8"),
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 def _article_response_headers(
     mimetype: str,
     *,

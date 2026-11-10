@@ -9,7 +9,6 @@ from urllib.parse import unquote, urlencode, urlsplit
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import (
     JSONResponse,
-    RedirectResponse,
     Response,
     StreamingResponse,
 )
@@ -1174,7 +1173,9 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 entry = resolve(source, path)
                 external_url = getattr(entry, "external_url", None)
                 if external_url:
-                    return RedirectResponse(external_url, status_code=302)
+                    return web_app._external_content_shell(
+                        external_url, entry.title
+                    )
                 article_dict = {
                     "path": entry.path,
                     "title": entry.title,

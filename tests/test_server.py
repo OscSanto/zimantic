@@ -1,6 +1,7 @@
 import json
 import unittest
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -714,6 +715,36 @@ class ServerTests(unittest.TestCase):
             shell.text.index("data-zimantic-storage-notice-dismiss"),
             shell.text.index("<iframe data-zimantic-article"),
         )
+
+    def test_content_external_url_uses_top_level_redirect_bridge(self):
+        entry = SimpleNamespace(
+            path="node/topic",
+            title="Topic",
+            mimetype="text/html",
+            size=None,
+            redirect_path=None,
+            external_url=(
+                "http://kolibri.example/learn/#/topics/t/topic/folders"
+            ),
+        )
+        with patch.object(
+            self.search,
+            "resolve_content",
+            lambda source, path=None: entry,
+            create=True,
+        ):
+            response = self.client.get("/content/manual/node/topic")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("text/html"))
+        self.assertNotIn("data-zimantic-toolbar", response.text)
+        self.assertIn("zimantic-external-redirect", response.text)
+        self.assertIn("window.top === window", response.text)
+        self.assertIn(
+            "http://kolibri.example/learn/#/topics/t/topic/folders",
+            response.text,
+        )
+        self.assertIn('target="_top"', response.text)
 
     def test_content_shell_hides_zim_search_when_scope_does_not_resolve(self):
         body = b"<html><head></head><body>Page</body></html>"

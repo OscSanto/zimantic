@@ -2134,6 +2134,38 @@ console.log(JSON.stringify({{inside, outside, narrowed, same, cleared}}));
         self.assertEqual(payload["same"], ["load", 1])
         self.assertEqual(payload["cleared"], ["run", "q", [], 0, []])
 
+    def test_modified_heading_click_opens_search_in_new_tab(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const appPath = (path) => `/zimantic${{path}}`;
+const opened = [];
+const window = {{open: (...args) => opened.push(args)}};
+let celebrated = 0, toggled = 0;
+const celebrateHeadingClick = () => {{ celebrated++; }};
+const toggleHeadingSearch = () => {{ toggled++; }};
+{_function_source(source, "function modifiedClick(", "function articleUrlValue(")}
+{_function_source(source, "function activateHomeHeading(", "function currentUrlValue(")}
+activateHomeHeading({{button: 0, ctrlKey: true}});
+const ctrl = opened.slice();
+activateHomeHeading({{button: 0, metaKey: true}});
+const meta = opened.slice();
+activateHomeHeading({{button: 0}});
+console.log(JSON.stringify({{ctrl, meta, opened, celebrated, toggled}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        newTab = [["/zimantic/", "_blank", "noopener"]]
+        self.assertEqual(payload["ctrl"], newTab)
+        self.assertEqual(payload["meta"], newTab * 2)
+        self.assertEqual(payload["opened"], newTab * 2)
+        self.assertEqual(payload["celebrated"], 1)
+        self.assertEqual(payload["toggled"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

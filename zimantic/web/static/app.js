@@ -3091,6 +3091,16 @@
                     handleExternalLink(event.data.url, event.data.offlineUrl, event.data.parent);
                     return;
                 }
+                if (event.data?.type === "zimantic-external-redirect") {
+                    // The content shell redirected to a running Kolibri server.
+                    // That server forbids framing, so leave the modal and send
+                    // the whole page there instead of showing a frame error.
+                    const url = readExternalUrl(event.data.url);
+                    if (!url) return;
+                    closeArticleModal();
+                    location.assign(url.href);
+                    return;
+                }
                 if (event.data?.type === "zimantic-app-navigate") {
                     // A same-origin app link from a captured article. The shell
                     // runs with an opaque origin in the modal, so it cannot load
@@ -4903,6 +4913,10 @@
             }
 
             function activateHomeHeading(event) {
+                if (event && modifiedClick(event)) {
+                    window.open(appPath("/"), "_blank", "noopener");
+                    return;
+                }
                 celebrateHeadingClick(event);
                 toggleHeadingSearch();
             }
