@@ -3265,7 +3265,7 @@
                 const node = document.createElement("li");
                 node.className = "result";
                 node.innerHTML = `<div class="result-body">
-  <div class="result-title"></div>
+  <h3 class="result-title"></h3>
   <div class="result-meta"></div>
   <div class="result-resource" hidden></div>
   <div class="result-snippet"></div>
@@ -4563,8 +4563,11 @@
                 const target = event.target instanceof Element ? event.target : null;
                 const link = target?.closest(".result-title a[href], a.result-thumb[href]");
                 if (!link) {
+                    const desktopSnippet =
+                        !matchMedia("(max-width: 480px)").matches &&
+                        Boolean(target?.closest(".result-snippet"));
                     if (
-                        !matchMedia("(max-width: 480px)").matches ||
+                        desktopSnippet ||
                         modifiedClick(event) ||
                         target?.closest("a, button, input, select, textarea, details, [contenteditable]") ||
                         window.getSelection()?.toString()

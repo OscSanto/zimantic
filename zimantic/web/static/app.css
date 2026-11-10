@@ -445,31 +445,31 @@ ol.results {
     flex: 1;
     min-width: 0;
 }
+.result-linked {
+    cursor: pointer;
+}
+.result-linked .result-snippet {
+    cursor: auto;
+}
 .result-linked:focus-within {
     border-color: var(--accent);
 }
 .result-title {
-    align-items: center;
-    display: flex;
-    font-size: 1.02rem;
+    display: inline-block;
+    font-size: 22px;
     font-weight: 600;
-    gap: 6px;
+    line-height: 28px;
+    margin: 0 0 3px;
 }
 .result-title a {
-    align-items: center;
     color: var(--accent);
-    display: flex;
-    flex: 1;
-    gap: 12px;
-    justify-content: space-between;
-    min-height: 44px;
-    min-width: 0;
     text-decoration: none;
+}
+.result-title a:hover {
+    text-decoration: underline;
 }
 .result-title-text {
     overflow-wrap: anywhere;
-    text-decoration: underline;
-    text-underline-offset: 0.15em;
 }
 .result-title a:focus-visible {
     border-radius: 4px;
@@ -1147,9 +1147,6 @@ summary {
     }
 }
 @media (max-width: 480px) {
-    .result-linked {
-        cursor: pointer;
-    }
     .result-linked:hover {
         border-color: var(--accent);
     }
