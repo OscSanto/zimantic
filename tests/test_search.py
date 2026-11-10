@@ -1802,6 +1802,17 @@ class SearchContractTests(unittest.TestCase):
         self.assertEqual(docs[0]["lead"], "first preview")
         self.assertEqual(docs[1]["lead"], "")
 
+        # A cached preview must restore the mimetype the first pass resolved.
+        cached_key = next(iter(search.preview_cache._data))
+        search.preview_cache.put(cached_key, ("first preview", "video/mp4"))
+        repeat = [{"id": "manual:first", "source_key": "manual", "lead": "", "path": "first"}]
+        search._executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            search._hydrate_results(repeat)
+        finally:
+            search._executor.shutdown(wait=True)
+        self.assertEqual(repeat[0]["mimetype"], "video/mp4")
+
     def test_title_search_falls_back_to_prefix_when_exact_matches_nothing(self):
         # Exact token matching misses these because the query word is a truncated
         # or base form of the title word; only the prefix fallback surfaces them.

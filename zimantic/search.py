@@ -2791,7 +2791,9 @@ class Search:
                 continue
             cached = preview_cache.get(cache_key(source, doc))
             if cached is not None:
-                doc["lead"] = cached
+                doc["lead"], cached_mimetype = cached
+                if cached_mimetype and not doc.get("mimetype"):
+                    doc["mimetype"] = cached_mimetype
                 continue
             if doc.get("lead"):
                 continue
@@ -2841,7 +2843,9 @@ class Search:
                     doc["mimetype"] = mimetype
                 if source is not None:
                     preview_cache.put(
-                        cache_key(source, doc), lead, quotas=self._cache_quotas([source])
+                        cache_key(source, doc),
+                        (lead, doc.get("mimetype")),
+                        quotas=self._cache_quotas([source]),
                     )
 
     def _enrich_pool(
