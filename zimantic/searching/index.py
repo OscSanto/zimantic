@@ -64,6 +64,7 @@ class IndexHandle:
     browse_rankings: dict[str, tuple[int, list[tuple[float, int]]]] = field(
         default_factory=dict, repr=False, compare=False
     )
+    browse_total: int | None = field(default=None, repr=False, compare=False)
     browse_centroid: Any | None = field(default=None, repr=False, compare=False)
     source_size: int | None = None
     zim_path: str | None = None
@@ -205,6 +206,7 @@ class IndexHandle:
         self.faiss_index = None
         self.random_article_ids = None
         self.browse_rankings.clear()
+        self.browse_total = None
         self.browse_centroid = None
 
     @staticmethod

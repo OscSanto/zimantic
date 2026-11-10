@@ -91,14 +91,16 @@ DONE_FAST = "fast"
 DONE_FULL = "full"
 DONE_VALUES = frozenset({DONE_FAST, DONE_FULL})
 
-SCHEMA = """
+DOCS_TOKENIZER = "unicode61 remove_diacritics 2"
+
+SCHEMA = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
     title, path UNINDEXED, target UNINDEXED, modified UNINDEXED,
-    tokenize='unicode61 remove_diacritics 2');
+    tokenize='{DOCS_TOKENIZER}');
 -- docs keeps only title/path/final target.  Excerpts and raw body text are
 -- intentionally not stored in the new index.
 CREATE VIRTUAL TABLE IF NOT EXISTS body USING fts5(
-    text, content='', detail=none, columnsize=0, tokenize='unicode61 remove_diacritics 2');
+    text, content='', detail=none, columnsize=0, tokenize='{DOCS_TOKENIZER}');
 -- body is contentless: it can add postings, never update/delete a row.
 CREATE TABLE IF NOT EXISTS vecs(
     id INTEGER PRIMARY KEY,

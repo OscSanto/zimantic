@@ -13,6 +13,7 @@ from typing import Any
 from ..contracts import SourceInfo, SourceResult
 from ..searching.diversity import diverse_order
 from ..searching.query import STOPWORDS
+from .schema import DOCS_TOKENIZER, INDEXED_COUNT
 from .search import SearchLimits, fetch_docs, vector_search
 
 BROWSE_MODES = ("random", "rare", "outliers", "diverse", "recency")
@@ -88,11 +89,16 @@ def _rare_rows(
         "CREATE VIRTUAL TABLE IF NOT EXISTS temp.zimantic_browse_words "
         "USING fts5vocab(main, docs, row)"
     )
-    db.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS temp.zimantic_browse_terms "
-        "USING fts5vocab(main, docs, instance)"
-    )
-    total = db.execute("SELECT count(*) FROM docs").fetchone()[0]
+    total = getattr(index, "browse_total", None)
+    if total is None:
+        meta = getattr(index, "index_meta", None) or {}
+        try:
+            total = int(meta.get(INDEXED_COUNT, ""))
+        except (TypeError, ValueError):
+            total = None
+    if total is None:
+        total = int(db.execute("SELECT count(*) FROM docs").fetchone()[0])
+        index.browse_total = total
     db.create_function(
         "zimantic_browse_idf",
         1,
@@ -101,29 +107,61 @@ def _rare_rows(
     )
     stopwords = sorted(STOPWORDS)
     placeholders = ",".join("?" for _ in stopwords)
-    selection = (
-        " WHERE doc IN (" + ",".join("?" for _ in rowids) + ")"
-        if rowids is not None else ""
-    )
-    word_selection = " AND term IN (SELECT term FROM terms)" if rowids is not None else ""
-    rows = db.execute(
-        "WITH weights AS MATERIALIZED ("
-        " SELECT term, zimantic_browse_idf(doc) AS weight"
-        " FROM temp.zimantic_browse_words"
-        f" WHERE term NOT IN ({placeholders}){word_selection}"
-        "), terms AS ("
-        f" SELECT DISTINCT term, doc FROM temp.zimantic_browse_terms{selection}"
-        ") SELECT terms.doc, round(avg(weights.weight), 12) AS score"
-        " FROM terms JOIN weights USING (term)"
-        " JOIN docs ON docs.rowid = terms.doc"
-        " WHERE docs.target IS NULL"
-        " GROUP BY terms.doc ORDER BY score DESC, terms.doc LIMIT ?",
-        [*stopwords, *(rowids or []), count],
-    ).fetchall()
-    ranked = [(float(score), int(rowid)) for rowid, score in rows]
     if rowids is None:
+        db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.zimantic_browse_terms "
+            "USING fts5vocab(main, docs, instance)"
+        )
+        rows = db.execute(
+            "WITH weights AS MATERIALIZED ("
+            " SELECT term, zimantic_browse_idf(doc) AS weight"
+            " FROM temp.zimantic_browse_words"
+            f" WHERE term NOT IN ({placeholders})"
+            "), terms AS MATERIALIZED ("
+            " SELECT DISTINCT term, doc FROM temp.zimantic_browse_terms"
+            ") SELECT terms.doc, round(avg(weights.weight), 12) AS score"
+            " FROM terms JOIN weights USING (term)"
+            " JOIN docs ON docs.rowid = terms.doc"
+            " WHERE docs.target IS NULL"
+            " GROUP BY terms.doc ORDER BY score DESC, terms.doc LIMIT ?",
+            [*stopwords, count],
+        ).fetchall()
+        ranked = [(float(score), int(rowid)) for rowid, score in rows]
         index.browse_rankings["rare"] = (count, ranked)
-    return ranked
+        return ranked
+
+    # A text query only needs the terms from the handful of matched titles.
+    # Tokenize those titles into a temporary FTS5 table and join them to the
+    # source vocabulary. This avoids scanning every term occurrence in the
+    # archive for each sorted source.
+    db.execute("DROP TABLE IF EXISTS temp.zimantic_candidate_terms")
+    db.execute("DROP TABLE IF EXISTS temp.zimantic_candidate_docs")
+    db.execute(
+        "CREATE VIRTUAL TABLE temp.zimantic_candidate_docs USING fts5("
+        f"title, tokenize='{DOCS_TOKENIZER}')"
+    )
+    db.execute(
+        "INSERT INTO temp.zimantic_candidate_docs(rowid, title) "
+        "SELECT rowid, title FROM docs WHERE rowid IN ("
+        + ",".join("?" for _ in rowids)
+        + ")",
+        list(rowids),
+    )
+    db.execute(
+        "CREATE VIRTUAL TABLE temp.zimantic_candidate_terms "
+        "USING fts5vocab(temp, zimantic_candidate_docs, instance)"
+    )
+    rows = db.execute(
+        "SELECT terms.doc, round(avg(zimantic_browse_idf(words.doc)), 12) "
+        "AS score"
+        " FROM temp.zimantic_candidate_terms terms"
+        " JOIN temp.zimantic_browse_words words ON words.term = terms.term"
+        " JOIN docs ON docs.rowid = terms.doc"
+        f" WHERE docs.target IS NULL AND terms.term NOT IN ({placeholders})"
+        " GROUP BY terms.doc ORDER BY score DESC, terms.doc LIMIT ?",
+        [*stopwords, count],
+    ).fetchall()
+    return [(float(score), int(rowid)) for rowid, score in rows]
 
 
 def _recent_rows(

@@ -82,6 +82,13 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(scores["common-1"], scores["common-2"])
         self.assertGreater(scores["unusual"], scores["common-1"])
         self.assertFalse(any("WHERE path IN" in sql for sql in statements))
+        self.assertFalse(
+            any("term IN (SELECT term FROM terms)" in sql for sql in statements)
+        )
+        self.assertFalse(
+            any("temp.zimantic_browse_terms" in sql for sql in statements)
+        )
+        self.assertEqual(self.index.browse_total, 5)
         self.assertEqual(sort_scores(self.index, [{"path": "missing"}], "rare"), {})
 
     def test_random_is_repeatable_and_handles_sparse_native_ids(self):
