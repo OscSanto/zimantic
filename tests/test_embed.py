@@ -258,6 +258,36 @@ class LowMemoryArenaTests(unittest.TestCase):
         self.assertFalse(self._build(memory_gb=8.0, low_memory=True))
         self.assertTrue(self._build(memory_gb=0.5, low_memory=False))
 
+
+class OnnxLogSeverityTests(unittest.TestCase):
+    """ORT's own warnings are shown only when the CLI is verbose."""
+
+    def _build(self, onnx_warnings):
+        captured = {}
+
+        def capture_load(path, sess_opts, providers=None):
+            captured["severity"] = sess_opts.log_severity_level
+            return MagicMock()
+
+        with (
+            patch.object(embed.ort, "InferenceSession", side_effect=capture_load),
+            patch.object(
+                embed.sentencepiece,
+                "SentencePieceProcessor",
+                return_value=MagicMock(),
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embed.Embedder(tmp, onnx_warnings=onnx_warnings)
+        return captured["severity"]
+
+    def test_warnings_kept_by_default(self):
+        self.assertNotEqual(self._build(True), 3)
+
+    def test_warnings_suppressed_without_verbose(self):
+        self.assertEqual(self._build(False), 3)
+
     def test_reclaim_happens_only_for_small_hosts_and_batches(self):
         tokenizer = MagicMock()
         tokenizer.encode.return_value = [1, 2]

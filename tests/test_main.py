@@ -461,7 +461,11 @@ class BuildWorkerTests(unittest.TestCase):
             embedder.assert_not_called()
             pipeline.call_args.args[0].embed(["text"])
             embedder.assert_called_once_with(
-                config["model_dir"], threads=2, device=None, batch_tokens=1000
+                config["model_dir"],
+                threads=2,
+                device=None,
+                batch_tokens=1000,
+                onnx_warnings=False,
             )
         self.assertEqual(pipeline.call_args.kwargs["workers"], 3)
         self.assertEqual(pipeline.call_args.kwargs["queue_size"], 32)

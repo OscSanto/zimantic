@@ -1265,6 +1265,7 @@ def _build_tasks(
                 threads=build_embed_threads,
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
                 batch_tokens=token_budget,
+                onnx_warnings=bool(getattr(args, "verbose", 0)),
             )
 
         embedder = _LazyEmbedder(_make_embedder)
@@ -1556,6 +1557,7 @@ def _run_positional_zim_build(
                 threads=cfg.get("onnx_build_threads"),
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
                 batch_tokens=int(cfg.get("embedding_batch_tokens", 1000)),
+                onnx_warnings=bool(getattr(args, "verbose", 0)),
             )
 
         embedder = _LazyEmbedder(_make_embedder)
@@ -2222,6 +2224,7 @@ def _run_open(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
                     open_cfg["model_dir"],
                     threads=open_cfg.get("onnx_query_threads"),
                     device=getattr(args, "device", None) or open_cfg.get("embed_device"),
+                    onnx_warnings=bool(getattr(args, "verbose", 0)),
                 )
 
             search.start_embedder(_make_embedder)
@@ -2300,6 +2303,7 @@ def _run_serve(args, cfg: dict) -> None:
                 cfg["model_dir"],
                 threads=cfg.get("onnx_query_threads"),
                 device=getattr(args, "device", None) or cfg.get("embed_device"),
+                onnx_warnings=bool(getattr(args, "verbose", 0)),
             )
 
         search.start_embedder(_make_embedder)

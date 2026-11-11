@@ -543,6 +543,7 @@ class Embedder:
         low_memory: bool | None = None,
         device: str = "auto",
         batch_tokens: int | None = None,
+        onnx_warnings: bool = True,
     ):
         """model_dir holds model.onnx and one tokenizer vocabulary.
 
@@ -558,6 +559,9 @@ class Embedder:
         offers), "cpu", "gpu", or a provider alias such as "cuda", "rocm",
         "migraphx", "directml" or "openvino"; an unavailable device falls back
         to the CPU with a warning, as does a run that fails after initialization.
+        onnx_warnings keeps ONNX Runtime's own warnings (for example graph
+        rewriter notices about subgraph input names) on stderr; the CLI turns
+        them off unless --verbose is given.
         """
         self.embedding_tokens = int(embedding_tokens)
         if self.embedding_tokens < SPECIAL_TOKEN_COUNT:
@@ -569,6 +573,7 @@ class Embedder:
             int(threads) if threads and int(threads) > 0 else default_onnx_query_threads()
         )
         self.low_memory = _low_memory_host() if low_memory is None else low_memory
+        self.onnx_warnings = bool(onnx_warnings)
         self.providers, device_warning = resolve_providers(device)
         if device_warning:
             logger.warning("zimantic: %s", device_warning)
@@ -693,6 +698,11 @@ class Embedder:
             opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         except RuntimeError:
             pass
+        if not self.onnx_warnings:
+            # ORT's C++ logger writes warnings such as graph_utils' subgraph
+            # rename notices straight to stderr, bypassing Python logging, so
+            # this cannot be filtered any other way. 3 = error, 4 = fatal.
+            opts.log_severity_level = 3
         return opts
 
     def batch_shape(self, width: int) -> tuple[int, int] | None:
