@@ -199,6 +199,57 @@ class DownloadModelTests(unittest.TestCase):
             Path("./model/multilingual-e5-base"),
         )
 
+    def test_reused_precision_folder_drops_the_previous_tokenizer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            directory = output / "int8"
+            directory.mkdir()
+            stale = directory / "sentencepiece.bpe.model"
+            stale.write_bytes(b"stale e5 vocabulary")
+            with patch.object(
+                model_files, "_download_file", return_value=True
+            ), patch.object(
+                model_files, "_write_derived_vocab"
+            ), patch.object(
+                model_files, "_write_model_config"
+            ):
+                model_files.download_model(
+                    model_files.DEFAULT_MODEL, ["int8"], output
+                )
+
+            self.assertFalse(stale.exists())
+
+    def test_reused_precision_folder_keeps_the_selected_tokenizer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            directory = output / "int8"
+            directory.mkdir()
+            sentencepiece = directory / "sentencepiece.bpe.model"
+            sentencepiece.write_bytes(b"e5 vocabulary")
+            for name in ("vocab.txt", "tokenizer.json"):
+                (directory / name).write_bytes(b"stale static vocabulary")
+            with patch.object(
+                model_files, "_download_file", return_value=True
+            ), patch.object(model_files, "_write_model_config"):
+                model_files.download_model(
+                    "multilingual-e5-small", ["int8"], output
+                )
+
+            self.assertTrue(sentencepiece.exists())
+            self.assertFalse((directory / "vocab.txt").exists())
+            self.assertFalse((directory / "tokenizer.json").exists())
+
+    def test_model_without_config_removes_a_stale_model_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "zimantic_model.json").write_text(
+                '{"truncate_dim": 256}', encoding="utf-8"
+            )
+            model_files._write_model_config(
+                model_files.MODEL_SPECS["multilingual-e5-small"], directory
+            )
+            self.assertFalse((directory / "zimantic_model.json").exists())
+
     def test_static_model_writes_derived_vocab_and_config(self):
         output = Path("/tmp/models")
         with patch.object(

@@ -861,6 +861,39 @@ class SessionProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "bad input shape"):
                 embedder.embed(["query: test"])
 
+    def test_vocabulary_mismatch_reports_the_mixed_folder(self):
+        class FailingSession:
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def get_providers(self):
+                return ["CPUExecutionProvider"]
+
+            def run(self, _outputs, _inputs):
+                raise RuntimeError(
+                    "indices element out of data bounds, idx=122841 must be "
+                    "within the inclusive range [-105879,105878]"
+                )
+
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = [1, 2]
+        with (
+            patch.object(embed.ort, "get_available_providers", return_value=[
+                "CPUExecutionProvider",
+            ]),
+            patch.object(embed.ort, "InferenceSession", return_value=FailingSession()),
+            patch.object(
+                embed.sentencepiece,
+                "SentencePieceProcessor",
+                return_value=tokenizer,
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            _sentencepiece_dir(tmp)
+            embedder = embed.Embedder(tmp)
+            with self.assertRaisesRegex(RuntimeError, "mixes vocabulary"):
+                embedder.embed(["query: test"])
+
     def test_failed_gpu_session_falls_back_to_cpu(self):
         captured = []
 
@@ -1023,6 +1056,40 @@ class TokenizerSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _sentencepiece_dir(tmp)
             (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+            kind, _ = embed._resolve_tokenizer(tmp)
+        self.assertEqual(kind, "sentencepiece")
+
+    def test_wordpiece_tokenizer_json_disambiguates_a_reused_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _sentencepiece_dir(tmp)
+            (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+            (Path(tmp) / "tokenizer.json").write_text(
+                json.dumps({"model": {"type": "WordPiece", "vocab": {}}}),
+                encoding="utf-8",
+            )
+            kind, path = embed._resolve_tokenizer(tmp)
+        self.assertEqual(kind, "wordpiece")
+        self.assertEqual(path.name, "vocab.txt")
+
+    def test_static_model_config_disambiguates_a_reused_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _sentencepiece_dir(tmp)
+            (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+            (Path(tmp) / "zimantic_model.json").write_text(
+                json.dumps({"architecture": "static-embedding"}),
+                encoding="utf-8",
+            )
+            kind, _ = embed._resolve_tokenizer(tmp)
+        self.assertEqual(kind, "wordpiece")
+
+    def test_unigram_tokenizer_json_keeps_sentencepiece(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _sentencepiece_dir(tmp)
+            (Path(tmp) / "vocab.txt").write_text("[PAD]\n", encoding="utf-8")
+            (Path(tmp) / "tokenizer.json").write_text(
+                json.dumps({"model": {"type": "Unigram", "vocab": []}}),
+                encoding="utf-8",
+            )
             kind, _ = embed._resolve_tokenizer(tmp)
         self.assertEqual(kind, "sentencepiece")
 

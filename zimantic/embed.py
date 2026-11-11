@@ -226,6 +226,27 @@ def _configured_tokenizer_class(model_dir) -> str:
     return str(data.get("tokenizer_class", "")).casefold()
 
 
+def _tokenizer_json_is_wordpiece(path: Path) -> bool:
+    """Return True when ``tokenizer.json`` declares a WordPiece model.
+
+    A reused model folder can contain both vocabulary files after a model
+    switch. ``tokenizer.json`` disambiguates it: the static default's WordPiece
+    export ships one, while the e5 downloads ship SentencePiece alone. Checking
+    the declared model type (rather than only the filename) avoids preferring a
+    WordPiece file left beside an XLM-R export.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    model = data.get("model")
+    return isinstance(model, dict) and str(model.get("type", "")).casefold() == (
+        "wordpiece"
+    )
+
+
 def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
     """Choose SentencePiece or WordPiece from the files in ``model_dir``.
 
@@ -233,8 +254,11 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
     accept the same input_ids/attention_mask tensors. The vocabulary artifact
     does, reliably: multilingual-e5 ships ``sentencepiece.bpe.model`` and the
     English e5-v2 models ship BERT's ``vocab.txt``. When a directory contains
-    both, honor tokenizer_config.json if it is present, otherwise keep the
-    historical SentencePiece choice.
+    both (for example a precision folder reused after switching models), honor
+    tokenizer_config.json if it is present, then a WordPiece tokenizer.json,
+    then the static model's config, and otherwise keep the historical
+    SentencePiece choice. The e5 and static vocabularies are not interchangeable:
+    SentencePiece ids exceed the static graph's 105,879-row embedding table.
     """
     sentencepiece_path = Path(model_dir) / "sentencepiece.bpe.model"
     wordpiece_path = Path(model_dir) / "vocab.txt"
@@ -243,6 +267,12 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
         if "xlm" in tokenizer_class or "sentencepiece" in tokenizer_class:
             return "sentencepiece", sentencepiece_path
         if tokenizer_class.startswith("bert") or "wordpiece" in tokenizer_class:
+            return "wordpiece", wordpiece_path
+        if _tokenizer_json_is_wordpiece(Path(model_dir) / "tokenizer.json"):
+            return "wordpiece", wordpiece_path
+        if str(_model_config(model_dir).get("architecture", "")).casefold() == (
+            "static-embedding"
+        ):
             return "wordpiece", wordpiece_path
         return "sentencepiece", sentencepiece_path
     if sentencepiece_path.is_file():
@@ -887,6 +917,17 @@ class Embedder:
                     f"MIGraphX returned shape {hidden.shape[:2]} for input {ids.shape}"
                 )
         except Exception as error:
+            if "indices element out of data bounds" in str(error):
+                # A tokenizer from a different model was selected; retrying on
+                # the CPU cannot succeed because the ids are outside the graph's
+                # embedding table. Point at the cause instead of the raw ORT
+                # Gather/Loop stack.
+                raise RuntimeError(
+                    "token ids exceed the embedding table in "
+                    f"{self.model_dir}; the folder probably mixes vocabulary "
+                    "files from different models (remove the stale "
+                    f"sentencepiece.bpe.model or vocab.txt and rebuild): {error}"
+                ) from error
             if provider == CPU_PROVIDER or not self._fall_back_to_cpu(error):
                 raise
             hidden = self._run_once(inputs)

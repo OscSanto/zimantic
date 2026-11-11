@@ -9,6 +9,9 @@ written, migrated, vacuumed, or checkpointed by this module.
 The provider pins one snapshot per configured entry discovery batch.  Channel
 runtimes retain it, and the snapshot is removed only after the last reader
 releases it.  A fresh snapshot is used to validate a build before publication.
+Snapshots left behind by an interrupted process are reclaimed on the next
+snapshot creation: each snapshot holds an advisory lock for its lifetime, so a
+directory whose lock can be taken has no live reader.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from ..._filelock import lock_file, unlock_file
 from ...diagnostics import public_cause
 from .schema import detect_schema
 
@@ -34,6 +38,9 @@ DEFAULT_MAX_SNAPSHOT_BYTES = 1_073_741_824
 DEFAULT_DISK_BUDGET_BYTES = 3_221_225_472
 DEFAULT_TIMEOUT_SECONDS = 10
 MAX_CONCURRENT_CREATIONS = 2
+SNAPSHOT_PREFIX = "snapshot-"
+SNAPSHOT_LOCK_NAME = ".lock"
+STALE_SNAPSHOT_GRACE_SECONDS = 60.0
 
 _LOCK = threading.Lock()
 _CREATION_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CREATIONS)
@@ -96,6 +103,94 @@ def _private_file(path: Path) -> None:
             os.chmod(path, 0o600)
         except OSError as error:
             raise SnapshotError("could not restrict the private snapshot file") from error
+
+
+def _lock_snapshot_directory(directory: Path) -> int:
+    """Take the lifetime advisory lock that marks a snapshot as live."""
+    path = directory / SNAPSHOT_LOCK_NAME
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise SnapshotError("could not create the private snapshot lock") from error
+    try:
+        owned = lock_file(fd)
+    except OSError as error:
+        os.close(fd)
+        raise SnapshotError("could not lock the private snapshot directory") from error
+    if not owned:
+        os.close(fd)
+        raise SnapshotError("another process owns the private snapshot directory")
+    return fd
+
+
+def _release_snapshot_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        unlock_file(fd)
+    except OSError:
+        # Closing the descriptor releases the advisory lock on both platforms.
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _remove_orphaned_snapshots(root: Path) -> None:
+    """Remove snapshot directories whose owning process is gone.
+
+    A live snapshot keeps its advisory lock until the last reader releases it.
+    The lock is released by the kernel when a process exits, even after a crash,
+    so an old directory whose lock we can take is safe to remove.  Recent
+    directories without a lock are left alone to avoid racing a snapshot that
+    another process has just created but not locked yet.
+    """
+    try:
+        entries = list(root.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    except OSError:
+        return
+    cutoff = time.time() - STALE_SNAPSHOT_GRACE_SECONDS
+    for directory in entries:
+        if not directory.name.startswith(SNAPSHOT_PREFIX):
+            continue
+        try:
+            if directory.is_symlink() or not directory.is_dir():
+                continue
+            if directory.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        lock_path = directory / SNAPSHOT_LOCK_NAME
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(lock_path, flags, 0o600)
+        except OSError:
+            continue
+        try:
+            try:
+                owned = lock_file(fd)
+            except OSError:
+                owned = False
+        finally:
+            _release_snapshot_lock(fd)
+        if not owned:
+            continue
+        try:
+            lock_path.unlink(missing_ok=True)
+            shutil.rmtree(directory)
+            logger.debug(
+                "zimantic: removed an orphaned Kolibri snapshot %s", directory
+            )
+        except OSError as error:
+            logger.warning(
+                "zimantic: could not remove an orphaned Kolibri snapshot (%s)",
+                public_cause(error),
+            )
+            logger.debug("Kolibri snapshot removal error: %s", error)
 
 
 def _declared_postgres(options_path: Path) -> bool:
@@ -279,6 +374,7 @@ class KolibriSnapshot:
         *,
         owner: SnapshotManager,
         size: int,
+        lock_fd: int | None = None,
         source_signature: tuple[tuple[int, int, int, int] | None, ...] | None = None,
     ) -> None:
         self.directory = directory
@@ -286,6 +382,7 @@ class KolibriSnapshot:
         self.size = int(size)
         self.source_signature = source_signature
         self._owner = owner
+        self._lock_fd = lock_fd
         self._refs = 1
         self._closed = False
         self._lock = threading.Lock()
@@ -317,6 +414,10 @@ class KolibriSnapshot:
                 return
             self._closed = True
         self._owner._retire(self)
+
+    def _release_lock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        _release_snapshot_lock(fd)
 
     def close(self) -> None:
         self.release()
@@ -396,6 +497,7 @@ class SnapshotManager:
                 _LIVE_SNAPSHOTS[self._key] = remaining
             else:
                 _LIVE_SNAPSHOTS.pop(self._key, None)
+        snapshot._release_lock()
         try:
             shutil.rmtree(snapshot.directory, ignore_errors=False)
         except OSError as error:
@@ -417,12 +519,15 @@ class SnapshotManager:
             )
         directory: Path | None = None
         database: Path | None = None
+        lock_fd: int | None = None
         try:
             _private_directory(self.snapshot_root)
+            _remove_orphaned_snapshots(self.snapshot_root)
             directory = Path(
-                tempfile.mkdtemp(prefix="snapshot-", dir=self.snapshot_root)
+                tempfile.mkdtemp(prefix=SNAPSHOT_PREFIX, dir=self.snapshot_root)
             )
             _private_directory(directory)
+            lock_fd = _lock_snapshot_directory(directory)
             # Record the source state before copying.  If a writer commits
             # after the copy, the runtime's next refresh sees a signature
             # change instead of treating the stale copy as current.
@@ -471,16 +576,20 @@ class SnapshotManager:
                 database,
                 owner=self,
                 size=size,
+                lock_fd=lock_fd,
                 source_signature=source_signature,
             )
             directory = None
             database = None
+            lock_fd = None
             return snapshot
         except SnapshotError:
             raise
         except sqlite3.Error as error:
             raise SnapshotError("could not read the Kolibri snapshot") from error
         finally:
+            if lock_fd is not None:
+                _release_snapshot_lock(lock_fd)
             if directory is not None:
                 shutil.rmtree(directory, ignore_errors=True)
             _CREATION_SLOTS.release()

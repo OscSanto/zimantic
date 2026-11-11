@@ -47,8 +47,4 @@ python tests/fixtures/mixed_library/kiwix_server.py --port 8085
 
 ## Raspberry Pi 4 targets
 
-The targets are startup under 120 seconds, mixed search p95 under 8 seconds,
-and peak RSS under 1 GiB. A recorded result from the documented hardware
-verifies them. A missing fixture or result is **unverified**. Each result
-records the device model and RAM, OS, storage, Python version, commit, and
-fixture revision.
+The targets are startup under 120 seconds, mixed search p95 under 8 seconds, and peak RSS under 1 GiB. A recorded result from the documented hardware verifies them. A missing fixture or result is unverified. Each result records the device model and RAM, OS, storage, Python version, commit, and fixture revision.

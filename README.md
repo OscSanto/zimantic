@@ -1,8 +1,8 @@
 # Zimantic
 
-Zimantic is an offline search engine for Kiwix ZIM files and configured directory trees, such as an offline `/library/www/html/modules`. Semantic search finds articles from questions and descriptions, including misspellings and queries in another language. Zimantic runs offline on devices as small as a Raspberry Pi Zero 2 W.
+Zimantic is an offline search engine for Kiwix ZIM files and configured directory trees, such as an offline copy of `/library/www/html/modules`. Semantic search finds articles from questions and descriptions, including misspellings and queries in another language. Zimantic runs offline on devices as small as a Raspberry Pi Zero 2 W.
 
-Semantic search performs best in widely spoken languages. Coverage varies by language; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
+Semantic search has the best coverage in widely spoken languages. Coverage varies by language; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
 
 | Query | Kiwix search | Zimantic |
 |---|---|---|
@@ -10,41 +10,41 @@ Semantic search performs best in widely spoken languages. Coverage varies by lan
 | "diabetis" (misspelled) | *Diabetes* not in the top 20 | *Diabetes* at **#1** |
 | "糖尿病" (Chinese for "diabetes") | *Diabetes* not in the top 20 | *Diabetes* at **#1** |
 
-*Searched in WikiMed, the Wikipedia medical encyclopedia ZIM.*
+*Searched in WikiMed, the Wikipedia medical encyclopedia ZIM file.*
 
 ## Features
 
-- Semantic search matches articles from questions and descriptions, even when the query and title share no words.
+- Semantic search matches articles from questions and descriptions when the query and the title share no words.
 - Alternate names and misspellings work: "diabetis" finds *Diabetes*, and "Leber's disease" finds *Leber's hereditary optic neuropathy*.
-- Multilingual queries use one model that covers more than 100 languages. A query in one language can find articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
+- A multilingual query uses one model that covers more than 100 languages. A query in one language finds articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
 - Collections and sources provide several scopes. Browse the library by collection and provider, search one collection as a unit, or combine individual sources. See [Source selection](docs/usage.md#source-selection).
-- Files collections search and serve a configured directory tree, such as an offline copy of `/library/www/html/modules`, as one bounded collection. See [Files collections](docs/collections.md#files-collections).
+- Files collections search and serve one configured directory tree, such as an offline copy of `/library/www/html/modules`, as one collection with a fixed scope. See [Files collections](docs/collections.md#files-collections).
 - Kolibri installations are searched and served directly. Each installed channel is one collection, and each top-level topic is one source. See [Kolibri installations](docs/collections.md#kolibri-installations).
-- Combined ranking orders semantic, title, and full-text results together. The full-text list combines SQLite body search with archive-native search when available.
-- Merged results collapse redirects into their target article, so each article appears once. Each result carries a bounded excerpt as its preview.
-- Progressive results run sources in parallel. The page shows a provisional merged list as each source finishes, then reranks it deterministically.
-- The library view at `/library` shows ZIM collections, files collections, Kolibri channels, and remote Kiwix books, grouped by collection with provider and media-type filters. See [Library view](docs/usage.md#library-view).
-- Low resource use supports devices such as a Raspberry Pi Zero 2 W (512 MB RAM), which uses about 250–325 MB while serving. See [Measured memory use](docs/search.md#measured-memory-use).
-- Search without vectors uses the indexes that exist. Title and body search work when their indexes exist. A ZIM without a Zimantic index can use its archive full-text index. If a model or FAISS file is unavailable, or model probes do not match, Zimantic uses the available lexical search. An invalid archive full-text index affects only that archive; the server logs the error and continues. Use [`zimantic diagnose`](docs/usage.md#diagnosing-zim-archives) to check suspect files without affecting the server.
-- Concurrent searches are bounded by `max_concurrent_searches`. A request waits up to `slot_wait_seconds` for a free slot before it reports busy, so overlapping searches queue on slow hardware instead of failing immediately. An abandoned browser stream skips queued source work and returns its slot. Identical in-flight queries share one computation. An in-memory cache bounded by `cache_size` and `cache_bytes` answers repeated queries, including deadline-limited partial pools for `partial_cache_seconds`. Explicit source and collection scopes are cached by their expanded source keys and publication generation. See [Source selection](docs/usage.md#source-selection).
-- Built-in article serving opens result links directly from the ZIM archives, including redirects, assets, and each ZIM's homepage, without `kiwix-serve`.
-- The web interface and JSON API support browsers and custom programs. Routes use short paths such as `/search`, `/suggest`, `/library`, `/collections.json`, `/content/<source-key>/<path>`, `/article/<source-key>/<path>`, and `/health`.
+- Combined ranking orders semantic, title, and full-text results in one list. The full-text list combines SQLite body search with ZIM full-text search.
+- Merged results collapse redirects into the target article, so each article appears one time. Each result carries a size-limited preview.
+- Progressive results run sources in parallel. The page shows a provisional merged list as each source finishes, then reranks the list deterministically.
+- The library page at `/library` shows ZIM collections, files collections, Kolibri channels, and remote Kiwix books, grouped by collection with provider and media-type filters. See [Library view](docs/usage.md#library-view).
+- Zimantic uses about 250–325 MB while it serves, which supports devices such as a Raspberry Pi Zero 2 W (512 MB RAM). See [Measured memory use](docs/search.md#measured-memory-use).
+- Search without vectors uses the available indexes. Title and body search work when their indexes exist. A ZIM file without a Zimantic index uses its ZIM full-text index. If a model or FAISS file is unavailable, or model probes do not match, Zimantic uses the available lexical search. An invalid ZIM full-text index affects only that ZIM file; the server logs the error and continues. Use [`zimantic diagnose`](docs/usage.md#diagnosing-zim-files) to check suspect files without effect on the server.
+- Concurrent searches are limited by `max_concurrent_searches`. A request waits up to `slot_wait_seconds` for a free slot before it reports busy, so overlapping searches queue on slow hardware. An abandoned browser stream skips queued source work and returns its slot. Identical in-flight queries share one computation. An in-memory cache limited by `cache_size` and `cache_bytes` answers repeated queries, including deadline-limited partial pools for `partial_cache_seconds`. Zimantic caches explicit source and collection scopes by their expanded source keys and publication generation. See [Source selection](docs/usage.md#source-selection).
+- Built-in article serving opens result links directly from the ZIM files, including redirects, assets, and each ZIM homepage, without `kiwix-serve`.
+- The web interface and JSON API serve browsers and custom programs. Routes use short paths such as `/search`, `/suggest`, `/library`, `/collections.json`, `/content/<source-key>/<path>`, `/article/<source-key>/<path>`, and `/health`.
 
-Zimantic searches local ZIM archives directly and does not need a separate Kiwix index. `zimantic build` creates semantic vectors and a SQLite title index. `zimantic serve` also searches an unbuilt ZIM through its archive full-text index. Zimantic serves articles, assets, and homepages directly from each archive. Use [kiwix-serve](https://kiwix.org/en/applications/) only for remote Kiwix sources.
+Zimantic searches local ZIM files directly and does not need a separate Kiwix index. `zimantic build` creates semantic vectors and a SQLite title index. `zimantic serve` also searches a ZIM file without an index through its ZIM full-text index. Zimantic serves articles, assets, and homepages directly from each ZIM file. Use [kiwix-serve](https://kiwix.org/en/applications/) only for remote Kiwix sources.
 
 ## Requirements
 
-- Python 3.11–3.14 with native dependency wheels available for the interpreter. `libzim` publishes wheels for specific Python ABIs and platforms, so select an interpreter with a compatible wheel. Update this range when the native dependencies support a newer Python version.
-- On 32-bit Linux platforms (armhf/armv7), the native dependencies have no prebuilt wheels. They work as distribution packages. Debian 13 (trixie) or newer provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic can use them. Known 32-bit machine names accept python-libzim 3 or newer; other machines require 4.1 or newer. Python package markers report the machine name, not interpreter bitness, so a 32-bit interpreter that reports a 64-bit machine name requires 4.1.
-- About 110 MB for the default embedding model, plus the ZIM files. The `multilingual-e5-small` alternative is about 120 MB, and the English-only `e5-small-v2` model about 35 MB on disk.
-- Wikipedia-style ZIM files. Zimantic relies on their predictable HTML structure to locate useful content blocks.
-- One provider seam covers ZIM, remote Kiwix, files, and Kolibri. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
-- Configured collections are declared with `[[collections]]` entries for ZIM roots, Kiwix servers, files trees, and Kolibri installations.
-- Local sources do not need `kiwix-serve`. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links returned by the kiwix-serve search API.
+- Python 3.11–3.14 with native dependency wheels for the interpreter. `libzim` publishes wheels for specific Python ABIs and platforms. Select an interpreter with a compatible wheel; the range covers the interpreter versions with published native wheels.
+- On 32-bit Linux platforms (armhf/armv7), the native dependencies have no prebuilt wheels. Use the distribution packages. Debian 13 (trixie) or later provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic uses them. Known 32-bit machine names accept python-libzim 3 or later; other machines require 4.1 or later. Python package markers report the machine name, not the interpreter bitness, so a 32-bit interpreter that reports a 64-bit machine name requires 4.1.
+- About 110 MB for the default embedding model, plus the ZIM files. The `multilingual-e5-small` alternative uses about 120 MB, and the English-only `e5-small-v2` model uses about 35 MB on disk.
+- Wikipedia-style ZIM files. Zimantic uses their predictable HTML structure to locate useful content blocks.
+- One provider interface covers ZIM, remote Kiwix, files, and Kolibri. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
+- Configuration declares collections with `[[collections]]` entries for ZIM roots, Kiwix servers, files trees, and Kolibri installations.
+- Local sources do not need `kiwix-serve`. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links from the kiwix-serve search API.
 
 ## Install
 
-1. Clone the repository into the data directory. Configuration lives at `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); omitted settings use hardware and XDG defaults.
+1. Clone the repository into the data directory. Configuration is at `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); omitted settings use hardware and XDG defaults.
 
    ```bash
    data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -66,7 +66,7 @@ Zimantic searches local ZIM archives directly and does not need a separate Kiwix
 
    For development, run `uv sync` and activate the environment with `. .venv/bin/activate`.
 
-   On 32-bit armhf, where the native dependencies have no wheels, install the distribution packages and let the environment use them:
+   On 32-bit armhf, the native dependencies have no wheels. Install the distribution packages and let the environment use them:
 
    ```bash
    sudo apt install python3-venv python3-numpy python3-tqdm python3-onnxruntime \
@@ -84,7 +84,7 @@ Zimantic searches local ZIM archives directly and does not need a separate Kiwix
    zimantic model
    ```
 
-   The command downloads the default static model's int8 export to `$XDG_DATA_HOME/zimantic/model/int8/` together with its WordPiece vocabulary. On a GPU host, use the `multilingual-e5-small` transformer instead: `zimantic model fp16 --model multilingual-e5-small`, then set `model_dir = "model/multilingual-e5-small/fp16"`. Accelerated providers run fp16 faster than int8, the static default gains little from a GPU, and the transformer retrieves better. Copy `config.gpu.toml` for a complete starting point. `zimantic model --list` shows every supported model, and `zimantic model --help` shows the options.
+   The command downloads the default static model's int8 export to `$XDG_DATA_HOME/zimantic/model/int8/` together with its WordPiece vocabulary. On a GPU host, use the `multilingual-e5-small` transformer instead: `zimantic model fp16 --model multilingual-e5-small`, then set `model_dir = "model/multilingual-e5-small/fp16"`. Accelerated providers run fp16 faster than int8. The static default gains little from a GPU, and the transformer retrieves better. Copy `config.gpu.toml` for a complete starting point. `zimantic model --list` shows every supported model, and `zimantic model --help` shows the options.
 
    For a manual install of the quality-first transformer alternative, `multilingual-e5-small`:
 
@@ -95,11 +95,11 @@ Zimantic searches local ZIM archives directly and does not need a separate Kiwix
    curl -L -o "$data_home/zimantic/model-e5/int8/sentencepiece.bpe.model" https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
    ```
 
-   Then set `model_dir = "model-e5/int8"`. Do not copy the static model's files by hand: it ships its vocabulary only as `tokenizer.json`, and `zimantic model` derives the runtime `vocab.txt` from it. English-only and larger multilingual models use the same layout; see [Using a different embedding model](docs/search.md#using-a-different-embedding-model). A file that does not match a documented checksum is reported, but Zimantic continues to run.
+   Then set `model_dir = "model-e5/int8"`. Do not copy the static model files by hand. The model ships its vocabulary only as `tokenizer.json`, and `zimantic model` derives the runtime `vocab.txt` from that file. English-only and larger multilingual models use the same layout; see [Using a different embedding model](docs/search.md#using-a-different-embedding-model). Zimantic reports a file that does not match a documented checksum and continues to run.
 
 4. Put ZIM files in `$XDG_DATA_HOME/zimantic/zims/`. Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
-5. Add a collection and check the XDG config. There is no implicit library, so uncomment or add the `[[collections]]` ZIM entry from `config.toml`. Use an absolute `path`, because provider paths resolve from the config file's directory. Relative `model_dir` and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`; omit them to use the defaults. Add Kiwix, files, or Kolibri entries only for those sources.
+5. Add a collection and check the XDG config. Zimantic has no implicit library. Uncomment or add the `[[collections]]` ZIM entry from `config.toml`. Use an absolute `path`, because provider paths resolve from the config file's directory. Relative `model_dir` and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`; omit them to use the defaults. Add Kiwix, files, or Kolibri entries only for those sources.
 
 6. Verify the installation.
 
@@ -107,7 +107,7 @@ Zimantic searches local ZIM archives directly and does not need a separate Kiwix
    zimantic --help
    ```
 
-   For a development runtime check, follow [Development install](CONTRIBUTING.md#development-install) and run `python -m pytest tests/test_runtime_api.py`. Use `python -m pytest` for the full suite.
+   For a development runtime check, follow [Development install](CONTRIBUTING.md#development-install) and run `python -m pytest tests/test_runtime_api.py`. Use `python -m pytest` for the full test suite.
 
 ### Windows
 
@@ -129,7 +129,7 @@ Download the default model with the CLI:
 zimantic model
 ```
 
-On Windows, the default `model_dir` is `./model/int8`. On a GPU host, use `zimantic model fp16 --model multilingual-e5-small` and set `model_dir = "./model/multilingual-e5-small/fp16"` in `config.toml`. The static default ships its vocabulary only as `tokenizer.json`, and the command derives the runtime `vocab.txt`; use the CLI rather than copying those files by hand. For a manual install of the `multilingual-e5-small` alternative:
+On Windows, the default `model_dir` is `./model/int8`. On a GPU host, use `zimantic model fp16 --model multilingual-e5-small` and set `model_dir = "./model/multilingual-e5-small/fp16"` in `config.toml`. The static default ships its vocabulary only as `tokenizer.json`, and the command derives the runtime `vocab.txt`; use the CLI and do not copy those files by hand. For a manual install of the `multilingual-e5-small` alternative:
 
 ```powershell
 New-Item -ItemType Directory -Force model-e5\int8 | Out-Null
@@ -139,7 +139,7 @@ Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/res
 
 Then set `model_dir = "./model-e5/int8"`.
 
-`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`. Restart `zimantic serve` to reload. Stop the server before you replace or delete a ZIM or index file. Windows does not allow an open file to be replaced in place.
+`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`. Restart `zimantic serve` to reload. Stop the server before you replace or delete a ZIM file or index file. Windows does not allow an in-place replacement of an open file.
 
 ## Optional dependencies
 
@@ -147,7 +147,7 @@ Core search does not require external tools. Local caption extraction, OCR, ASR,
 
 ## Configuration and collections
 
-Zimantic uses explicit `[[collections]]` entries for ZIM archives, remote Kiwix, files trees, and Kolibri installations. The [collections guide](docs/collections.md) has minimal examples, path behavior, provider limits, and advanced overrides.
+Zimantic uses explicit `[[collections]]` entries for ZIM files, remote Kiwix, files trees, and Kolibri installations. The [collections guide](docs/collections.md) has minimal examples, path behavior, provider limits, and advanced overrides.
 
 ## Usage
 
@@ -166,4 +166,4 @@ See [Limitations](docs/limitations.md) for operational constraints and [Architec
 
 ## Search details
 
-The search examples in this README are a brief illustration, not a universal benchmark. See [Search, models, and ranking](docs/search.md) for model selection, ranking behavior, measured performance, and the detailed Kiwix comparison.
+The search examples in this README illustrate behavior; they are not a universal benchmark. See [Search, models, and ranking](docs/search.md) for model selection, ranking behavior, measured performance, and the detailed Kiwix comparison.

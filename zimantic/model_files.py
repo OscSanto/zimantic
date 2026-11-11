@@ -500,10 +500,48 @@ def _write_derived_vocab(spec: ModelSpec, directory: Path, force: bool) -> None:
             )
 
 
+# Every vocabulary artifact zimantic downloads or derives. A precision folder
+# can be reused after a model switch, so files that do not belong to the
+# selected model are removed rather than left for the tokenizer resolver.
+_TOKENIZER_FILE_NAMES = ("sentencepiece.bpe.model", "vocab.txt", "tokenizer.json")
+
+
+def _remove_stale_tokenizer_files(spec: ModelSpec, directory: Path) -> None:
+    """Delete vocabulary files that belong to a different model.
+
+    The default model changed from ``multilingual-e5-small`` to the static model
+    without changing the default precision folder. Downloading the new model
+    left the old ``sentencepiece.bpe.model`` beside ``vocab.txt``; selecting
+    SentencePiece then produced token ids beyond the static graph's embedding
+    table, failing embedding with "indices element out of data bounds".
+    """
+    keep = {spec.tokenizer.name, *(derived.name for derived in spec.derived)}
+    for name in _TOKENIZER_FILE_NAMES:
+        if name in keep:
+            continue
+        path = directory / name
+        try:
+            if path.is_file():
+                logger.info("zimantic: removing stale %s", path)
+                path.unlink()
+        except OSError as error:
+            raise ModelDownloadError(
+                f"could not remove stale {path}: {error}"
+            ) from error
+
+
 def _write_model_config(spec: ModelSpec, directory: Path) -> None:
-    if not spec.config:
-        return
     destination = directory / MODEL_CONFIG_NAME
+    if not spec.config:
+        # A reused folder may still describe the previous model's prompts and
+        # truncation. Defaults come from code for models without a config.
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError as error:
+            raise ModelDownloadError(
+                f"could not remove stale {destination}: {error}"
+            ) from error
+        return
     text = json.dumps(spec.config, indent=2, sort_keys=True) + "\n"
     try:
         if destination.read_text(encoding="utf-8") == text:
@@ -565,5 +603,6 @@ def download_model(
         )
         for model_file in files:
             _download_file(spec, model_file, directory / model_file.name, force)
+        _remove_stale_tokenizer_files(spec, directory)
         downloaded.append((precision, directory))
     return downloaded

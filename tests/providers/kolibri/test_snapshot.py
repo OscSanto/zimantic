@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -143,6 +145,59 @@ def test_disk_budget_prevents_unbounded_retained_snapshots(tmp_path):
     finally:
         for snapshot in retained:
             snapshot.close()
+
+
+def test_orphaned_snapshot_directories_are_reclaimed(tmp_path):
+    fixture = make_two_channel_fixture(tmp_path)
+    root = tmp_path / "indexes" / "snapshots"
+    orphan = root / "snapshot-orphan"
+    orphan.mkdir(parents=True)
+    (orphan / "db.sqlite3").write_bytes(b"stale snapshot")
+    (orphan / ".lock").touch()
+    old = time.time() - 3600
+    os.utime(orphan, (old, old))
+    manager = SnapshotManager(
+        database_path=fixture.db_path,
+        storage_path=fixture.storage,
+        home_path=fixture.home,
+        snapshot_root=root,
+    )
+    snapshot = manager.acquire()
+    try:
+        assert not orphan.exists()
+        assert snapshot.directory.is_dir()
+    finally:
+        snapshot.close()
+    assert not snapshot.directory.exists()
+
+
+def test_live_snapshot_directories_are_not_reclaimed(tmp_path):
+    fixture = make_two_channel_fixture(tmp_path)
+    root = tmp_path / "indexes" / "snapshots"
+    first_manager = SnapshotManager(
+        database_path=fixture.db_path,
+        storage_path=fixture.storage,
+        home_path=fixture.home,
+        snapshot_root=root,
+    )
+    first = first_manager.acquire()
+    old = time.time() - 3600
+    os.utime(first.directory, (old, old))
+    second_manager = SnapshotManager(
+        database_path=fixture.db_path,
+        storage_path=fixture.storage,
+        home_path=fixture.home,
+        snapshot_root=root,
+    )
+    second = second_manager.acquire()
+    try:
+        assert first.directory.is_dir()
+        assert second.directory.is_dir()
+    finally:
+        second.close()
+        first.close()
+    assert not first.directory.exists()
+    assert not second.directory.exists()
 
 
 def test_failed_refresh_retains_the_last_complete_batch(tmp_path):
