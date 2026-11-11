@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zimantic"
+version = "1.0.2"
+description = "Offline-capable search for ZIM archives, local files, and Kolibri, with remote Kiwix support"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "numpy",
+    "tqdm",
+    "onnxruntime",
+    "sentencepiece",
+    # Wheels exist for 64-bit, armv7, i686, ppc64le and s390x. Skip machines
+    # without one so installation cannot fall back to a Rust source build; the
+    # Python tokenizer remains available there.
+    "tokenizers>=0.23; platform_machine not in 'arm armv5l armv5tel armv6b armv6l i386 i486 i586 mips mipsel ppc powerpc riscv32 s390 sh4 sparc m68k'",
+    "faiss-cpu",
+    "fastapi",
+    "uvicorn",
+    "libzim>=3",
+    # PEP 508 has no bitness marker; match known 32-bit machine names.
+    "libzim>=4.1.0; platform_machine not in 'arm armhf armv5l armv5tel armv6b armv6l armv7b armv7l armv8b armv8l i386 i486 i586 i686 x86 x86_32 mips mipsel ppc powerpc riscv32 s390 sh4 sparc m68k'",
+    "puremagic>=1.30",
+    "pymupdf",
+    # Known 32-bit machines use the stdlib HTML fallback.
+    "selectolax; platform_machine not in 'arm armhf armv5l armv5tel armv6b armv6l armv7b armv7l armv8b armv8l i386 i486 i586 i686 x86 x86_32 mips mipsel ppc powerpc riscv32 s390 sh4 sparc m68k'",
+]
+
+[project.optional-dependencies]
+# Explicit opt-in for a separately installed/built Lexbor on 32-bit machines.
+lexbor = ["selectolax"]
+
+[dependency-groups]
+# Development and test-only tools; the application does not need them at runtime.
+dev = [
+    "pytest",
+    "httpx2",
+]
+
+[project.scripts]
+zimantic = "zimantic.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["zimantic*"]
+
+[tool.setuptools.package-data]
+"zimantic.web" = [
+    "static/*",
+    "static/mathjax/LICENSE",
+    "static/mathjax/README.md",
+    "static/mathjax/HTML-CSS/TeX/woff/*.woff",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+norecursedirs = [
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "node_modules",
+    "venv",
+    "__pypackages__",
+]
+
+[tool.ty.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+unresolved-attribute = "ignore"

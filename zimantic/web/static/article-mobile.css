@@ -1,0 +1,29 @@
+/* Conservative reader fallback for desktop-only captures. Most desktop pages
+   anchor their layout in a fixed-width child of <body> (a 900px wrapper, say),
+   so cap that child and let wide code and tables scroll inside their own box
+   rather than stretching the whole document. */
+@media (max-width: 800px) {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    -webkit-overflow-scrolling: touch;
+    overflow-x: auto !important;
+    overflow-y: auto !important;
+  }
+  body {
+    overflow-wrap: break-word;
+    overflow-x: visible !important;
+  }
+  body > * { max-width: 100% !important; min-width: 0 !important; }
+  img, video, iframe { max-width: 100% !important; }
+  img, video { height: auto !important; }
+  pre {
+    max-width: 100% !important;
+    overflow-x: visible !important;
+  }
+  table {
+    display: block !important;
+    max-width: 100% !important;
+    overflow-x: visible !important;
+  }
+}

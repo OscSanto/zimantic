@@ -1,0 +1,9 @@
+1
+00:00:00,000 --> 00:00:01,000
+<i>tricky</i> hippopotamus &amp; friends
+
+NOTE a note that must be skipped
+
+2
+00:00:01,000 --> 00:00:02,000
+youtube-style tag content

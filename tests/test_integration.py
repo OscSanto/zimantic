@@ -1,0 +1,963 @@
+import gc
+import itertools
+import json
+import os
+import re
+import shutil
+import tempfile
+import time
+import unittest
+import xml.etree.ElementTree as ET
+from collections.abc import Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import quote
+
+from fastapi.testclient import TestClient
+from libzim.writer import Creator, Hint, Item, StringProvider
+
+from zimantic.indexing import pipeline as build_module
+from zimantic.indexing.locator import IndexLocator
+from zimantic.libzim_compat import get_entry_by_id
+from zimantic.providers.config import RuntimeConfig, ZimConfig
+from zimantic.providers.zim.discovery import zim_collection_key, zim_source_key
+from zimantic.providers.zim.entries import ArchiveEntryProducer
+from zimantic.search import Search
+from zimantic.web.app import create_app
+
+ALPHA_HTML = (
+    "<html><body><p>Alpha is a sufficiently long article about tires and "
+    "wheels that passes the minimum block length for indexing.</p></body></html>"
+)
+BETA_HTML = (
+    "<html><body><p>Beta is a sufficiently long article about brakes and "
+    "rotors that passes the minimum block length for indexing.</p></body></html>"
+)
+AIR_HTML = (
+    "<html><body><p>Air is a mixture of gases surrounding the planet and "
+    "supporting life through breathing and atmospheric processes.</p></body></html>"
+)
+AIR_DISAMBIGUATION_HTML = (
+    "<html><body>"
+    "<p>Air may refer to several different things, including the atmosphere "
+    "and various works, places, and organizations.</p>"
+    "<p>This disambiguation page lists articles associated with the same title.</p>"
+    "</body></html>"
+)
+
+
+def _build_zim(
+    zim_path: Path,
+    index_dir: Path,
+    embedder=None,
+    batch_size: int = 1,
+    *,
+    fast: bool = False,
+    force: bool = False,
+    **_kwargs,
+) -> None:
+    """Exercise the generic pipeline with a real ZIM producer."""
+    from types import SimpleNamespace
+
+    source = SimpleNamespace(
+        key=zim_source_key("library", Path(zim_path).name),
+        provider="zim",
+        collection_key=zim_collection_key("library"),
+        provider_id=None,
+        path=str(zim_path),
+    )
+    producer = ArchiveEntryProducer(
+        source,
+        zim_path,
+        fast=fast,
+        cfg={"batch_size": batch_size},
+        catalog_path=Path(index_dir).parent / "catalog.sqlite",
+    )
+    build_module.build_index(
+        producer,
+        IndexLocator(index_dir),
+        embedder,
+        {"batch_size": batch_size},
+        fast=fast,
+        force=force,
+    )
+
+
+@contextmanager
+def _temp_dir(test_case):
+    """Yield a temporary directory and register its cleanup early.
+
+    unittest runs cleanups in LIFO order, so a Search created later is closed
+    before Windows tries to delete the files it still has open. Windows can
+    also briefly keep a freshly written archive locked (antivirus or the search
+    indexer), so retry the removal before giving up on a best-effort cleanup.
+    """
+    directory = Path(tempfile.mkdtemp())
+
+    def cleanup():
+        for delay in (0, 0.05, 0.1, 0.25, 0.5):
+            if delay:
+                time.sleep(delay)
+            try:
+                shutil.rmtree(directory)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                # Native handles close when their last Python reference goes
+                # away; collect before retrying in case a finalizer is pending.
+                gc.collect()
+        shutil.rmtree(directory, ignore_errors=True)
+
+    test_case.addCleanup(cleanup)
+    yield directory
+
+
+class _Page(Item):
+    def __init__(self, path: str, title: str, html, mimetype: str = "text/html"):
+        super().__init__()
+        self._path = path
+        self._title = title
+        self._html = html.encode("utf-8") if isinstance(html, str) else html
+        self._mimetype = mimetype
+
+    def get_path(self):
+        return self._path
+
+    def get_title(self):
+        return self._title
+
+    def get_mimetype(self):
+        return self._mimetype
+
+    def get_contentprovider(self):
+        return StringProvider(self._html)
+
+    def get_hints(self):
+        return {Hint.FRONT_ARTICLE: True}
+
+
+class _PdfPage(Item):
+    def __init__(self, path: str, title: str, pdf: bytes):
+        super().__init__()
+        self._path = path
+        self._title = title
+        self._pdf = pdf
+
+    def get_path(self):
+        return self._path
+
+    def get_title(self):
+        return self._title
+
+    def get_mimetype(self):
+        return "application/pdf"
+
+    def get_contentprovider(self):
+        return StringProvider(self._pdf)
+
+    def get_hints(self):
+        return {Hint.FRONT_ARTICLE: True}
+
+
+def _create_zim(
+    path: Path,
+    pages: list[tuple[str, str, str]],
+    redirects: Sequence[tuple[str, str, str]] = (),
+) -> None:
+    creator = Creator(path)
+    creator.config_indexing(True, "eng")
+    creator.set_mainpath(pages[0][0])
+    with creator:
+        for page_path, title, html in pages:
+            creator.add_item(_Page(page_path, title, html))
+        for title, page_path, target in redirects:
+            creator.add_redirection(title, page_path, target, {})
+
+
+def _create_sparse_zim(path: Path) -> None:
+    """A ZIM that is mostly non-articles, like an OSM tile archive."""
+    creator = Creator(path)
+    creator.config_indexing(True, "eng")
+    creator.set_mainpath("Alpha")
+    with creator:
+        creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+        creator.add_item(
+            _Page("I/logo.png", "Logo", b"\x89PNG\r\n\x1a\n", mimetype="image/png")
+        )
+        creator.add_item(
+            _Page("style.css", "Stylesheet", b"body {}", mimetype="text/css")
+        )
+
+
+def _search_results(search, *args, **kwargs):
+    """Return one page of results from the public ``search_page`` API."""
+    return search.search_page(*args, **kwargs)["results"]
+
+
+def _zim_key(name: str = "manual") -> str:
+    from zimantic.providers.zim.discovery import zim_source_key
+
+    return zim_source_key("library", f"{name}.zim")
+
+
+def _zim_runtime(search: Search):
+    return next(iter(search.runtimes.values()))
+
+
+def _zim_index(search: Search, name: str = "manual"):
+    return _zim_runtime(search).indexes[_zim_key(name)]
+
+
+ZIM_KEY = _zim_key()
+ZIM_URL = quote(ZIM_KEY, safe="")
+
+
+def _config(root: Path, *, max_results: int = 100) -> RuntimeConfig:
+    return RuntimeConfig(
+        settings={
+            "index_dir": str(root / "indexes"),
+            "candidate_count": 16,
+            "page_size": 10,
+            "max_results": max_results,
+            "source_query_threads": 1,
+        },
+        collections=(ZimConfig(name="library", path=str(root / "zims")),),
+    )
+
+
+def _close_search(search: Search) -> None:
+    search.close()
+
+
+class LocalIntegrationTests(unittest.TestCase):
+    def _build_fixture(
+        self,
+        root: Path,
+        *,
+        pages: list[tuple[str, str, str]] | None = None,
+        redirects: Sequence[tuple[str, str, str]] = (),
+        fast: bool = False,
+        zim_name: str = "manual",
+    ) -> Path:
+        zims = root / "zims"
+        indexes = root / "indexes"
+        zims.mkdir(exist_ok=True)
+        indexes.mkdir(exist_ok=True)
+        zim_path = zims / f"{zim_name}.zim"
+        _create_zim(
+            zim_path,
+            pages
+            or [
+                ("Alpha", "Alpha", ALPHA_HTML),
+                ("Beta", "Beta", BETA_HTML),
+            ],
+            redirects,
+        )
+        _build_zim(
+            zim_path,
+            indexes,
+            embedder=None,
+            batch_size=2,
+            fast=fast,
+        )
+        return zim_path
+
+    def _open_search(self, root: Path, *, semantic: bool = False) -> Search:
+        search = Search(_config(root), embedder=None, semantic=semantic)
+        self.addCleanup(_close_search, search)
+        return search
+
+    def test_real_zim_build_search_and_http_api(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            self._build_fixture(root)
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+            self.addCleanup(client.close)
+
+            response = client.get("/search", params={"q": "rotors"})
+            self.assertEqual(response.status_code, 200)
+            result = response.json()[0]
+            self.assertEqual(result["title"], "Beta")
+            self.assertEqual(result["path"], "Beta")
+            self.assertEqual(result["url"], f"/content/{quote(_zim_key('manual'), safe='')}/Beta")
+            self.assertEqual(result["mimetype"], "text/html")
+            self.assertEqual(response.headers["x-total-count"], "1")
+
+            # /content/ is the toolbar shell: it embeds the raw article in an
+            # iframe so the toolbar survives every in-frame navigation.
+            shell = client.get(f"/content/{ZIM_URL}/Beta")
+            self.assertEqual(shell.status_code, 200)
+            self.assertTrue(shell.headers["content-type"].startswith("text/html"))
+            self.assertIn(b'data-zimantic-toolbar', shell.content)
+            self.assertIn(b"min-height: 0 !important", shell.content)
+            self.assertIn(b'data-zimantic-action="close"', shell.content)
+            self.assertIn(b"window.close()", shell.content)
+            self.assertIn(b"history.back()", shell.content)
+            self.assertIn(b'data-zimantic-home', shell.content)
+            self.assertIn(b'data-zimantic-action="previous"', shell.content)
+            self.assertIn(b'data-zimantic-action="next"', shell.content)
+            self.assertIn(b'data-zimantic-action="parent-previous"', shell.content)
+            self.assertIn(b'data-zimantic-action="parent-next"', shell.content)
+            self.assertIn(">←</button>".encode(), shell.content)
+            self.assertIn(">→</button>".encode(), shell.content)
+            self.assertIn(">↑</button>".encode(), shell.content)
+            self.assertIn(">↓</button>".encode(), shell.content)
+            self.assertIn(b"zimantic-modal-navigation", shell.content)
+            self.assertIn(b"zimantic-shell-navigate", shell.content)
+            self.assertIn(b"zimantic-article-storage-blocked", shell.content)
+            self.assertIn(b"data-zimantic-storage-notice", shell.content)
+            self.assertIn(b"zimantic-open-article", shell.content)
+            self.assertLess(
+                shell.content.index(b'data-zimantic-action="close"'),
+                shell.content.index(b"data-zimantic-storage-notice-dismiss"),
+            )
+            self.assertLess(
+                shell.content.index(b"data-zimantic-storage-notice-dismiss"),
+                shell.content.index(b"<iframe data-zimantic-article"),
+            )
+            self.assertIn(b"zimantic-article-ready", shell.content)
+            self.assertIn(b"zimantic-article-navigate", shell.content)
+            self.assertIn(b"zimantic-parent-article-navigate", shell.content)
+            self.assertIn(f"/random?source={ZIM_URL}".encode(), shell.content)
+            self.assertIn(b"<div data-zimantic-capture-notice hidden>", shell.content)
+            self.assertIn(b"data-zimantic-capture-notice-dismiss", shell.content)
+            self.assertIn(b"captureHasVisibleContent", shell.content)
+            self.assertIn(b"<iframe data-zimantic-article", shell.content)
+            self.assertIn(f'src="/article/{ZIM_URL}/Beta"'.encode(), shell.content)
+            self.assertLess(
+                shell.content.index(b'data-zimantic-action="close"'),
+                shell.content.index(b'data-zimantic-action="previous"'),
+            )
+            self.assertLess(
+                shell.content.index(b'data-zimantic-action="previous"'),
+                shell.content.index(b'>Random</a>'),
+            )
+            self.assertNotIn(b'data-zimantic-action="print"', shell.content)
+            self.assertLess(
+                shell.content.index(b'data-zimantic-action="parent-previous"'),
+                shell.content.index(b'data-zimantic-zim-search'),
+            )
+            self.assertNotIn(b"zimantic-toolbar-brand", shell.content)
+            self.assertNotIn(b'>Search</a>', shell.content)
+            toolbar_script = b"<script data-zimantic-toolbar>"
+            self.assertIn(toolbar_script, shell.content)
+            self.assertLess(
+                shell.content.index(b"<body>"),
+                shell.content.index(b'data-zimantic-action="close"'),
+            )
+            self.assertLess(
+                shell.content.index(toolbar_script),
+                shell.content.index(b"</body>"),
+            )
+            self.assertNotIn(b"&lt;script data-zimantic-toolbar", shell.content)
+
+            # The raw article keeps its own markup and gains only the
+            # navigation bridge; the toolbar is never duplicated into it.
+            raw_article = client.get(f"/article/{ZIM_URL}/Beta")
+            self.assertEqual(raw_article.status_code, 200)
+            self.assertTrue(raw_article.headers["content-type"].startswith("text/html"))
+            self.assertIn(b"brakes and rotors", raw_article.content)
+            self.assertIn(b"data-zimantic-bridge", raw_article.content)
+            self.assertNotIn(b'data-zimantic-toolbar', raw_article.content)
+            self.assertNotIn(b'data-zimantic-action="close"', raw_article.content)
+
+            random_article = client.get(
+                "/random",
+                params={"source": ZIM_KEY},
+                follow_redirects=False,
+            )
+            self.assertEqual(random_article.status_code, 307)
+            self.assertRegex(
+                random_article.headers["location"],
+                f"^/content/{re.escape(ZIM_URL)}/(Alpha|Beta)$",
+            )
+
+            homepage = client.get(f"/content/{ZIM_KEY}", follow_redirects=False)
+            self.assertEqual(homepage.status_code, 307)
+            self.assertIn(f"/content/{ZIM_URL}/", homepage.headers["location"])
+            homepage_article = client.get(homepage.headers["location"])
+            self.assertEqual(homepage_article.status_code, 200)
+            raw_homepage = client.get(f"/article/{ZIM_KEY}", follow_redirects=False)
+            self.assertEqual(raw_homepage.status_code, 307)
+            self.assertIn(f"/article/{ZIM_URL}/", raw_homepage.headers["location"])
+
+            # A missing article still gets a toolbar shell with a friendly error
+            # panel; only /article/ returns the JSON 404.
+            missing = client.get(f"/content/{ZIM_URL}/missing")
+            self.assertEqual(missing.status_code, 404)
+            self.assertIn(b'data-zimantic-toolbar', missing.content)
+            self.assertIn(b"Article not found", missing.content)
+            self.assertIn(b"not available in the offline archive", missing.content)
+            self.assertNotIn(b'{"detail":"article not found"}', missing.content)
+            self.assertNotIn(b'src=f"/article/{ZIM_URL}/missing"', missing.content)
+            missing_raw = client.get(f"/article/{ZIM_URL}/missing")
+            self.assertEqual(missing_raw.status_code, 404)
+            self.assertEqual(
+                missing_raw.json(),
+                {"error": "not_found", "source": ZIM_KEY},
+            )
+
+            health = client.get("/health").json()
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(health["sources"], 1)
+            self.assertTrue(health["embedding"]["loaded"] is False)
+            self.assertEqual(health["indexes"][0]["status"], "ok")
+            self.assertGreater(health["indexes"][0]["entry_count"], 0)
+            self.assertEqual(
+                client.get("/sources").json()[0]["homepage"],
+                health["indexes"][0]["homepage"],
+            )
+
+            stream = client.get("/search/stream", params={"q": "rotors"})
+            self.assertEqual(stream.status_code, 200)
+            self.assertEqual(
+                [json.loads(line)["type"] for line in stream.text.splitlines()],
+                ["started", "source", "done"],
+            )
+            self.assertEqual(json.loads(stream.text.splitlines()[-1])["results"][0]["title"], "Beta")
+
+    def test_homepage_with_trailing_slash_path(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            self._build_fixture(
+                root,
+                pages=[("docs/", "Docs", ALPHA_HTML)],
+            )
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+
+            homepage = client.get(f"/content/{ZIM_KEY}", follow_redirects=False)
+            self.assertEqual(homepage.status_code, 307)
+            self.assertEqual(homepage.headers["location"], f"/content/{ZIM_URL}/docs/")
+            shell = client.get(homepage.headers["location"], follow_redirects=True)
+            self.assertEqual(shell.status_code, 200)
+            self.assertNotIn(b'{"detail":"article not found"}', shell.content)
+            raw = client.get(f"/article/{ZIM_URL}/docs/", follow_redirects=True)
+            self.assertEqual(raw.status_code, 200)
+
+    def test_toolbar_skips_container_paths_that_are_not_articles(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            self._build_fixture(
+                root,
+                pages=[("A/5e_Hazards", "5e Hazards", ALPHA_HTML)],
+            )
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+
+            self.assertTrue(search.article_path_exists(ZIM_KEY, "A/5e_Hazards"))
+            self.assertFalse(search.article_path_exists(ZIM_KEY, "A"))
+
+            shell = client.get(f"/content/{ZIM_URL}/A/5e_Hazards")
+            self.assertEqual(shell.status_code, 200)
+            self.assertIn(
+                f'<span class="zimantic-toolbar-home-full">{ZIM_KEY}</span>'.encode(),
+                shell.content,
+            )
+            self.assertIn(
+                f'title="Open this ZIM\'s homepage ({ZIM_KEY})"'.encode(),
+                shell.content,
+            )
+            # The MediaWiki first-letter container must not become a link.
+            self.assertNotIn(b'href=f"/content/{ZIM_URL}/A"', shell.content)
+            self.assertIn(b">5e Hazards</a>", shell.content)
+
+    def test_unindexed_zim_uses_native_fulltext_before_build(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            _create_zim(
+                zims / "manual.zim",
+                [("Beta", "Beta", BETA_HTML)],
+            )
+
+            search = self._open_search(root)
+
+            self.assertEqual(search.source_keys(), [_zim_key("manual")])
+            result = _search_results(search, "rotors", limit=1)[0]
+            self.assertEqual(result["title"], "Beta")
+            self.assertEqual(result["url"], f"/content/{quote(_zim_key('manual'), safe='')}/Beta")
+            report = search.health()["indexes"][0]
+            self.assertFalse(report["index_file"])
+            self.assertFalse(report["capabilities"]["title"])
+            self.assertTrue(report["capabilities"]["fulltext"])
+            self.assertNotIn("article", report["capabilities"])
+
+    def test_unindexed_zim_random_only_returns_articles(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            _create_sparse_zim(zims / "manual.zim")
+
+            search = self._open_search(root)
+            index = _zim_index(search)
+            archive = index.ensure_open()
+            assert archive is not None
+            article_id = None
+            asset_ids: list[int] = []
+            for i in range(archive.entry_count):
+                entry = get_entry_by_id(archive, i)
+                if entry.path == "Alpha":
+                    article_id = i
+                elif not entry.is_redirect:
+                    asset_ids.append(i)
+            self.assertIsNotNone(article_id)
+            self.assertTrue(asset_ids)
+
+            # Media entries must be rejected so a probe that lands on one is
+            # retried and the article is still returned.
+            with patch(
+                "zimantic.content.serving.secrets.randbelow",
+                side_effect=itertools.cycle([*asset_ids, article_id]),
+            ):
+                self.assertEqual(search.random_article_path(ZIM_KEY), "Alpha")
+
+            # Every probe landing on an asset (a sparse archive) must still
+            # resolve: the scan fallback picks from the collected article ids.
+            # The final uniform pick draws from that list, whose bound differs
+            # from the entry-id space, so return a valid index for it.
+            index.random_article_ids = None
+            with patch(
+                "zimantic.content.serving.secrets.randbelow",
+                side_effect=lambda upper: asset_ids[0] if upper > 1 else 0,
+            ):
+                self.assertEqual(search.random_article_path(ZIM_KEY), "Alpha")
+            self.assertEqual(index.random_article_ids, [article_id])
+
+    def test_indexed_random_uses_uniform_fallback_when_sparse(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "manual.zim"
+            _create_sparse_zim(zim_path)
+            _build_zim(zim_path, indexes, embedder=None, batch_size=1)
+
+            search = self._open_search(root)
+            index = _zim_index(search)
+            self.assertIsNotNone(index.db_for_thread())
+            archive = index.ensure_open()
+            assert archive is not None
+            article_id = None
+            asset_ids: list[int] = []
+            for i in range(archive.entry_count):
+                entry = get_entry_by_id(archive, i)
+                if entry.path == "Alpha":
+                    article_id = i
+                elif not entry.is_redirect:
+                    asset_ids.append(i)
+            self.assertIsNotNone(article_id)
+            self.assertTrue(asset_ids)
+
+            # Every probe lands on an asset, forcing the COUNT/OFFSET fallback;
+            # it must still return the only eligible article, not fail.
+            with patch(
+                "zimantic.content.serving.secrets.randbelow",
+                side_effect=lambda upper: asset_ids[0] if upper > 1 else 0,
+            ):
+                self.assertEqual(search.random_article_path(ZIM_KEY), "Alpha")
+
+    def test_zim_without_native_fulltext_is_not_a_source(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            creator = Creator(zims / "raw.zim")
+            creator.set_mainpath("Alpha")
+            with creator:
+                creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+
+            search = self._open_search(root)
+
+            # No SQLite index and no native full-text index means there is
+            # nothing to search, so it must not be advertised as a source.
+            self.assertEqual(search.source_keys(), [])
+
+    def test_pdf_entries_are_indexed_end_to_end(self):
+        import pymupdf
+
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "library.zim"
+
+            document = pymupdf.open()
+            page = document.new_page()
+            page.insert_textbox(
+                pymupdf.Rect(72, 72, 520, 760),
+                "Photosynthesis converts light energy into chemical energy "
+                "stored in glucose.",
+                fontsize=11,
+            )
+            pdf = document.tobytes()
+            document.close()
+
+            creator = Creator(zim_path)
+            creator.config_indexing(True, "eng")
+            with creator:
+                creator.add_item(
+                    _PdfPage("media/photosynthesis.pdf", "Photosynthesis", pdf)
+                )
+
+            _build_zim(zim_path, indexes, embedder=None, batch_size=1)
+            search = self._open_search(root)
+
+            results = _search_results(search, "photosynthesis", limit=5)
+            self.assertTrue(
+                any(result["title"] == "Photosynthesis" for result in results)
+            )
+            self.assertEqual(
+                next(result for result in results if result["title"] == "Photosynthesis")["mimetype"],
+                "application/pdf",
+            )
+            self.assertIn(
+                "light energy",
+                next(result for result in results if result["title"] == "Photosynthesis")["lead"],
+            )
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "Windows cannot replace a ZIM that the running server holds open",
+    )
+    def test_interrupted_upgrade_keeps_published_index_until_reload(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            old_pages = [("Old", "Old article", ALPHA_HTML)]
+            new_pages = [
+                ("New", "New article", BETA_HTML),
+                ("New Two", "New second article", ALPHA_HTML),
+            ]
+            zim_path = self._build_fixture(root, pages=old_pages, fast=True)
+            search = self._open_search(root)
+            self.assertEqual(_search_results(search, "old article", limit=1)[0]["title"], "Old article")
+
+            replacement = root / "zims" / "manual-replacement.zim"
+            _create_zim(replacement, new_pages)
+            replacement.replace(zim_path)
+
+            from zimantic.providers.zim import entries as entries_module
+
+            real_read_entry = entries_module.read_entry
+            calls = 0
+
+            def read_one_then_interrupt(zim, index, **kwargs):
+                nonlocal calls
+                if calls:
+                    raise RuntimeError("interrupted upgrade")
+                calls += 1
+                return real_read_entry(zim, index, **kwargs)
+
+            with patch.object(entries_module, "read_entry", side_effect=read_one_then_interrupt):
+                with self.assertRaisesRegex(RuntimeError, "interrupted upgrade"):
+                    _build_zim(
+                        zim_path,
+                        root / "indexes",
+                        embedder=None,
+                        batch_size=1,
+                        fast=False,
+                    )
+
+            self.assertEqual(_search_results(search, "old article", limit=1)[0]["title"], "Old article")
+            self.assertEqual(_search_results(search, "new article", limit=1), [])
+
+            _build_zim(
+                zim_path,
+                root / "indexes",
+                embedder=None,
+                batch_size=1,
+                fast=False,
+            )
+            summary = search.reload()
+            self.assertEqual(summary["upgraded"], [])
+            self.assertEqual(_search_results(search, "new article", limit=1)[0]["title"], "New article")
+            self.assertEqual(_search_results(search, "old article", limit=1), [])
+
+    def test_corrupt_vectors_degrade_and_missing_zim_is_ignored(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zim_path = self._build_fixture(root)
+            locator = IndexLocator(root / "indexes")
+            from types import SimpleNamespace
+
+            source = SimpleNamespace(
+                key=zim_source_key("library", Path(zim_path).name),
+                provider="zim",
+                collection_key=zim_collection_key("library"),
+            )
+            lease = locator.paths(source)
+            assert lease is not None
+            faiss_path = lease.faiss_path
+            lease.close()
+            if faiss_path is None:
+                self.skipTest("fixture built without vectors")
+            faiss_path.write_bytes(b"not a faiss index")
+
+            search = self._open_search(root, semantic=True)
+            self.assertFalse(_zim_index(search).semantic)
+            self.assertEqual(_search_results(search, "alpha", limit=1)[0]["title"], "Alpha")
+
+            # Removing the archive orphans the finished index: it is ignored
+            # entirely rather than served title-only, so the source disappears.
+            # Close first so Windows releases its handle to the archive.
+            search.close()
+            zim_path.unlink()
+            missing_zim_search = self._open_search(root)
+            self.assertNotIn("manual", _zim_runtime(missing_zim_search).indexes)
+            self.assertEqual(missing_zim_search.health()["status"], "degraded")
+
+    def test_redirects_collapse_and_disambiguation_ranking_survive_real_build(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            self._build_fixture(
+                root,
+                pages=[
+                    ("Air", "Air", AIR_HTML),
+                    ("Air_(disambiguation)", "Air", AIR_DISAMBIGUATION_HTML),
+                ],
+                redirects=[("Breeze", "Breeze", "Air")],
+            )
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+
+            redirect_results = _search_results(search, "breeze", limit=10)
+            self.assertEqual(len(redirect_results), 1)
+            self.assertEqual(redirect_results[0]["title"], "Air")
+            self.assertEqual(redirect_results[0]["path"], "Air")
+            redirect_article = client.get(
+                f"/content/{ZIM_KEY}/Breeze",
+                follow_redirects=False,
+            )
+            self.assertEqual(redirect_article.status_code, 307)
+            self.assertEqual(
+                redirect_article.headers["location"],
+                f"/content/{ZIM_URL}/Air",
+            )
+            redirect_raw_article = client.get(
+                f"/article/{ZIM_KEY}/Breeze",
+                follow_redirects=False,
+            )
+            self.assertEqual(redirect_raw_article.status_code, 307)
+            self.assertEqual(
+                redirect_raw_article.headers["location"],
+                f"/article/{ZIM_URL}/Air",
+            )
+
+            ordinary_results = _search_results(search, "air", limit=10)
+            self.assertEqual(ordinary_results[0]["title"], "Air")
+
+            disambiguation_results = _search_results(search, "air disambiguation", limit=10)
+            self.assertEqual(
+                disambiguation_results[0]["title"],
+                "Air (disambiguation)",
+            )
+
+    def test_http_boundaries_etags_and_gzip_are_preserved(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            long_text = "A detailed article body for compression testing. " * 30
+            long_html = f"<html><body><p>{long_text}</p></body></html>"
+            self._build_fixture(
+                root,
+                pages=[
+                    ("Article One", "Article One", long_html),
+                    ("Article Two", "Article Two", long_html),
+                ],
+            )
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+
+            self.assertEqual(client.get("/search", params={"q": " "}).status_code, 200)
+            self.assertEqual(
+                client.get("/search", params={"q": "", "sort": "diverse"}).status_code,
+                200,
+            )
+            self.assertEqual(
+                client.get("/search", params={"q": "x" * 4097}).status_code,
+                422,
+            )
+            self.assertEqual(
+                client.get("/search", params={"q": "article", "limit": 0}).status_code,
+                422,
+            )
+            self.assertEqual(
+                client.get("/search", params={"q": "article", "offset": -1}).status_code,
+                422,
+            )
+
+            sources = client.get("/sources")
+            old_etag = sources.headers["etag"]
+            self.assertEqual(
+                client.get("/sources", headers={"If-None-Match": old_etag}).status_code,
+                304,
+            )
+
+            response = client.get("/search", params={"q": "article"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("content-encoding"), "gzip")
+            self.assertEqual(len(response.json()), 2)
+
+            self._build_fixture(
+                root,
+                pages=[("Other", "Other", ALPHA_HTML)],
+                fast=True,
+                zim_name="other",
+            )
+            search.reload()
+            changed_sources = client.get("/sources")
+            self.assertNotEqual(changed_sources.headers["etag"], old_etag)
+            self.assertEqual(
+                client.get("/sources", headers={"If-None-Match": old_etag}).status_code,
+                200,
+            )
+
+    def test_unreadable_archive_is_reported_in_sources_and_library(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zim_path = self._build_fixture(root)
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+            self.assertEqual(search.source_dicts()[0]["provider"], "zim")
+
+            # Corrupt the archive without changing its size, so the index stays
+            # trusted while the archive itself cannot be opened.
+            data = bytearray(zim_path.read_bytes())
+            data[0:4] = b"XXXX"
+            zim_path.write_bytes(bytes(data))
+            future = time.time() + 2
+            os.utime(zim_path, (future, future))
+            search.reload()
+
+            # An unreadable archive is a library-only source, not searchable.
+            self.assertEqual(search.source_dicts(), [])
+
+            library = client.get("/library.json")
+            self.assertEqual(library.status_code, 200)
+            self.assertEqual(len(library.json()), 1)
+            self.assertEqual(library.json()[0]["provider"], "zim")
+            self.assertNotIn("available", library.json()[0])
+            self.assertEqual(library.json()[0]["size"], zim_path.stat().st_size)
+
+    def test_library_perma_ref_comes_from_the_filename_stem(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "manual_2026-08.zim"
+            creator = Creator(zim_path)
+            creator.config_indexing(True, "eng")
+            creator.set_mainpath("Alpha")
+            with creator:
+                creator.add_metadata("Name", "A Display Name")
+                creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+            _build_zim(
+                zim_path,
+                indexes,
+                embedder=None,
+                batch_size=2,
+                fast=True,
+            )
+
+            search = self._open_search(root)
+            library = search.library_dicts()
+
+            self.assertEqual(library[0]["key"], _zim_key("manual_2026-08"))
+            self.assertEqual(library[0]["title"], "A Display Name")
+            self.assertEqual(
+                library[0]["provider_id"],
+                _zim_runtime(search).catalog.get_key(_zim_key("manual_2026-08")).provider_id,
+            )
+
+    def test_xhtml_articles_get_the_article_bridge(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zims = root / "zims"
+            indexes = root / "indexes"
+            zims.mkdir()
+            indexes.mkdir()
+            zim_path = zims / "manual.zim"
+            creator = Creator(zim_path)
+            creator.config_indexing(True, "eng")
+            creator.set_mainpath("Alpha")
+            with creator:
+                creator.add_item(
+                    _Page(
+                        "Alpha",
+                        "Alpha",
+                        ALPHA_HTML,
+                        mimetype="application/xhtml+xml",
+                    )
+                )
+            _build_zim(
+                zim_path,
+                indexes,
+                embedder=None,
+                batch_size=2,
+                fast=True,
+            )
+
+            search = self._open_search(root)
+            client = TestClient(create_app(search))
+            response = client.get(f"/article/{ZIM_URL}/Alpha")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"data-zimantic-bridge", response.content)
+            # The injected bridge must keep an XHTML document well-formed XML.
+            ET.fromstring(response.content)
+
+    def test_unmounted_zim_dir_leaves_served_views_empty_until_remount(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            self._build_fixture(root)
+            (root / "zims").rename(root / "zims-offline")
+
+            search = self._open_search(root)
+            self.assertEqual(search.source_dicts(), [])
+            self.assertEqual(search.library_dicts(), [])
+            # The on-disk catalog is retained for the next successful scan.
+            self.assertEqual(len(_zim_runtime(search).catalog.rows()), 1)
+
+    def test_duplicate_uuid_keeps_one_deterministic_source(self):
+        with _temp_dir(self) as tmp:
+            root = Path(tmp)
+            zim_path = self._build_fixture(root)
+            copy_path = zim_path.with_name("manual-copy.zim")
+            copy_path.write_bytes(zim_path.read_bytes())
+            search = self._open_search(root)
+
+            data = bytearray(zim_path.read_bytes())
+            data[0:4] = b"XXXX"
+            zim_path.write_bytes(bytes(data))
+            future = time.time() + 2
+            os.utime(zim_path, (future, future))
+            search.reload()
+
+            # The two files share a UUID, so exactly one source remains. Listing
+            # does not probe availability; selection is deterministic.
+            sources = search.source_dicts()
+            self.assertEqual(len(sources), 1)
+            self.assertTrue(sources[0]["searchable"])
+            # The corrupt copy remains a library-only source; readable copies
+            # with distinct root-relative paths are always distinct sources.
+            self.assertEqual(len(search.library_dicts()), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,441 @@
+"""Kolibri entry producer, text extraction, captions, and fingerprints."""
+
+from __future__ import annotations
+
+import pytest
+from index_helpers import body_hits as _body_hits
+from index_helpers import docs as _docs
+from index_helpers import meta as _meta
+
+from zimantic.indexing.derived import DerivedTextConfig, SourceDerivedOperations
+from zimantic.indexing.locator import IndexLocator
+from zimantic.indexing.pipeline import build_index
+from zimantic.providers.kolibri.discovery import (
+    kolibri_node_source_key,
+    kolibri_root_key,
+)
+from zimantic.providers.kolibri.entries import row_id_for
+
+from .helpers import (
+    KolibriFixture,
+    build_sources,
+    kolibri_config,
+    make_metadata_fixture,
+    make_two_channel_fixture,
+    open_runtime,
+)
+
+
+def test_topic_entry_and_child_alias_are_searchable(tmp_path):
+    fixture = make_two_channel_fixture(tmp_path)
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        topic_key = kolibri_node_source_key("kolibri", "channel-a", "topic-1")
+        source = next(
+            item for item in runtime.library_sources() if item.key == topic_key
+        )
+        producer = runtime.entry_producer(source, fast=False)
+        assert producer.count == 2
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        topic = rows[0]
+        assert topic.title == "Topic One"
+        assert topic.path == "node/topic-1"
+        assert topic.target_id is None
+        assert topic.id == row_id_for("channel-a", "topic-1")
+        document = rows[1]
+        assert document.title == "PDF One"
+        assert document.path == "node/topic-1"
+        assert document.target_id == topic.id
+        assert document.id == row_id_for("channel-a", "doc-1")
+        assert "zebra" in document.body
+
+        locator = build_sources(runtime, index_dir)
+        meta = _meta(locator, source)
+        assert meta["truncated"] == "0"
+        assert _body_hits(locator, source, "zebra")
+        docs = _docs(locator, source)
+        assert {row[2] for row in docs} == {"node/topic-1"}
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_topic_row_links_to_kolibri_and_same_title_child_is_folded(tmp_path):
+    fixture = KolibriFixture(tmp_path)
+    fixture.add_channel("channel-a", "Channel A", "root-a")
+    fixture.add_node(
+        "root-a",
+        "channel-a",
+        "Course",
+        kind="topic",
+        lft=1,
+        rght=6,
+        level=0,
+    )
+    fixture.add_node(
+        "same-title",
+        "channel-a",
+        "Course",
+        kind="document",
+        parent_id="root-a",
+        lft=2,
+        rght=3,
+    )
+    fixture.add_document("same-title", "same title body", extension="txt")
+    fixture.add_node(
+        "different-title",
+        "channel-a",
+        "Different",
+        kind="document",
+        parent_id="root-a",
+        lft=4,
+        rght=5,
+    )
+    fixture.add_document("different-title", "different title body", extension="txt")
+    fixture.close()
+    index_dir = tmp_path / "indexes"
+    config = kolibri_config(fixture, server_url="http://localhost:8085")
+    runtime, batch, _ = open_runtime(index_dir, config)
+    try:
+        source = runtime.library_sources()[0]
+        assert source.item_count == 1
+        producer = runtime.entry_producer(source, fast=False)
+        assert producer.count == 2
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        assert rows[0].title == "Course"
+        assert rows[0].path == "node/root-a"
+        assert rows[0].target_id is None
+        assert rows[1].title == "Different"
+        assert rows[1].path == "node/root-a"
+        assert rows[1].target_id == rows[0].id
+
+        store = runtime.content_store(source)
+        try:
+            entry = store.resolve("node/root-a")
+            assert entry.external_url == (
+                "http://localhost:8085/learn/#/topics/t/root-a/folders"
+            )
+            assert entry.mimetype == "text/html"
+        finally:
+            store.close()
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_exercise_description_is_indexed_and_coach_content_is_not(tmp_path):
+    fixture = make_two_channel_fixture(tmp_path)
+    fixture.db.execute(
+        "UPDATE content_contentnode SET coach_content = 1 WHERE id = 'exercise-1'"
+    )
+    coach = "private coach only text"
+    fixture.db.execute(
+        "INSERT INTO content_contentnode "
+        "(id, parent_id, tree_id, level, lft, rght, title, coach_content, "
+        "content_id, channel_id, description, kind, available) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "coach-node",
+            "root-b",
+            2,
+            1,
+            6,
+            7,
+            "Coach Node",
+            1,
+            "coach-node",
+            "channel-b",
+            coach,
+            "exercise",
+            1,
+        ),
+    )
+    fixture.db.commit()
+    index_dir = tmp_path / "indexes"
+    config = kolibri_config(fixture)
+    from zimantic.providers.kolibri import KolibriProvider
+    from zimantic.providers.kolibri.discovery import kolibri_collection_key
+
+    from .helpers import context, runtime_config
+
+    provider_batch = KolibriProvider().discover(
+        config, context(index_dir, runtime_config(index_dir, config))
+    )
+    collection_b = next(
+        item
+        for item in provider_batch.collections
+        if item.key == kolibri_collection_key("kolibri", "channel-b")
+    )
+    runtime = provider_batch.open(collection_b)
+    batch = provider_batch
+    try:
+        root_key = kolibri_root_key("kolibri", "channel-b")
+        source = next(
+            item for item in runtime.library_sources() if item.key == root_key
+        )
+        producer = runtime.entry_producer(source, fast=False)
+        rows = {
+            producer.entry_at(index).path: producer.entry_at(index)
+            for index in range(producer.count)
+        }
+        assert "node/exercise-1" not in rows
+        assert "node/coach-node" not in rows
+        assert all("private coach" not in row.body for row in rows.values())
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_exercise_without_file_gets_metadata_description(tmp_path):
+    fixture = KolibriFixture(tmp_path)
+    fixture.add_channel("channel-a", "Channel A", "root-a")
+    fixture.add_node("root-a", "channel-a", "Channel A", kind="topic", lft=1, rght=4, level=0)
+    fixture.add_node(
+        "exercise-1",
+        "channel-a",
+        "Exercise One",
+        kind="exercise",
+        parent_id="root-a",
+        lft=2,
+        rght=3,
+        description="public exercise description",
+    )
+    fixture.close()
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        source = runtime.library_sources()[0]
+        producer = runtime.entry_producer(source, fast=False)
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        topic = next(item for item in rows if item.title == "Channel A")
+        alias = next(item for item in rows if item.title == "Exercise One")
+        assert alias.path == topic.path
+        assert alias.target_id == topic.id
+        assert "public exercise description" in alias.body
+        store = runtime.content_store(source)
+        try:
+            data = store.read(alias.path, head_only=False, max_bytes=1 << 20)
+            assert data.mimetype == "text/plain"
+            assert b"Channel A" in data.content
+        finally:
+            store.close()
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_file_selection_is_deterministic_and_ignores_sql_order(tmp_path):
+    fixture = KolibriFixture(tmp_path)
+    fixture.add_channel("channel-a", "Channel A", "root-a")
+    fixture.add_node("root-a", "channel-a", "Channel A", kind="topic", lft=1, rght=4, level=0)
+    fixture.add_node("video", "channel-a", "Video", kind="video", parent_id="root-a", lft=2, rght=3)
+    fixture.add_video("video", preset="high_res_video", variant=True)
+    fixture.close()
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        source = runtime.library_sources()[0]
+        first = runtime.entry_producer(source, fast=False)
+        first_path = first.entry_at(0).path
+        # Reorder the physical file rows without changing their meaning.
+        fixture.db.execute(
+            "UPDATE content_file SET priority = CASE WHEN preset = 'high_res_video' "
+            "THEN 1 ELSE 2 END"
+        )
+        fixture.db.commit()
+        second = runtime.entry_producer(source, fast=False)
+        assert second.entry_at(0).path == first_path
+        assert second.fingerprint == first.fingerprint
+    finally:
+        fixture.db.close()
+        runtime.close()
+        batch.close()
+
+
+def test_ambiguous_primary_mapping_is_skipped_with_an_error(tmp_path):
+    fixture = KolibriFixture(tmp_path)
+    fixture.add_channel("channel-a", "Channel A", "root-a")
+    fixture.add_node("root-a", "channel-a", "Channel A", kind="topic", lft=1, rght=4, level=0)
+    fixture.add_node("doc", "channel-a", "Ambiguous", kind="document", parent_id="root-a", lft=2, rght=3)
+    fixture.add_file("doc", b"one", "pdf", preset="document")
+    fixture.add_file("doc", b"two", "pdf", preset="document")
+    fixture.close()
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        source = runtime.library_sources()[0]
+        producer = runtime.entry_producer(source, fast=False)
+        assert producer.count == 1
+        assert producer.entry_at(0).path == "node/root-a"
+        assert any("ambiguous" in error for error in producer.errors)
+        store = runtime.content_store(source)
+        try:
+            from zimantic.content.store import ArticleUnavailableError
+
+            with pytest.raises(ArticleUnavailableError):
+                store.read("node/doc", head_only=False, max_bytes=1 << 20)
+        finally:
+            store.close()
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_captions_are_absent_by_default_and_indexed_when_enabled(tmp_path):
+    fixture = KolibriFixture(tmp_path)
+    fixture.add_channel("channel-a", "Channel A", "root-a")
+    fixture.add_node("root-a", "channel-a", "Channel A", kind="topic", lft=1, rght=4, level=0)
+    fixture.add_node("video", "channel-a", "Lesson Video", kind="video", parent_id="root-a", lft=2, rght=3)
+    fixture.add_video(
+        "video",
+        captions=(
+            b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n"
+            b"caption zebra\n\n00:00:01.000 --> 00:00:02.000\n"
+            b"caption zebra\n"
+        ),
+    )
+    fixture.close()
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        source = runtime.library_sources()[0]
+        off = runtime.entry_producer(source, fast=False)
+        assert off.derived_text_inputs(0) == ()
+        assert [item.kind for item in off.derived_text_inputs(1)] == []
+        locator = IndexLocator(index_dir)
+        build_index(off, locator, None, {"batch_size": 1}, fast=False)
+        assert _body_hits(locator, source, "caption") == []
+
+        operations = {source.key: SourceDerivedOperations(captions=True)}
+        cfg = {
+            "max_entry_bytes": 1 << 20,
+            "max_body_text_bytes": 1 << 20,
+            "max_preview_chars": 1000,
+            "derived_source_operations": operations,
+            "derived_text": DerivedTextConfig(),
+        }
+        on = runtime.entry_producer(source, fast=False)
+        on.cfg.update(cfg)
+        on.captions_enabled = True
+        # Rebuild the manifest/fingerprint with captions included.
+        on.__init__(
+            source,
+            runtime._snapshot,
+            channel=runtime.channel,
+            scope=runtime._by_key[source.key].scope,
+            storage_root=runtime.storage_root,
+            config=runtime.config,
+            fast=False,
+            cfg=cfg,
+            snapshot_factory=runtime._manager.acquire,
+        )
+        assert [item.kind for item in on.derived_text_inputs(1)] == ["captions"]
+        build_index(
+            on,
+            locator,
+            None,
+            {"batch_size": 1, "max_body_text_bytes": 1 << 20, **cfg},
+            fast=False,
+        )
+        hits = _body_hits(locator, source, "zebra")
+        assert hits
+        docs = _docs(locator, source)
+        assert {row[2] for row in docs} == {"node/root-a"}
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_fingerprint_tracks_relevant_changes_and_validation_detects_writes(tmp_path):
+    fixture = make_two_channel_fixture(tmp_path)
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        topic_key = kolibri_node_source_key("kolibri", "channel-a", "topic-1")
+        source = next(
+            item for item in runtime.library_sources() if item.key == topic_key
+        )
+        producer = runtime.entry_producer(source, fast=False)
+        fingerprint = producer.fingerprint
+        assert producer.validate_snapshot() is True
+
+        # An unrelated channel change does not affect this source.
+        fixture.db.execute(
+            "UPDATE content_contentnode SET title = 'Other' WHERE id = 'audio-1'"
+        )
+        fixture.db.commit()
+        unrelated = runtime.entry_producer(source, fast=False)
+        assert unrelated.fingerprint == fingerprint
+
+        # A relevant description, availability, or primary file change does.
+        fixture.db.execute(
+            "UPDATE content_contentnode SET description = 'changed' WHERE id = 'doc-1'"
+        )
+        fixture.db.commit()
+        changed = runtime.entry_producer(source, fast=False)
+        assert changed.fingerprint != fingerprint
+        assert producer.validate_snapshot() is False
+    finally:
+        fixture.db.close()
+        runtime.close()
+        batch.close()
+
+
+def test_fingerprint_tracks_effective_derived_options(tmp_path):
+    fixture = make_two_channel_fixture(tmp_path)
+    runtime, batch, _ = open_runtime(tmp_path / "indexes", kolibri_config(fixture))
+    try:
+        source = runtime.library_sources()[0]
+        runtime._cfg["derived_collection_operations"] = {
+            "kolibri": SourceDerivedOperations(options={"asr_model": "tiny"})
+        }
+        inherited = runtime.entry_producer(source, fast=False)
+        runtime._cfg["derived_source_operations"] = {
+            source.key: SourceDerivedOperations(options={"asr_model": "small"})
+        }
+        overridden = runtime.entry_producer(source, fast=False)
+        assert overridden.fingerprint != inherited.fingerprint
+        runtime._cfg["derived_collection_operations"] = {
+            "kolibri": SourceDerivedOperations(options={"asr_model": "base"})
+        }
+        unchanged = runtime.entry_producer(source, fast=False)
+        assert unchanged.fingerprint == overridden.fingerprint
+    finally:
+        fixture.db.close()
+        runtime.close()
+        batch.close()
+
+
+def test_descriptive_metadata_is_searchable_and_invalidates_the_build(tmp_path):
+    fixture = make_metadata_fixture(tmp_path)
+    index_dir = tmp_path / "indexes"
+    runtime, batch, _ = open_runtime(index_dir, kolibri_config(fixture))
+    try:
+        source = next(item for item in runtime.library_sources() if item.key.endswith(":unit"))
+        producer = runtime.entry_producer(source, fast=False)
+        rows = [producer.entry_at(index) for index in range(producer.count)]
+        row = next(item for item in rows if item.title == "Count with small numbers")
+        assert row.target_id is not None
+        for text in ("Khan Academy", "Lower Primary", "numeracy", "Practice", "Counting", "Questions: 8"):
+            assert text in row.body
+        locator = build_sources(runtime, index_dir)
+        assert _body_hits(locator, source, "numeracy")
+        assert _body_hits(locator, source, "Primary")
+        assert _body_hits(locator, source, "Academy")
+        fixture.db.execute(
+            "UPDATE content_contenttag SET tag_name = 'new tag' WHERE id = 'tag-1'"
+        )
+        fixture.db.commit()
+        assert not producer.validate_snapshot()
+        changed = runtime.entry_producer(source, fast=False)
+        assert producer.fingerprint != changed.fingerprint
+        fast = runtime.entry_producer(source, fast=True)
+        assert all(
+            not fast.entry_at(index).body and not fast.entry_at(index).excerpt
+            for index in range(fast.count)
+        )
+    finally:
+        runtime.close()
+        batch.close()
+        fixture.dispose()

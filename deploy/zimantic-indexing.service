@@ -1,0 +1,40 @@
+# One-shot: nightly full build (with meaning vectors) of every ZIM, then rescan.
+#
+# Triggered by deploy/zimantic-indexing.timer. Install both:
+#   cp deploy/zimantic-indexing.service deploy/zimantic-indexing.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zimantic-indexing.timer
+#
+# Runs only between 01:00 and 06:00 in the machine's own local time. The timer
+# starts it at 01:00; the ExecCondition below also rejects manual or retried
+# starts outside the window. Sources that are already indexed are skipped (build
+# is idempotent), so the nightly run is near-instant once the library is
+# complete and does real work only for new or interrupted indexes.
+#
+# Mixed-library examples (the default `build` covers every configured ZIM,
+# files, and Kolibri collection and reports Kiwix as skipped):
+#   zimantic build --provider files
+#   zimantic build --collection modules
+#   zimantic build --source kolibri:kolibri:<channel_id>:root
+# A files or Kolibri collection whose content is mounted read-only still needs
+# only ReadOnlyPaths for that mount; indexes stay under index_dir.
+#
+# Use a companion .path unit to trigger a fast build when a non-ZIM tree changes,
+# for example PathChanged=/library/www/html/modules (files) or
+# PathChanged=/library/kolibri/content (Kolibri). Keep watching source roots,
+# never index_dir.
+
+[Unit]
+Description=Build full Zimantic indexes at night and rescan
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.local/share/zimantic
+# Only the full build is allowed between 01:00 and 06:00 local time.
+ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
+# Serialize against the path-triggered fast build: `build` takes the index lock
+# itself, and --no-wait-lock exits 75 instead of queueing when the other build holds
+# it. A skipped trigger is not an error, and reload waits for that other build.
+ExecStart=/bin/sh -c 'build_status=0; "%h/.local/bin/zimantic" build --no-wait-lock --wait-stable || build_status=$?; if [ "$build_status" -eq 75 ]; then echo "zimantic: another build is running, nightly full build skipped" >&2; exit 0; fi; reload_status=0; "%h/.local/bin/zimantic" reload || reload_status=$?; if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi; exit "$reload_status"'
+NoNewPrivileges=yes
+PrivateTmp=yes

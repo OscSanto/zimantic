@@ -1,0 +1,63 @@
+# Settings tuned for a Raspberry Pi 5 (4 cores, 4-8 GB RAM).
+# Copy this file to config.toml to use them.
+
+# Matches `zimantic model` (int8 default). For a GPU, use the e5
+# transformer: ./model/multilingual-e5-small/fp16 (see config.gpu.toml).
+model_dir = "./model/int8"
+index_dir = "./indexes"
+
+port = 8090
+# A Kiwix server is declared only as an explicit [[collections]] entry below.
+# Leave those entries commented out to search local Zimantic indexes only.
+
+page_size = 10
+max_results = 100
+
+# Moderate batch size for a Pi 5.
+batch_size = 16
+
+# Independent source-build concurrency is automatic (normally one on a Pi 5).
+
+max_html_bytes = 4_194_304
+max_entry_bytes = 1073741824
+max_article_bytes = 33_554_432
+max_preview_chars = 1_000
+
+# Serving concurrency remains automatic, including CPU affinity/cgroup limits.
+# One three-thread build call used less RAM than 3x1 on a Pi 500, with similar
+# complete-build throughput. WARNING: benchmark before increasing threads or
+# forcing several model workers; synchronization and workspace memory trade off.
+onnx_build_threads = 3
+# Model-call concurrency also applies to single-source builds; automatic = 1.
+# onnx_build_workers = 1
+
+# nprobe = 64
+min_cosine_similarity = 0.85
+
+# Source threads, native processes and user-search admission stay automatic.
+candidate_count = 16
+max_stream_ranks = 16
+source_timeout = 12
+
+cache_size = 256
+cache_bytes = 33_554_432  # 32 MiB per cache
+
+# Provider paths resolve from this config file's directory, unlike the global
+# model_dir/index_dir above (which resolve under $XDG_DATA_HOME/zimantic when
+# this file is the XDG config). Use an absolute path when the ZIMs live in the
+# data directory, for example:
+#   path = "/home/pi/.local/share/zimantic/zims"
+[[collections]]
+type = "zim"
+name = "library"
+path = "./zims"
+
+# [[collections]]
+# type = "kiwix"
+# name = "kiwix"
+# server = "http://localhost:8085"
+# catalog_path = "/kiwix/catalog/v2/entries"
+# catalog_limit = 1000
+# max_catalog_entries = 50000
+# max_response_bytes = 67108864
+# max_remote_sources = 100

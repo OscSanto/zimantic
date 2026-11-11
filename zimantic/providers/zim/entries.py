@@ -1,0 +1,338 @@
+"""ZIM-backed :class:`EntryProducer`.
+
+This adapter is the only place where the generic index pipeline touches libzim.
+It preserves the archive entry's raw ``_index`` and redirect target index so
+existing FTS rowids and FAISS ids do not need renumbering.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from ...content.reader import (
+    _READABLE_MIMETYPES,
+    DEFAULT_MAX_BODY_TEXT_BYTES,
+    DEFAULT_MAX_ENTRY_BYTES,
+    DEFAULT_MAX_HTML_BYTES,
+    DEFAULT_PREVIEW_CHARS,
+    read_entry,
+)
+from ...diagnostics import relative_display
+from ...indexing.types import MAX_ROW_ID, EntryRecord
+from .metadata import header_uuid
+
+logger = logging.getLogger(__name__)
+
+
+def _setting(cfg: Mapping[str, Any] | None, key: str, default: int) -> int:
+    value = (cfg or {}).get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return int(default)
+    return int(value)
+
+
+class ArchiveEntryProducer:
+    """Bounded, resumable sequence of rows from one ZIM archive."""
+
+    provider = "zim"
+
+    def __init__(
+        self,
+        source: Any,
+        path: Path | str,
+        *,
+        fast: bool = False,
+        cfg: Mapping[str, Any] | None = None,
+        archive: Any | None = None,
+        max_entries: int | None = None,
+        catalog_path: Path | str | None = None,
+    ) -> None:
+        self.source = source
+        self.key = str(getattr(source, "key", ""))
+        self.collection_key = str(getattr(source, "collection_key", ""))
+        self.provider = str(getattr(source, "provider", self.provider))
+        self.provider_id = getattr(source, "provider_id", None)
+        self.path = Path(path)
+        self.fast = bool(fast)
+        from ...scoped_settings import resolve_settings
+
+        defaults = dict(cfg or {})
+        if max_entries is not None:
+            defaults["max_entries"] = max_entries
+        self.cfg = resolve_settings(defaults, source)
+        self.catalog_path = Path(catalog_path) if catalog_path else None
+        self.max_html_bytes = _setting(
+            self.cfg, "max_html_bytes", DEFAULT_MAX_HTML_BYTES
+        )
+        self.max_entry_bytes = _setting(
+            self.cfg, "max_entry_bytes", DEFAULT_MAX_ENTRY_BYTES
+        )
+        self.max_preview_chars = _setting(
+            self.cfg, "max_preview_chars", DEFAULT_PREVIEW_CHARS
+        )
+        self.max_body_text_bytes = _setting(
+            self.cfg, "max_body_text_bytes", DEFAULT_MAX_BODY_TEXT_BYTES
+        )
+        self._archive = archive
+        self._owns_archive = archive is None
+        self._closed = False
+        self._stat = self.path.stat()
+        self.source_size = max(0, int(self._stat.st_size))
+        self.source_mtime = round(self._stat.st_mtime_ns / 1_000_000_000)
+        try:
+            self._uuid = header_uuid(self.path)
+        except (OSError, ValueError):
+            self._uuid = ""
+        self._archive_entry_count = self._entry_count()
+        configured_cap = self.cfg.get("max_entries", max_entries)
+        if configured_cap is None:
+            configured_cap = getattr(source, "max_entries", None)
+        if isinstance(configured_cap, int) and not isinstance(configured_cap, bool):
+            self.count = max(0, min(self._archive_entry_count, configured_cap))
+        else:
+            self.count = self._archive_entry_count
+        self.truncated = self.count < self._archive_entry_count
+        self._order = None
+        self.article_work_count = None
+        self.order_fingerprint = ""
+        self.fingerprint = self._fingerprint()
+        self._update_catalog()
+
+    def _update_catalog(self) -> None:
+        if self.catalog_path is None:
+            return
+        try:
+            from ...catalog import SourceCatalog
+            from .metadata import metadata_from_archive
+
+            with SourceCatalog(self.catalog_path) as catalog:
+                catalog.upsert(
+                    metadata_from_archive(
+                        self._open(),
+                        self.path,
+                        key=self.key,
+                        collection_key=self.collection_key,
+                    )
+                )
+        except Exception as error:
+            logger.warning(
+                "catalog metadata update failed for %s (%s)",
+                relative_display(getattr(self, "_root", None), self.path),
+                type(error).__name__,
+            )
+            logger.debug("catalog metadata update error for %s: %s", self.path, error)
+
+    # -- producer contract -------------------------------------------------
+
+    def _entry_count(self) -> int:
+        archive = self._open()
+        try:
+            return max(0, int(archive.entry_count))
+        except (AttributeError, TypeError, ValueError):
+            return 0
+
+    def _open(self):
+        if self._archive is None:
+            from libzim.reader import Archive
+
+            self._archive = Archive(str(self.path))
+        return self._archive
+
+    def entry_at(self, index: int) -> EntryRecord | None:
+        if not isinstance(index, int) or index < 0 or index >= self.count:
+            return None
+        archive = self._open()
+        entry_id = int(self._order[index]) if self._order is not None else index
+        row = read_entry(
+            archive,
+            entry_id,
+            fast=self.fast,
+            max_html_bytes=self.max_html_bytes,
+            max_entry_bytes=self.max_entry_bytes,
+            max_preview_chars=self.max_preview_chars,
+            max_body_text_bytes=self.max_body_text_bytes,
+        )
+        if row is None:
+            return None
+        if row.id < 0 or row.id > MAX_ROW_ID:
+            raise ValueError(
+                f"ZIM entry {index} has an unsafe row id {row.id}; refusing to "
+                "merge or remap provider identities"
+            )
+        if row.target_id is not None and (
+            row.target_id < 0 or row.target_id > MAX_ROW_ID
+        ):
+            raise ValueError(
+                f"ZIM entry {index} redirects to an unsafe row id "
+                f"{row.target_id}; refusing to merge or remap provider identities"
+            )
+        return row
+
+    def modified_at(self, index: int) -> int | None:
+        if not isinstance(index, int) or index < 0 or index >= self.count:
+            return None
+        return self.source_mtime
+
+    def prepare_iteration(self, order: str | None = None) -> str:
+        """Keep canonical ids and caps while choosing a resumable reading order.
+
+        Native order groups article work first; older bindings use ID order.
+        Only metadata is read here, never compressed article bodies.
+        """
+        if order not in (None, "efficient-v1", "id-v1"):
+            raise ValueError(f"unsupported ZIM entry order {order!r}")
+        self._order = None
+        self.article_work_count = None
+        self.order_fingerprint = ""
+        iterator = getattr(self._open(), "iter_efficient", None)
+        has_efficient_order = callable(iterator)
+        if order == "id-v1" or (order is None and not has_efficient_order):
+            self.order_fingerprint = hashlib.sha256(
+                f"zim:id-v1:{self.count}".encode("ascii")
+            ).hexdigest()
+            return "id-v1"
+        if not has_efficient_order:
+            raise RuntimeError("resuming efficient ZIM order requires libzim 4.1")
+        import numpy as np
+
+        def entries():
+            for entry in iterator():
+                entry_id = int(entry._index)
+                if not 0 <= entry_id < self.count:
+                    continue
+                work = False
+                if not entry.is_redirect:
+                    mime = entry.get_item().mimetype.split(";", 1)[0].strip().lower()
+                    work = mime in _READABLE_MIMETYPES
+                yield entry_id, work
+
+        records = np.fromiter(entries(), dtype=[("id", "<u4"), ("work", "?")])
+        ids, work = records["id"], records["work"]
+        if len(ids) != self.count or not np.array_equal(
+            np.sort(ids), np.arange(self.count, dtype=np.uint32)
+        ):
+            raise RuntimeError("native ZIM iterator does not enumerate every archive entry")
+        self._order = np.concatenate((ids[work], ids[~work]))
+        self.article_work_count = int(work.sum())
+        self.order_fingerprint = hashlib.sha256(self._order.tobytes()).hexdigest()
+        return "efficient-v1"
+
+    def validate_snapshot(self) -> bool:
+        """Independently recheck the live archive against the fingerprint."""
+        try:
+            stat = self.path.stat()
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot validate ZIM source {self.key}: {error}"
+            ) from error
+        if stat.st_size != self._stat.st_size:
+            return False
+        if round(stat.st_mtime_ns / 1_000_000_000) != round(
+            self._stat.st_mtime_ns / 1_000_000_000
+        ):
+            return False
+        try:
+            current_uuid = header_uuid(self.path)
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                f"cannot validate ZIM source {self.key}: {error}"
+            ) from error
+        return not (self._uuid and current_uuid != self._uuid)
+
+    def reusable_vectors(self, index_dir, db, cfg, embedder):
+        from .legacy_index import open_legacy_vectors
+
+        return open_legacy_vectors(self, index_dir, db, cfg, embedder)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._order = None
+        if not self._owns_archive:
+            return
+        archive = self._archive
+        self._archive = None
+        close = getattr(archive, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    # -- derived text ------------------------------------------------------
+
+    def derived_text_inputs(self, index: int):
+        """ZIM embedded-media enrichment is not enabled in this phase."""
+        return ()
+
+    # -- identity ----------------------------------------------------------
+
+    def _fingerprint(self) -> str:
+        from ...indexing.derived import source_operations
+
+        operations = source_operations(self.cfg, self)
+        payload = {
+            "provider": self.provider,
+            "key": self.key,
+            "uuid": self._uuid,
+            "size": self._stat.st_size,
+            "mtime": round(self._stat.st_mtime_ns / 1_000_000_000),
+            "count": self.count,
+            "entry_count": self._archive_entry_count,
+            "fast": self.fast,
+            "max_html_bytes": self.max_html_bytes,
+            "max_entry_bytes": self.max_entry_bytes,
+            "max_preview_chars": self.max_preview_chars,
+            "max_body_text_bytes": self.max_body_text_bytes,
+            "derived_text": self.cfg.get("derived_text"),
+            "derived_operations": (
+                {**operations.state(), **operations.options} if operations else None
+            ),
+            "derived_engines": sorted(
+                str(name)
+                for name in (self.cfg.get("derived_engines") or {})
+            ),
+        }
+        encoded = json.dumps(
+            payload, sort_keys=True, default=str, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+
+def create_zim_producer(
+    source: Any,
+    *,
+    fast: bool,
+    cfg: Mapping[str, Any] | None = None,
+    archive_factory: Any | None = None,
+    max_entries: int | None = None,
+    catalog_path: Path | str | None = None,
+) -> ArchiveEntryProducer:
+    """Open the archive through an optional test/runtime factory."""
+    path = getattr(source, "path", None)
+    if not path:
+        record = getattr(source, "record", None)
+        path = getattr(record, "path", None)
+    if not path:
+        raise ValueError("ZIM source does not expose a private archive locator")
+    archive = None
+    if archive_factory is not None and archive_factory is not object:
+        archive = archive_factory(str(path))
+    return ArchiveEntryProducer(
+        source,
+        path,
+        fast=fast,
+        cfg=cfg,
+        archive=archive,
+        max_entries=max_entries,
+        catalog_path=catalog_path,
+    )
+
+
+__all__ = ["ArchiveEntryProducer", "create_zim_producer"]

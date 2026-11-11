@@ -1,253 +1,169 @@
 # Zimantic
 
-**Offline search that understands what you mean, for Kiwix ZIM files.**
+Zimantic is an offline search engine for Kiwix ZIM files and configured directory trees, such as an offline copy of `/library/www/html/modules`. Semantic search finds articles from questions and descriptions, including misspellings and queries in another language. Zimantic runs offline on devices as small as a Raspberry Pi Zero 2 W.
 
-Zimantic adds meaning based searching on ZIM files; the compressed offline copies of Wikipedia and other websites which are published by Kiwix.  
+Semantic search has the best coverage in widely spoken languages. Coverage varies by language; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
 
-Ask a question, describe something without knowing its name, misspell it, or search in one of 100+ languages, and Zimantic looks for the article closest to what you mean. It works best in widely spoken languages. Everything runs offline, on low resource hardware as small
-as a Raspberry Pi Zero 2 W.
-
-| You type | Kiwix search | Zimantic |
+| Query | Kiwix search | Zimantic |
 |---|---|---|
 | "what causes lockjaw" | *Tetanus* not in the top 20 | *Tetanus* at **#1** |
 | "diabetis" (misspelled) | *Diabetes* not in the top 20 | *Diabetes* at **#1** |
 | "糖尿病" (Chinese for "diabetes") | *Diabetes* not in the top 20 | *Diabetes* at **#1** |
 
-*Searched in WikiMed, the Wikipedia medical encyclopedia ZIM. Results below.*
+*Searched in WikiMed, the Wikipedia medical encyclopedia ZIM file.*
 
 ## Features
 
-- **Search by meaning**: questions and descriptions find articles even when they share no words with the title.
-- **Alternate names and misspellings**: "diabetis" finds *Diabetes*; "Leber's disease" finds *Leber's hereditary optic neuropathy*.
-- **Multilingual**: one model covers 100+ languages; a query in one language finds articles written in another.
-  Strongest in widely used languages (see the results below).
-- **Several collections at once**: search any combination of your ZIMs, ranked together in one list.
-- **Best of three searches**: combines meaning, title-word and Kiwix full-text search into a single ranking.
-- **Clean results & previews**: redirects are merged into their article, so each article appears once, with its first paragraph as a preview.
-- **Lightweight and offline**: runs on low resource devices, such as on a Raspberry Pi Zero 2 W (512 MB RAM), using ~250–300 MB while serving.
-- **Web page and JSON API**: search from any browser on the network, or from your own programs.
+- Semantic search matches articles from questions and descriptions when the query and the title share no words.
+- Alternate names and misspellings work: "diabetis" finds *Diabetes*, and "Leber's disease" finds *Leber's hereditary optic neuropathy*.
+- A multilingual query uses one model that covers more than 100 languages. A query in one language finds articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
+- Collections and sources provide several scopes. Browse the library by collection and provider, search one collection as a unit, or combine individual sources. See [Source selection](docs/usage.md#source-selection).
+- Files collections search and serve one configured directory tree, such as an offline copy of `/library/www/html/modules`, as one collection with a fixed scope. See [Files collections](docs/collections.md#files-collections).
+- Kolibri installations are searched and served directly. Each installed channel is one collection, and each top-level topic is one source. See [Kolibri installations](docs/collections.md#kolibri-installations).
+- Combined ranking orders semantic, title, and full-text results in one list. The full-text list combines SQLite body search with ZIM full-text search.
+- Merged results collapse redirects into the target article, so each article appears one time. Each result carries a size-limited preview.
+- Progressive results run sources in parallel. The page shows a provisional merged list as each source finishes, then reranks the list deterministically.
+- The library page at `/library` shows ZIM collections, files collections, Kolibri channels, and remote Kiwix books, grouped by collection with provider and media-type filters. See [Library view](docs/usage.md#library-view).
+- Zimantic uses about 250–325 MB while it serves, which supports devices such as a Raspberry Pi Zero 2 W (512 MB RAM). See [Measured memory use](docs/search.md#measured-memory-use).
+- Search without vectors uses the available indexes. Title and body search work when their indexes exist. A ZIM file without a Zimantic index uses its ZIM full-text index. If a model or FAISS file is unavailable, or model probes do not match, Zimantic uses the available lexical search. An invalid ZIM full-text index affects only that ZIM file; the server logs the error and continues. Use [`zimantic diagnose`](docs/usage.md#diagnosing-zim-files) to check suspect files without effect on the server.
+- Concurrent searches are limited by `max_concurrent_searches`. A request waits up to `slot_wait_seconds` for a free slot before it reports busy, so overlapping searches queue on slow hardware. An abandoned browser stream skips queued source work and returns its slot. Identical in-flight queries share one computation. An in-memory cache limited by `cache_size` and `cache_bytes` answers repeated queries, including deadline-limited partial pools for `partial_cache_seconds`. Zimantic caches explicit source and collection scopes by their expanded source keys and publication generation. See [Source selection](docs/usage.md#source-selection).
+- Built-in article serving opens result links directly from the ZIM files, including redirects, assets, and each ZIM homepage, without `kiwix-serve`.
+- The web interface and JSON API serve browsers and custom programs. Routes use short paths such as `/search`, `/suggest`, `/library`, `/collections.json`, `/content/<source-key>/<path>`, `/article/<source-key>/<path>`, and `/health`.
 
-Zimantic finds articles; [kiwix-serve](https://kiwix.org/en/applications/) displays them. Searching itself does not
-require Kiwix, but serving the article pages does, so Zimantic works alongside Kiwix rather than replacing it.
-
-# How it works
-
-### 1. Indexing a ZIM (`build`, once per ZIM)
-
-**What gets read.** Every entry in the ZIM is visited once. Images, stylesheets and scripts are skipped.
-Redirects, including the small "forwarding" pages some
-ZIMs use instead of real redirects, are stored as **title-only** entries that point to their article.
-Thus, searching "USA" still finds the United States page.
-
-**Why the first paragraph.** For each article, Zimantic keeps the title plus the **first paragraph**.
-Wikipedia's writer's guidelines require opening paragraph to summarize the whole article, so it's the
-most compact description. That makes it the best text to compare with
-questions and descriptions.
-
-**Forming a clean paragraph.** Zimantic uses Wikipedia's page structure:
-- it takes the first `<p>` with at least 50 characters, so pages that open with a one-liner like
-  "Mercury may refer to:" (disambiguation pages, lists) are stored as title-only;
-- it skips stylesheets, scripts and footnote markers like `[1]` inside the paragraph;
-- it keeps at most 1,000 characters.
-
-**Other ZIMs** (Stack Exchange, Gutenberg, TED, …) aren't refused: `build` runs on any ZIM and applies the same
-first-paragraph rule to every HTML page. But nothing has been tuned or tested for them, so results depend on how
-each site lays out its pages. PDFs inside a ZIM are skipped.
-
-**Embedding.** The title and first paragraph are turned into a vector (a list of numbers describing their meaning), currently by
-[multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, ~118 MB).
-Input is capped at 256 tokens.
-
-**Storage.** Each ZIM gets two files in `index_dir`:
-- `<name>.sqlite`: titles, first paragraphs, paths, redirect targets, and a full-text index of the titles (SQLite FTS5).
-- `<name>.faiss`: the vectors, in one of two layouts depending on aritlce count:
-
-| ZIM size | Vector index | Why |
-|---|---|---|
-| Under 10,000 articles | **Flat**: the query is compared with every vector | Exact, and small enough (a few MB) that comparing everything is fast |
-| 10,000 articles or more | **IVF + 8-bit (SQ8)**: vectors are grouped into 4·√n clusters, and each search only scans the closest `nprobe` clusters (64 by default) | Comparing millions of vectors per search is too slow. On WikiMed (70k articles), scanning 64 of 1,062 clusters (6%) was within a few points of scanning every cluster, at less than half the search time (26 ms vs 66 ms). 8-bit numbers were nearly exact. **Heavier compression (e.g. PQ48) lost ~25% of the top hits in earlier testing.** |
-
-The `.faiss` file is memory-mapped: the operating system reads only the **clusters** a search touches instead of loading
-the whole index into RAM. Clusters are found relative to the distance of query-to-cluster centres in vector space.
-
-If a build stops, running it again resumes from the last saved batch.
-
-### 2. Starting the server (`serve`, once)
-
-At startup Zimantic loads the embedding model and opens every **finished** index; that is, the SQLite file
-, the FAISS file, and the ZIM.
-These stay open for as long as the server runs; **nothing is reloaded per search**. 
-
-A lightweight HTML page is served through FastAPI and is accessible from any browser at `http://<host>:8090`
-(the `port` in `config.yaml`).
-
-### 3. Each search
-
-1. **Embed the query** with the same model used to index
-2. **Run three searches** on each selected ZIM. They find the best matches in different ways:
-
-   | Search | Finds | Good at | Time |
-   |---|---|---|---|
-   | **Meaning** (FAISS) | Articles whose first-paragraph vector is closest to the query (cosine similarity) | Questions, descriptions, other languages | ~13 ms |
-   | **Title words** (SQLite FTS5, BM25 ranking) | Titles containing every word of the query, including redirect titles | Exact titles, alternate names (via redirect titles) | ~4 ms |
-   | **Full text** (the ZIM's own Kiwix index) | Articles containing the words anywhere | Words buried deep inside an article | ~8 ms |
-
-3. **Collapse redirects**: every hit on a redirect is replaced by the article it points to, and duplicates are
-   merged, so each article appears only once.
-4. **Merge the three lists with Reciprocal Rank Fusion (RRF).** Their scores can't be compared
-   (a cosine similarity, a BM25 score, a position in Kiwix's list), so RRF ignores scores and uses positions only:
-   an article earns `1 / (60 + its position)` from each list it appears in. An article found near the top
-   by several searches beats one that's first in just one.
-
-*Timings measured on WikiMed; a whole search took 26 ms (median over 785 benchmark queries).
-A Raspberry Pi Zero 2 W is much slower (around 150 ms).*
-
-## Compared with Kiwix search
-
-
-![Ask a question, get the article](docs/images/1-questions.png)
-![Ask in another language](docs/images/3-languages.png)
-![How often the right article comes first: Zimantic vs Kiwix](docs/images/0-scorecard.png)
-
-*Measured on WikiMed, the Wikipedia medical encyclopedia ZIM (`wikipedia_en_medicine_maxi_2026-04`, 70,523 articles),
-against kiwix-serve's full-text search.*
-
-### Results by type of search
-
-**#1** = the right article is the first result. **Top 5** = it's somewhere in the first five.
-"Not in top 20" = it didn't appear in the first 20 results.
-
-| Type of search | Example query → article wanted | Kiwix | Zimantic | #1 Kiwix → Zimantic | Top 5 Kiwix → Zimantic | Queries |
-|---|---|---|---|---|---|---|
-| Common single words | "tuberculosis" → *Tuberculosis* | #3 | **#1** | 33% → **100%** | 93% → **100%** | 15 |
-| Exact titles | "Malaria" → *Malaria* | #2 | **#1** | 72% → **100%** | 100% → 100% | 25 |
-| Alternate names | "Leber's disease" → *Leber's hereditary optic neuropathy* | #2 | **#1** | 52% → **82%** | 70% → **99%** | 200¹ |
-| Misspellings | "diabetis" → *Diabetes* | not in top 20 | **#1** | 0% → **60%** | 7% → **83%** | 30 |
-| First-sentence descriptions | "(INN) is a non-steroidal anti-inflammatory drug (NSAID)." → *Ampiroxicam* | #5 | **#1** | 72% → **83%** | 82% → **92%** | 200¹ |
-| Describing it without the name | "poor blood flow to part of the brain that kills brain cells" → *Stroke* | #17 | **#1** | 8% → **37%** | 37% → **78%** | 60 |
-| Questions | "what causes lockjaw" → *Tetanus* | not in top 20 | **#1** | 12% → **45%** | 28% → **80%** | 40 |
-| Questions & phrases in other languages² | "Herzinfarkt" (German: heart attack) → *Myocardial infarction* | not in top 20 | **#1** | 0% → **33%** | 0% → **53%** | 30 |
-| Words deep inside an article | "When undergoing lymphadenopathy, these are described as feeling like a "firm pea"." → *Facial lymph nodes* | **#1** | #2 | **68%** → 28% | **78%** → 76% | 200¹ |
-
-¹ Generated automatically from the articles, not typed by real users. The other sets were written by hand; with 25–60 queries
-each, treat their numbers as accurate to roughly ±12–18 points.
-² Spanish, French, German, Chinese, Hindi, Arabic, Russian, Japanese, Swahili and Portuguese, mixed.
-
-### Single words in other languages
-
-The English articles searched with one word in another language, 15 common medical words per language
-(malaria, diabetes, fever, cough, pregnancy, heart, blood, …). Translations were written for this test, so less common
-languages may contain mistakes.
-
-| Language | Example query → article wanted | Kiwix | Zimantic | #1 Kiwix → Zimantic | Top 5 Kiwix → Zimantic |
-|---|---|---|---|---|---|
-| English | "tuberculosis" → *Tuberculosis* | #3 | **#1** | 33% → **100%** | 93% → **100%** |
-| Spanish | "dolor de cabeza" → *Headache* | not in top 20 | **#1** | 13% → **60%** | 20% → **73%** |
-| French | "tuberculose" → *Tuberculosis* | #15 | **#1** | 13% → **53%** | 27% → **60%** |
-| Portuguese | "coração" → *Heart* | #4 | **#1** | 13% → **53%** | 40% → **80%** |
-| Afrikaans | "bloed" → *Blood* | not in top 20 | **#1** | 7% → **33%** | 20% → **33%** |
-| Arabic | "سعال" → *Cough* | not in top 20 | **#1** | 0% → **20%** | 0% → **33%** |
-| Hindi | "मलेरिया" → *Malaria* | not in top 20 | **#1** | 0% → **20%** | 0% → **33%** |
-| Amharic | "ልብ" → *Heart* | not in top 20 | **#1** | 0% → **13%** | 0% → **13%** |
-| Somali | "madax xanuun" → *Headache* | not in top 20 | **#1** | 0% → **13%** | 0% → **13%** |
-| Swahili, Igbo, Zulu, Kinyarwanda | e.g. "ikholera" (Zulu) → *Cholera* | not in top 20 | **#1** | 0% → **7%** | 0–7% → 7% |
-| Hausa, Yoruba | | | | 0% → 0% | 0% → 0% |
-
-**Where Kiwix is still better, or cheaper:**
-- **Words buried deep inside an article.** Kiwix indexes every word thus performs better on deeper searches (68% first vs 28%; in the top 5 they're nearly tied, 78% vs 76%). While Zimantic only indexes each article's title and first paragraph.
-- **No setup.** Kiwix search works the moment a ZIM is added. Zimantic must index each ZIM
-  first.
-- **Smaller footprint.** Zimantic adds a `.sqlite` and `.faiss` per ZIM and needs more RAM.
+Zimantic searches local ZIM files directly and does not need a separate Kiwix index. `zimantic build` creates semantic vectors and a SQLite title index. `zimantic serve` also searches a ZIM file without an index through its ZIM full-text index. Zimantic serves articles, assets, and homepages directly from each ZIM file. Use [kiwix-serve](https://kiwix.org/en/applications/) only for remote Kiwix sources.
 
 ## Requirements
-- Python 3.12, 3.13 or 3.14 (the pinned numpy needs 3.12+; libzim doesn't support 3.15 yet)
-- About 120 MB for the embedding model, plus your ZIM files
-- Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find the first paragraph)
-- *Searching does not require Kiwix.* To open the articles from the result links, run
-  [kiwix-serve](https://kiwix.org/en/applications/) with the same ZIMs (set its address as `kiwix_url` in `config.yaml`).
 
-## Where your files go
-
-By default everything lives inside the project folder, so `config.yaml` works without changes:
-
-```
-zimantic/
-├── config.yaml          ← settings (paths below are its defaults)
-├── model/               ← model_dir: model.onnx + sentencepiece.bpe.model   (you download)
-├── zims/                ← zim_dir:   your .zim files                          (you download)
-├── indexes/             ← index_dir: <name>.sqlite + <name>.faiss            (created by build)
-└── zimantic/           ← the program
-```
-
-Your files are somewhere else (a USB drive, another disk)? Point `zim_dir`, `model_dir` or `index_dir` in
-`config.yaml` at them instead. These three folders are git-ignored, so ZIMs, models and indexes never get committed.
+- Python 3.11–3.14 with native dependency wheels for the interpreter. `libzim` publishes wheels for specific Python ABIs and platforms. Select an interpreter with a compatible wheel; the range covers the interpreter versions with published native wheels.
+- On 32-bit Linux platforms (armhf/armv7), the native dependencies have no prebuilt wheels. Use the distribution packages. Debian 13 (trixie) or later provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic uses them. Known 32-bit machine names accept python-libzim 3 or later; other machines require 4.1 or later. Python package markers report the machine name, not the interpreter bitness, so a 32-bit interpreter that reports a 64-bit machine name requires 4.1.
+- About 110 MB for the default embedding model, plus the ZIM files. The `multilingual-e5-small` alternative uses about 120 MB, and the English-only `e5-small-v2` model uses about 35 MB on disk.
+- Wikipedia-style ZIM files. Zimantic uses their predictable HTML structure to locate useful content blocks.
+- One provider interface covers ZIM, remote Kiwix, files, and Kolibri. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
+- Configuration declares collections with `[[collections]]` entries for ZIM roots, Kiwix servers, files trees, and Kolibri installations.
+- Local sources do not need `kiwix-serve`. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links from the kiwix-serve search API.
 
 ## Install
 
-1. **Get the code** and enter the folder 
-- run the next commands from here 
-- `config.yaml` is read from this folder, so configure appropriately
+1. Clone the repository into the data directory. Configuration is at `$XDG_CONFIG_HOME/zimantic/config.toml` (normally `~/.config/zimantic/config.toml`); omitted settings use hardware and XDG defaults.
 
    ```bash
-   git clone https://github.com/OscSanto/zimantic.git
-   cd zimantic
+   data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+   config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+   mkdir -p "$data_home" "$config_home/zimantic"
+   git clone https://github.com/OscSanto/zimantic.git "$data_home/zimantic"
+   cd "$data_home/zimantic"
+   if [ ! -e "$config_home/zimantic/config.toml" ]; then
+       cp config.toml "$config_home/zimantic/config.toml"
+   fi
    ```
 
-2. **Create a virtual environment and install the dependencies:**
+2. Install the CLI with uv. This command installs the locked runtime dependencies without the development tools and creates the executable at `~/.local/bin/zimantic`.
 
    ```bash
-   python3 -m venv .venv
-   . .venv/bin/activate              # Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
+   uv sync --locked --no-dev --no-editable
+   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
    ```
 
-3. **Download the model into `model/`** (keep these exact file names):
+   For development, run `uv sync` and activate the environment with `. .venv/bin/activate`.
+
+   On 32-bit armhf, the native dependencies have no wheels. Install the distribution packages and let the environment use them:
 
    ```bash
-   mkdir -p model
-   curl -L -o model/model.onnx https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
-   curl -L -o model/sentencepiece.bpe.model https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
+   sudo apt install python3-venv python3-numpy python3-tqdm python3-onnxruntime \
+       python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
+       python3-fastapi python3-uvicorn
+   python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install 'puremagic>=1.30' 'tokenizers>=0.23'
+   .venv/bin/pip install --no-deps .
+   ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
    ```
 
-   (`curl` is built into Linux, macOS and Windows 10+. On Windows PowerShell, use `curl.exe` and `mkdir model`.)
-
-4. **Put your ZIM files in `zims/`.** Download them from [library.kiwix.org](https://library.kiwix.org)
-   or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
-
-5. **Check `config.yaml`.** If you used the folders above, nothing needs changing. Otherwise point
-   `zim_dir` / `model_dir` / `index_dir` at your folders. To open articles from the results, set
-   `kiwix_url` to where kiwix-serve runs.
-
-6. **Check that it runs:**
+3. Download the default multilingual model.
 
    ```bash
-   python -m zimantic --help
+   zimantic model
    ```
 
-## Use
+   The command downloads the default static model's int8 export to `$XDG_DATA_HOME/zimantic/model/int8/` together with its WordPiece vocabulary. On a GPU host, use the `multilingual-e5-small` transformer instead: `zimantic model fp16 --model multilingual-e5-small`, then set `model_dir = "model/multilingual-e5-small/fp16"`. Accelerated providers run fp16 faster than int8. The static default gains little from a GPU, and the transformer retrieves better. Copy `config.gpu.toml` for a complete starting point. `zimantic model --list` shows every supported model, and `zimantic model --help` shows the options.
 
-```bash
-python -m zimantic build wikipedia_en_medicine_maxi_2026-04   # index ZIMs in zim_dir by name (one or more)
-python -m zimantic build --path /some/where/x.zim             # or index one ZIM file by its path
-python -m zimantic serve                                      # web page on http://<host>:8090 after build is succesful
+   For a manual install of the quality-first transformer alternative, `multilingual-e5-small`:
+
+   ```bash
+   data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+   mkdir -p "$data_home/zimantic/model-e5/int8"
+   curl -L -o "$data_home/zimantic/model-e5/int8/model.onnx" https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
+   curl -L -o "$data_home/zimantic/model-e5/int8/sentencepiece.bpe.model" https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
+   ```
+
+   Then set `model_dir = "model-e5/int8"`. Do not copy the static model files by hand. The model ships its vocabulary only as `tokenizer.json`, and `zimantic model` derives the runtime `vocab.txt` from that file. English-only and larger multilingual models use the same layout; see [Using a different embedding model](docs/search.md#using-a-different-embedding-model). Zimantic reports a file that does not match a documented checksum and continues to run.
+
+4. Put ZIM files in `$XDG_DATA_HOME/zimantic/zims/`. Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
+
+5. Add a collection and check the XDG config. Zimantic has no implicit library. Uncomment or add the `[[collections]]` ZIM entry from `config.toml`. Use an absolute `path`, because provider paths resolve from the config file's directory. Relative `model_dir` and `index_dir` overrides resolve under `$XDG_DATA_HOME/zimantic`; omit them to use the defaults. Add Kiwix, files, or Kolibri entries only for those sources.
+
+6. Verify the installation.
+
+   ```bash
+   zimantic --help
+   ```
+
+   For a development runtime check, follow [Development install](CONTRIBUTING.md#development-install) and run `python -m pytest tests/test_runtime_api.py`. Use `python -m pytest` for the full test suite.
+
+### Windows
+
+Zimantic supports 64-bit Windows (x86-64) on Python 3.11–3.14. Windows ARM64 and 32-bit Windows are not supported because `libzim`, `faiss-cpu`, and `onnxruntime` do not publish wheels for those targets.
+
+Use these Windows equivalents:
+
+```powershell
+git clone https://github.com/OscSanto/zimantic.git zimantic
+cd zimantic
+uv sync --locked --no-dev
+.venv\Scripts\activate
+zimantic --help
 ```
 
-The name is the ZIM's file name without `.zim` (for `zims/wikipedia_en_medicine_maxi_2026-04.zim`,
-use `wikipedia_en_medicine_maxi_2026-04`).
+Download the default model with the CLI:
 
-To open articles from the results, run kiwix-serve with the same ZIMs, in a second terminal:
-
-```bash
-sudo apt install kiwix-tools             # Debian/Ubuntu/Raspberry Pi OS; other systems: kiwix.org/en/applications
-kiwix-serve --port 8080 zims/*.zim       # matches the default kiwix_url in config.yaml
+```powershell
+zimantic model
 ```
 
-If a build stops, run it again and it will automatically pick up where it left off.
+On Windows, the default `model_dir` is `./model/int8`. On a GPU host, use `zimantic model fp16 --model multilingual-e5-small` and set `model_dir = "./model/multilingual-e5-small/fp16"` in `config.toml`. The static default ships its vocabulary only as `tokenizer.json`, and the command derives the runtime `vocab.txt`; use the CLI and do not copy those files by hand. For a manual install of the `multilingual-e5-small` alternative:
 
-To rebuild a ZIM, delete its `.sqlite` and `.faiss` from `index_dir` first.
-Restart `serve` after building a new index so it picks it up.
+```powershell
+New-Item -ItemType Directory -Force model-e5\int8 | Out-Null
+Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model-e5\int8\model.onnx
+Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model-e5\int8\sentencepiece.bpe.model
+```
 
-Each ZIM gets two files in `index_dir`: `<name>.sqlite` (titles, first paragraphs) and
-`<name>.faiss` (vectors). If building index is slow, consider building on a more powerful PC and copying over both files.
+Then set `model_dir = "./model-e5/int8"`.
 
-JSON API Example: `GET /api/search?q=...&zim=<name>&zim=<name2>&limit=20` (no `zim` = all) and `GET /api/zims`.
+`zimantic reload` is unavailable on Windows because it relies on `SIGHUP`. Restart `zimantic serve` to reload. Stop the server before you replace or delete a ZIM file or index file. Windows does not allow an in-place replacement of an open file.
+
+## Optional dependencies
+
+Core search does not require external tools. Local caption extraction, OCR, ASR, and remote Kiwix support are optional; see the [dependency and derived-text guide](docs/derived-text.md#optional-dependencies).
+
+## Configuration and collections
+
+Zimantic uses explicit `[[collections]]` entries for ZIM files, remote Kiwix, files trees, and Kolibri installations. The [collections guide](docs/collections.md) has minimal examples, path behavior, provider limits, and advanced overrides.
+
+## Usage
+
+```bash
+zimantic build
+zimantic serve
+zimantic open zims/example.zim
+zimantic reload
+```
+
+A build with no arguments indexes configured local collections. For command options, build behavior, GPU setup, hardware tuning, and systemd examples, see [Usage and operations](docs/usage.md). The [web interface guide](docs/usage.md#source-selection) covers source selection and the library. The [API reference](docs/api.md) documents the HTTP endpoints.
+
+## Security and limitations
+
+See [Limitations](docs/limitations.md) for operational constraints and [Architecture](docs/architecture.md) for provider boundaries and content safety.
+
+## Search details
+
+The search examples in this README illustrate behavior; they are not a universal benchmark. See [Search, models, and ranking](docs/search.md) for model selection, ranking behavior, measured performance, and the detailed Kiwix comparison.

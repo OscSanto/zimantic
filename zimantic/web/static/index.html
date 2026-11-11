@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Zimantic</title>
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+        <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
+        <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
+        <link rel="manifest" href="site.webmanifest" />
+        <link rel="stylesheet" href="app.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <header class="site-header">
+                <h1>
+                    <button id="homeHeading" type="button" aria-label="Zimantic: clear or restore search">Zimantic</button>
+                </h1>
+                <nav class="view-nav" aria-label="Primary" data-i18n-aria-label="Primary">
+                    <a href="./" data-i18n="Search">Search</a>
+                    <a href="library" data-i18n="Library">Library</a>
+                </nav>
+            </header>
+
+            <main id="searchView">
+                <div class="subtitle" data-i18n="Search your offline library">
+                    Search your offline library
+                </div>
+
+                <form id="searchForm" autocomplete="off">
+                    <input
+                        id="question"
+                        type="search"
+                        maxlength="4096"
+                        placeholder="how to change a lightbulb"
+                        aria-label="Search query"
+                        data-i18n-placeholder="how to change a lightbulb"
+                        data-i18n-aria-label="Search query"
+                    />
+                    <button id="searchButton" type="submit" data-i18n="Search">Search</button>
+                </form>
+
+                <div id="startupStatus" class="startup-status" role="status" hidden data-i18n="Loading sources…">
+                    Loading sources…
+                </div>
+                <div class="search-summary" id="searchSummary">
+                    <div class="status" id="status"></div>
+                    <div id="sortControls" class="sort-controls" hidden>
+                        <label for="sortSelect" data-i18n="Sort by">Sort by</label>
+                        <select id="sortSelect">
+                            <option value="relevance" data-i18n="Relevance">Relevance</option>
+                            <option value="diverse" data-i18n="Diversity">Diversity</option>
+                            <option value="recency" data-i18n="Recency">Recency</option>
+                            <option value="rare" data-i18n="Rare titles">Rare titles</option>
+                            <option value="outliers" data-i18n="Semantic outliers" hidden>Semantic outliers</option>
+                            <option value="random" data-i18n="Random">Random</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="debug-stats" id="debugStats" hidden></div>
+                <div class="source-scope-panel">
+                    <div class="scope-line" id="scopeLine" hidden>
+                        <span id="scopeLineText"></span>
+                        <button
+                            id="scopeLineReset"
+                            class="secondary scope-line-reset"
+                            type="button"
+                            data-i18n="Reset source filters"
+                            hidden
+                        >
+                            Reset source filters
+                        </button>
+                    </div>
+                    <div class="source-filter-toolbar" id="sourceFilterToolbar" hidden>
+                        <span class="source-filter-heading" data-i18n="Filter by source">Filter by source</span>
+                        <input
+                            id="sourceFilterSearch"
+                            class="source-filter-search"
+                            type="search"
+                            placeholder="Search sources"
+                            aria-label="Search sources"
+                            data-i18n-placeholder="Search sources"
+                            data-i18n-aria-label="Search sources"
+                        />
+                    </div>
+                    <div class="source-filters" id="sourceFilters" hidden>
+                        <div
+                            class="source-filter-options"
+                            id="sourceFilterOptions"
+                            role="group"
+                            aria-label="Filter by source"
+                            data-i18n-aria-label="Filter by source"
+                        ></div>
+                        <div class="source-filter-status" id="sourceFilterStatus" aria-live="polite"></div>
+                    </div>
+                </div>
+                <div class="filter-line" id="filterLine"></div>
+                <div id="notice"></div>
+                <div id="results"><div class="empty"></div></div>
+                <nav class="pager" id="pager" aria-label="Results pagination" data-i18n-aria-label="Results pagination"></nav>
+                <div id="searchAnnouncement" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+            </main>
+
+            <section id="libraryView" hidden role="main" aria-labelledby="libraryHeading">
+                <div class="library-heading">
+                    <h2 id="libraryHeading" data-i18n="Your library">Your library</h2>
+                </div>
+                <div class="library-toolbar">
+                    <label class="library-filter-select">
+                        <span data-i18n="Provider">Provider</span>
+                        <select id="libraryProviderFilter" aria-label="Filter by provider" data-i18n-aria-label="Filter by provider">
+                            <option value="" data-i18n="All providers">All providers</option>
+                            <option value="zim">ZIM</option>
+                            <option value="files" data-i18n="Files">Files</option>
+                            <option value="kolibri" data-i18n="Kolibri">Kolibri</option>
+                            <option value="kiwix" data-i18n="Remote Kiwix">Remote Kiwix</option>
+                        </select>
+                    </label>
+                    <label class="library-filter-select">
+                        <span data-i18n="Media type">Media type</span>
+                        <select id="libraryMediaFilter" aria-label="Filter by media type" data-i18n-aria-label="Filter by media type">
+                            <option value="" data-i18n="All media">All media</option>
+                            <option value="text" data-i18n="Text">Text</option>
+                            <option value="video" data-i18n="Video">Video</option>
+                            <option value="audio" data-i18n="Audio">Audio</option>
+                            <option value="image" data-i18n="Images">Images</option>
+                            <option value="other" data-i18n="Other">Other</option>
+                        </select>
+                    </label>
+                    <label class="library-filter-select">
+                        <span data-i18n="Language">Language</span>
+                        <select id="libraryLanguageFilter" aria-label="Filter by language" data-i18n-aria-label="Filter by language">
+                            <option value="" data-i18n="All languages">All languages</option>
+                        </select>
+                    </label>
+                    <div class="library-search-row">
+                        <input
+                            id="libraryFilter"
+                            type="search"
+                            placeholder="Filter library"
+                            aria-label="Filter library"
+                            data-i18n-placeholder="Filter library"
+                            data-i18n-aria-label="Filter library"
+                        />
+                        <button id="libraryShuffle" class="library-button" type="button" data-i18n="Shuffle">Shuffle</button>
+                    </div>
+                    <span id="libraryStatus" class="status" aria-live="polite"></span>
+                </div>
+                <div class="scope-line" id="libraryScopeLine" hidden>
+                    <span id="libraryScopeLineText" aria-live="polite"></span>
+                    <button
+                        id="libraryScopeLineReset"
+                        class="secondary scope-line-reset"
+                        type="button"
+                        data-i18n="Reset all filters"
+                    >
+                        Reset all filters
+                    </button>
+                </div>
+                <div id="libraryGrid"></div>
+            </section>
+
+            <details id="settingsDetails" class="settings">
+                <summary data-i18n="Settings">Settings</summary>
+                <label>
+                    <span data-i18n="Language">Language</span>
+                    <select id="localePicker" aria-label="Language" data-i18n-aria-label="Language">
+                        <option value="en">English</option>
+                        <option value="es">Español</option>
+                    </select>
+                </label>
+            </details>
+        </div>
+
+        <div id="libraryInfoModal" class="library-info-modal" hidden>
+            <button
+                class="library-info-backdrop"
+                type="button"
+                tabindex="-1"
+                aria-label="Close source details"
+                data-i18n-aria-label="Close source details"
+            ></button>
+            <section
+                class="library-info-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="libraryInfoTitle"
+            >
+                <button
+                    id="libraryInfoClose"
+                    class="library-info-close"
+                    type="button"
+                    aria-label="Close source details"
+                    data-i18n-aria-label="Close source details"
+                >&times;</button>
+                <div id="libraryInfoContent" class="library-info-content"></div>
+            </section>
+        </div>
+
+        <div id="articleModal" class="article-modal" hidden>
+            <button class="article-modal-backdrop" type="button" tabindex="-1" aria-label="Close article" data-i18n-aria-label="Close article"></button>
+            <section class="article-modal-dialog" role="dialog" aria-modal="true" aria-label="Article" data-i18n-aria-label="Article">
+                <iframe
+                    id="articleModalFrame"
+                    class="article-modal-frame"
+                    title="Article"
+                    referrerpolicy="no-referrer"
+                    data-i18n-title="Article"
+                ></iframe>
+                <div
+                    id="externalLinkNotice"
+                    class="external-link-notice"
+                    role="dialog"
+                    aria-modal="true"
+                    hidden
+                    tabindex="-1"
+                    aria-labelledby="externalLinkTitle"
+                >
+                    <div class="external-link-notice-panel">
+                        <h2 id="externalLinkTitle" data-i18n="Online link">Online link</h2>
+                        <p id="externalLinkUrl" class="external-link-url"></p>
+                        <p data-i18n="This link points to an online site. It is not cached in your offline library, so opening it may require an internet connection.">
+                            This link points to an online site. It is not cached in your offline library, so opening
+                            it may require an internet connection.
+                        </p>
+                        <div class="external-link-actions">
+                            <button id="externalLinkBack" class="secondary" type="button" data-i18n="Return to article ↩️">
+                                Return to article ↩️
+                            </button>
+                            <a id="externalLinkOpen" class="secondary" target="_blank" rel="noopener noreferrer">
+                                <span data-i18n="Open online site">Open online site</span> <span aria-hidden="true"> ↗</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <script src="i18n.js" defer></script>
+        <script src="app.js" defer></script>
+    </body>
+</html>

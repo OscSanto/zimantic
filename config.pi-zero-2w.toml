@@ -1,0 +1,60 @@
+# Settings tuned for a Raspberry Pi Zero 2 W (4 cores, 512 MB RAM).
+# Copy this file to config.toml to use them. Build indexes elsewhere or use `build --fast`.
+
+# Matches `zimantic model` (int8 default). For a GPU, use the e5
+# transformer: ./model/multilingual-e5-small/fp16 (see config.gpu.toml).
+model_dir = "./model/int8"
+index_dir = "./indexes"
+
+port = 8090
+# A Kiwix server is declared only as an explicit [[collections]] entry below.
+# Leave those entries commented out to search local Zimantic indexes only.
+
+page_size = 10
+# Smaller pool to reduce cache and ranking work.
+max_results = 50
+
+# Small batches save RAM.
+batch_size = 8
+
+# Available RAM keeps automatic source-build concurrency at one.
+
+max_html_bytes = 4_194_304
+max_entry_bytes = 268435456
+max_article_bytes = 33_554_432
+max_preview_chars = 1_000
+
+# Serving and build-model concurrency stay automatic, including cgroup limits.
+# The mobile profile normally uses two ONNX build threads, bounded by usable
+# physical cores; query embeddings have their own automatic thread budget.
+
+# nprobe = 64
+min_cosine_similarity = 0.85
+
+# Source threads, native processes and user-search admission stay automatic.
+candidate_count = 16
+max_stream_ranks = 8
+source_timeout = 12
+
+cache_size = 64
+cache_bytes = 8_388_608  # 8 MiB per cache
+
+# Provider paths resolve from this config file's directory, unlike the global
+# model_dir/index_dir above (which resolve under $XDG_DATA_HOME/zimantic when
+# this file is the XDG config). Use an absolute path when the ZIMs live in the
+# data directory, for example:
+#   path = "/home/pi/.local/share/zimantic/zims"
+[[collections]]
+type = "zim"
+name = "library"
+path = "./zims"
+
+# [[collections]]
+# type = "kiwix"
+# name = "kiwix"
+# server = "http://localhost:8085"
+# catalog_path = "/kiwix/catalog/v2/entries"
+# catalog_limit = 1000
+# max_catalog_entries = 50000
+# max_response_bytes = 67108864
+# max_remote_sources = 100

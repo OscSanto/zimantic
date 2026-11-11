@@ -1,0 +1,356 @@
+# Zimantic settings. Omitted settings use hardware-based defaults, but collections
+# are never implicit: add at least one [[collections]] entry to have a library.
+# See config.pi-zero-2w.toml, config.pi-5.toml and config.gpu.toml for tuned
+# starting points.
+
+# Provider paths ([[collections]] path/database_path/storage) are resolved
+# once against the directory containing the active config file, including when
+# the config is reached through a symlink. CLI path operands are resolved
+# against the invocation's working directory. Absolute paths also work.
+#
+# On Linux and other XDG platforms, omitted global data paths default under
+# $XDG_DATA_HOME/zimantic (normally ~/.local/share/zimantic).
+# Relative global path overrides (model_dir/index_dir) are relative to that
+# data directory. An existing config.toml in the current directory keeps its
+# historical current-directory-relative behavior.
+#
+# Keep global scalar keys before the first [[collections]] or [derived_text]
+# header. After a table header, TOML keys belong to that table.
+#
+# Collections are declared with [[collections]]. There is no zim_dir or
+# kiwix_server shorthand and no implicit default collection: every ZIM, files,
+# Kolibri, and Kiwix collection needs an explicit entry. Each configured
+# root/server is one collection; a ZIM archive or a files/Kolibri source is one
+# source. `zimantic sources --json` prints the discovered hierarchy.
+# Add a local ZIM collection (downloaded from https://library.kiwix.org):
+#
+# [[collections]]
+# type = "zim"
+# name = "library"
+# path = "zims"
+#
+# Must contain model.onnx and either vocab.txt (WordPiece; used by the static
+# default and English e5-v2) or sentencepiece.bpe.model (multilingual-e5).
+# `zimantic model` writes model/int8 for the CPU default and derives vocab.txt.
+# On a GPU host, use the e5 transformer instead:
+#   zimantic model fp16 --model multilingual-e5-small
+#   model_dir = "model/multilingual-e5-small/fp16"
+# model_dir = "model/int8"
+#
+# Where current index generations are written. Root-level v0 index pairs can be
+# reused by a full build. catalog.sqlite lives beside this directory.
+# index_dir = "indexes"
+
+# SERVER
+
+# Search page port; reachable from other devices on the network.
+port = 8090
+
+# Optional URL path prefix when a reverse proxy strips it before forwarding.
+# web_base_path = "/zimantic"
+
+# Sandbox article documents in the browser (secure browsing). Off by default
+# because local ZIMs are trusted input and sandboxing isolates Web Storage and
+# IndexedDB (some offline sites lose persistence). Enable this when serving ZIMs,
+# file trees, or Kolibri HTML5 apps from untrusted sources. The shell itself
+# stays trusted and the article is isolated inside it. A raw /article/ document
+# opened directly or in a permitted popup is still unsandboxed and can use the
+# app origin and persistent storage, so this is not a complete boundary.
+# secure_browsing = false
+
+# Optional Kiwix collections are declared with [[collections]] type = "kiwix".
+# Point server at a running kiwix-serve HTTP API (not a ZIM folder); with the
+# standard local setup this is often http://localhost:8085.
+
+# TUNING
+
+# Results per page in the UI and API. Values above max_results are clamped to
+# max_results because a page is sliced from the ranked pool.
+# page_size = 10
+
+# Previews are read from the ZIM at request time. Hydrate at most this many
+# results per page; the rest keep an empty lead. 0 disables preview hydration.
+# preview_limit = 10
+
+# Largest ranked result pool kept and served. Pages are drawn from this pool.
+# Desktop 100, mobile 50, supercomputer 200.
+# max_results = 100
+
+# Rows per read/commit window. Desktop 32, mobile 8, supercomputer 128.
+# Larger windows improve length sorting but retain more lexical body text.
+# batch_size = 32
+
+# Maximum padded input tokens per model call, after sorting by actual token
+# length. ~1000 permits roughly 30 short texts or 4 long ones. A single text
+# longer than this budget still runs alone (capped by the model token limit).
+# Increase for GPU throughput; decrease to reduce worker memory.
+# embedding_batch_tokens = 1000
+
+# Embedding device. "auto" (the default) tries every accelerated provider the
+# installed ONNX Runtime build exposes (CUDA, ROCm, DirectML, OpenVINO) and
+# otherwise runs on the CPU. "gpu" requires an accelerated provider; "cpu"
+# forces the CPU. Other values: cuda, rocm, directml/dml (Windows), openvino
+# (Intel, OpenVINO AUTO device selection) or coreml (Apple, must be requested
+# explicitly). GPU support comes from the ONNX Runtime package, not this
+# setting: replace onnxruntime with onnxruntime-gpu (CUDA), onnxruntime-rocm,
+# onnxruntime-directml or onnxruntime-openvino. An unavailable device, or a run
+# that fails on it, falls back to the CPU with a warning.
+# `zimantic build --device ...` and `zimantic serve --device ...` override this
+# setting.
+# embed_device = "auto"
+
+# Maximum HTML read per article.
+# max_html_bytes = 4_194_304
+
+# Maximum decompressed entry materialized while building. Desktop 1 GiB,
+# mobile 256 MiB, supercomputer 4 GiB. This is intentionally high for large,
+# friendly ZIM articles; lower it on memory-constrained hosts.
+# max_entry_bytes = 1073741824
+
+# Maximum uncompressed local ZIM entry served or previewed. This caps per-request memory use for
+# HTML and binary assets alike; max_html_bytes is the separate parser limit.
+# max_article_bytes = 33_554_432
+
+# Maximum preview characters extracted for displayed results; build-time extraction is transient.
+# max_preview_chars = 1_000
+
+# Maximum lexical body text per item indexed into the contentless body FTS.
+# This is independent of max_preview_chars. Longer text is cut at a UTF-8
+# character boundary and counted in body_truncated_count.
+# max_body_text_bytes = 1_048_576
+# max_entries = 100000  # optional global default for local source indexing
+#
+# Extraction limits above, max_preview_chars, search tuning (candidate_count,
+# nprobe, min_cosine_similarity, source_timeout), and cache quotas can also be
+# set directly on [[collections]] or its exact-key sources entries. Unspecified
+# fields inherit global -> collection -> source; host-wide resources stay global.
+# Files-only indexing globs, independent of serving permissions:
+# index_include = ["**/*.html", "**/*.txt", "**/*.pdf"]
+# index_exclude = ["**/drafts/**"]
+
+# Maximum optional derived-preview cache bytes per source. Reaching it omits
+# new preview artifacts, never searchable postings.
+# max_derived_cache_bytes_per_source = 536_870_912
+
+# Optional build-time derived-text engines. Operations stay off unless a
+# collection derived_text default or an exact source override enables them.
+# Options below are global defaults; collections can override them in their
+# derived_text table, and exact sources can override them alongside ocr/asr/etc.
+# [derived_text]
+# max_caption_bytes = 1_048_576
+# ocr_languages = ["eng"]  # installed Tesseract data names; French is "fra"
+# max_ocr_pages = 20
+# max_ocr_pixels = 50_000_000
+# max_ocr_output_bytes = 262_144
+# asr_engine = "auto"   # auto, whisper.cpp, faster-whisper
+# asr_model = "base.en"
+# asr_model = "base"    # Spanish/multilingual alternative
+# asr_threads = 0       # 0 uses the engine default
+# asr_batched = false   # faster-whisper: extra 2-4x speed, uses VAD
+# max_asr_seconds = 3_600
+# max_asr_bytes = 1_073_741_824
+# max_asr_output_bytes = 1_048_576
+# task_timeout_seconds = 7_200
+# max_spool_bytes = 2_147_483_648
+# workers = "auto"   # "auto" (CPU/RAM-derived) or a positive integer
+# cache = true
+#
+# Derived text runs only at build time with local engines. captions parses
+# .srt/.vtt sidecars and needs no external tool; embedded text tracks use the
+# shared ffmpeg adapter when a local ffmpeg/ffprobe is available. ocr and asr
+# are unavailable unless their local engine is installed; a missing engine
+# degrades only that operation. A missing asr_model checkpoint is downloaded to
+# the selected backend's cache on first use. The spool and per-engine input caps
+# above are separate from max_entry_bytes and may need raising for large media.
+
+# Large ZIMs only (10,000+ articles): how many IVF clusters each search scans.
+# By default, searches scan about 6% of the clusters, scaling automatically with ZIM size.
+# Higher = more accurate but slower. Set this to a fixed integer to override the automatic value.
+# nprobe = 64
+
+# Meaning matches below this cosine similarity are discarded when the source
+# also has a title or full-text match. A meaning-only query keeps its best
+# candidates regardless, so this cannot turn it into an empty result list.
+# Lower it (0.80) when a lexical match should not suppress broader meaning
+# matches, for example for cross-language queries.
+# min_cosine_similarity = 0.85
+
+# Maximum admitted user searches, not source threads or libzim processes.
+# Profile ceilings (desktop 4, mobile 2, supercomputer 8) are automatically
+# reduced for CPU quotas and available RAM. A positive override wins.
+# max_concurrent_searches = 4
+# Minimum candidates requested from each source before fusion. Desktop/mobile
+# 16, supercomputer 32. The per-source count scales with the number of sources;
+# this is the floor, so a single source still returns the whole pool. Raise it
+# to trade speed for recall.
+# candidate_count = 16
+# Maximum completion-spaced intermediate ranking passes during a streamed
+# search. Desktop 16, mobile 8, supercomputer 32. Timed snapshots are still
+# emitted about every 700 ms, and the final ranking always includes every source;
+# lower this on slow CPUs.
+# max_stream_ranks = 16
+# Per-source search deadline, in seconds (fractional values are accepted).
+# The global value also bounds Kiwix catalog requests.
+# source_timeout = 12
+# Monotonic deadline for one admitted search (scheduling, ranking and bounded
+# previews). Default 30; must be positive.
+# search_timeout_seconds = 30
+# A search that reaches its deadline returns the results ranked so far. Keep
+# that partial pool for this many seconds so reloading the same query is fast
+# instead of repeating the whole fan-out. Complete results are unaffected.
+# Default 60; set to 0 to disable partial-result caching.
+# partial_cache_seconds = 60
+# Source chips shown per collection group in the search filter before "Other".
+# source_filter_limit = 10
+# Sources loaded per library collection page (up to 1000).
+# collection_source_limit = 1000
+# Global request-work cap for an explicitly selected Kiwix collection. A
+# single explicit source is never capped. Reaching it reports a partial scope.
+# max_explicit_collection_sources = 500
+# Seconds a search waits for a free slot before reporting busy. Keep this at
+# least as long as a typical cold search on the host so overlapping requests
+# queue instead of returning 503.
+# slot_wait_seconds = 10
+# Exact-query LRU cache. Set cache_size to 0 to disable.
+# Desktop 256, mobile 64, supercomputer 1024.
+# cache_size = 256
+# The byte budget applies independently to the search and preview caches.
+# Desktop 32 MiB, mobile 8 MiB, supercomputer 256 MiB.
+# cache_bytes = 33_554_432
+# Scoped cache quotas remain inside these global ceilings. A mixed-source entry
+# counts against every participating source. cache_size = 0 disables admission;
+# cache_bytes = 0 means count-only caching.
+
+# ADVANCED RESOURCE OVERRIDES
+#
+# Normally omit all of these. Automatic counts respect CPU affinity/cgroup
+# quotas; memory-heavy workers also use available RAM/cgroup headroom.
+# These are different layers, not one count to copy between settings.
+# Positive explicit values override automatic bounds. Benchmark increases.
+# See docs/usage.md#advanced-resource-overrides.
+#
+# Shared source-query/preview thread pool: SQLite/FAISS, remote requests and
+# calls into native helpers. Automatic = min(8, usable logical CPU threads).
+# source_query_threads = 8
+#
+# ONNX threads inside one query-embedding call, NOT source fan-out or builds.
+# Automatic = min(4, usable physical cores minus one), at least one.
+# onnx_query_threads = 3
+#
+# Shared native libzim full-text subprocess pool across all collections.
+# Automatic = up to 8, bounded by CPU/source threads and available RAM,
+# reserving 256 MiB for the server/model and 128 MiB per helper.
+# libzim_search_processes = 2
+#
+# Independent source builds. Automatic = up to 8, allowing four usable logical
+# CPU threads and four GiB of available RAM per worker, at least one.
+# build_workers = 2
+#
+# ONNX threads inside each BUILD model call. Profile defaults: desktop 1,
+# mobile 2, supercomputer 8, bounded by usable physical cores. The Pi 5/500
+# preset uses 3 for lower RAM at similar throughput. More threads can reduce
+# the number of independent model calls and add synchronization overhead.
+# onnx_build_threads = 1
+#
+# Concurrent BUILD model calls, including single-source builds. Workers share
+# one loaded model. CPU, onnx_build_threads and available RAM bound the default.
+# onnx_build_workers = 2
+
+# COLLECTIONS
+#
+# Local indexed providers share one layout:
+#   index_dir/<provider>/<collection>-<digest>/<source>-<digest>/
+#     current                      JSON manifest for the pinned generation
+#     generations/<uuid>/index.sqlite
+#     generations/<uuid>/index.faiss   (only when vectors exist)
+# catalog.sqlite is the private ZIM metadata cache beside index_dir. Files and
+# Kolibri do not write it, and Kiwix keeps no persistent local catalog. A
+# catalog with an older schema is rebuilt by a full ZIM scan.
+#
+# [[collections]]
+# type = "zim"
+# name = "library"
+# path = "zims"
+# label = "ZIM files"
+# max_entries = 100000
+# max_visited_entries = 1000000
+# traversal_timeout_seconds = 300
+#
+# [[collections]]
+# type = "kiwix"
+# name = "kiwix"
+# label = "Kiwix"
+# server = "http://localhost:8085"
+# catalog_path = "/kiwix/catalog/v2/entries"
+# catalog_limit = 1000
+# max_catalog_entries = 50000
+# max_response_bytes = 67108864
+# Maximum remote sources searched by an unscoped query for this server entry.
+# Explicit source selections are still honored; 0 keeps unscoped searches local.
+# max_remote_sources = 100
+#
+# Search and serve an ordinary directory tree, for example an offline copy of
+# /library/www/html/modules. One configured directory is one collection. The
+# default granularity keeps the whole root as one source; "children" makes each
+# immediate child directory a source plus one source for loose root files.
+# Source keys change when a large collection collapses past max_sources, so a
+# rebuild and an updated source override key are required after that.
+#
+# [[collections]]
+# type = "files"
+# name = "modules"
+# path = "/library/www/html/modules"
+# label = "Modules"
+# granularity = "collection"
+# include = ["**/*.html", "**/*.htm", "**/*.xhtml",
+#            "**/*.txt", "**/*.md", "**/*.pdf"]
+# exclude = ["**/node_modules/**", "**/.git/**", "**/__pycache__/**"]
+# max_sources = 64
+# max_entries = 100000
+# max_file_bytes = 268435456
+# index_exclude = ["**/drafts/**"]  # indexed content only, still servable
+# sources = [
+#   { key = "files:modules:root", max_body_text_bytes = 65536, cache_size = 32 },
+# ]
+#
+# Search and serve a local Kolibri installation. Supported target: Kolibri
+# v0.19.5 installed SQLite schema. Kolibri does not need to be running. Each
+# installed channel becomes one collection; "children" makes each top-level
+# topic a source plus an Ungrouped source for direct leaves. The installation
+# is read only: Zimantic creates private consistent snapshots outside
+# path/content/storage and never writes the database or its WAL/SHM sidecars.
+# IIAB-style example:
+#
+# [[collections]]
+# type = "kolibri"
+# name = "kolibri"
+# path = "/library/kolibri"
+# label = "Kolibri"
+# granularity = "children"          # "children" or "collection"
+# max_sources = 64
+# max_entries = 500000
+# max_snapshot_bytes = 1073741824
+# snapshot_disk_budget_bytes = 3221225472
+# snapshot_timeout_seconds = 10
+# max_html5_zip_entries = 10000
+# max_html5_zip_directory_bytes = 8388608
+# max_html5_zip_member_bytes = 268435456
+# max_html5_zip_total_bytes = 1073741824
+# html5_zip_timeout_seconds = 10
+# Each content topic is one search result and child titles act as redirects to
+# it. Optional running Kolibri server: topic results link to its learn page and
+# viewer-only presets (such as exercises) redirect there. Example:
+# server_url = "http://localhost:8085"
+# Optional overrides for non-standard installations:
+# database_path = "/library/kolibri/db.sqlite3"
+# storage = "/library/kolibri/content/storage"
+#
+# Advanced: optional exact-source enrichment overrides. Discover the key first;
+# absent switches inherit the collection defaults (or stay off if not set). captions
+# reads .srt/.vtt sidecars and embedded text tracks (embedded tracks use the
+# shared ffmpeg adapter when available), ocr reads images and image-only PDF
+# pages, and asr transcribes audio/video. For example, inside a [[collections]]
+# entry:
+# sources = [
+#   { key = "files:modules:root", captions = "index", ocr = "tesseract", asr = "whisper" },
+# ]

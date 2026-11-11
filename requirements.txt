@@ -1,9 +1,0 @@
-numpy==2.5.3
-PyYAML==6.0.3
-tqdm==4.70.1
-onnxruntime==1.30.0
-sentencepiece==0.2.2
-faiss-cpu==1.15.1
-libzim==3.13.0
-fastapi==0.141.1
-uvicorn==0.53.0
