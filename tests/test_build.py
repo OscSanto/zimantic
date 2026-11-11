@@ -685,6 +685,19 @@ def _stage_threads():
     ]
 
 
+def _wait_for_tokenization(pipeline, timeout=2):
+    """Wait until submitted windows have reached the inference queue."""
+    deadline = time.monotonic() + timeout
+    while True:
+        with pipeline._tokenize_lock:
+            pending = list(pipeline._tokenize_tasks)
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("tokenization did not finish")
+        time.sleep(0.001)
+
+
 class _GatePipeline:
     """Preparation-stage stand-in that blocks before returning a future."""
 
@@ -1226,6 +1239,7 @@ class EmbeddingPipelineTests(unittest.TestCase):
         slow_started = threading.Event()
         release_slow = threading.Event()
         fourth_finished = threading.Event()
+        all_workers_started = threading.Event()
         fast_workers_started = threading.Barrier(3)
         worker_ids = set()
         worker_lock = threading.Lock()
@@ -1242,6 +1256,8 @@ class EmbeddingPipelineTests(unittest.TestCase):
                     entry_id = int(texts[0].split("\n", 1)[0].removeprefix("passage: T"))
                     with worker_lock:
                         worker_ids.add(threading.get_ident())
+                        if len(worker_ids) == 4:
+                            all_workers_started.set()
                     if entry_id == 0:
                         slow_started.set()
                         if not release_slow.wait(timeout=5):
@@ -1270,6 +1286,7 @@ class EmbeddingPipelineTests(unittest.TestCase):
                     try:
                         self.assertTrue(slow_started.wait(timeout=2))
                         self.assertTrue(fourth_finished.wait(timeout=2))
+                        self.assertTrue(all_workers_started.wait(timeout=2))
                         self.assertEqual(len(worker_ids), 4)
                         self.assertLessEqual(len(read_positions), pipeline.max_pending_per_build)
                         directory = IndexLocator(tmp).source_directory(
@@ -1319,6 +1336,87 @@ class EmbeddingPipelineTests(unittest.TestCase):
         for i, length in enumerate(lengths):
             self.assertEqual(result[i][0], length)
 
+    def test_tokenization_runs_in_parallel_across_windows(self):
+        barrier = threading.Barrier(2, timeout=2)
+        tokenizer_threads = set()
+        lock = threading.Lock()
+
+        class ParallelTokenEmbedder(_Embedder):
+            def encode(self, texts):
+                with lock:
+                    tokenizer_threads.add(threading.get_ident())
+                barrier.wait()
+                return super().encode(texts)
+
+        pipeline = build_module.EmbeddingPipeline(
+            ParallelTokenEmbedder(), workers=1, tokenizer_workers=2
+        )
+        try:
+            first = pipeline.submit(
+                [EntryRecord(0, "T0", "first excerpt", "p0")]
+            )
+            second = pipeline.submit(
+                [EntryRecord(1, "T1", "second excerpt", "p1")]
+            )
+            self.assertEqual(set(first.result(timeout=3)), {0})
+            self.assertEqual(set(second.result(timeout=3)), {1})
+        finally:
+            pipeline.close()
+        self.assertEqual(len(tokenizer_threads), 2)
+
+    def test_tokenization_overlaps_blocked_inference(self):
+        inference_started = threading.Event()
+        release_inference = threading.Event()
+        second_tokenized = threading.Event()
+
+        class BlockingInferenceEmbedder(_Embedder):
+            def encode(self, texts):
+                if texts[0].startswith("passage: T1"):
+                    second_tokenized.set()
+                return super().encode(texts)
+
+            def embed_encoded(self, inputs):
+                inference_started.set()
+                if not release_inference.wait(timeout=5):
+                    raise TimeoutError("inference was not released")
+                return super().embed_encoded(inputs)
+
+        pipeline = build_module.EmbeddingPipeline(
+            BlockingInferenceEmbedder(), workers=1
+        )
+        try:
+            first = pipeline.submit(
+                [EntryRecord(0, "T0", "first excerpt", "p0")]
+            )
+            self.assertTrue(inference_started.wait(timeout=2))
+            second = pipeline.submit(
+                [EntryRecord(1, "T1", "second excerpt", "p1")]
+            )
+            try:
+                self.assertTrue(second_tokenized.wait(timeout=2))
+                self.assertFalse(second.done())
+            finally:
+                release_inference.set()
+            self.assertEqual(set(first.result(timeout=2)), {0})
+            self.assertEqual(set(second.result(timeout=2)), {1})
+        finally:
+            release_inference.set()
+            pipeline.close()
+
+    def test_embedder_token_cap_skips_pre_truncation(self):
+        class CappingEmbedder(_Embedder):
+            caps_tokens_on_encode = True
+
+            def truncate(self, *_args, **_kwargs):
+                raise AssertionError("redundant text truncation was called")
+
+        rows = [EntryRecord(0, "T0", "a long excerpt", "p0")]
+        pipeline = build_module.EmbeddingPipeline(CappingEmbedder(), workers=1)
+        try:
+            self.assertEqual(set(pipeline.submit(rows).result(timeout=2)), {0})
+        finally:
+            pipeline.close()
+
     def test_oversized_single_input_is_not_dropped_and_errors_propagate(self):
         class TokenEmbedder(_Embedder):
             def encode(self, texts):
@@ -1362,9 +1460,12 @@ class EmbeddingPipelineTests(unittest.TestCase):
             self.assertTrue(started.wait(timeout=2))
             queued = pipeline.submit(rows[1:2])
             with ThreadPoolExecutor(max_workers=1) as pool:
-                blocked = pool.submit(pipeline.submit, rows[2:])
+                blocked_submit = pool.submit(pipeline.submit, rows[2:])
                 try:
                     self.assertTrue(third_encoded.wait(timeout=2))
+                    # Submission is now asynchronous: the call returns a future,
+                    # and cancellation reaches that future.
+                    blocked = blocked_submit.result(timeout=2)
                     pipeline.close(wait=False)
                     with self.assertRaises(KeyboardInterrupt):
                         queued.result(timeout=2)
@@ -1552,6 +1653,7 @@ if len(sys.argv) > 2:
             self.assertTrue(started.wait(timeout=2))
             values = [[10], [20, 21, 22], [30, 31], [40, 41]]
             pending = [pipeline.submit(rows(group)) for group in values]
+            _wait_for_tokenization(pipeline)
             release.set()
             self.assertEqual(set(first.result(timeout=2)), {0, 1, 2})
             for future, expected in zip(pending, values):
@@ -1596,6 +1698,7 @@ if len(sys.argv) > 2:
             first = pipeline.submit(rows(1))
             self.assertTrue(started.wait(timeout=2))
             pending = [pipeline.submit(rows(value)) for value in (2, 9, 3)]
+            _wait_for_tokenization(pipeline)
             pipeline._requests.put(None)
             release.set()
             self.assertEqual(first.result(timeout=2)[0][0], 1)

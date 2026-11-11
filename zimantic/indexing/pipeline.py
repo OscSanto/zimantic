@@ -129,6 +129,7 @@ class EmbeddingPipeline:
         queue_size: int = 8,
         max_pending_per_build: int | None = None,
         token_budget: int = DEFAULT_EMBEDDING_BATCH_TOKENS,
+        tokenizer_workers: int | None = None,
     ) -> None:
         workers = int(workers)
         if workers < 1:
@@ -153,6 +154,19 @@ class EmbeddingPipeline:
         ]
         for thread in self._threads:
             thread.start()
+        # Tokenization runs on its own bounded pool so one source's preparation
+        # thread can keep the inference workers fed.  Keep it smaller than the
+        # inference pool: the Rust tokenizer already parallelizes a batch call,
+        # and an unbounded second pool only adds memory and CPU contention.
+        if tokenizer_workers is None:
+            tokenizer_workers = max(1, min(workers, 4))
+        self._tokenizers = ThreadPoolExecutor(
+            max_workers=max(1, int(tokenizer_workers)),
+            thread_name_prefix="zimantic-tokenize",
+        )
+        self._tokenize_slots = threading.BoundedSemaphore(max(2, workers + 1))
+        self._tokenize_tasks: dict[Future, Future] = {}
+        self._tokenize_lock = threading.Lock()
         # Join native inference before interpreter teardown destroys ORT state.
         atexit.register(self.close)
 
@@ -161,6 +175,12 @@ class EmbeddingPipeline:
             if self._cancelled:
                 raise KeyboardInterrupt
             raise RuntimeError("embedding pipeline is closed")
+
+    def _check_cancelled(self) -> None:
+        # close(wait=True) stops new submissions but lets already-tokenizing
+        # windows finish, so only a cancelled pipeline abandons this work.
+        if self._cancelled:
+            raise KeyboardInterrupt
 
     def submit(
         self,
@@ -171,48 +191,96 @@ class EmbeddingPipeline:
         with self._submit_condition:
             self._check_open()
         future = Future()
-        batches = _embedding_batches(self._embedder, rows, self.token_budget)
-        if not batches:
-            future.set_result({})
-            return future
-        remaining = len(batches)
-        vectors = {}
-        lock = threading.Lock()
-
-        def finished(batch_future):
-            nonlocal remaining
-            with lock:
-                error = batch_future.exception()
-                if error is None:
-                    vectors.update(batch_future.result())
-                elif not future.done():
-                    future.set_exception(error)
-                remaining -= 1
-                if remaining == 0 and not future.done():
-                    future.set_result(vectors)
-
-        for ids, inputs in batches:
-            if cancel_event is not None and cancel_event.is_set():
-                if not future.done():
-                    future.set_exception(_StageStopped())
-                raise _StageStopped()
-            batch_future = Future()
-            batch_future.add_done_callback(finished)
-            request = _EmbeddingRequest(ids, inputs, batch_future)
-            # Serialize insertion with close so no request can miss cancellation.
+        # Bound queued tokenization as well as queued inference.  The tokenizer
+        # task releases this slot once its batches are in the inference queue.
+        while not self._tokenize_slots.acquire(timeout=0.05):
             with self._submit_condition:
-                while True:
-                    self._check_open()
-                    if cancel_event is not None and cancel_event.is_set():
-                        if not future.done():
-                            future.set_exception(_StageStopped())
-                        raise _StageStopped()
-                    try:
-                        self._requests.put_nowait(request)
-                        break
-                    except Full:
-                        self._submit_condition.wait(timeout=0.05)
+                self._check_open()
+        try:
+            with self._submit_condition:
+                self._check_open()
+            task = self._tokenizers.submit(
+                self._tokenize, rows, future, cancel_event
+            )
+        except BaseException:
+            self._tokenize_slots.release()
+            raise
+        with self._tokenize_lock:
+            self._tokenize_tasks[task] = future
+        task.add_done_callback(self._tokenize_done)
         return future
+
+    def _tokenize(
+        self,
+        rows: list[EntryRecord],
+        future: Future,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        """Tokenize one window in parallel with other windows and inference."""
+        try:
+            self._check_cancelled()
+            if cancel_event is not None and cancel_event.is_set():
+                future.set_exception(_StageStopped())
+                return
+            batches = _embedding_batches(self._embedder, rows, self.token_budget)
+            if not batches:
+                future.set_result({})
+                return
+            remaining = len(batches)
+            vectors = {}
+            lock = threading.Lock()
+
+            def finished(batch_future):
+                nonlocal remaining
+                with lock:
+                    error = batch_future.exception()
+                    if error is None:
+                        vectors.update(batch_future.result())
+                    elif not future.done():
+                        future.set_exception(error)
+                    remaining -= 1
+                    if remaining == 0 and not future.done():
+                        future.set_result(vectors)
+
+            for ids, inputs in batches:
+                self._check_cancelled()
+                if cancel_event is not None and cancel_event.is_set():
+                    if not future.done():
+                        future.set_exception(_StageStopped())
+                    return
+                batch_future = Future()
+                batch_future.add_done_callback(finished)
+                request = _EmbeddingRequest(ids, inputs, batch_future)
+                # Serialize insertion with close so no request can miss cancellation.
+                with self._submit_condition:
+                    while True:
+                        self._check_cancelled()
+                        if cancel_event is not None and cancel_event.is_set():
+                            if not future.done():
+                                future.set_exception(_StageStopped())
+                            return
+                        try:
+                            self._requests.put_nowait(request)
+                            break
+                        except Full:
+                            self._submit_condition.wait(timeout=0.05)
+        except BaseException as error:
+            logger.debug("tokenization failed", exc_info=True)
+            if not future.done():
+                future.set_exception(error)
+
+    def _tokenize_done(self, task: Future) -> None:
+        with self._tokenize_lock:
+            future = self._tokenize_tasks.pop(task, None)
+        self._tokenize_slots.release()
+        if future is None or future.done():
+            return
+        if task.cancelled():
+            future.set_exception(KeyboardInterrupt())
+            return
+        error = task.exception()
+        if error is not None:
+            future.set_exception(error)
 
     def close(self, *, wait: bool = True) -> None:
         with self._submit_condition:
@@ -230,12 +298,21 @@ class EmbeddingPipeline:
                             request.future.set_exception(KeyboardInterrupt())
                 self._submit_condition.notify_all()
         if wait:
+            # Running tokenizer tasks must enqueue their batches before the
+            # inference workers see the end-of-queue sentinels.
+            self._tokenizers.shutdown(wait=True)
             if not already_closed:
                 for _ in self._threads:
                     self._requests.put(None)
             for thread in self._threads:
                 thread.join()
             atexit.unregister(self.close)
+        else:
+            with self._tokenize_lock:
+                pending = list(self._tokenize_tasks)
+            for task in pending:
+                task.cancel()
+            self._tokenizers.shutdown(wait=False, cancel_futures=True)
 
     def _run(self) -> None:
         while True:
@@ -2012,9 +2089,16 @@ def _embedding_batches(embedder, rows: list[EntryRecord], token_budget: int):
         return []
     passages = []
     passage_prefix = getattr(embedder, "passage_prefix", "passage: ")
+    # Embedder.encode already caps the token ids, so pre-truncating the text
+    # only re-tokenizes long excerpts several times.  Keep the text truncation
+    # for embedders that do not make that guarantee.
+    skip_truncation = getattr(embedder, "caps_tokens_on_encode", False)
     for row in articles:
         prefix = f"{passage_prefix}{row.title}\n"
-        passages.append(prefix + embedder.truncate(row.excerpt, prefix=prefix))
+        if skip_truncation:
+            passages.append(prefix + row.excerpt)
+        else:
+            passages.append(prefix + embedder.truncate(row.excerpt, prefix=prefix))
     encoded = embedder.encode(passages)
     ordered = sorted(zip(articles, encoded), key=lambda pair: len(pair[1]))
     batch_shape = getattr(embedder, "batch_shape", None)

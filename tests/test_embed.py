@@ -1213,6 +1213,24 @@ class FastTokenizerTests(unittest.TestCase):
         self.assertEqual(len(ids[0]), embedder.embedding_tokens)
         self.assertEqual(ids[0][0], embedder.tokenizer.cls_id)
         self.assertEqual(ids[0][-1], embedder.tokenizer.sep_id)
+        self.assertTrue(embedder.caps_tokens_on_encode)
+        self.assertIsNone(embedder._tokenizer_lock)
+
+    def test_python_wordpiece_and_sentencepiece_lock_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            embedder = self._embedder(directory, tokens=False)
+        self.assertIsNone(embedder._tokenizer_lock)
+
+        with (
+            patch.object(embed.ort, "InferenceSession", return_value=MagicMock()),
+            patch.object(
+                embed.sentencepiece, "SentencePieceProcessor", return_value=MagicMock()
+            ),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            _sentencepiece_dir(directory)
+            embedder = embed.Embedder(directory)
+        self.assertIsNotNone(embedder._tokenizer_lock)
 
 
 if __name__ == "__main__":

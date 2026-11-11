@@ -500,6 +500,11 @@ class _FastWordPiece:
 
 
 class Embedder:
+    # ``encode`` keeps each row within ``embedding_tokens`` after tokenizing, so
+    # callers do not need to pre-truncate the text.  Long excerpts are capped on
+    # token ids instead of re-tokenizing the source text to find a word boundary.
+    caps_tokens_on_encode = True
+
     def __init__(
         self,
         model_dir,
@@ -623,7 +628,20 @@ class Embedder:
             # BERT uses [PAD] = 0, unlike XLM-R. Do not hard-code 1 here: it is
             # [unused0] in a standard BERT vocabulary.
             self.pad_id = self.tokenizer.pad_id
-        self._tokenizer_lock = threading.Lock()
+        # The Rust tokenizer and the read-only Python WordPiece fallback are
+        # thread-safe. SentencePiece's Python binding is not documented as such,
+        # and loading one processor per thread would cost ~45 MB each on the
+        # small hosts this project targets, so only that path stays serialized.
+        self._tokenizer_lock = (
+            threading.Lock() if self.tokenizer_kind == "sentencepiece" else None
+        )
+
+    def _locked_tokenizer_encode(self, text: str) -> list[int]:
+        lock = self._tokenizer_lock
+        if lock is None:
+            return self.tokenizer.encode(text)
+        with lock:
+            return self.tokenizer.encode(text)
 
     def _new_session_options(self):
         opts = ort.SessionOptions()  # ty: ignore[possibly-missing-attribute]
@@ -770,8 +788,7 @@ class Embedder:
 
     def token_count(self, text: str, prefix: str = "") -> int:
         """Count special tokens and tokenizer pieces for the full input."""
-        with self._tokenizer_lock:
-            pieces = self.tokenizer.encode(prefix + text)
+        pieces = self._locked_tokenizer_encode(prefix + text)
         return SPECIAL_TOKEN_COUNT + len(pieces)
 
     def truncate(self, text: str, prefix: str = "") -> str:
@@ -803,10 +820,9 @@ class Embedder:
         return text[:low]
 
     def _ids(self, text: str) -> list[int]:
-        with self._tokenizer_lock:
-            pieces = self.tokenizer.encode(text)[
-                : self.embedding_tokens - SPECIAL_TOKEN_COUNT
-            ]
+        pieces = self._locked_tokenizer_encode(text)[
+            : self.embedding_tokens - SPECIAL_TOKEN_COUNT
+        ]
         if self.tokenizer_kind == "wordpiece":
             # BERT numbering comes straight from vocab.txt ([CLS]=101, [SEP]=102).
             return [self.tokenizer.cls_id] + pieces + [self.tokenizer.sep_id]

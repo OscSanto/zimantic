@@ -66,6 +66,10 @@ class _LazyEmbedder:
         """The loaded model's fingerprint, or empty when it was never needed."""
         return getattr(self._value, "fingerprint", "") if self._value is not None else ""
 
+    @property
+    def caps_tokens_on_encode(self) -> bool:
+        return bool(getattr(self._get(), "caps_tokens_on_encode", False))
+
 
 def _embedding_queue_size(cfg: dict, workers: int, device: str | None = None) -> int:
     """Keep a CPU read window from blocking behind its own small model calls."""
