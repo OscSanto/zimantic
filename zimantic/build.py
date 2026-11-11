@@ -23,7 +23,9 @@ def build(zim_path: Path, index_dir, embedder, batch_size: int) -> None:
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(db_path)
+    # Wait up to 60 s for the lock: with sqlite's default 5 s, anything reading the index during a build
+    # (a search server, a script) could crash the build with "database is locked".
+    db = sqlite3.connect(db_path, timeout=60)
     db.executescript(SCHEMA)
     meta = dict(db.execute("SELECT key, value FROM meta"))
     if meta.get("done"):
