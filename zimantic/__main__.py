@@ -31,7 +31,7 @@ def main() -> None:
 
    
     if args.command == "build":
-        from .build import build as build_zim
+        from .build import build as build_zim, build_settings
 
         if args.path:
             zims = [args.path]
@@ -47,9 +47,16 @@ def main() -> None:
             if (Path(cfg["index_dir"]) / f"{zim.stem}.faiss").exists():
                 sys.exit(f"zimantic: {zim.stem} is already indexed")
 
-        embedder = Embedder(cfg["model_dir"])
+        from .hardware import detect
+        hw = detect()
+        workers, threads, batch_size, note = build_settings(cfg, hw)
+        print(f"hardware: {hw.describe()}")
+        print(f"settings: {workers} embedding workers ({note}) x {threads or 'default'} threads, "
+              f"batch_size {batch_size}")
+
+        embedder = Embedder(cfg["model_dir"], threads=threads or None)
         for zim in zims:
-            build_zim(zim, cfg["index_dir"], embedder, cfg["batch_size"])
+            build_zim(zim, cfg["index_dir"], embedder, batch_size, workers)
 
     elif args.command == "serve":
         from .search import Search
