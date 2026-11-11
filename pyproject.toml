@@ -13,6 +13,10 @@ dependencies = [
     "tqdm",
     "onnxruntime",
     "sentencepiece",
+    # Wheels exist for 64-bit, armv7, i686, ppc64le and s390x. Skip machines
+    # without one so installation cannot fall back to a Rust source build; the
+    # Python tokenizer remains available there.
+    "tokenizers>=0.23; platform_machine not in 'arm armv5l armv5tel armv6b armv6l i386 i486 i586 mips mipsel ppc powerpc riscv32 s390 sh4 sparc m68k'",
     "faiss-cpu",
     "fastapi",
     "uvicorn",

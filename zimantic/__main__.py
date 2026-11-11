@@ -52,6 +52,16 @@ class _LazyEmbedder:
         return method(width) if method is not None else None
 
     @property
+    def query_prefix(self) -> str:
+        """The configured model's query prompt (empty for static models)."""
+        return self._get().query_prefix
+
+    @property
+    def passage_prefix(self) -> str:
+        """The configured model's passage prompt (empty for static models)."""
+        return self._get().passage_prefix
+
+    @property
     def fingerprint(self) -> str:
         """The loaded model's fingerprint, or empty when it was never needed."""
         return getattr(self._value, "fingerprint", "") if self._value is not None else ""
@@ -496,12 +506,14 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     model_cmd.add_argument(
         "--model",
-        default="multilingual-e5-small",
+        default=None,
         metavar="NAME",
         help=(
-            "model to download: multilingual-e5-small (default), "
-            "multilingual-e5-base, multilingual-e5-large, e5-small-v2, "
-            "e5-base-v2 or e5-large-v2"
+            "model to download: static-similarity-mrl-multilingual-v1 "
+            "(default; 256-dimensional static embeddings), "
+            "multilingual-e5-small (the previous default; 384-dimensional "
+            "transformer), multilingual-e5-base, multilingual-e5-large, "
+            "e5-small-v2, e5-base-v2 or e5-large-v2"
         ),
     )
     model_cmd.add_argument(
@@ -2314,21 +2326,22 @@ def _run_model(args, cfg: dict) -> None:
         return
 
     precisions = args.precision or [DEFAULT_PRECISION]
+    model = args.model or DEFAULT_MODEL
     configured_dir = Path(cfg["model_dir"])
     output_dir = (
         args.dir
         if args.dir is not None
-        else default_output_dir(args.model, configured_dir)
+        else default_output_dir(model, configured_dir)
     )
     try:
         downloads = download_model(
-            args.model, precisions, output_dir, force=args.force
+            model, precisions, output_dir, force=args.force
         )
     except ModelDownloadError as error:
         sys.exit(f"zimantic: {error}")
 
     for precision, directory in downloads:
-        print(f"zimantic: {args.model} {precision} -> {directory}")
+        print(f"zimantic: {model} {precision} -> {directory}")
     folders = [directory for _precision, directory in downloads]
     if len(folders) == 1 and folders[0] != configured_dir:
         print(f'zimantic: set model_dir = "{folders[0]}" to use this export')

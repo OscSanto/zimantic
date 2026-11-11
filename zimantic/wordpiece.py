@@ -1,10 +1,12 @@
-"""A small BERT WordPiece tokenizer for English-only e5 ONNX models.
+"""A small BERT WordPiece tokenizer.
 
 The multilingual-e5 models use a SentencePiece vocabulary, while the English
-e5-v2 models use BERT's WordPiece vocabulary (``vocab.txt``). This module keeps
-that tokenizer dependency-free: ``sentencepiece`` cannot read a BERT vocabulary
-and dragging in the Hugging Face Rust tokenizer costs far more memory than the
-few hundred lines needed here.
+e5-v2 models and the static default use BERT's WordPiece vocabulary
+(``vocab.txt``). This module is the dependency-free fallback: :class:`Embedder`
+prefers the Hugging Face Rust ``tokenizers`` package when the model directory
+ships a ``tokenizer.json``, which tokenizes batches far faster. The fallback
+still covers installations without that package, hand-built folders with only a
+vocabulary, and 32-bit platforms without a compatible wheel.
 """
 
 from __future__ import annotations
@@ -106,9 +108,16 @@ class WordPieceTokenizer:
     ):
         self.vocab = {}
         with open(vocab_file, encoding="utf-8") as handle:
-            for index, token in enumerate(handle.read().splitlines()):
-                # The first occurrence wins, as in BERT's read_vocab.
-                self.vocab.setdefault(token, index)
+            # Split on newline only. `str.splitlines()` also breaks on U+2028,
+            # U+2029 and the C1 separators, and some multilingual vocabularies
+            # contain those characters as tokens; splitting them would shift
+            # every later vocabulary id by one.
+            lines = handle.read().split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        for index, token in enumerate(lines):
+            # The first occurrence wins, as in BERT's read_vocab.
+            self.vocab.setdefault(token.rstrip("\r"), index)
         self.lower_case = bool(lower_case)
         self.strip_accents = self.lower_case
         self.max_input_chars_per_word = int(max_input_chars_per_word)

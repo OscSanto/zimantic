@@ -414,6 +414,9 @@ class BuildWorkerTests(unittest.TestCase):
         import zimantic.__main__ as main_module
 
         class _Embedder:
+            query_prefix = "query: "
+            passage_prefix = "passage: "
+
             @staticmethod
             def truncate(text, **_kwargs):
                 return text
@@ -428,6 +431,8 @@ class BuildWorkerTests(unittest.TestCase):
         self.assertEqual(lazy.truncate("text"), "text")
         self.assertEqual(calls, [1])
         self.assertEqual(lazy.embed(["a"]), ["a"])
+        self.assertEqual(lazy.query_prefix, "query: ")
+        self.assertEqual(lazy.passage_prefix, "passage: ")
         self.assertEqual(calls, [1])
 
     def test_one_source_uses_all_configured_embedding_workers(self):
@@ -558,7 +563,10 @@ class ModelCommandTests(unittest.TestCase):
         ):
             main_module.main()
 
-        self.assertIn("multilingual-e5-small (default): fp32, fp16, int8", output.getvalue())
+        self.assertIn(
+            "static-similarity-mrl-multilingual-v1 (default): fp32, fp16, int8",
+            output.getvalue(),
+        )
         self.assertIn("default precision: int8 (CPU)", output.getvalue())
 
     def test_omitted_precisions_download_int8_only(self):
@@ -584,7 +592,7 @@ class ModelCommandTests(unittest.TestCase):
                 main_module.main()
 
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0][0], "multilingual-e5-small")
+        self.assertEqual(seen[0][0], "static-similarity-mrl-multilingual-v1")
         self.assertEqual(seen[0][1], ["int8"])
         self.assertEqual(seen[0][2], Path(config["model_dir"]))
 

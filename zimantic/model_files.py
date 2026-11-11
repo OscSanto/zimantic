@@ -1,6 +1,7 @@
-"""Download the supported e5 ONNX exports and their tokenizer vocabularies."""
+"""Download the supported ONNX embedding exports and their tokenizers."""
 
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -8,12 +9,18 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 PRECISIONS = ("fp32", "fp16", "int8")
 DEFAULT_PRECISION = "int8"
-DEFAULT_MODEL = "multilingual-e5-small"
+DEFAULT_MODEL = "static-similarity-mrl-multilingual-v1"
+
+# Written beside every model graph. It records what the graph itself cannot
+# express: whether the graph returns a pooled sentence embedding, how many
+# Matryoshka dimensions to keep, and the prompt prefixes the model expects.
+MODEL_CONFIG_NAME = "zimantic_model.json"
 
 DOWNLOAD_CHUNK_BYTES = 1 << 20
 DOWNLOAD_TIMEOUT_SECONDS = 60
@@ -32,11 +39,22 @@ class ModelFile:
 
 
 @dataclass(frozen=True)
+class DerivedFile:
+    """A file generated from a downloaded artifact, with a pinned checksum."""
+
+    name: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     repo: str
     revision: str
     tokenizer: ModelFile
     exports: dict[str, tuple[ModelFile, ...]]
+    derived: tuple[DerivedFile, ...] = ()
+    config: dict[str, Any] | None = None
 
     def precisions(self) -> tuple[str, ...]:
         return tuple(precision for precision in PRECISIONS if precision in self.exports)
@@ -58,10 +76,64 @@ _WORDPIECE = ModelFile(
     size=231_508,
     sha256="07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
 )
+_STATIC_EMBEDDING_TOKENIZER = ModelFile(
+    remote="0_StaticEmbedding/tokenizer.json",
+    name="tokenizer.json",
+    size=2_563_370,
+    sha256="11aaf894a4ccf3d95e8830e27c0f8152791fbbff2b988e29a265580b86edd216",
+)
 
 # Revisions are pinned so the checksums below stay valid, and so a later upstream
 # replacement cannot silently change the vectors an index was built with.
 MODEL_SPECS = {
+    "static-similarity-mrl-multilingual-v1": ModelSpec(
+        repo="sentence-transformers/static-similarity-mrl-multilingual-v1",
+        revision="b68f4122911bcffcd6e1f695f2d99cd6788972d8",
+        tokenizer=_STATIC_EMBEDDING_TOKENIZER,
+        exports={
+            "fp32": (
+                _export(
+                    "onnx/model.onnx",
+                    "model.onnx",
+                    433_684_847,
+                    "f9240f0d516953af8458b80a19e8070be1856f7195b65216c016b08e230e4fa0",
+                ),
+            ),
+            "fp16": (
+                _export(
+                    "onnx/model_fp16.onnx",
+                    "model.onnx",
+                    216_844_889,
+                    "fcdf6c63211755d3e79c2e75a280e5826f1c0c002d90c9dd60519af9503352ab",
+                ),
+            ),
+            "int8": (
+                _export(
+                    "onnx/model_int8.onnx",
+                    "model.onnx",
+                    108_424_888,
+                    "9eaf678438a0c2669e7388e90fd8ef25c3138dd3155cb0d62fd8114760405a3a",
+                ),
+            ),
+        },
+        # The ONNX graph is an EmbeddingBag over a WordPiece vocabulary. The
+        # repository ships that vocabulary only as tokenizer.json; the runtime
+        # tokenizer reads the same tokens with their ids from vocab.txt.
+        derived=(
+            DerivedFile(
+                name="vocab.txt",
+                size=871_891,
+                sha256="87b44292b452f6c05afa49b2e488e7eedf79ea4f4c39db6f2f4b37764228ef3f",
+            ),
+        ),
+        config={
+            "architecture": "static-embedding",
+            "dimension": 1024,
+            "truncate_dim": 256,
+            "query_prefix": "",
+            "passage_prefix": "",
+        },
+    ),
     "multilingual-e5-small": ModelSpec(
         repo="Xenova/multilingual-e5-small",
         revision="761b726dd34fb83930e26aab4e9ac3899aa1fa78",
@@ -256,17 +328,25 @@ MODEL_SPECS = {
     ),
 }
 
-# The checksums documented for the default model. Other models are intentionally
-# not listed: verify_model_files() warns for a model it does not recognize.
-DEFAULT_MODEL_CHECKSUMS = {
-    "model.onnx": frozenset(
-        file.sha256
-        for files in MODEL_SPECS[DEFAULT_MODEL].exports.values()
-        for file in files
-        if file.name == "model.onnx"
-    ),
-    "sentencepiece.bpe.model": MODEL_SPECS[DEFAULT_MODEL].tokenizer.sha256,
-}
+def _documented_checksums() -> dict[str, frozenset[str]]:
+    """Every checksum this project downloads or generates, keyed by filename.
+
+    A model directory is recognized when each of its files matches one of the
+    documented hashes. Listing all supported models (not only the default) keeps
+    the prominent alternatives from warning on every start.
+    """
+    values: dict[str, set[str]] = {}
+    for spec in MODEL_SPECS.values():
+        for files in spec.exports.values():
+            for model_file in files:
+                values.setdefault(model_file.name, set()).add(model_file.sha256)
+        values.setdefault(spec.tokenizer.name, set()).add(spec.tokenizer.sha256)
+        for derived in spec.derived:
+            values.setdefault(derived.name, set()).add(derived.sha256)
+    return {name: frozenset(hashes) for name, hashes in values.items()}
+
+
+DOCUMENTED_CHECKSUMS = _documented_checksums()
 
 
 def sha256_file(path: Path) -> str:
@@ -277,7 +357,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _file_matches(path: Path, model_file: ModelFile) -> bool:
+def _file_matches(path: Path, model_file: ModelFile | DerivedFile) -> bool:
     try:
         if path.stat().st_size != model_file.size:
             return False
@@ -382,6 +462,58 @@ def default_output_dir(model: str, model_dir: Path) -> Path:
     return root if model == DEFAULT_MODEL else root / model
 
 
+def _write_derived_vocab(spec: ModelSpec, directory: Path, force: bool) -> None:
+    """Write ``vocab.txt`` from a downloaded Hugging Face ``tokenizer.json``.
+
+    The static embedding export ships its WordPiece vocabulary only as JSON. The
+    runtime tokenizer is dependency-free and reads one token per line, so derive
+    that file here and verify it against a pinned checksum.
+    """
+    source = directory / spec.tokenizer.name
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+        vocab = data["model"]["vocab"]
+        ordered = [""] * len(vocab)
+        for token, index in vocab.items():
+            ordered[index] = token
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+        raise ModelDownloadError(
+            f"could not read the vocabulary from {source}: {error}"
+        ) from error
+    text = "\n".join(ordered) + "\n"
+    for derived in spec.derived:
+        if derived.name != "vocab.txt":
+            raise ModelDownloadError(
+                f"unsupported derived model file {derived.name!r}"
+            )
+        destination = directory / derived.name
+        if destination.exists() and not force and _file_matches(destination, derived):
+            logger.info("zimantic: %s is already present", destination)
+            continue
+        # Write bytes, not text: text mode translates newlines on Windows and
+        # would change the pinned checksum.
+        destination.write_bytes(text.encode("utf-8"))
+        if not _file_matches(destination, derived):
+            raise ModelDownloadError(
+                f"generated {destination} does not match the expected "
+                "size or checksum; the upstream tokenizer may have changed"
+            )
+
+
+def _write_model_config(spec: ModelSpec, directory: Path) -> None:
+    if not spec.config:
+        return
+    destination = directory / MODEL_CONFIG_NAME
+    text = json.dumps(spec.config, indent=2, sort_keys=True) + "\n"
+    try:
+        if destination.read_text(encoding="utf-8") == text:
+            return
+    except OSError:
+        pass
+    # Byte-for-byte stable across platforms so the model fingerprint matches.
+    destination.write_bytes(text.encode("utf-8"))
+
+
 def download_model(
     model: str,
     precisions: list[str] | tuple[str, ...],
@@ -418,11 +550,19 @@ def download_model(
     downloaded: list[tuple[str, Path]] = []
     for precision in precisions:
         directory = output_dir / precision
-        files = [*spec.exports[precision], spec.tokenizer]
-        # Write external data and the tokenizer first. The graph is the last
-        # file replaced, so an interrupted --force refresh cannot leave a new
-        # graph pointing at missing or old weights.
-        files.sort(key=lambda model_file: model_file.name == "model.onnx")
+        _download_file(
+            spec, spec.tokenizer, directory / spec.tokenizer.name, force
+        )
+        if spec.derived:
+            _write_derived_vocab(spec, directory, force)
+        _write_model_config(spec, directory)
+        # Write external data before the graph. The graph is the last file
+        # replaced, so an interrupted --force refresh cannot leave a new graph
+        # pointing at missing or old weights.
+        files = sorted(
+            spec.exports[precision],
+            key=lambda model_file: model_file.name == "model.onnx",
+        )
         for model_file in files:
             _download_file(spec, model_file, directory / model_file.name, force)
         downloaded.append((precision, directory))

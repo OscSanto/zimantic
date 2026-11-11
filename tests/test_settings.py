@@ -677,7 +677,12 @@ class LoadConfigTests(unittest.TestCase):
         with patch.object(
             hardware, "detect", return_value=Hardware(1, 1, 512 << 20, 384 << 20)
         ):
-            for name in ("config.toml", "config.pi-zero-2w.toml", "config.pi-5.toml"):
+            for name in (
+                    "config.toml",
+                    "config.pi-zero-2w.toml",
+                    "config.pi-5.toml",
+                    "config.gpu.toml",
+                ):
                 with self.subTest(config=name):
                     cfg = load_config(root / name, warn=lambda _: None)
                     for key in (

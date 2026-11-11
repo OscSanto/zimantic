@@ -1075,5 +1075,145 @@ class InputSignatureTests(unittest.TestCase):
         )
 
 
+class StaticOutputTests(unittest.TestCase):
+    def _embedder(self):
+        class Session:
+            def get_providers(self):
+                return ["CPUExecutionProvider"]
+
+            def get_inputs(self):
+                return [
+                    types.SimpleNamespace(name="input_ids"),
+                    types.SimpleNamespace(name="attention_mask"),
+                ]
+
+            def get_outputs(self):
+                return [types.SimpleNamespace(shape=["batch_size", 1024])]
+
+            def run(self, _outputs, inputs):
+                batch = inputs["input_ids"].shape[0]
+                row = np.arange(1024, dtype=np.float32) + 1.0
+                return [np.tile(row, (batch, 1))]
+
+        with (
+            patch.object(embed.ort, "InferenceSession", return_value=Session()),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            (Path(directory) / "vocab.txt").write_text(
+                "[PAD]\n[UNK]\n[CLS]\n[SEP]\na\nb\n", encoding="utf-8"
+            )
+            (Path(directory) / "zimantic_model.json").write_text(
+                json.dumps(
+                    {
+                        "truncate_dim": 4,
+                        "query_prefix": "",
+                        "passage_prefix": "",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return embed.Embedder(directory, device="cpu")
+
+    def test_pooled_output_is_not_mean_pooled_again(self):
+        embedder = self._embedder()
+        self.assertTrue(embedder.pooled_output)
+        self.assertEqual(embedder.truncate_dim, 4)
+        self.assertEqual((embedder.query_prefix, embedder.passage_prefix), ("", ""))
+
+    def test_truncation_renormalizes_the_reduced_vector(self):
+        embedder = self._embedder()
+        vectors = embedder.embed_encoded([[2, 5, 3], [2, 3]])
+        self.assertEqual(vectors.shape, (2, 4))
+        np.testing.assert_allclose(
+            np.linalg.norm(vectors, axis=1), [1.0, 1.0], rtol=1e-6
+        )
+        # The same pooled row truncates to the same direction for both rows.
+        np.testing.assert_allclose(vectors[0], vectors[1], rtol=1e-6)
+
+
+def _write_wordpiece_json(directory, tokens):
+    from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, processors
+
+    vocabulary = {token: index for index, token in enumerate(tokens)}
+    tokenizer = Tokenizer(models.WordPiece(vocabulary, unk_token="[UNK]"))
+    tokenizer.normalizer = normalizers.BertNormalizer(lowercase=True)
+    tokenizer.pre_tokenizer = pre_tokenizers.BertPreTokenizer()
+    tokenizer.post_processor = processors.TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        special_tokens=[
+            ("[CLS]", vocabulary["[CLS]"]),
+            ("[SEP]", vocabulary["[SEP]"]),
+        ],
+    )
+    tokenizer.save(str(Path(directory) / "tokenizer.json"))
+
+
+class FastTokenizerTests(unittest.TestCase):
+    TOKENS = [
+        "[PAD]", "[UNK]", "[CLS]", "[SEP]", "hello", "world", "##s",
+        "don", "'", "t", "a", "b",
+    ]
+
+    def _embedder(self, directory, tokens=True):
+        (Path(directory) / "vocab.txt").write_text(
+            "\n".join(self.TOKENS) + "\n", encoding="utf-8"
+        )
+        if tokens:
+            _write_wordpiece_json(directory, self.TOKENS)
+
+        class Session:
+            def get_providers(self):
+                return ["CPUExecutionProvider"]
+
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="input_ids")]
+
+            def get_outputs(self):
+                return [types.SimpleNamespace(shape=["batch_size", 64])]
+
+            def run(self, _outputs, inputs):
+                batch = inputs["input_ids"].shape[0]
+                return [np.ones((batch, 64), dtype=np.float32)]
+
+        with patch.object(embed.ort, "InferenceSession", return_value=Session()):
+            return embed.Embedder(directory, device="cpu", embedding_tokens=8)
+
+    def test_batched_tokenizer_matches_the_python_fallback(self):
+        from zimantic.wordpiece import WordPieceTokenizer
+
+        with tempfile.TemporaryDirectory() as directory:
+            fast = self._embedder(directory)
+            self.assertTrue(fast._fast_tokenizer)
+            python = WordPieceTokenizer(Path(directory) / "vocab.txt")
+            texts = ["Hello worlds", "don't stop", "a b"]
+            limit = fast.embedding_tokens - embed.SPECIAL_TOKEN_COUNT
+            expected = [
+                [python.cls_id] + python.encode(text)[:limit] + [python.sep_id]
+                for text in texts
+            ]
+            self.assertEqual(fast.encode(texts), expected)
+
+    def test_falls_back_when_tokenizer_json_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            embedder = self._embedder(directory, tokens=False)
+        self.assertFalse(embedder._fast_tokenizer)
+        self.assertIsInstance(embedder.tokenizer, embed.WordPieceTokenizer)
+
+    def test_falls_back_when_the_tokenizers_package_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(embed, "_FastWordPiece", side_effect=ImportError):
+                embedder = self._embedder(directory)
+        self.assertFalse(embedder._fast_tokenizer)
+        self.assertIsInstance(embedder.tokenizer, embed.WordPieceTokenizer)
+
+    def test_caps_batched_ids_before_adding_special_tokens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            embedder = self._embedder(directory)
+            ids = embedder.encode(["hello world hello world hello world"])
+        self.assertEqual(len(ids[0]), embedder.embedding_tokens)
+        self.assertEqual(ids[0][0], embedder.tokenizer.cls_id)
+        self.assertEqual(ids[0][-1], embedder.tokenizer.sep_id)
+
+
 if __name__ == "__main__":
     unittest.main()

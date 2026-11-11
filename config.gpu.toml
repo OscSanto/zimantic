@@ -1,0 +1,45 @@
+# Settings for a GPU host that embeds with multilingual-e5-small fp16.
+# Copy this file to config.toml to use them.
+#
+# Install the accelerated runtime and the transformer export first:
+#   uv pip install onnxruntime-gpu    # or -rocm, -directml, -openvino
+#   zimantic model fp16 --model multilingual-e5-small
+#
+# The static default is optimized for CPUs and gains little from a GPU. The e5
+# transformer also retrieves better, so it is the recommended GPU model.
+model_dir = "./model/multilingual-e5-small/fp16"
+index_dir = "./indexes"
+
+port = 8090
+# Collections are never implicit; add at least one [[collections]] entry.
+# [[collections]]
+# type = "zim"
+# name = "library"
+# path = "zims"
+
+page_size = 10
+max_results = 100
+
+# "auto" tries CUDA, ROCm, MIGraphX, DirectML and OpenVINO in that order, then
+# falls back to the CPU. Set "cuda", "rocm", "migraphx", "directml" or
+# "openvino" to pin one provider.
+embed_device = "auto"
+
+# GPU builds gain from larger model calls than the CPU int8 defaults. Lower
+# batch_size if a large read window exhausts GPU memory; lower
+# embedding_batch_tokens if one model call does.
+batch_size = 64
+embedding_batch_tokens = 1024
+
+# One ONNX thread per call: the device does the work. Raise model-call
+# concurrency only when the GPU has spare memory and builds are input-bound.
+onnx_build_threads = 1
+# onnx_build_workers = 2
+
+# Serving concurrency remains automatic.
+# nprobe = 64
+min_cosine_similarity = 0.85
+
+candidate_count = 16
+max_stream_ranks = 16
+source_timeout = 12

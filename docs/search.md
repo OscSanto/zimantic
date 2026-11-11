@@ -2,22 +2,55 @@
 
 ## Using a different embedding model
 
-The default is `multilingual-e5-small`, but Zimantic loads the ONNX graph and tokenizer vocabulary in `model_dir`. Two tokenizer formats are supported:
+The default is `static-similarity-mrl-multilingual-v1`, a static multilingual model: an
+EmbeddingBag over a 105,879-token WordPiece vocabulary with 1,024-dimensional token
+vectors. Zimantic keeps the leading **256 dimensions** (Matryoshka truncation) and
+renormalizes them. It encodes about 12,300 passages per second through the production Rust tokenizer
+and int8 graph, and needs no prompt prefixes. It covers 50 languages, a narrower set than multilingual-e5-small's 100+. Its int8
+ONNX graph is about 108 MB.
+
+`multilingual-e5-small` remains the quality-first alternative: a 384-dimensional
+transformer with about 118 MB int8, slower embedding, and better retrieval
+overall. The trade-offs are recorded in
+[build performance](build-performance.md#static-embedding-models). Pick it when retrieval
+quality matters more than build time or memory; pick the default for a large library or a
+slow build host.
+
+Zimantic loads the ONNX graph and tokenizer vocabulary in `model_dir`. Two tokenizer
+formats are supported:
 
 - `sentencepiece.bpe.model` selects the XLM-R SentencePiece tokenizer used by the multilingual-e5 models.
-- `vocab.txt` selects the BERT WordPiece tokenizer used by the English e5-v2 models.
+- `vocab.txt` selects the BERT WordPiece tokenizer used by the English e5-v2 models and the static default.
 
-Zimantic selects the tokenizer from the vocabulary file. If the directory contains both files, it reads `tokenizer_config.json` when available. Otherwise, it selects SentencePiece. The ONNX graph does not identify its tokenizer. Apart from the vocabulary, the model follows the e5 contract: `input_ids` and `attention_mask` inputs (plus `token_type_ids` when the graph declares it), a `last_hidden_state` output, mean pooling, L2 normalization, and the `query: ` / `passage: ` prefixes.
+Zimantic selects the tokenizer from the vocabulary file. If the directory contains both files, it reads `tokenizer_config.json` when available. Otherwise, it selects SentencePiece. For WordPiece models, Zimantic uses the Hugging Face Rust `tokenizers` package when the folder contains `tokenizer.json`, and falls back to a built-in Python tokenizer when that package or file is unavailable (for example a hand-built folder with only `vocab.txt`). The Rust path is about five times faster end to end. The graph does not identify its tokenizer. The graph does identify its pooling contract: a 3-D `last_hidden_state` is mean-pooled, while a 2-D `sentence_embedding` is already pooled and is used as-is. A `zimantic_model.json` beside the graph records anything the graph cannot express: `truncate_dim`, `query_prefix`, and `passage_prefix`. Downloaded static models omit both prompts, while e5 models use `query: ` and `passage: `. Without that file, Zimantic assumes an e5-style transformer with those prefixes and no truncation.
 
-`zimantic model` downloads the Xenova ONNX exports from a pinned revision and verifies each file's SHA-256 before replacing the destination. For the default model, fp32 is about 470 MB, fp16 about 235 MB, and int8 about 118 MB (the int8 export is Xenova's `model_quantized.onnx`). The default is int8, which is the smallest download and is optimized for CPU inference. If you run embeddings on a GPU, prefer `zimantic model fp16`: accelerated providers generally execute fp16 faster than quantized int8. Use fp32 only when comparing against a full-precision baseline. The probe check described below lets indexes built with one precision be served with another without re-embedding.
+`zimantic model` downloads pinned revisions and verifies each file's SHA-256 before replacing the destination. For the static default, fp32 is about 434 MB, fp16 about 217 MB, and int8 about 108 MB. The default is int8, which is the smallest download and is optimized for CPU inference. On a GPU host, switch to the `multilingual-e5-small` transformer instead: `zimantic model fp16 --model multilingual-e5-small` (about 235 MB, `model/multilingual-e5-small/fp16`). The static default gains little from a GPU, and the transformer also retrieves better. See [GPU acceleration](usage.md#gpu-acceleration) for a ready-to-copy preset. Use fp32 only when comparing against a full-precision baseline. The probe check described below lets indexes built with one precision be served with another without re-embedding.
 
-To try the larger multilingual model:
+The static model ships its vocabulary only as Hugging Face `tokenizer.json`. The download
+command derives `vocab.txt` from it and verifies a pinned checksum, so a hand-built
+`model_dir` needs either the same derived file or an e5 vocabulary instead.
+
+To use the quality-first multilingual model:
+
+```bash
+zimantic model int8 --model multilingual-e5-small --dir model-e5
+```
+
+That writes `model-e5/int8`, because non-default models get their own folder under the model root. Point `model_dir` at it and rebuild:
+
+```toml
+model_dir = "./model-e5/int8"
+index_dir = "./indexes-e5"
+```
+
+To try the larger multilingual models, replace `small` with `base` or `large`:
 
 ```bash
 zimantic model int8 --model multilingual-e5-base
+zimantic model int8 --model multilingual-e5-large
 ```
 
-Replace `base` with `large` in the model name to try `multilingual-e5-large`. Non-default models get their own folder under the model root, so the base example writes `model/multilingual-e5-base/int8` (and does not replace the default model). For the English-only `e5-small-v2`, the command selects its WordPiece vocabulary automatically:
+For the English-only `e5-small-v2`, the command selects its WordPiece vocabulary automatically:
 
 ```bash
 zimantic model int8 --model e5-small-v2 --dir model-e5-small-v2
@@ -27,19 +60,14 @@ The same command works for other BERT WordPiece e5-v2 models such as `e5-base-v2
 
 Set `model_dir` directly to the folder containing `model.onnx` and its tokenizer
 vocabulary (normally the selected precision folder). Zimantic does not search
-parent directories for model files. Use a separate `index_dir` to keep existing indexes available while you build indexes for the selected model:
+parent directories for model files. Use a separate `index_dir` to keep existing indexes available while you build indexes for the selected model.
 
-```toml
-model_dir = "./model-e5-small-v2/int8"
-index_dir = "./indexes-e5-small-v2"
-```
+Vectors are model-specific. Each full index records a fingerprint of `model.onnx`, the tokenizer vocabulary, and `zimantic_model.json`. A server configured with a different model ignores those vectors and serves title and full-text results until the index is rebuilt. Rebuild after switching models to restore semantic search. Switching between the static default (256 dimensions) and any e5 model (384 dimensions or more) also changes the vector dimension, so it always requires a rebuild.
 
-```bash
-zimantic build --force
-zimantic serve
-```
-
-Vectors are model-specific. Each full index records a fingerprint of `model.onnx` and the tokenizer vocabulary. A server configured with a different model ignores those vectors and serves title and full-text results until the index is rebuilt. Rebuild after switching models to restore semantic search. A checksum warning for a non-default model is informational.
+An existing installation that still points at `multilingual-e5-small` keeps working; the
+default changes only what `zimantic model` downloads and what a new install fetches. To
+move an installation that used the old default in `model/int8`, run
+`zimantic model int8 --force` and rebuild the indexes.
 
 A full build also stores a small set of fixed probe sentences and their embeddings. When the model fingerprint differs, `serve` re-embeds those stored probes with the configured model and reuses the index if the mean cosine similarity is at least 0.99 (and the minimum is at least 0.98). This lets an index built with the FP32 export be served with the int8 export of the same model, for example. It does not accept a different model or tokenizer. An index without stored probes requires the same model file. The check is deliberately conservative: a different fine-tune with the same architecture should fail it.
 
@@ -47,18 +75,19 @@ These measurements use 256-token passages, batch size 32, and 4 CPU threads on o
 
 | Model | Int8 ONNX | Vector dim | Extra RSS¹ | Embedding² | Notes |
 |---|---:|---:|---:|---:|---|
-| `multilingual-e5-small` | 118 MB | 384 | ~190 MB | 68/s (1×) | Default; 100+ languages |
+| `static-similarity-mrl-multilingual-v1` | 108 MB | 256 | ~130 MB | ~12,300/s | Default; 50 languages; static |
+| `multilingual-e5-small` | 118 MB | 384 | ~190 MB | 68/s (1×) | Quality-first alternative; 100+ languages |
 | `multilingual-e5-base` | 279 MB | 768 | ~340 MB | 26/s (0.38×) | 100+ languages; ~2.7× slower |
 | `multilingual-e5-large` | 562 MB | 1,024 | ~730 MB | 9/s (0.13×) | 100+ languages; ~7.8× slower |
 | `e5-small-v2` | 34 MB | 384 | ~65 MB | 64/s (0.93×) | English only; WordPiece |
 
 ¹ Additional resident memory for the model and vocabulary after loading, excluding ONNX Runtime's batch arena. Add this to the server's baseline footprint (see [Measured memory use](search.md#measured-memory-use)); leave about 0.5 GB of headroom for base and 1 GB for large. On hosts with 2 GB RAM or less the arena is disabled, so builds stay closer to these figures.
 
-² Passages per second while embedding 256 passages in batches of 32. A single query embedding takes about 14 ms with either small model, 39 ms with base, and 110 ms with large, so query latency rises in the same direction.
+² Passages per second while embedding 256 passages in batches of 32. The static model's rate is measured with the production encoder and is effectively limited by the ONNX graph. A single query embedding takes about 0.04 ms with the static default, 14 ms with either e5 small model, 39 ms with base, and 110 ms with large.
 
-`e5-small-v2` has the same 12-layer, 384-hidden encoder as `multilingual-e5-small`; the smaller file comes from a 30k-entry rather than a 250k-entry embedding table. It therefore saves roughly 125 MB of resident memory but embeds at about the same speed, and it cannot search non-English text. Choose it only for an English-only library on a RAM-constrained host; otherwise the default gives much broader coverage for the same compute.
+`e5-small-v2` has the same 12-layer, 384-hidden encoder as `multilingual-e5-small`; the smaller file comes from a 30k-entry rather than a 250k-entry embedding table. It therefore saves roughly 125 MB of resident memory but embeds at about the same speed, and it cannot search non-English text.
 
-Vector storage also grows with dimension: an 8-bit IVF index stores one byte per dimension per article (384 B, 768 B, and 1 KB), while a flat index for under 10,000 articles stores float32 vectors (1.5 KB, 3 KB, and 4 KB). FAISS flat indexes do not provide float16 storage; the SQLite staging table uses float16 during a build, but vectors are widened to float32 when written to FAISS. For a mostly English library on a small device, use the default. The base model is an option when cross-language recall matters; the large model needs more RAM.
+Vector storage grows with dimension: an 8-bit IVF index stores one byte per dimension per article (256 B for the static default, 384 B, 768 B, and 1 KB for the e5 models), while a flat index for under 10,000 articles stores float32 vectors. FAISS flat indexes do not provide float16 storage; the SQLite staging table uses float16 during a build, but vectors are widened to float32 when written to FAISS.
 
 ## Measured memory use
 
@@ -72,7 +101,7 @@ As a reference point, a clean benchmark using `wikipedia_en_100_2026-08.zim` (5,
 
 The server benchmark loaded the embedding model, opened the single ZIM index, and handled health, source-discovery, and search requests. `serve --fast` omits the model and FAISS, so it uses much less memory but does not provide semantic search.
 
-Most of the footprint comes from the default model: the ~118 MB int8 weights and the SentencePiece vocabulary (~50 MB of native memory). The English-only `e5-small-v2` replaces both with a ~34 MB model and a small WordPiece vocabulary. They are loaded once and are not duplicated, and `gc.collect()` cannot release them because they are C++ allocations, not Python objects. ONNX Runtime also reads the file into a temporary buffer while loading (so there is a short-lived ~2× peak at startup), and its CPU memory arena keeps the working set of the largest embedding batch for the lifetime of the session. At `batch_size = 32` that arena alone can consume ~400 MB and retain it. On hosts with 2 GB RAM or less, Zimantic therefore disables the arena and returns freed heap memory to the OS between batches (`malloc_trim` on glibc), capping build memory near the model size at a modest throughput cost. Machines with more RAM keep the arena for faster builds. `serve` embeds one query per active search; up to `max_concurrent_searches` queries can be in flight, but each query is a single short sequence, so the arena costs little there either way.
+Most of the footprint comes from the model. The static default uses about 108 MB of int8 weights plus a 105k-entry WordPiece vocabulary; the `multilingual-e5-small` alternative uses about 118 MB of weights plus the SentencePiece vocabulary (~50 MB of native memory). The English-only `e5-small-v2` replaces both with a ~34 MB model and a small WordPiece vocabulary. The table above was measured with the former e5 default; the static default has smaller per-batch activations. Models are loaded once and are not duplicated, and `gc.collect()` cannot release them because they are C++ allocations, not Python objects. ONNX Runtime also reads the file into a temporary buffer while loading (so there is a short-lived ~2× peak at startup), and its CPU memory arena keeps the working set of the largest embedding batch for the lifetime of the session. For the e5 transformer at `batch_size = 32` that arena alone can consume ~400 MB and retain it; static batches are much smaller. On hosts with 2 GB RAM or less, Zimantic therefore disables the arena and returns freed heap memory to the OS between batches (`malloc_trim` on glibc), capping build memory near the model size at a modest throughput cost. Machines with more RAM keep the arena for faster builds. `serve` embeds one query per active search; up to `max_concurrent_searches` queries can be in flight, but each query is a single short sequence, so the arena costs little there either way.
 
 ## How it works
 
@@ -88,7 +117,7 @@ Each article's excerpt is extracted transiently for the embedding and discarded 
 
 Other ZIMs (Stack Exchange, Gutenberg, TED, and others) are supported when they contain readable text: HTML, XHTML, plain text, and PDFs. PDF text is read from the file's embedded text layer, so scanned documents without one are skipped.
 
-Embedding. Zimantic embeds titles and temporary excerpts with [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, about 118 MB). The model uses a fixed budget of 256 tokens. See [Using a different embedding model](search.md#using-a-different-embedding-model) for other e5 models, their tokenizers, and their memory and speed costs. Entries without body text, such as JavaScript loader pages, remain searchable by title and full text but have no semantic vector. Zimantic creates previews from the local ZIM only for results on the displayed page.
+Embedding. Zimantic embeds titles and temporary excerpts with [static-similarity-mrl-multilingual-v1](https://huggingface.co/sentence-transformers/static-similarity-mrl-multilingual-v1) (static int8 ONNX, about 108 MB, Matryoshka-truncated to 256 dimensions). Inputs use a fixed budget of 256 tokens. The previous default, [multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (int8 ONNX, about 118 MB, 384 dimensions), remains available as a quality-first alternative. See [Using a different embedding model](search.md#using-a-different-embedding-model) for both models, their tokenizers, and their memory and speed costs. Entries without body text, such as JavaScript loader pages, remain searchable by title and full text but have no semantic vector. Zimantic creates previews from the local ZIM only for results on the displayed page.
 
 Storage. Each ZIM gets an immutable generation under `index_dir/<provider>/<collection-slug>-<hash>/<source-slug>-<hash>/generations/<build-generation>/` (`index.sqlite`, optional `index.faiss`, and a `lease`), plus one shared catalog:
 

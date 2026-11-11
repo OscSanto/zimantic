@@ -1883,7 +1883,8 @@ class Search:
         if not wants_semantic:
             return None
         try:
-            return embedder.embed([f"query: {query}"])
+            prefix = getattr(embedder, "query_prefix", "query: ")
+            return embedder.embed([prefix + query])
         except Exception as error:
             logger.warning(
                 "zimantic: query embedding failed (%s); falling back to title "

@@ -2011,8 +2011,9 @@ def _embedding_batches(embedder, rows: list[EntryRecord], token_budget: int):
     if not articles:
         return []
     passages = []
+    passage_prefix = getattr(embedder, "passage_prefix", "passage: ")
     for row in articles:
-        prefix = f"passage: {row.title}\n"
+        prefix = f"{passage_prefix}{row.title}\n"
         passages.append(prefix + embedder.truncate(row.excerpt, prefix=prefix))
     encoded = embedder.encode(passages)
     ordered = sorted(zip(articles, encoded), key=lambda pair: len(pair[1]))

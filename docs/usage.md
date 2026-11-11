@@ -17,7 +17,7 @@ zimantic build --wait-stable          # wait for changing download sizes, then i
 zimantic build --no-wait-lock         # exit 75 if another build holds the lock
 zimantic build --lock-timeout 600     # wait at most ten minutes for the lock
 zimantic build --force zims/x.zim     # rebuild one already-indexed ZIM
-zimantic build --device cuda          # embed with a CUDA GPU (see below)
+zimantic build --device cuda          # e5 fp16 on CUDA (see GPU acceleration)
 zimantic build --provider files       # only files collections
 zimantic build --collection modules   # one collection key or entry name
 zimantic build --source files:modules:root  # one exact source key
@@ -34,7 +34,7 @@ zimantic prune --dry-run              # report orphaned Zimantic indexes
 zimantic prune --yes                  # delete only those under the build lock
 zimantic serve                        # web page; unindexed ZIMs use native full-text search
 zimantic serve --fast                 # start without a model or vectors
-zimantic serve --device cuda          # keep a CUDA GPU for query embedding
+zimantic serve --device cuda          # e5 fp16 on CUDA for query embedding
 zimantic serve --debug                # include ranking scores and explanations; restart on SIGHUP
 zimantic serve --dev                  # alias for --debug
 zimantic open zims/a.zim              # throwaway read-only server for one named ZIM
@@ -44,9 +44,9 @@ zimantic open a.zim --no-browser      # print the URL without launching a browse
 zimantic open a.zim --port 9000       # pin a loopback port; default is OS-assigned
 zimantic reload                       # ask a running server to rescan indexes and ZIMs
 zimantic model                        # download the int8 export (CPU default)
-zimantic model fp16                   # download fp16; recommended with a GPU
+zimantic model fp16 --model multilingual-e5-small  # GPU: e5 fp16 export
 zimantic model fp32 fp16              # download selected precisions
-zimantic model --model e5-small-v2    # download another supported e5 model
+zimantic model --model e5-small-v2    # download another supported model
 zimantic model --dir ./models         # write models/<precision>/ instead of model/
 zimantic model --list                 # show supported models and precisions
 ```
@@ -144,7 +144,7 @@ Disk space. Keep about **20% of total ZIM file size** free when building indexes
 
 Tuning keys in `config.toml` are commented out by default. Profile selection uses usable physical cores and effective total RAM, including ancestor cgroup limits, rather than the unrestricted host's CPU/RAM. Mobile applies through 1 GiB; supercomputer applies at 32 usable physical cores or 128 GiB; other hosts use desktop. Profiles choose batching, caches and result pools, while serving thread/process counts are resolved separately. Build concurrency also uses usable logical CPU threads and **available**, not total, RAM.
 
-Copy `config.pi-zero-2w.toml` or `config.pi-5.toml` for memory/batching starting points. Both leave serving counts and source-build concurrency automatic. The Pi 5 preset retains its measured three-thread build override; omit `onnx_build_threads` to use the automatic profile value instead.
+Copy `config.pi-zero-2w.toml` or `config.pi-5.toml` for memory/batching starting points, or `config.gpu.toml` for a GPU host. They leave serving counts and source-build concurrency automatic. The Pi 5 preset retains its measured three-thread build override; omit `onnx_build_threads` to use the automatic profile value instead.
 
 ### Advanced resource overrides
 
@@ -168,9 +168,10 @@ These deprecated config aliases are accepted: `embed_threads` → `onnx_query_th
 
 ## CPU build tuning
 
-On the tested i5-13600KF desktop with multilingual-e5-small int8, smaller model
-calls beat larger batches. This CPU-only configuration retains the normal
-32-row read window:
+On the tested i5-13600KF desktop with the `multilingual-e5-small` alternative,
+smaller model calls beat larger batches. This CPU-only configuration retains the
+normal 32-row read window. The findings describe the transformer pipeline; the
+static default is limited by tokenization rather than model-call size:
 
 ```toml
 embed_device = "cpu"
@@ -192,17 +193,23 @@ for repeated complete-build results and numerical checks.
 
 ## GPU acceleration
 
+Use the `multilingual-e5-small` transformer, not the static default, when you
+have a GPU. The static model is a token-lookup graph that is already fast on a
+CPU and gains little from a device; the transformer is the slow path a GPU
+actually accelerates, and it retrieves better. Copy
+[`config.gpu.toml`](../config.gpu.toml) for a complete starting point.
+
 Quick start for an NVIDIA CUDA host:
 
 ```bash
 uv sync --locked --no-dev
 uv pip install onnxruntime-gpu   # or -rocm, -directml, -openvino
-zimantic model fp16
+zimantic model fp16 --model multilingual-e5-small
 ```
 
 ```toml
 embed_device = "gpu"       # or "cuda"
-model_dir = "model/fp16"   # relative to the XDG data directory
+model_dir = "model/multilingual-e5-small/fp16"   # relative to the XDG data directory
 ```
 
 Install the accelerated wheel after every `uv sync`, because the lockfile
@@ -211,7 +218,7 @@ ONNX Runtime's accelerated execution providers. `embed_device = "auto"` (the def
 
 Supported values are `auto`, `gpu` (prefer an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm` (AMD), `migraphx` (AMD through a MIGraphX-enabled ONNX Runtime build), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection), and `coreml` (Apple). `--device` overrides the setting for one `build` or `serve` run. CoreML is never selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling can be slower than the CPU for this model.
 
-Use the fp16 model with a GPU. Download it with `zimantic model fp16` and point `model_dir` at that folder. Accelerated providers usually run fp16 faster than the default quantized int8 export, which is tuned for CPUs. Keep int8 for CPU-only hosts and small devices.
+Use the fp16 export of `multilingual-e5-small`. Download it with `zimantic model fp16 --model multilingual-e5-small` and point `model_dir` at `model/multilingual-e5-small/fp16`. Accelerated providers usually run fp16 faster than the quantized int8 export, which is tuned for CPUs. Keep the static default on CPU-only hosts and small devices, and keep `e5-small-v2` only for English-only libraries.
 
 The provider comes from the ONNX Runtime package, not from Zimantic. Replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`, `onnxruntime-directml`, or `onnxruntime-openvino`; MIGraphX requires an ONNX Runtime build that includes `MIGraphXExecutionProvider` (for example, a ROCm build targeting gfx803). If the requested provider is missing or cannot initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so the same configuration also runs on machines without a GPU. If a run fails on the device after initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead of failing the build.
 
@@ -247,7 +254,7 @@ a two-source build; they are not universal defaults:
 
 ```toml
 embed_device = "migraphx"
-model_dir = "model/fp16"
+model_dir = "model/multilingual-e5-small/fp16"
 batch_size = 256
 embedding_batch_tokens = 1024
 onnx_build_workers = 4

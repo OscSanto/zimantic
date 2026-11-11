@@ -1,7 +1,8 @@
 # Settings tuned for a Raspberry Pi Zero 2 W (4 cores, 512 MB RAM).
 # Copy this file to config.toml to use them. Build indexes elsewhere or use `build --fast`.
 
-# Matches `zimantic model` (int8 default). Use ./model/fp16 with a GPU.
+# Matches `zimantic model` (int8 default). For a GPU, use the e5
+# transformer: ./model/multilingual-e5-small/fp16 (see config.gpu.toml).
 model_dir = "./model/int8"
 index_dir = "./indexes"
 

@@ -287,7 +287,10 @@ Embedding dominates build time. multilingual-e5-small int8 runs at about **84 do
 on the same restricted CPUs, roughly 12.6 minutes for these 63,608 articles,
 while the entire lexical index builds in 1.8-2.6 seconds. Static embedding
 models replace the transformer with one learned vector per token and mean
-pooling, which makes document encoding roughly 400 times cheaper.
+pooling. The default model encodes at about **12,300 documents/s** through the
+production Rust WordPiece tokenizer and int8 graph (about 147 times faster than
+e5, or about 5 seconds for this corpus); the ONNX graph is the remaining limit.
+A single static query embedding takes about 0.04 ms.
 
 Two [Model2Vec](https://github.com/MinishLab/model2vec) models,
 sentence-transformers' static multilingual model, and the English-only
@@ -299,13 +302,16 @@ WordPiece tokens with Matryoshka-truncatable dimensions.
 
 | Embedding model | Dim | Vocabulary | Parameters | fp32 size | English semantic #1 / top 20 | Hybrid + BM25 #1 / top 20 | Misspelled hybrid #1 | Encode docs/s |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| multilingual-e5-small int8 (production) | 384 | ~250k | ~118M | 118 MB int8 | 20.6% / 36.6% | 55.5% / 91.8% | 58.0% | ~84 |
+| multilingual-e5-small int8 (quality-first alternative) | 384 | ~250k | ~118M | 118 MB int8 | 20.6% / 36.6% | 55.5% / 91.8% | 58.0% | ~84 |
 | e5-small-v2 int8 (English-only) | 384 | ~30.5k | 33M | 34 MB int8 | 21.7% / 38.3% | 56.1% / 92.5% | 58.0% | ~88 |
-| potion-retrieval-32M | 512 | 63,091 | 32.3M | 129.2 MB | 18.5% / 39.2% | 52.6% / 89.0% | 28.0% | ~35,600 |
-| static-similarity-mrl-multilingual-v1 | 1024 | 105,879 | 108.4M | 433.7 MB | 17.0% / 35.7% | 48.3% / 87.1% | 24.0% | ~17,400 |
-| potion-multilingual-128M | 256 | 500,353 | 128.1M | 512.4 MB | 10.2% / 28.3% | 47.3% / 84.6% | 16.0% | ~31,400 |
+| potion-retrieval-32M | 512 | 63,091 | 32.3M | 129.2 MB | 18.2% / 38.5% | 52.6% / 88.9% | 28.0% | ~35,600 |
+| static-similarity-mrl-multilingual-v1, 256d (default) | 256 | 105,879 | 108.4M | 433.7 MB | 15.5% / 31.9% | 47.2% / 86.4% | 26.0% | ~12,300 |
+| potion-multilingual-128M | 256 | 500,353 | 128.1M | 512.4 MB | 10.4% / 29.1% | 47.9% / 84.0% | 14.0% | ~31,400 |
 
-`e5-small-v2` is the English-only counterpart to the production model: a third
+All rows use a 256-token input cap. The default row is measured through the
+production int8 ONNX export; the other static rows use their fp32 weights.
+
+`e5-small-v2` is the English-only counterpart to `multilingual-e5-small`: a third
 of the parameters and int8 bytes, marginally better English quality (+1.1
 points semantic #1, +0.6 hybrid), and identical misspelling behavior. It scores
 about zero on every non-English query set (Spanish 2.4%/3.5%, French
@@ -316,38 +322,42 @@ model's, which shows that model size is not the build bottleneck in this
 pipeline.
 
 `potion-retrieval-32M` is close to e5 on English semantic retrieval and only
-2.9 points behind on hybrid #1, while encoding about 420 times faster and using
-a quarter of the fp32 parameters. It still loses the cases that matter for a
+2.9 points behind on hybrid #1, while its vectorized encoder runs about 420
+times faster and uses a quarter of the fp32 parameters. It still loses the cases that matter for a
 mixed library: misspelled queries (28% versus 58% #1), because averaging fixed
 token vectors gives no contextual correction, and every non-English query set
 because its vocabulary and training are English.
 
-`static-similarity-mrl-multilingual-v1` is the closest multilingual static
-model: it recovers most of e5's English semantic rate (17.0% versus 20.6%, and
-35.7% versus 36.6% top-20) and keeps more cross-language signal than
-`potion-multilingual-128M`. It is still 7.2 points behind on hybrid #1 and loses
-most typo tolerance. Truncating its Matryoshka vectors to 256 dimensions costs
-about one point of hybrid #1 (47.4% / 86.8%) at a quarter of the vector bytes;
-512 dimensions are within 0.1 point of the full 1,024.
+`static-similarity-mrl-multilingual-v1`, truncated to 256 dimensions, is the
+production default. It keeps the best static English semantic rate (15.5%
+versus 10.4% for `potion-multilingual-128M`) and the best static top-20
+(86.4%), and it keeps more cross-language signal than the other multilingual
+static model. Its hybrid #1 ties `potion-multilingual-128M` (47.2% versus
+47.9%), but it is still 8.3 points behind `multilingual-e5-small` on hybrid #1
+and loses most typo tolerance. Truncating the Matryoshka vectors to 256
+dimensions costs about one point of hybrid #1 against the full 1,024, at a
+quarter of the vector bytes; 512 dimensions are within 0.1 point of the full
+size.
 
-The static `docs/s` figures are not measured identically: the two Model2Vec
-models use a vectorized encoder, while the sentence-transformers model was
-mean-pooled per document in numpy. Treat the column as an order of magnitude,
-not a controlled speed ranking.
+The static `docs/s` figures are not measured identically: the original
+Model2Vec models and the official distillations use model2vec's vectorized
+encoder, while the NIFE/SIF arms were mean-pooled per document in numpy. The
+default's rate is measured through the production encoder. Treat the column as
+an order of magnitude.
 
 Semantic #1 / top-20 by query language on this English-only archive (these rows
 test whether the model lands on the right English article from another
 language's phrasing, not retrieval within that language):
 
-| Language | multilingual-e5-small | potion-retrieval-32M | static-similarity-mrl-multilingual-v1 | potion-multilingual-128M |
+| Language | multilingual-e5-small | potion-retrieval-32M | static-similarity-mrl-multilingual-v1, 256d (default) | potion-multilingual-128M |
 |---|---:|---:|---:|---:|
-| English | 20.6% / 36.6% | 18.5% / 39.2% | 17.0% / 35.7% | 10.2% / 28.3% |
-| Spanish | 15.3% / 45.9% | 0.0% / 2.4% | 9.4% / 30.6% | 7.1% / 21.2% |
-| French | 21.2% / 47.1% | 1.2% / 5.9% | 11.8% / 35.3% | 4.7% / 23.5% |
-| Chinese | 4.7% / 36.5% | 0.0% / 0.0% | 8.2% / 41.2% | 3.5% / 14.1% |
-| Hindi | 23.5% / 41.2% | 0.0% / 0.0% | 0.0% / 4.7% | 1.2% / 7.1% |
-| Arabic | 9.4% / 22.4% | 0.0% / 0.0% | 4.7% / 25.9% | 0.0% / 5.9% |
-| German, Italian, Portuguese, Japanese, Russian, Swahili | 1.2-33.3% / 3.5-53.3% | 0.0% / 0.0% | 0.0-13.3% / 1.2-40.0% | 0.0-6.7% / 6.7-33.3% |
+| English | 20.6% / 36.6% | 18.2% / 38.5% | 15.0% / 32.6% | 10.4% / 29.1% |
+| Spanish | 15.3% / 45.9% | 0.0% / 2.4% | 5.9% / 28.2% | 5.9% / 20.0% |
+| French | 21.2% / 47.1% | 1.2% / 5.9% | 8.2% / 28.2% | 4.7% / 23.5% |
+| Chinese | 4.7% / 36.5% | 0.0% / 0.0% | 5.9% / 31.8% | 3.5% / 15.3% |
+| Hindi | 23.5% / 41.2% | 0.0% / 0.0% | 0.0% / 3.5% | 1.2% / 7.1% |
+| Arabic | 9.4% / 22.4% | 0.0% / 0.0% | 2.4% / 16.5% | 0.0% / 5.9% |
+| German, Italian, Portuguese, Japanese, Russian, Swahili | 1.2-33.3% / 3.5-53.3% | 0.0% / 0.0% | 0.0-13.3% / 4.7-40.0% | 0.0-6.7% / 6.7-20.0% |
 
 Static vectors are unit length and drop into the existing IVF-SQ8 index, but
 they separate worse: on `potion-retrieval-32M`, scanning 6% of clusters matches
@@ -356,10 +366,52 @@ only 81.4% of exact top-1 results, versus 94.2% for the 256-dimensional
 `static-similarity-mrl-multilingual-v1`. That would need a higher `nprobe` or
 exact flat search to match e5's ANN recall.
 
-Static embeddings are therefore a plausible opt-in profile for English-only,
-build-speed-sensitive libraries, not the default. Even the closest multilingual
-static model remains 7.2 points behind e5 on hybrid #1, keeps only part of its
-cross-language behavior, and trades away typo tolerance.
+The static model is therefore the default for build speed and memory, not for
+quality: it is 8.3 points behind e5 on hybrid #1, keeps only part of e5's
+cross-language behavior, and trades away typo tolerance. `multilingual-e5-small`
+remains the quality-first alternative.
+
+#### Distilling the production teachers
+
+The published static models combine two steps: distill the teacher's token
+table, then train (Model2Vec's Tokenlearn on C4, or NIFE's MsMARCO
+distillation). To separate them, `intfloat/multilingual-e5-small` and
+`intfloat/multilingual-e5-large` were distilled with model2vec 0.10
+(`distill`, PCA to 256 + SIF weights, no Tokenlearn). A second arm reproduces
+[NIFE](https://github.com/stephantul/pynife)'s initialization step: the same
+teacher token pass with no PCA and no Zipf/SIF weighting.
+
+| Static model | Dim | Encode docs/s | Semantic #1 / top 20 | Hybrid + BM25 #1 / top 20 | Misspelled #1 |
+|---|---:|---:|---:|---:|---:|
+| multilingual-e5-small (teacher) | 384 | ~84 | 20.6% / 36.6% | 55.5% / 91.8% | 58.0% |
+| model2vec distill, e5-small | 256 | ~38,000 | 10.2% / 25.1% | 43.6% / 83.0% | 16.0% |
+| model2vec distill, e5-small, SIF, no PCA | 384 | ~13,600 | 9.9% / 27.9% | 44.9% / 83.6% | 10.0% |
+| model2vec distill, e5-large | 256 | ~30,500 | 10.4% / 27.4% | 45.5% / 84.0% | 14.0% |
+| model2vec distill, e5-large, SIF, no PCA | 1024 | ~5,600 | 12.3% / 28.6% | 46.0% / 83.9% | 14.0% |
+| NIFE init, e5-small | 384 | ~21,700 | 6.2% / 18.4% | 42.1% / 81.4% | 6.0% |
+| NIFE init, e5-large | 1024 | ~17,300 | 7.5% / 18.7% | 41.6% / 82.0% | 2.0% |
+
+Teacher scale barely transfers: distilling e5-large buys 1.9 points of hybrid
+#1 over e5-small. Every distilled model stays below the pretrained
+`potion-multilingual-128M` (47.9% / 84.0%) and
+`static-similarity-mrl-multilingual-v1` (47.2% / 86.4%), and far below the
+teacher. Cross-language matching collapses to about 0% on every non-English
+query set for both teachers, so mean-pooling isolated token states does not
+preserve e5's cross-lingual alignment; only statics trained on parallel or
+multilingual data retain part of it.
+
+NIFE's initialization alone is much weaker than model2vec's PCA + SIF (6.2%
+versus 10.2% semantic #1), and adding the teacher's prompts does not help.
+PCA without weighting is worse still (4.7%). Its published retention (about
+90% of the teacher's NDCG@10 at 60,000-70,000 queries/s) comes from the
+training stages: teacher embeddings over a corpus, optional tokenizer
+expansion, cosine-space distillation for five epochs, then query finetuning.
+pynife ships no multilingual checkpoint (only English `mxbai-embed-large-v1`
+and `gte-modernbert-base`), and its custom-model path needs a corpus and GPU
+training, so those stages are not measured here.
+
+These distillation numbers are therefore a floor, not a ceiling: they exclude
+Tokenlearn, which is part of every published potion model.
 
 ## ZIM iteration and resource bounds
 
@@ -416,7 +468,10 @@ publication are outside the article ETA.
 ## Warm MIGraphX versus CPU builds (gfx803)
 
 Linux x86-64, Intel i5-13600KF (14 physical/20 logical cores, unrestricted
-affinity), 31.2 GiB RAM, AMD gfx803 GPU. CPU uses multilingual-e5-small int8
+affinity), 31.2 GiB RAM, AMD gfx803 GPU. The GPU comparison uses the
+multilingual-e5-small transformer; the static default is a token-lookup graph
+and is not the GPU choice (see [GPU acceleration](usage.md#gpu-acceleration)).
+CPU uses multilingual-e5-small int8
 with ONNX Runtime 1.31.1. GPU uses the fp16 export with ONNX Runtime 1.29.0 in
 `ghcr.io/schaka/rocm-migraphx-ort-torch-builder:latest-gfx803`.
 
@@ -631,7 +686,7 @@ cache is warm; the procedure drops no system caches on the shared host.
 
 Complete `communitybuilding.stackexchange.com_en_all_2026-08.zim`:
 **6,331,350 bytes**, 3,706 entries, 3,508 indexed rows, 1,504 vectors.
-Default multilingual-e5-small int8 model, 256-token inputs, 32-row windows.
+multilingual-e5-small int8 model (the former default), 256-token inputs, 32-row windows.
 Source revision: `3c4349b`. Archive SHA-256:
 `33ba5516c9eb1fcb3da26fbd552cf6a3dda66f956469cf9e7f55e36abedcd424`.
 Model graph SHA-256:

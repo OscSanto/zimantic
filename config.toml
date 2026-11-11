@@ -1,6 +1,7 @@
 # Zimantic settings. Omitted settings use hardware-based defaults, but collections
 # are never implicit: add at least one [[collections]] entry to have a library.
-# See config.pi-zero-2w.toml and config.pi-5.toml for tuned starting points.
+# See config.pi-zero-2w.toml, config.pi-5.toml and config.gpu.toml for tuned
+# starting points.
 
 # Provider paths ([[collections]] path/database_path/storage) are resolved
 # once against the directory containing the active config file, including when
@@ -28,9 +29,12 @@
 # name = "library"
 # path = "zims"
 #
-# Must contain model.onnx and either sentencepiece.bpe.model (multilingual-e5)
-# or vocab.txt (English e5-v2). `zimantic model` writes model/int8 (the CPU
-# default) or model/fp16 (recommended with a GPU).
+# Must contain model.onnx and either vocab.txt (WordPiece; used by the static
+# default and English e5-v2) or sentencepiece.bpe.model (multilingual-e5).
+# `zimantic model` writes model/int8 for the CPU default and derives vocab.txt.
+# On a GPU host, use the e5 transformer instead:
+#   zimantic model fp16 --model multilingual-e5-small
+#   model_dir = "model/multilingual-e5-small/fp16"
 # model_dir = "model/int8"
 #
 # Where current index generations are written. Root-level v0 index pairs can be

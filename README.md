@@ -36,7 +36,7 @@ Zimantic searches local ZIM archives directly and does not need a separate Kiwix
 
 - Python 3.11–3.14 with native dependency wheels available for the interpreter. `libzim` publishes wheels for specific Python ABIs and platforms, so select an interpreter with a compatible wheel. Update this range when the native dependencies support a newer Python version.
 - On 32-bit Linux platforms (armhf/armv7), the native dependencies have no prebuilt wheels. They work as distribution packages. Debian 13 (trixie) or newer provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic can use them. Known 32-bit machine names accept python-libzim 3 or newer; other machines require 4.1 or newer. Python package markers report the machine name, not interpreter bitness, so a 32-bit interpreter that reports a 64-bit machine name requires 4.1.
-- About 120 MB for the default embedding model, plus the ZIM files. The English-only `e5-small-v2` model is about 35 MB on disk.
+- About 110 MB for the default embedding model, plus the ZIM files. The `multilingual-e5-small` alternative is about 120 MB, and the English-only `e5-small-v2` model about 35 MB on disk.
 - Wikipedia-style ZIM files. Zimantic relies on their predictable HTML structure to locate useful content blocks.
 - One provider seam covers ZIM, remote Kiwix, files, and Kolibri. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
 - Configured collections are declared with `[[collections]]` entries for ZIM roots, Kiwix servers, files trees, and Kolibri installations.
@@ -73,7 +73,7 @@ Zimantic searches local ZIM archives directly and does not need a separate Kiwix
        python3-sentencepiece python3-faiss python3-libzim python3-pymupdf \
        python3-fastapi python3-uvicorn
    python3 -m venv --system-site-packages .venv
-   .venv/bin/pip install 'puremagic>=1.30'
+   .venv/bin/pip install 'puremagic>=1.30' 'tokenizers>=0.23'
    .venv/bin/pip install --no-deps .
    ln -sfn "$PWD/.venv/bin/zimantic" ~/.local/bin/zimantic
    ```
@@ -84,16 +84,18 @@ Zimantic searches local ZIM archives directly and does not need a separate Kiwix
    zimantic model
    ```
 
-   The command downloads the int8 export to `$XDG_DATA_HOME/zimantic/model/int8/model.onnx` and its tokenizer vocabulary. On a GPU host, use `zimantic model fp16` instead; fp16 is faster on CUDA, ROCm, DirectML, and OpenVINO, while int8 is the smallest CPU-oriented default. Set `model_dir = "model/fp16"` in the XDG config in that case. `zimantic model --list` shows the other supported e5 models, and `zimantic model --help` shows the options. To download manually:
+   The command downloads the default static model's int8 export to `$XDG_DATA_HOME/zimantic/model/int8/` together with its WordPiece vocabulary. On a GPU host, use the `multilingual-e5-small` transformer instead: `zimantic model fp16 --model multilingual-e5-small`, then set `model_dir = "model/multilingual-e5-small/fp16"`. Accelerated providers run fp16 faster than int8, the static default gains little from a GPU, and the transformer retrieves better. Copy `config.gpu.toml` for a complete starting point. `zimantic model --list` shows every supported model, and `zimantic model --help` shows the options.
+
+   For a manual install of the quality-first transformer alternative, `multilingual-e5-small`:
 
    ```bash
    data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-   mkdir -p "$data_home/zimantic/model/int8"
-   curl -L -o "$data_home/zimantic/model/int8/model.onnx" https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
-   curl -L -o "$data_home/zimantic/model/int8/sentencepiece.bpe.model" https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
+   mkdir -p "$data_home/zimantic/model-e5/int8"
+   curl -L -o "$data_home/zimantic/model-e5/int8/model.onnx" https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx
+   curl -L -o "$data_home/zimantic/model-e5/int8/sentencepiece.bpe.model" https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model
    ```
 
-   English-only and larger multilingual models use the same layout; see [Using a different embedding model](docs/search.md#using-a-different-embedding-model). Zimantic warns when `model.onnx` or `sentencepiece.bpe.model` differs from a documented checksum, but continues to run.
+   Then set `model_dir = "model-e5/int8"`. Do not copy the static model's files by hand: it ships its vocabulary only as `tokenizer.json`, and `zimantic model` derives the runtime `vocab.txt` from it. English-only and larger multilingual models use the same layout; see [Using a different embedding model](docs/search.md#using-a-different-embedding-model). A file that does not match a documented checksum is reported, but Zimantic continues to run.
 
 4. Put ZIM files in `$XDG_DATA_HOME/zimantic/zims/`. Download them from [library.kiwix.org](https://library.kiwix.org) or [download.kiwix.org/zim](https://download.kiwix.org/zim/).
 
@@ -127,13 +129,15 @@ Download the default model with the CLI:
 zimantic model
 ```
 
-On Windows, the default `model_dir` is `./model/int8`. On a GPU host, use `zimantic model fp16` and set `model_dir = "./model/fp16"` in `config.toml`. To download the int8 model manually:
+On Windows, the default `model_dir` is `./model/int8`. On a GPU host, use `zimantic model fp16 --model multilingual-e5-small` and set `model_dir = "./model/multilingual-e5-small/fp16"` in `config.toml`. The static default ships its vocabulary only as `tokenizer.json`, and the command derives the runtime `vocab.txt`; use the CLI rather than copying those files by hand. For a manual install of the `multilingual-e5-small` alternative:
 
 ```powershell
-New-Item -ItemType Directory -Force model\int8 | Out-Null
-Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model\int8\model.onnx
-Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model\int8\sentencepiece.bpe.model
+New-Item -ItemType Directory -Force model-e5\int8 | Out-Null
+Invoke-WebRequest -Uri https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/model_quantized.onnx -OutFile model-e5\int8\model.onnx
+Invoke-WebRequest -Uri https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/sentencepiece.bpe.model -OutFile model-e5\int8\sentencepiece.bpe.model
 ```
+
+Then set `model_dir = "./model-e5/int8"`.
 
 `zimantic reload` is unavailable on Windows because it relies on `SIGHUP`. Restart `zimantic serve` to reload. Stop the server before you replace or delete a ZIM or index file. Windows does not allow an open file to be replaced in place.
 
