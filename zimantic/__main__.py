@@ -673,6 +673,65 @@ def _build_config(cfg: dict, fast: bool) -> dict:
     return values
 
 
+def _make_build_embedding_context(cfg: dict, args, parser: argparse.ArgumentParser):
+    """Create the lazy embedder and shared pipeline for any build path.
+
+    Positional and configured builds must agree on ``onnx_build_threads``,
+    ``onnx_build_workers``, queue size, and token budget. ``--workers`` only
+    controls concurrent source builds; it must not cap model concurrency.
+    """
+    if getattr(args, "fast", False):
+        return None, None
+
+    from .embed import Embedder
+    from .hardware import detect
+    from .indexing.pipeline import EmbeddingPipeline
+    from .settings import default_embedding_workers
+
+    build_embed_threads = cfg.get("onnx_build_threads") or 1
+    token_budget = int(cfg.get("embedding_batch_tokens", 1000))
+
+    def _make_embedder():
+        return Embedder(
+            cfg["model_dir"],
+            threads=build_embed_threads,
+            device=getattr(args, "device", None) or cfg.get("embed_device"),
+            batch_tokens=token_budget,
+            onnx_warnings=bool(getattr(args, "verbose", 0)),
+        )
+
+    embedder = _LazyEmbedder(_make_embedder)
+    hw = detect()
+    embedding_workers = int(
+        cfg.get("onnx_build_workers")
+        or default_embedding_workers(
+            build_embed_threads=build_embed_threads,
+            token_budget=token_budget,
+        )
+    )
+    if embedding_workers < 1 or token_budget < 1:
+        parser.error(
+            "onnx_build_workers and embedding_batch_tokens must be at least 1"
+        )
+    logger.info(
+        "zimantic: build hardware: %s; %d embedding workers x %d threads, "
+        "%d padded tokens per call",
+        hw.describe(),
+        embedding_workers,
+        build_embed_threads,
+        token_budget,
+    )
+    pipeline = EmbeddingPipeline(
+        embedder,
+        workers=embedding_workers,
+        queue_size=_embedding_queue_size(
+            cfg, embedding_workers, getattr(args, "device", None)
+        ),
+        token_budget=token_budget,
+    )
+    return embedder, pipeline
+
+
 def _provider_kinds() -> tuple[str, ...]:
     from .providers.config import BUILTIN_PROVIDERS
 
@@ -1051,7 +1110,7 @@ def _build_tasks(
 ) -> None:
     """Build one or more already-discovered sources through the generic pipeline."""
     from .indexing.locator import IndexLocator
-    from .indexing.pipeline import EmbeddingPipeline, _AllFilesProgress, build_index
+    from .indexing.pipeline import _AllFilesProgress, build_index
 
     workers = args.workers
     if workers is None:
@@ -1059,46 +1118,7 @@ def _build_tasks(
     if workers < 1:
         parser.error("--workers must be at least 1")
 
-    embedder = None
-    embedding_pipeline = None
-    if not args.fast:
-        from .embed import Embedder
-
-        build_embed_threads = cfg.get("onnx_build_threads") or 1
-        token_budget = int(cfg.get("embedding_batch_tokens", 1000))
-
-        def _make_embedder():
-            return Embedder(
-                cfg["model_dir"],
-                threads=build_embed_threads,
-                device=getattr(args, "device", None) or cfg.get("embed_device"),
-                batch_tokens=token_budget,
-                onnx_warnings=bool(getattr(args, "verbose", 0)),
-            )
-
-        embedder = _LazyEmbedder(_make_embedder)
-        from .hardware import detect
-        from .settings import default_embedding_workers
-
-        hw = detect()
-        embedding_workers = int(cfg.get("onnx_build_workers") or default_embedding_workers(
-            build_embed_threads=build_embed_threads, token_budget=token_budget
-        ))
-        if embedding_workers < 1 or token_budget < 1:
-            parser.error("onnx_build_workers and embedding_batch_tokens must be at least 1")
-        logger.info(
-            "zimantic: build hardware: %s; %d embedding workers x %d threads, "
-            "%d padded tokens per call",
-            hw.describe(), embedding_workers, build_embed_threads, token_budget,
-        )
-        embedding_pipeline = EmbeddingPipeline(
-            embedder,
-            workers=embedding_workers,
-            queue_size=_embedding_queue_size(
-                cfg, embedding_workers, getattr(args, "device", None)
-            ),
-            token_budget=token_budget,
-        )
+    embedder, embedding_pipeline = _make_build_embedding_context(cfg, args, parser)
 
     build_cfg = _build_config(cfg, args.fast)
     derived_pool = None
@@ -1400,34 +1420,7 @@ def _run_positional_zim_build(
         zim_sizes = {zim: zim.stat().st_size for zim in zims}
     zims = _select_zim_paths(zims, zim_sizes)
 
-    embedder = None
-    embedding_pipeline = None
-    if not args.fast:
-        from .embed import Embedder
-        from .indexing.pipeline import EmbeddingPipeline
-
-        def _make_embedder():
-            return Embedder(
-                cfg["model_dir"],
-                threads=cfg.get("onnx_build_threads"),
-                device=getattr(args, "device", None) or cfg.get("embed_device"),
-                batch_tokens=int(cfg.get("embedding_batch_tokens", 1000)),
-                onnx_warnings=bool(getattr(args, "verbose", 0)),
-            )
-
-        embedder = _LazyEmbedder(_make_embedder)
-        if workers >= 1:
-            embedding_workers = int(cfg.get("onnx_build_workers", 2))
-            if embedding_workers < 1:
-                parser.error("onnx_build_workers must be at least 1")
-            embedding_pipeline = EmbeddingPipeline(
-                embedder,
-                workers=min(embedding_workers, max(1, workers)),
-                queue_size=_embedding_queue_size(
-                    cfg, workers, getattr(args, "device", None)
-                ),
-                token_budget=int(cfg.get("embedding_batch_tokens", 1000)),
-            )
+    embedder, embedding_pipeline = _make_build_embedding_context(cfg, args, parser)
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     build_cfg["interrupt_event"] = _BUILD_STOP_EVENT or threading.Event()

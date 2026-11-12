@@ -261,6 +261,48 @@ class BuildWorkerTests(unittest.TestCase):
         )
         self.assertFalse(any(cfg["_stage_split"] for cfg in configs))
 
+    def test_positional_build_uses_configured_embedding_workers(self):
+        import zimantic.__main__ as main_module
+
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
+        with tempfile.TemporaryDirectory() as tmp:
+            zim = Path(tmp) / "one.zim"
+            zim.write_bytes(b"ZIM\x04")
+            config = {
+                "index_dir": str(Path(tmp) / "indexes"),
+                "model_dir": "/unused/model",
+                "onnx_build_workers": 3,
+                "embedding_batch_tokens": 1000,
+                "onnx_build_threads": 2,
+            }
+            args = types.SimpleNamespace(
+                workers=1,
+                fast=False,
+                force=False,
+                paths=[zim],
+                list=False,
+                wait_stable=False,
+            )
+            with (
+                patch.object(
+                    main_module, "_build_producer_for_zim", return_value=object()
+                ),
+                patch.object(
+                    build_module, "build_index", return_value=_build_report()
+                ),
+                patch.object(build_module, "EmbeddingPipeline") as pipeline,
+                patch("zimantic.embed.Embedder") as embedder,
+                patch.object(
+                    main_module, "_embedding_queue_size", return_value=32
+                ),
+            ):
+                main_module._run_positional_zim_build(
+                    config, args, argparse.ArgumentParser()
+                )
+            embedder.assert_not_called()
+            self.assertEqual(pipeline.call_args.kwargs["workers"], 3)
+            self.assertEqual(pipeline.call_args.kwargs["queue_size"], 32)
+
     def test_build_stability_wait_is_opt_in(self):
         import zimantic.__main__ as main_module
         from zimantic import settings
