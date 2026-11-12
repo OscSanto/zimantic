@@ -316,6 +316,20 @@ def test_derived_cache_prune_recounts_kept_entries(tmp_path):
     assert cache._bytes == kept.stat().st_size
 
 
+def test_derived_pool_terminates_after_a_runaway_task():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from zimantic.indexing.derived import DerivedWorkerPool
+
+    pool = DerivedWorkerPool(1)
+    pool.mark_runaway()
+    executor = SimpleNamespace(shutdown=Mock(), _processes={})
+    pool._executor = executor
+    pool.close()
+    executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+
 @pytest.mark.skipif(
     shutil.which("tesseract") is None, reason="tesseract is unavailable"
 )

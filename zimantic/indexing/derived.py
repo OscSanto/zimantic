@@ -735,6 +735,7 @@ class DerivedWorkerPool:
             max_tasks_per_child=max_tasks_per_child,
         )
         self._closed = False
+        self._runaway = False
 
     def submit(
         self,
@@ -749,8 +750,18 @@ class DerivedWorkerPool:
             _worker_extract, operation, engine, payload, dict(options)
         )
 
+    def mark_runaway(self) -> None:
+        """Record that a task exceeded its timeout and may still be running."""
+        self._runaway = True
+
     def close(self) -> None:
         if self._closed:
+            return
+        if self._runaway:
+            # A running ProcessPoolExecutor task cannot be cancelled. Waiting
+            # for it would block the build for the full task timeout, so stop
+            # the pool instead.
+            self.terminate()
             return
         self._closed = True
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -1033,6 +1044,7 @@ class DerivedTextStage:
         try:
             return future.result(timeout=timeout)
         except TimeoutError as error:
+            self.worker_pool.mark_runaway()
             future.cancel()
             raise RuntimeError(
                 f"{operation} worker timed out after {timeout:g}s"
