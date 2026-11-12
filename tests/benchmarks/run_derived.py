@@ -89,14 +89,27 @@ def main() -> int:
     for workers in worker_sizes:
         trials[f"pool-{workers}"] = []
     digests: dict[str, str] = {}
+    expected_digest: str | None = None
+
+    def record(name: str, digest: str) -> None:
+        nonlocal expected_digest
+        if expected_digest is None:
+            expected_digest = digest
+        elif digest != expected_digest:
+            raise SystemExit(
+                f"{name} produced a different text digest; the benchmark "
+                "cannot compare timings for non-identical output"
+            )
+        digests.setdefault(name, digest)
+
     for _ in range(max(1, args.repeats)):
         elapsed, digest = _run_sequential(payload, args.count, options)
         trials["sequential"].append(elapsed)
-        digests.setdefault("sequential", digest)
+        record("sequential", digest)
         for workers in worker_sizes:
             elapsed, digest = _run_pool(payload, args.count, options, workers)
             trials[f"pool-{workers}"].append(elapsed)
-            digests.setdefault(f"pool-{workers}", digest)
+            record(f"pool-{workers}", digest)
 
     baseline = statistics.median(trials["sequential"])
     report = {
