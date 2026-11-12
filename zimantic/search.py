@@ -2890,6 +2890,10 @@ class Search:
         final page is ranked, and cutting every preview off there would make
         the excerpt depend on how long the source fan-out took.
         """
+        # The public document contract always carries ``lead``. A source group
+        # that is skipped by the budget may otherwise leave the key missing.
+        for doc in docs:
+            doc.setdefault("lead", "")
         if self.preview_limit <= 0:
             return
         if deadline is None:

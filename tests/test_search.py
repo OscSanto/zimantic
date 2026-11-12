@@ -1801,6 +1801,19 @@ class SearchContractTests(unittest.TestCase):
         self.assertGreaterEqual(deadlines[0] - before, 4.0)
         self.assertEqual(search.preview_cache.stats()["size"], 0)
 
+    def test_hydration_always_sets_lead(self):
+        search = _bare_search({})
+        self.addCleanup(search._executor.shutdown, wait=True)
+        search.preview_limit = 0
+        doc = {
+            "id": "item",
+            "path": "alpha",
+            "title": "Alpha",
+            "source_key": "missing",
+        }
+        search._hydrate_results([doc])
+        self.assertEqual(doc["lead"], "")
+
     def test_preview_hydration_is_bounded(self):
         class _Entry:
             _index = 1
