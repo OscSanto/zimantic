@@ -1,4 +1,4 @@
-"""Adapters for the libzim 3 and 4 entry and search APIs."""
+"""Adapters for the released libzim 4 entry and search APIs."""
 
 import inspect
 from functools import cache
@@ -19,19 +19,14 @@ def supports_threaded_search() -> bool:
 
 
 def get_entry_by_id(archive: Any, entry_id: int) -> Any:
-    getter = getattr(archive, "get_entry_by_id", None)
-    if getter is None:
-        getter = archive._get_entry_by_id
-    return getter(entry_id)
+    return archive.get_entry_by_id(entry_id)
 
 
 def search_results(
     search: Any, start: int, count: int, *, archive: Any = None,
     include_snippets: bool = True, include_index: bool = False,
 ) -> list[dict[str, Any]]:
-    getter = getattr(search, "get_results", None)
-    if getter is None:
-        getter = search.getResults
+    getter = search.get_results
     native_results = (
         getter(start, count, include_snippets=False)
         if not include_snippets and supports_threaded_search()
@@ -39,11 +34,8 @@ def search_results(
     )
     results = []
     for result in native_results:
-        if isinstance(result, str):
-            path, title = result, ""
-        else:
-            path = getattr(result, "path", result)
-            title = getattr(result, "title", "")
+        path = result.path
+        title = result.title
         entry = None
         if path and archive is not None and (not title or include_index):
             try:

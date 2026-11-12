@@ -20,9 +20,9 @@ dependencies = [
     "faiss-cpu",
     "fastapi",
     "uvicorn",
-    "libzim>=3",
-    # PEP 508 has no bitness marker; match known 32-bit machine names.
-    "libzim>=4.1.0; platform_machine not in 'arm armhf armv5l armv5tel armv6b armv6l armv7b armv7l armv8b armv8l i386 i486 i586 i686 x86 x86_32 mips mipsel ppc powerpc riscv32 s390 sh4 sparc m68k'",
+    # libzim 4.1 provides the efficient iterator and the modern entry/search
+    # bindings this project uses directly.
+    "libzim>=4.1.0",
     "puremagic>=1.30",
     "pymupdf",
     # Known 32-bit machines use the stdlib HTML fallback.

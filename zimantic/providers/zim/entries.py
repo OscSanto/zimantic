@@ -208,23 +208,26 @@ class ArchiveEntryProducer:
     def prepare_iteration(self, order: str | None = None) -> str:
         """Keep canonical ids and caps while choosing a resumable reading order.
 
-        Native order groups article work first; older bindings use ID order.
-        Only metadata is read here, never compressed article bodies.
+        Native ``iter_efficient`` order groups article work first. ``id-v1`` is
+        accepted only to resume a staged build created by an older release;
+        every new build requires python-libzim 4.1 or later. Only metadata is
+        read here, never compressed article bodies.
         """
         if order not in (None, "efficient-v1", "id-v1"):
             raise ValueError(f"unsupported ZIM entry order {order!r}")
         self._order = None
         self.article_work_count = None
         self.order_fingerprint = ""
-        iterator = getattr(self._open(), "iter_efficient", None)
-        has_efficient_order = callable(iterator)
-        if order == "id-v1" or (order is None and not has_efficient_order):
+        if order == "id-v1":
             self.order_fingerprint = hashlib.sha256(
                 f"zim:id-v1:{self.count}".encode("ascii")
             ).hexdigest()
             return "id-v1"
-        if not has_efficient_order:
-            raise RuntimeError("resuming efficient ZIM order requires libzim 4.1")
+        iterator = getattr(self._open(), "iter_efficient", None)
+        if not callable(iterator):
+            raise RuntimeError(
+                "ZIM builds require python-libzim 4.1 or later (iter_efficient)"
+            )
         import numpy as np
 
         def entries():

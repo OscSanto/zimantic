@@ -194,7 +194,7 @@ These distillation numbers are therefore a floor, not a ceiling: they exclude To
 
 ## ZIM iteration and resource limits
 
-ZIM builds use `iter_efficient()` from python-libzim 4.1.0 or later. This iterator follows storage order; its exact order is not part of the public contract. Earlier python-libzim versions use entry-ID order, which is slower. `iter_by_path()` and `iter_by_title()` do not follow storage order. The build records the selected order and its digest. Resume preserves ID order after an upgrade and rejects a different order or an incomplete manifest instead of applying saved row positions to a different sequence. Completed indexes stay valid.
+ZIM builds require python-libzim 4.1.0 or later and use its `iter_efficient()` iterator. This iterator follows storage order; its exact order is not part of the public contract. `iter_by_path()` and `iter_by_title()` do not follow storage order. The build records the selected order and its digest. A staged build created by a pre-4.1 release can resume in ID order; new builds never use that fallback. Resume rejects a different order or an incomplete manifest instead of applying saved row positions to a different sequence. Completed indexes stay valid.
 
 Builds use row windows with limits, not article-count windows. This also limits redirect and title-only rows. A shared body-text budget limits retained text. The build flushes queued work before it waits for budget that the same build holds.
 

@@ -13,6 +13,8 @@ from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
+from libzim.reader import set_cluster_cache_max_size
+
 if TYPE_CHECKING:
     from libzim.reader import Archive
 
@@ -44,14 +46,9 @@ def resolve_archive_href(
     return normalize_archive_path(candidate)
 
 
-try:
-    from libzim.reader import set_cluster_cache_max_size
-except ImportError:
-    pass
-else:
-    # libzim undercounts this cache: its 16 MB default really used ~170 MB.
-    # 1 MB used ~4 MB and was not slower.
-    set_cluster_cache_max_size(1 << 20)  # 1*2^20 = ~1MB
+# libzim undercounts this cache: its 16 MB default really used ~170 MB.
+# 1 MB used ~4 MB and was not slower.
+set_cluster_cache_max_size(1 << 20)  # 1*2^20 = ~1MB
 
 # Best-effort budget for one entry parse (HTML or PDF). Parsers check a shared
 # deadline cooperatively during DOM traversal/PDF pages and return the partial
