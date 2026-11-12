@@ -160,6 +160,23 @@ def test_new_builds_require_the_efficient_iterator(tmp_path):
         producer.close()
 
 
+def test_staged_id_order_can_still_resume(tmp_path):
+    from types import SimpleNamespace
+
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
+
+    path = tmp_path / "legacy.zim"
+    _create_zim(path)
+    source = SimpleNamespace(key="legacy", provider="zim", collection_key="zim:test")
+    producer = ArchiveEntryProducer(source, path, fast=True)
+    try:
+        assert producer.prepare_iteration("id-v1") == "id-v1"
+        assert producer.order_fingerprint
+        assert producer.entry_at(0).id == 0
+    finally:
+        producer.close()
+
+
 def _context(index_dir: Path, *, archive_factory=Archive) -> ProviderContext:
     return ProviderContext(
         config=RuntimeConfig(),
