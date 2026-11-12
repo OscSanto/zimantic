@@ -40,9 +40,11 @@ path and validated options cross the process boundary. The built-in SubRip and
 WebVTT parser always runs in-process because it is pure Python.
 
 `"auto"` sizes the pool from usable cores minus one and currently available
-memory (512 MiB per worker, with headroom). If no worker fits, the engine-backed
-operations are reported unavailable instead of risking memory pressure; the
-built-in caption parser still works. A single source still reads and extracts
+memory (512 MiB per worker, with headroom), then bounds it by the number of
+concurrently built sources because each source submits one extraction at a
+time. If no worker fits, the engine-backed operations are reported unavailable
+instead of risking memory pressure; the built-in caption parser still works. A
+single source still reads and extracts
 its entries sequentially; the pool overlaps extraction across concurrently
 built sources. Use the benchmark in `tests/benchmarks/run_derived.py` to compare
 pool sizes on the target hardware.
