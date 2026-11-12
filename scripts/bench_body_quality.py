@@ -92,8 +92,8 @@ def serve(args):
     cfg = {
         **DESKTOP, "zim_dir": str(args.output.parent / "zims"),
         "index_dir": str(args.output / "indexes"), "model_dir": str(args.model),
-        "embed_device": "cpu", "embed_threads": args.threads,
-        "build_embed_threads": args.threads, "embedding_workers": 1,
+        "embed_device": "cpu", "onnx_query_threads": args.threads,
+        "onnx_build_threads": args.threads, "onnx_build_workers": 1,
         "cache_size": 0, "cache_bytes": 0,
     }
     metrics = {"save_seconds": 0.0, "body_docs": 0}
