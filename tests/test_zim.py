@@ -281,6 +281,33 @@ class TextExtractionTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_empty_body_falls_back_to_the_excerpt(self):
+        html = (
+            "<html><body><p>éclair au chocolat est délicieux et "
+            "suffisamment long pour être retenu comme article.</p></body></html>"
+        ).encode()
+
+        class _Item:
+            mimetype = "text/html"
+            content = html
+
+        class _Entry:
+            is_redirect = False
+            title = "Café"
+            path = "cafe"
+
+            def get_item(self):
+                return _Item()
+
+        class _Archive:
+            def get_entry_by_id(self, _index):
+                return _Entry()
+
+        row = content_reader.read_entry(_Archive(), 0, max_body_text_bytes=1)
+        self.assertIsNotNone(row)
+        self.assertTrue(row.excerpt)
+        self.assertEqual(row.body, row.excerpt)
+
     @unittest.skipUnless(content_reader.LexborHTMLParser, "requires Lexbor DOM recovery")
     def test_deep_valid_containers_retain_prose_without_duplicates(self):
         text = "Useful article prose inside deeply nested containers should remain readable."

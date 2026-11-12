@@ -1535,12 +1535,14 @@ def _read_html_entry(
                 input_truncated=truncated,
             )
             body_truncated = body_truncated or extracted_truncated
-            if not body and excerpt:
-                body = excerpt
-                body_truncated = False
         else:
             body, byte_truncated = truncate_utf8(body, max_body_text_bytes)
             body_truncated = body_truncated or byte_truncated
+        if not body and excerpt:
+            # A byte cap can truncate a multi-byte opening character to an
+            # empty body. Keep the excerpt rather than publishing no body text.
+            body = excerpt
+            body_truncated = False
         return EntryRecord(
             entry_id,
             title,
