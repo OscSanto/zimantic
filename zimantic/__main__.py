@@ -1431,7 +1431,11 @@ def _run_positional_zim_build(
     build_cfg = _build_config(cfg, args.fast)
     build_cfg["embedding_pipeline"] = embedding_pipeline
     build_cfg["interrupt_event"] = _BUILD_STOP_EVENT or threading.Event()
-    build_cfg["_stage_split"] = not (workers > 1 and len(zims) > 1)
+    concurrent_sources = (
+        1 if workers == 1 or len(zims) == 1 else min(workers, len(zims))
+    )
+    build_cfg["_stage_split"] = concurrent_sources == 1
+    build_cfg["_concurrent_sources"] = concurrent_sources
     locator = IndexLocator(cfg["index_dir"])
     failures: list[tuple[Path, BaseException]] = []
     interrupted = False

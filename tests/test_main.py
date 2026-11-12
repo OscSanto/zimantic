@@ -218,6 +218,49 @@ class BuildWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "not a ZIM file"):
                 main_module._collect_zims([path], Path(tmp))
 
+    def test_positional_build_divides_reader_processes(self):
+        import zimantic.__main__ as main_module
+
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
+        with tempfile.TemporaryDirectory() as tmp:
+            zims = [Path(tmp) / "one.zim", Path(tmp) / "two.zim"]
+            for path in zims:
+                path.write_bytes(b"ZIM\x04")
+            configs = []
+            args = types.SimpleNamespace(
+                workers=2,
+                fast=True,
+                force=False,
+                paths=zims,
+                list=False,
+                wait_stable=False,
+            )
+            with (
+                patch.object(
+                    main_module, "_build_producer_for_zim", return_value=object()
+                ),
+                patch.object(
+                    build_module,
+                    "build_index",
+                    side_effect=lambda _producer, _locator, _embedder, cfg, **_kw: (
+                        configs.append(cfg) or _build_report()
+                    ),
+                ),
+            ):
+                main_module._run_positional_zim_build(
+                    {
+                        "index_dir": str(Path(tmp) / "indexes"),
+                        "build_workers": 2,
+                    },
+                    args,
+                    argparse.ArgumentParser(),
+                )
+        self.assertEqual(len(configs), 2)
+        self.assertTrue(
+            all(cfg["_concurrent_sources"] == 2 for cfg in configs)
+        )
+        self.assertFalse(any(cfg["_stage_split"] for cfg in configs))
+
     def test_build_stability_wait_is_opt_in(self):
         import zimantic.__main__ as main_module
         from zimantic import settings
