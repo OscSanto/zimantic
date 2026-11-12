@@ -861,6 +861,24 @@ def test_derived_config_and_workers_are_validated():
     assert binding == "memory"
 
 
+def test_clear_staging_removes_sqlite_sidecars(tmp_path):
+    db_path = tmp_path / "staging-full.sqlite"
+    faiss_path = tmp_path / "staging-full.faiss"
+    db_path.write_bytes(b"db")
+    faiss_path.write_bytes(b"faiss")
+    sidecars = [
+        Path(f"{db_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")
+    ]
+    for path in sidecars:
+        path.write_bytes(b"sidecar")
+
+    build_module._clear_staging(db_path, faiss_path)
+
+    assert not db_path.exists()
+    assert not faiss_path.exists()
+    assert all(not path.exists() for path in sidecars)
+
+
 def test_spooled_input_is_private_and_bounded():
     import os
 

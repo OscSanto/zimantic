@@ -626,8 +626,14 @@ def _staging_paths(directory: Path, mode: str) -> tuple[Path, Path]:
 
 
 def _clear_staging(db_path: Path, faiss_path: Path) -> None:
-    db_path.unlink(missing_ok=True)
-    faiss_path.unlink(missing_ok=True)
+    for path in (
+        db_path,
+        Path(f"{db_path}-wal"),
+        Path(f"{db_path}-shm"),
+        Path(f"{db_path}-journal"),
+        faiss_path,
+    ):
+        path.unlink(missing_ok=True)
 
 
 def _reset_staging(db_path: Path, faiss_path: Path) -> sqlite3.Connection:
@@ -2050,8 +2056,7 @@ def build_index(
         )
         lease.close()
         locator.cleanup(source)
-        state.build_db_path.unlink(missing_ok=True)
-        state.build_faiss_path.unlink(missing_ok=True)
+        _clear_staging(state.build_db_path, state.build_faiss_path)
         completed = True
         current = _read_published_state(locator, source)
         report_meta: Mapping[str, str] = {}
