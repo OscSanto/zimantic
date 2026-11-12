@@ -607,8 +607,6 @@ class LoadConfigTests(unittest.TestCase):
         })
 
     def test_zim_and_kiwix_reject_derived_source_overrides(self):
-        from zimantic.providers.config import ConfigValidationError
-
         for kind, extra in (
             ("zim", 'path = "zims"\n'),
             ("kiwix", 'server = "http://localhost:8085"\n'),
@@ -621,11 +619,16 @@ class LoadConfigTests(unittest.TestCase):
                     'sources = [{ key = "' + kind + ':lib:item", ocr = "tesseract" }]\n',
                     encoding="utf-8",
                 )
-                with self.assertRaisesRegex(
-                    ConfigValidationError,
-                    f"{kind} collections do not support derived-text",
-                ):
-                    load_config(path, warn=lambda _: None)
+                warnings = []
+                cfg = load_config(path, warn=warnings.append)
+                self.assertEqual(cfg["collections"], ())
+                self.assertTrue(
+                    any(
+                        f"{kind} collections do not support derived-text"
+                        in message
+                        for message in warnings
+                    )
+                )
 
     def test_bad_source_override_reports_its_own_config_section(self):
         from zimantic.providers.config import ConfigValidationError
