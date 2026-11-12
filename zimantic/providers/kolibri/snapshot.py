@@ -467,12 +467,6 @@ class SnapshotManager:
                     "and storage roots"
                 )
 
-    def _current_bytes(self) -> int:
-        with _LOCK:
-            return sum(
-                size for _directory, size in _LIVE_SNAPSHOTS.get(self._key, ())
-            )
-
     def _register(self, directory: Path, size: int) -> None:
         if size > self.max_snapshot_bytes:
             raise SnapshotBudgetError(

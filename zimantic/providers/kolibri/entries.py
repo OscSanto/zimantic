@@ -258,7 +258,6 @@ class KolibriEntryProducer:
         self.errors = snapshot_value.errors
         self._row_ids: list[int] = []
         seen: dict[int, tuple[str, str]] = {}
-        self._node_ids_by_row_id: dict[int, str] = {}
         for item in self._items:
             row_id = row_id_for(self.channel.id, item.node.id)
             other = seen.get(row_id)
@@ -269,7 +268,6 @@ class KolibriEntryProducer:
                 )
             seen[row_id] = (self.channel.id, item.node.id)
             self._row_ids.append(row_id)
-            self._node_ids_by_row_id[row_id] = item.node.id
         self.source_size = sum(
             item.primary_size or 0 for item in self._items
         )
@@ -715,14 +713,6 @@ class KolibriEntryProducer:
         if not isinstance(index, int) or index < 0 or index >= self.count:
             return None
         return self._items[index].primary_mtime
-
-    def node_id_for_row(self, row_id: int) -> str | None:
-        """Return the node id behind a canonical row id, or ``None``."""
-        return self._node_ids_by_row_id.get(int(row_id))
-
-    def row_id_for_node(self, node_id: str) -> int:
-        """Return this source's canonical row id for an opaque node id."""
-        return row_id_for(self.channel.id, str(node_id))
 
     def validate_snapshot(self) -> bool:
         snapshot = None

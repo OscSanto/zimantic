@@ -161,6 +161,9 @@ class Search:
     cfg: Mapping[str, Any] = {}
     semantic: bool = False
     open_scope: Any | None = None
+    # Cadence for completion-spaced stream snapshots. Tests may lower it on an
+    # instance; normal callers use the documented default.
+    stream_update_interval: float = DEFAULT_STREAM_UPDATE_INTERVAL
     embedder: Any = None
     _defer_faiss: bool = False
     runtimes: ClassVar[dict[str, CollectionRuntime]] = {}
@@ -203,16 +206,6 @@ class Search:
     @max_stream_ranks.setter
     def max_stream_ranks(self, value: int) -> None:
         self.__dict__["_max_stream_ranks"] = value
-
-    @property
-    def stream_update_interval(self) -> float:
-        return self.__dict__.get(
-            "_stream_update_interval", DEFAULT_STREAM_UPDATE_INTERVAL
-        )
-
-    @stream_update_interval.setter
-    def stream_update_interval(self, value: float) -> None:
-        self.__dict__["_stream_update_interval"] = value
 
     @property
     def max_html_bytes(self) -> int:

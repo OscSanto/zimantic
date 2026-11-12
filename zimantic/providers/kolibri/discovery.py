@@ -222,10 +222,6 @@ class SourceScope:
     rght: int | None = None
     title: str = ""
 
-    @property
-    def is_topic(self) -> bool:
-        return self.kind == "topic"
-
 
 @dataclass(frozen=True)
 class KolibriSource:

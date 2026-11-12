@@ -395,10 +395,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
         with self._lock:
             self._fulltext_pool = pool
 
-    def set_preview_cache(self, cache: Any | None) -> None:
-        with self._lock:
-            self._preview_cache = cache
-
     def start_faiss(self) -> None:
         """Load deferred FAISS vectors for this runtime's indexes."""
         # The core calls bind_search(defer_faiss=False) before this method, so
@@ -738,13 +734,6 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
         if record is not None:
             return record
         return self._catalog.get_key(source.key)
-
-    def find_source(self, identifier: str) -> SourceInfo | None:
-        with self._lock:
-            for source in self._library_sources:
-                if source.key == identifier:
-                    return source
-        return None
 
     def random_source(self) -> SourceInfo:
         with self._lock:

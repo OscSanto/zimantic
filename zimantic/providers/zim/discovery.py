@@ -193,11 +193,6 @@ class ScanResult:
         }
     )
 
-    @property
-    def discovered_paths(self) -> set[str]:
-        return set(self.records)
-
-
 def _same_signature(record: SourceRecord | None, stat: os.stat_result) -> bool:
     if record is None:
         return False

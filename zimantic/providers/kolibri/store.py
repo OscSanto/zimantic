@@ -221,22 +221,6 @@ class KolibriContentStore:
             timeout_seconds=self._zip_timeout,
         )
 
-    def _storage_exists(self, file: FileRow) -> bool:
-        try:
-            relative, _absolute = storage_path(self.storage_root, file)
-        except ValueError:
-            return False
-        try:
-            opened = open_confined(self.storage_root, relative)
-        except FilesConfinedError:
-            return False
-        try:
-            return stat_module.S_ISREG(opened.stat.st_mode)
-        finally:
-            close = getattr(opened.handle, "close", None)
-            if callable(close):
-                close()
-
     def _storage_info(self, file: FileRow) -> os.stat_result | None:
         try:
             relative, _absolute = storage_path(self.storage_root, file)
