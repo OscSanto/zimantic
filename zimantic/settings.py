@@ -499,24 +499,27 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         resolve_workers,
     )
 
+    from .providers.config import ConfigValidationError
+
     try:
         derived_text = parse_derived_text(envelope.get("derived_text"))
-        overrides = parse_source_overrides(envelope.get("sources"))
-        collection_operations = {}
-        for entry in collections:
-            derived = getattr(entry, "derived_text", None)
-            if derived is None:
-                continue
-            collection_operations[entry.name] = SourceDerivedOperations(
-                captions=derived.captions == "index",
-                ocr=None if derived.ocr == "off" else derived.ocr,
-                asr=None if derived.asr == "off" else derived.asr,
-                options=derived.options,
-            )
     except (TypeError, ValueError) as error:
-        from .providers.config import ConfigValidationError
-
         raise ConfigValidationError(f"derived_text: {error}") from error
+    try:
+        overrides = parse_source_overrides(envelope.get("sources"))
+    except (TypeError, ValueError) as error:
+        raise ConfigValidationError(f"source override: {error}") from error
+    collection_operations = {}
+    for entry in collections:
+        derived = getattr(entry, "derived_text", None)
+        if derived is None:
+            continue
+        collection_operations[entry.name] = SourceDerivedOperations(
+            captions=derived.captions == "index",
+            ocr=None if derived.ocr == "off" else derived.ocr,
+            asr=None if derived.asr == "off" else derived.asr,
+            options=derived.options,
+        )
     derived_workers, worker_bound = resolve_workers(
         derived_text.workers,
         usable_cores=hw.threads,

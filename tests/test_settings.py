@@ -627,6 +627,22 @@ class LoadConfigTests(unittest.TestCase):
                 ):
                     load_config(path, warn=lambda _: None)
 
+    def test_bad_source_override_reports_its_own_config_section(self):
+        from zimantic.providers.config import ConfigValidationError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                '[[collections]]\ntype = "files"\nname = "media"\n'
+                'path = "media"\n'
+                'sources = [{ key = "files:media:root", ocr = "bad" }]\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ConfigValidationError, "^source override:"
+            ):
+                load_config(path, warn=lambda _: None)
+
     def test_unknown_global_keys_are_fatal(self):
         from zimantic.providers.config import ConfigValidationError
 
