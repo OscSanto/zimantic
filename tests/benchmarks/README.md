@@ -24,7 +24,7 @@ The report contains:
 - peak process RSS (`VmHWM`) after the server handles search requests;
 - a ZIM-only and mixed-library `/search` comparison with the same query file.
 
-The benchmark measures ZIM, Files, and Kolibri providers together. It requires the documented fixture and query set. Store results in `tests/benchmarks/results/`. A missing Raspberry Pi 4 result is unverified.
+The benchmark measures ZIM, Files, and Kolibri providers together. It requires the documented fixture and query set. Result files are local artifacts; `tests/benchmarks/results/` is gitignored and is not retained in the repository. A missing Raspberry Pi 4 result is unverified.
 
 `scripts/benchmark_body_fts.py` provides a synthetic comparison. It does not replace a measurement with the real providers.
 
@@ -65,7 +65,7 @@ For a four-core/2 GiB resource proxy use `--limits 4:2048`; for this 20-thread d
 
 These are ZIM full-text microbenchmarks, not whole-server memory or Raspberry Pi performance guarantees. They do not load models/FAISS or hydrate previews. OS caches stay warm: the harness never drops shared host caches, and cached file pages can be charged outside the service's cgroup. MemoryMax therefore tests cgroup-accounted memory pressure, not every physical page used by the ZIM file. PSS is reported separately.
 
-See the [native-only matrix](results/native-workers-2026-11-08.json), [resident-headroom matrix](results/native-budgets-2026-11-08.json), and [interpretation and limit audit](../../docs/architecture.md#constrained-workerbudget-comparison-november-8-2026). The native-only matrix records a four-helper automatic ceiling; the headroom matrix uses an eight-helper ceiling. Additional [short failure-report validation](results/native-oom-2026-11-08.json) retains systemd's termination result when the probe cannot finish.
+Regenerate the native-only matrix, resident-headroom matrix, and short failure-report validation with the commands below; their JSON files are local artifacts and are not retained in the repository. See the [interpretation and limit audit](../../docs/architecture.md#constrained-workerbudget-comparison-november-8-2026). The native-only matrix records a four-helper automatic ceiling; the headroom matrix uses an eight-helper ceiling.
 
 ### Reader GIL/thread results, November 9, 2026
 

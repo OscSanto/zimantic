@@ -67,7 +67,7 @@ Reconsider the default process/thread choice only after testing bindings that bo
 
 [`run_native.py`](../tests/benchmarks/run_native.py) runs 132 full-workload trials over the same four ZIM files and query mix, with eight source threads, 96 warm-up searches and 96 measured searches per trial. Each configuration has two fresh systemd user services. CPUQuota simulates 1, 2, 4, or 8 usable CPUs; MemoryMax ranges from 256 MiB to 2 GiB, with swap disabled. The harness isolates and collects the services after each run; it does not drop host caches. This simulates resource budgets, not Raspberry Pi instruction speed, storage, or complete web-server performance.
 
-The [native-only matrix](../tests/benchmarks/results/native-workers-2026-11-08.json) uses a four-helper automatic ceiling:
+The native-only matrix (regenerate with [`run_native.py`](../tests/benchmarks/run_native.py)) uses a four-helper automatic ceiling. Result files are local artifacts and are not retained in this repository:
 
 | CPU quota | MemoryMax | 1 helper: searches/s | 2 helpers | 4 helpers | 8 helpers |
 |---|---:|---:|---:|---:|---:|
@@ -80,7 +80,7 @@ The [native-only matrix](../tests/benchmarks/results/native-workers-2026-11-08.j
 
 Values are medians of successful trials. Extra helpers beyond the CPU quota provide no benefit or reduce throughput, while they increase memory. Eight helpers on eight CPUs improve throughput substantially. The automatic budget therefore allows up to eight helpers, limited by CPU, source-thread capacity, and memory rather than an unconditional eight-process default. Counts above eight are explicit overrides, not a measured recommendation.
 
-The [headroom matrix](../tests/benchmarks/results/native-budgets-2026-11-08.json) retains 256 MiB of touched anonymous memory to simulate server/model residency and checks the automatic budget:
+The headroom matrix (also from `run_native.py`) retains 256 MiB of touched anonymous memory to simulate server/model residency and checks the automatic budget:
 
 | CPU quota | MemoryMax | Automatic helpers | Searches/s | Median peak cgroup memory |
 |---|---:|---:|---:|---:|
@@ -144,7 +144,7 @@ The [snippet runner](../tests/benchmarks/run_snippets.py) compares deferred prev
 
 The three ZIM files and twelve queries are the same as the reader comparison above. Every query searches all three ZIM files, ranks their candidates with the production ranker, and hydrates only the displayed ten. One query means one search across the library, **not one ZIM-file search**. There are 75 successful fresh-service trials, three repetitions per configuration, and 9,408 measured queries. Exact candidate/ranked identities agree across strategies; eager HTML leads and deferred previews return identical text. All trials use the same local GIL-releasing reader/native build: libzim 9.8.2, Xapian 1.4.31, ICU 78.3, and the production Lexbor preview reader.
 
-The [single-client report](../tests/benchmarks/results/snippets-single-client-2026-11-09.json) uses four native/source workers, a four-CPU/2 GiB quota, and 512 MiB of simulated residency. Values below are medians of the three process-backend trials. The miss case never reuses previews; the hit case has every displayed path cached, but it bypasses the finalized-query cache.
+The single-client report (regenerate with `tests/benchmarks/run_snippets.py`; result files are not retained in this repository) uses four native/source workers, a four-CPU/2 GiB quota, and 512 MiB of simulated residency. Values below are medians of the three process-backend trials. The miss case never reuses previews; the hit case has every displayed path cached, but it bypasses the finalized-query cache.
 
 | Strategy | Miss queries/s | CPU ms/query | Miss p50 ms | Miss p95 ms | Search/rank p50 ms | Cached-preview p50 ms |
 |---|---:|---:|---:|---:|---:|---:|
@@ -155,7 +155,7 @@ The [single-client report](../tests/benchmarks/results/snippets-single-client-20
 
 Selective native prefetch improves uncached median latency, but it increases CPU and tail latency and postpones source completion. With cached previews, throughput drops from 383 to 29 queries/s. Thread results have the same native trade-off: 19.2 to 22.8 uncached queries/s, but 475 to 28 with cached previews. Eager HTML leads on threads instead regress from 19.2 to 14.4 uncached queries/s.
 
-The [concurrent report](../tests/benchmarks/results/snippets-concurrent-2026-11-09.json) uses four clients, eight native/source workers, the desktop's twenty-CPU/8 GiB quota, the same reserve, and preview misses:
+The concurrent report (from `run_snippets.py`) uses four clients, eight native/source workers, the desktop's twenty-CPU/8 GiB quota, the same reserve, and preview misses:
 
 | Backend | Strategy | Queries/s | CPU ms/query | p50 ms | p95 ms |
 |---|---|---:|---:|---:|---:|
@@ -168,7 +168,7 @@ The [concurrent report](../tests/benchmarks/results/snippets-concurrent-2026-11-
 
 Here selective prefetch wins substantially: native snippets yield 3.5x process-backend throughput, and identical HTML leads yield 3.4x. This is parallel preview work, not free text that the search query already retrieved. Native snippet generation runs outside the GIL; normal HTML preview traversal executes Python. Moving that traversal into separate helper processes also scales, whereas moving it into native-worker threads does not.
 
-The [single-ZIM-file control](../tests/benchmarks/results/snippets-one-source-2026-11-09.json) searches astronomy alone, with one client and four threads under the four-CPU quota. Deferred previews reach 24.1 queries/s versus 21.3 with four prefetched native snippets and 14.4 with sixteen. Four-snippet prefetch roughly preserves median latency (43.7 versus 42.4 ms), but it worsens p95 from 54.8 to 103.5 ms. Thus the multi-source uncached improvement is not universal.
+The single-ZIM-file control (from `run_snippets.py`) searches astronomy alone, with one client and four threads under the four-CPU quota. Deferred previews reach 24.1 queries/s versus 21.3 with four prefetched native snippets and 14.4 with sixteen. Four-snippet prefetch roughly preserves median latency (43.7 versus 42.4 ms), but it worsens p95 from 54.8 to 103.5 ms. Thus the multi-source uncached improvement is not universal.
 
 Across the three-source miss cases, four-per-source prefetch generates eleven previews per query on average and reuses 7.42: about 81% of displayed previews, with 33% of prefetches wasted. Fetching sixteen generates 44 and reuses 9.17, which wastes 79%. Every prefetch is wasted in the fully cached-preview case. Native snippets also change the displayed text: this workload averages 583 characters with selective native reuse and 498 with all-native reuse, versus 943 for normal leads. They are query-centered fragments, not equivalent opening-text previews. They do not go in the existing query-independent preview cache without a change to its key.
 
