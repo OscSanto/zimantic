@@ -285,6 +285,37 @@ def test_derived_cache_identity_ignores_scheduling_options():
     assert "cache" not in one._options()
 
 
+def test_derived_cache_counts_existing_entries_and_evicts(tmp_path):
+    from zimantic.indexing.derived import DerivedTextCache
+
+    first = DerivedTextCache(tmp_path, max_bytes=20)
+    assert first.put("a", "ocr", "tesseract", {}, "x" * 12) is not None
+    assert first.put("b", "ocr", "tesseract", {}, "y" * 12) is not None
+    sizes = [path.stat().st_size for path in tmp_path.rglob("*.txt")]
+    assert sum(sizes) <= 20
+
+    # A new build must see the bytes already on disk before adding more.
+    second = DerivedTextCache(tmp_path, max_bytes=20)
+    assert second._bytes == sum(
+        path.stat().st_size for path in tmp_path.rglob("*") if path.is_file()
+    )
+    assert second.put("c", "ocr", "tesseract", {}, "z" * 12) is not None
+    assert sum(
+        path.stat().st_size for path in tmp_path.rglob("*.txt")
+    ) <= 20
+
+
+def test_derived_cache_prune_recounts_kept_entries(tmp_path):
+    from zimantic.indexing.derived import DerivedTextCache
+
+    cache = DerivedTextCache(tmp_path, max_bytes=100)
+    kept = cache.put("a", "ocr", "tesseract", {}, "keep")
+    assert kept is not None
+    cache.put("b", "ocr", "tesseract", {}, "remove")
+    assert cache.prune(keep=[kept]) == 1
+    assert cache._bytes == kept.stat().st_size
+
+
 @pytest.mark.skipif(
     shutil.which("tesseract") is None, reason="tesseract is unavailable"
 )

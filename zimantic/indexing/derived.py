@@ -425,11 +425,58 @@ class DerivedTextCache:
     def __init__(self, root: Path | str, max_bytes: int = 512 << 20) -> None:
         self.root = Path(root)
         self.max_bytes = max(0, int(max_bytes))
-        self._bytes = 0
         try:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         except OSError:
             pass
+        # A build creates a new cache object, so count entries left by earlier
+        # builds. Otherwise every run gets a fresh budget and the directory can
+        # grow without bound.
+        self._bytes = self._scan_bytes()
+
+    def _scan_bytes(self) -> int:
+        total = 0
+        try:
+            for path in self.root.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    total += path.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return total
+
+    def _reserve(self, path: Path, extra: int) -> bool:
+        """Make room for ``extra`` bytes, replacing ``path`` if it exists."""
+        try:
+            current = path.stat().st_size
+        except OSError:
+            current = 0
+        if self._bytes - current + extra <= self.max_bytes:
+            return True
+        candidates: list[tuple[int, Path, int]] = []
+        try:
+            for candidate in self.root.rglob("*"):
+                if candidate == path or not candidate.is_file():
+                    continue
+                try:
+                    stat = candidate.stat()
+                except OSError:
+                    continue
+                candidates.append((stat.st_mtime_ns, candidate, stat.st_size))
+        except OSError:
+            return False
+        for _age, victim, size in sorted(candidates):
+            if self._bytes - current + extra <= self.max_bytes:
+                break
+            try:
+                victim.unlink()
+            except OSError:
+                continue
+            self._bytes = max(0, self._bytes - size)
+        return self._bytes - current + extra <= self.max_bytes
 
     def _key_path(
         self,
@@ -476,9 +523,13 @@ class DerivedTextCache:
         if not text or self.max_bytes <= 0:
             return None
         data = text.encode("utf-8")
-        if self._bytes + len(data) > self.max_bytes:
-            return None
         path = self._key_path(digest, operation, engine, options)
+        try:
+            previous = path.stat().st_size
+        except OSError:
+            previous = 0
+        if not self._reserve(path, len(data)):
+            return None
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         try:
@@ -491,7 +542,7 @@ class DerivedTextCache:
         except OSError:
             temporary.unlink(missing_ok=True)
             return None
-        self._bytes += len(data)
+        self._bytes = max(0, self._bytes - previous + len(data))
         return path
 
     def prune(self, keep: Iterable[Path] = ()) -> int:
@@ -506,7 +557,7 @@ class DerivedTextCache:
                     removed += 1
                 except OSError:
                     continue
-        self._bytes = 0
+        self._bytes = self._scan_bytes()
         return removed
 
 
