@@ -100,6 +100,19 @@ class ScopedEntryProducer:
             return None
         return self._producer.entry_at(self._indices[index])
 
+    def entry_id_at(self, index: int) -> int:
+        return self._producer.entry_id_at(self._indices[index])
+
+    def parallel_reader(
+        self, *, workers: int, start: int = 0, chunk_size: int = 16
+    ):
+        factory = getattr(self._producer, "parallel_reader", None)
+        if not callable(factory):
+            return None
+        return factory(
+            workers=workers, start=start, chunk_size=chunk_size, view=self
+        )
+
     def derived_text_inputs(self, index: int):
         if index < 0 or index >= self.count:
             return ()

@@ -224,11 +224,6 @@ def encode_fingerprint(value: str) -> str:
 # -- schema helpers --------------------------------------------------------
 
 
-def _create_probe(connection: sqlite3.Connection, sql: str) -> None:
-    connection.execute(sql)
-    connection.execute("DROP TABLE IF EXISTS temp.__zimantic_fts_probe")
-
-
 def ensure_fts5(connection: sqlite3.Connection) -> None:
     """Raise an actionable error when this SQLite build lacks FTS5."""
     try:

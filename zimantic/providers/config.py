@@ -16,7 +16,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from ..scoped_settings import FILTER_KEYS, SCOPED_KEYS, parse_scoped_settings
-from ..settings import KNOWN_KEYS, normalize_resource_settings
+from ..settings import KNOWN_KEYS
 
 ProviderKind = Literal["zim", "kiwix", "files", "kolibri"]
 Granularity = Literal["collection", "children"]
@@ -27,9 +27,6 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RESERVED_ZIM_NAMES = frozenset({"open"})
 
 BUILTIN_PROVIDERS: tuple[ProviderKind, ...] = ("zim", "kiwix", "files", "kolibri")
-
-# Keys that belong to the normalized settings envelope rather than a provider.
-ENVELOPE_KEYS = frozenset({"derived_text", "sources"})
 
 
 class ConfigValidationError(ValueError):
@@ -383,18 +380,13 @@ class RuntimeConfig:
     config_present: bool = True
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "settings", MappingProxyType(normalize_resource_settings(self.settings))
-        )
+        object.__setattr__(self, "settings", MappingProxyType(dict(self.settings)))
         object.__setattr__(
             self, "envelope", MappingProxyType(dict(self.envelope))
         )
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.settings.get(key, default)
-
-    def collections_of(self, kind: ProviderKind) -> tuple[ProviderConfig, ...]:
-        return tuple(entry for entry in self.collections if entry.kind == kind)
 
 
 @dataclass(frozen=True)
@@ -701,40 +693,33 @@ class ProviderConfigSpec:
     """
 
     kind: ProviderKind
-    config_class: type
     parse: Callable[[Mapping[str, Any], Path], ProviderConfig]
     allowed_keys: frozenset[str]
     defaults: Mapping[str, Any]
-    buildable: bool = True
 
 
 _PROVIDER_CONFIG_SPECS: Mapping[ProviderKind, ProviderConfigSpec] = MappingProxyType(
     {
         "zim": ProviderConfigSpec(
             kind="zim",
-            config_class=ZimConfig,
             parse=_parse_zim,
             allowed_keys=_ZIM_KEYS,
             defaults=PROVIDER_DEFAULTS["zim"],
         ),
         "kiwix": ProviderConfigSpec(
             kind="kiwix",
-            config_class=KiwixConfig,
             parse=_parse_kiwix,
             allowed_keys=_KIWIX_KEYS,
             defaults=PROVIDER_DEFAULTS["kiwix"],
-            buildable=False,
         ),
         "files": ProviderConfigSpec(
             kind="files",
-            config_class=FilesConfig,
             parse=_parse_files,
             allowed_keys=_FILES_KEYS,
             defaults=PROVIDER_DEFAULTS["files"],
         ),
         "kolibri": ProviderConfigSpec(
             kind="kolibri",
-            config_class=KolibriConfig,
             parse=_parse_kolibri,
             allowed_keys=_KOLIBRI_KEYS,
             defaults=PROVIDER_DEFAULTS["kolibri"],
@@ -778,7 +763,6 @@ def parse_collections(
     *,
     config_dir: Path | str,
     warn=None,
-    allow_disabled_providers: bool = True,
 ) -> ParsedCollections:
     base = Path(config_dir)
     unknown = sorted(set(data) - KNOWN_KEYS - {"collections", "derived_text"})

@@ -1069,3 +1069,28 @@ def test_interrupted_v0_migration_resumes_or_restarts(tmp_path, replace_old):
     )
     assert report.status == "published"
     assert embedder.encoded_count == (2 if replace_old else 0)
+
+
+@pytest.mark.skipif(not hasattr(Archive, "iter_efficient"), reason="requires libzim 4.1")
+def test_parallel_reader_matches_serial_entry_order(tmp_path):
+    from types import SimpleNamespace
+
+    from zimantic.providers.zim.entries import ArchiveEntryProducer
+
+    path = tmp_path / "parallel.zim"
+    with Creator(path) as creator:
+        creator.add_item(_Page("Alpha", "Alpha", ALPHA_HTML))
+        creator.add_item(_Page("Beta", "Beta", ALPHA_HTML))
+        creator.add_item(_Page("Gamma", "Gamma", ALPHA_HTML))
+        creator.add_redirection("Alias", "Alias", "Alpha", {})
+    source = SimpleNamespace(key="parallel", provider="zim", collection_key="zim:test")
+    producer = ArchiveEntryProducer(source, path)
+    producer.prepare_iteration()
+    expected = [producer.entry_at(i) for i in range(producer.count)]
+    reader = producer.parallel_reader(workers=2, chunk_size=1)
+    assert reader is not None
+    try:
+        actual = [reader.read(i) for i in range(producer.count)]
+    finally:
+        reader.close()
+    assert actual == expected

@@ -585,7 +585,7 @@ const loadPage = (page) => pages.push(page);
 {_function_source(source, "function readLocationState()", "function syncArticleModal(")}
 {_function_source(source, "function applySourceSelection(", "function makeStateUrl(")}
 const empty = readLocationState();
-location.href = "http://example.test/?browse=random&seed=7&source=manual";
+location.href = "http://example.test/?sort=random&seed=7&source=manual";
 const browsing = readLocationState();
 current = {{
   question: "", browse: "random", seed: 7, searchAll: false,
@@ -597,7 +597,7 @@ const query = makeStateUrl("topic", selectedSourceKeys, 0);
 const rare = makeStateUrl("", [], 0, null, [], "files:modules", "rare", 99);
 applySourceSelection("", ["other"], 0, ["other"], null);
 applySourceSelection("", ["manual"], 1, ["manual"], null);
-location.href = "http://example.test/?q=topic&browse=random&seed=7";
+location.href = "http://example.test/?q=topic&seed=7";
 const queryState = readLocationState();
 console.log(JSON.stringify({{empty, browsing, paged, modal, query, rare, searches, pages, queryState}}));
 """

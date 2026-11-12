@@ -30,6 +30,7 @@ from zimantic.content.reader import (
     _TextExtractor,
     disambiguation_title,
     extract_excerpt,
+    extract_excerpt_and_body,
     extract_pdf_excerpt,
     is_disambiguation,
     is_javascript_shell,
@@ -253,6 +254,32 @@ class TextExtractionTests(unittest.TestCase):
         text = "Useful article prose after malformed navigation must remain visible and searchable."
         html = f"<nav><a>Home</a><div>Menu</nav><p>{text}</p>".encode()
         self.assertEqual(list(iter_text_blocks(html)), [text])
+
+    def test_shared_excerpt_and_body_traversal_matches_separate_calls(self):
+        html = (
+            "<html><body><style>.x{color:red}</style>"
+            "<p>This article or its section is a stub. You can help by expanding "
+            "the article with sourced details about the topic and its context.</p>"
+            "<div class='lang-fr'><p>Texte français suffisamment long pour être "
+            "retenu comme paragraphe candidat distinct.</p></div>"
+            "<div><p>The second paragraph has enough prose to remain in both the "
+            "short preview and the larger lexical body extraction result.</p></div>"
+            "</body></html>"
+        ).encode()
+        for preview_chars in (60, 1000):
+            for body_bytes in (1, 80, 1 << 20):
+                expected = (
+                    extract_excerpt(html, max_preview_chars=preview_chars),
+                    *content_reader.extract_body(html, body_bytes),
+                )
+                self.assertEqual(
+                    extract_excerpt_and_body(
+                        html,
+                        max_preview_chars=preview_chars,
+                        max_body_text_bytes=body_bytes,
+                    ),
+                    expected,
+                )
 
     @unittest.skipUnless(content_reader.LexborHTMLParser, "requires Lexbor DOM recovery")
     def test_deep_valid_containers_retain_prose_without_duplicates(self):

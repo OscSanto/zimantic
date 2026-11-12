@@ -319,9 +319,14 @@ class _TestZimRuntime(IndexedRuntime, EnrichingRuntime):
 
 
 class RuntimeCapabilityTests(unittest.TestCase):
-    def test_legacy_resource_keys_still_control_runtime_pools(self):
+    def test_canonical_resource_keys_control_runtime_pools(self):
         search = Search(
-            RuntimeConfig(settings={"search_workers": 2, "fulltext_workers": 3}),
+            RuntimeConfig(
+                settings={
+                    "source_query_threads": 2,
+                    "libzim_search_processes": 3,
+                }
+            ),
             semantic=False,
         )
         with patch("zimantic.fulltext.FulltextPool") as pool_factory:
@@ -1765,6 +1770,37 @@ class SearchContractTests(unittest.TestCase):
             read.call_args.kwargs["max_html_bytes"], PREVIEW_HTML_BYTES
         )
 
+    def test_failed_previews_are_not_cached_and_get_their_own_deadline(self):
+        from zimantic.contracts import SourceInfo as CanonicalSourceInfo
+
+        source = CanonicalSourceInfo(
+            "files:media:root", provider="files", collection_key="files:media"
+        )
+        search = _bare_search({"search_timeout_seconds": 5.0})
+        self.addCleanup(search._executor.shutdown, wait=True)
+        deadlines = []
+
+        class _Runtime:
+            def preview(self, source, doc, *, max_chars, max_bytes, deadline):
+                deadlines.append(deadline)
+                raise RuntimeError("preview failed")
+
+        search.sources = {source.key: source}
+        search.runtimes = {source.collection_key: _Runtime()}
+        search.preview_cache = QueryCache(16)
+        doc = {
+            "id": "item",
+            "path": "alpha",
+            "title": "Alpha",
+            "source_key": source.key,
+        }
+        before = time.monotonic()
+        search._hydrate_results([doc])
+        self.assertEqual(len(deadlines), 1)
+        self.assertIsNotNone(deadlines[0])
+        self.assertGreaterEqual(deadlines[0] - before, 4.0)
+        self.assertEqual(search.preview_cache.stats()["size"], 0)
+
     def test_preview_hydration_is_bounded(self):
         class _Entry:
             _index = 1
@@ -2503,6 +2539,26 @@ class GracefulDegradationTests(unittest.TestCase):
                 self.assertEqual(archive.call_count, 1)
             self.assertEqual(index.error, "cannot open")
 
+    def test_allow_reopen_clears_a_latched_archive_failure(self):
+        with _temp_dir(self) as tmp:
+            index = IndexHandle(
+                None,
+                None,
+                None,
+                None,
+                threading.Lock(),
+                zim_path=str(Path(tmp) / "archive.zim"),
+            )
+            reopened = object()
+            with patch(
+                "zimantic.searching.index.Archive",
+                side_effect=[RuntimeError("cannot open"), reopened],
+            ) as archive:
+                self.assertIsNone(index.ensure_open())
+                self.assertTrue(index.open_failed)
+                index.allow_reopen()
+                self.assertIs(index.ensure_open(), reopened)
+                self.assertEqual(archive.call_count, 2)
 
     def test_finished_stream_is_cached_for_search_method(self):
         with _temp_dir(self) as tmp:
@@ -2523,6 +2579,39 @@ class GracefulDegradationTests(unittest.TestCase):
                 cached = _search_results(search, "tire change", limit=1)
             self.assertEqual(cached[0]["title"], "Tire Change")
             search._executor.shutdown(wait=True)
+
+    def test_source_error_is_not_cached_as_complete(self):
+        from zimantic.contracts import SourceInfo, SourceResult
+
+        search = _bare_search({})
+        self.addCleanup(search._executor.shutdown, wait=True)
+        source = SourceInfo(
+            key="remote",
+            provider="kiwix",
+            title="Remote",
+            collection_key="kiwix:remote",
+            searchable=True,
+        )
+        scope = {
+            "status": "complete",
+            "requested": 1,
+            "scheduled": 1,
+            "completed": 1,
+            "limit_reason": None,
+        }
+        search._finalize_search(
+            "tire",
+            [SourceResult(source=source, error="remote is down", status="error")],
+            0,
+            10,
+            False,
+            10,
+            {},
+            0,
+            "error-key",
+            scope,
+        )
+        self.assertIsNone(search.cache.get("error-key"))
 
     def test_deadline_partial_result_is_cached_briefly(self):
         search = _bare_search({})
@@ -3899,9 +3988,13 @@ class SourceScopeTests(unittest.TestCase):
             )
             for index in range(3)
         }
+        # The library sorts by title; the cap must still use catalog order.
+        for index, source in enumerate(search.sources.values()):
+            object.__setattr__(source, "_catalog_order", 2 - index)
         try:
             scope = search._search_scope(None, "kiwix:remote")
             self.assertEqual(len(scope.sources), 2)
+            self.assertEqual([item.key for item in scope.sources], ["book-2", "book-1"])
             self.assertEqual(scope.requested, 3)
             self.assertTrue(scope.source_cap)
         finally:

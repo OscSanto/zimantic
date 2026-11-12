@@ -53,6 +53,7 @@ DEFAULT_BODY_BUFFER_BYTES = 16 << 20
 DEFAULT_STAGING_RESERVE_BYTES = 1 << 20
 DEFAULT_EMBEDDING_BATCH_TOKENS = 1000
 FAST_BUILD_BATCH_SIZE = 256
+MIN_PARALLEL_READ_ROWS = 1000
 _REUSED_VECTOR_SOURCE = "reused_vector_source"
 
 
@@ -477,6 +478,41 @@ def _cfg_int(cfg: Mapping[str, Any], key: str, default: int) -> int:
     return value
 
 
+def _configured_reader_processes(cfg: Mapping[str, Any]) -> int:
+    if isinstance(cfg, Mapping):
+        value = cfg.get("reader_processes")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+    from ..settings import default_reader_processes
+
+    return default_reader_processes()
+
+
+def _open_parallel_reader(
+    producer: EntryProducer,
+    cfg: Mapping[str, Any],
+    *,
+    fast: bool,
+    start: int,
+):
+    """Return a per-source process reader, or None when it cannot help."""
+    if fast:
+        return None
+    factory = getattr(producer, "parallel_reader", None)
+    if not callable(factory):
+        return None
+    remaining = max(0, int(_producer_attr(producer, "count", 0) or 0) - int(start))
+    if remaining < MIN_PARALLEL_READ_ROWS:
+        # Process startup and IPC cost more than a short serial read.
+        return None
+    processes = _configured_reader_processes(cfg)
+    concurrent = max(1, _cfg_int(cfg, "_concurrent_sources", 1))
+    workers = processes // concurrent
+    if workers < 2:
+        return None
+    return factory(workers=workers, start=start, chunk_size=8)
+
+
 def _producer_attr(producer: Any, name: str, default: Any = None) -> Any:
     return getattr(producer, name, default)
 
@@ -522,6 +558,13 @@ def _open_database(path: Path) -> sqlite3.Connection:
     existing = path.is_file() and path.stat().st_size > 0
     db = sqlite3.connect(path)
     try:
+        # The staging database is disposable until publication.  WAL commits
+        # without an fsync per read window and is still recoverable after a
+        # process crash; a power loss can lose recent windows, which resume
+        # detects as a missing/older NEXT checkpoint.
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA temp_store=MEMORY")
         if existing:
             index_schema.read_index_meta(db)
         else:
@@ -802,14 +845,20 @@ def _read_entry(
     derived_stage: Any | None,
     derived_metadata: dict[str, Any] | None,
     derived_refs: dict[int, list[tuple[str, int, str]]] | None,
+    entry_reader: Any | None = None,
 ) -> tuple[EntryRecord | None, int | None]:
     """Read one source entry and apply derived text in the reader thread.
 
     Providers and derived-text caches may own thread-affine resources, so this
     stays in the thread that created the producer.  Staged workers only receive
-    immutable row snapshots and per-window reference snapshots.
+    immutable row snapshots and per-window reference snapshots.  ``entry_reader``
+    optionally delegates the raw ZIM read and HTML extraction to helper
+    processes; only derived text still runs here.
     """
-    row = producer.entry_at(index)
+    if entry_reader is None:
+        row = producer.entry_at(index)
+    else:
+        row = entry_reader.read(index)
     modified_at = getattr(producer, "modified_at", None)
     modified_value = modified_at(index) if callable(modified_at) else None
     if modified_value is not None and (
@@ -1126,6 +1175,7 @@ def _index_entries_staged(
     db_path: Path,
     progress=None,
     interrupt_event: threading.Event | None = None,
+    entry_reader: Any | None = None,
 ) -> None:
     """Read, prepare, embed, and commit windows with independent stages."""
     count = int(_producer_attr(producer, "count", 0) or 0)
@@ -1204,6 +1254,7 @@ def _index_entries_staged(
                 derived_stage=derived_stage,
                 derived_metadata=derived_metadata,
                 derived_refs=derived_refs,
+                entry_reader=entry_reader,
             )
             if row is not None:
                 batch_modified[row.id] = modified_value
@@ -1261,6 +1312,7 @@ def _index_entries(
     db_path: Path | None = None,
     stage_split: bool = True,
     interrupt_event: threading.Event | None = None,
+    entry_reader: Any | None = None,
 ) -> None:
     if stage_split and embedding_pipeline is not None and reuse_vectors is None:
         if db_path is None:
@@ -1280,6 +1332,7 @@ def _index_entries(
             db_path=db_path,
             progress=progress,
             interrupt_event=interrupt_event,
+            entry_reader=entry_reader,
         )
         return
     pending_embeddings: list[
@@ -1399,6 +1452,7 @@ def _index_entries(
                 derived_stage=derived_stage,
                 derived_metadata=derived_metadata,
                 derived_refs=derived_refs,
+                entry_reader=entry_reader,
             )
             if row is not None:
                 batch_modified[row.id] = modified_value
@@ -1875,28 +1929,44 @@ def build_index(
             if not isinstance(body_budget, BodyBudget):
                 body_budget = shared_body_budget(max_body_text_bytes)
             progress = _BuildProgress(producer, start, cfg.get("progress_callback"))
-            _index_entries(
-                producer,
-                state.db,
-                start,
-                batch_size,
-                embedder,
-                fast,
-                cfg.get("embedding_pipeline"),
-                body_budget=body_budget,
-                max_body_text_bytes=max_body_text_bytes,
-                derived_stage=derived_stage,
-                derived_metadata=derived_metadata,
-                derived_refs=derived_refs,
-                progress=progress,
-                token_budget=max(1, _cfg_int(
-                    cfg, "embedding_batch_tokens", DEFAULT_EMBEDDING_BATCH_TOKENS
-                )),
-                reuse_vectors=reuse_vectors,
-                db_path=state.build_db_path,
-                stage_split=bool(cfg.get("_stage_split", True)),
-                interrupt_event=cfg.get("interrupt_event"),
+            entry_reader = _open_parallel_reader(
+                producer, cfg, fast=fast, start=start
             )
+            try:
+                _index_entries(
+                    producer,
+                    state.db,
+                    start,
+                    batch_size,
+                    embedder,
+                    fast,
+                    cfg.get("embedding_pipeline"),
+                    body_budget=body_budget,
+                    max_body_text_bytes=max_body_text_bytes,
+                    derived_stage=derived_stage,
+                    derived_metadata=derived_metadata,
+                    derived_refs=derived_refs,
+                    progress=progress,
+                    token_budget=max(1, _cfg_int(
+                        cfg, "embedding_batch_tokens", DEFAULT_EMBEDDING_BATCH_TOKENS
+                    )),
+                    reuse_vectors=reuse_vectors,
+                    db_path=state.build_db_path,
+                    stage_split=bool(cfg.get("_stage_split", True)),
+                    interrupt_event=cfg.get("interrupt_event"),
+                    entry_reader=entry_reader,
+                )
+            finally:
+                if entry_reader is not None:
+                    try:
+                        if interrupt_event is not None and interrupt_event.is_set():
+                            entry_reader.terminate()
+                        else:
+                            entry_reader.close()
+                    except Exception:
+                        logger.debug(
+                            "could not stop parallel entry reader", exc_info=True
+                        )
             progress.close()
             progress = None
             if reuse_vectors is not None and not reuse_vectors.valid():

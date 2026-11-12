@@ -27,7 +27,6 @@ class FakeSearch:
         self.search_page_calls = []
         self.suggest_calls = []
         self.stream_calls = []
-        self.browse_calls = []
         self.sort_calls = []
         self.refresh_calls = 0
 
@@ -129,7 +128,6 @@ class FakeSearch:
     ):
         if browse is not None:
             self._validate_browse(browse, seed)
-            self.browse_calls.append((source, collection, browse, seed))
         self.sort_calls.append((sort, seed))
         self.search_page_calls.append(
             (query, source, limit, offset, collection, debug)
@@ -163,7 +161,6 @@ class FakeSearch:
     ):
         if browse is not None:
             self._validate_browse(browse, seed)
-            self.browse_calls.append((source, collection, browse, seed))
         self.sort_calls.append((sort, seed))
         self.stream_calls.append(
             (query, source, limit, offset, collection, debug)
@@ -229,6 +226,38 @@ class ServerTests(unittest.TestCase):
         )
         self.assertIn("the", config["stopwords"])
         self.assertGreater(config["max_query_length"], 0)
+
+    def test_config_library_filters_follow_discovery_changes(self):
+        manual = self.search.source_dicts()[0]
+        kolibri = {
+            **manual,
+            "key": "kolibri:channel",
+            "provider": "kolibri",
+            "title": "Channel",
+            "language": "spa",
+            "media_types": ["video"],
+            "collection": {
+                "key": "kolibri:channel",
+                "label": "Channel",
+                "provider": "kolibri",
+            },
+        }
+        with (
+            patch.object(
+                self.search, "source_dicts", lambda: [manual, kolibri]
+            ),
+            patch.object(
+                self.search, "collection_version", lambda: ("test-process", 2)
+            ),
+        ):
+            config = self.client.get("/config").json()
+        self.assertEqual(
+            config["library_filters"]["providers"], ["zim", "kolibri"]
+        )
+        self.assertEqual(
+            config["library_filters"]["media_types"], ["text", "video"]
+        )
+        self.assertEqual(config["library_filters"]["languages"], ["eng", "spa"])
 
     def test_random_without_zim_opens_a_random_local_source(self):
         response = self.client.get("/random", follow_redirects=False)
@@ -432,6 +461,23 @@ class ServerTests(unittest.TestCase):
         unmatched = self.client.get("/library.json", params={"language": "fra"})
         self.assertEqual(unmatched.status_code, 200)
         self.assertEqual(unmatched.json(), [])
+
+        # Exclusion terms compose on the server instead of reaching it as a
+        # literal substring that empties the page before the browser can filter.
+        excluded = self.client.get("/sources", params={"q": "-manual"})
+        self.assertEqual(excluded.status_code, 200)
+        self.assertEqual(excluded.json(), [])
+        excluded_collections = self.client.get(
+            "/collections.json", params={"q": "-library"}
+        )
+        self.assertEqual(excluded_collections.json(), [])
+        # Terms match at a word boundary, matching the browser's filter.
+        prefixed = self.client.get("/collections.json", params={"q": "libr"})
+        self.assertEqual([item["key"] for item in prefixed.json()], ["zim:library"])
+        self.assertEqual(
+            self.client.get("/collections.json", params={"q": "ibrary"}).json(),
+            [],
+        )
 
     def test_listing_filters_reject_unknown_values(self):
         for path, params in (
@@ -1184,29 +1230,9 @@ class ServerTests(unittest.TestCase):
             ("page", "manual", 5, 10, None, False),
         )
 
-    def test_browse_api_reuses_pagination_and_accepts_explicit_modes(self):
-        homepage = self.client.get("/?q=").text
-        self.assertNotIn('id="browseSection"', homepage)
-        self.assertIn('<label for="sortSelect" data-i18n="Sort by">', homepage)
-        self.assertLess(homepage.index('id="sortSelect"'), homepage.index('id="settingsDetails"'))
-        response = self.client.get(
-            "/browse?mode=random&seed=7&offset=10&limit=5&source=manual"
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["x-page"], "2")
-        self.assertEqual(self.search.browse_calls[-1], ("manual", None, "random", 7))
-        stream = self.client.get(
-            "/browse/stream?mode=rare&collection=zim:library"
-        )
-        self.assertEqual(stream.status_code, 200)
-        self.assertEqual(
-            json.loads(stream.text.splitlines()[-1])["type"], "done"
-        )
-        self.assertEqual(
-            self.search.browse_calls[-1], (None, "zim:library", "rare", 0)
-        )
-        self.assertEqual(self.client.get("/browse?mode=unknown").status_code, 422)
-        self.assertEqual(self.client.get("/browse?seed=-1").status_code, 422)
+    def test_removed_browse_routes_return_not_found(self):
+        for path in ("/browse", "/browse/stream"):
+            self.assertEqual(self.client.get(path).status_code, 404)
 
     def test_search_sorting_and_empty_queries_work_for_json_and_streams(self):
         for path in ("/search", "/search/stream"):
@@ -1233,13 +1259,6 @@ class ServerTests(unittest.TestCase):
                 client.get("/config").json()["browse_modes"],
                 ["random", "rare", "diverse", "recency"],
             )
-            for path in ("/browse", "/browse/stream"):
-                self.assertEqual(
-                    client.get(path + "?mode=outliers").status_code, 400
-                )
-                self.assertEqual(
-                    client.get(path + "?mode=diverse").status_code, 200
-                )
             for path in ("/search", "/search/stream"):
                 self.assertEqual(client.get(path + "?q=").status_code, 200)
                 self.assertEqual(search.sort_calls[-1], ("diverse", 0))

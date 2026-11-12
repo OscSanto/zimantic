@@ -64,7 +64,7 @@ def _build(tmp, rows, *, fast=False, embedder=None, extra=None):
     return IndexLocator(tmp)
 
 
-def _handle(locator, source, *, read_only=True):
+def _handle(locator, source):
     lease = locator.paths(source)
     assert lease is not None
     db_path = lease.sqlite_path.resolve().as_uri() + "?mode=ro"
@@ -74,7 +74,6 @@ def _handle(locator, source, *, read_only=True):
         db_path=db_path,
         generation=lease.generation,
         lease=lease,
-        read_only=read_only,
     )
 
 
@@ -180,6 +179,18 @@ def test_body_search_ranks_positional_index_by_bm25():
         assert body_search(db, "zebra", 1) == [(1, 1.0)]
         assert body_search(db, "cafe missing", 16) == []
         assert body_search(db, "", 16) == []
+
+
+def test_body_search_skips_an_index_without_a_body_channel():
+    with sqlite3.connect(":memory:") as db:
+        assert body_search(db, "zebra", 16) == []
+
+
+def test_body_search_propagates_a_malformed_body_index():
+    with sqlite3.connect(":memory:") as db:
+        db.execute("CREATE TABLE body(text TEXT)")
+        with pytest.raises(sqlite3.OperationalError, match="no such column"):
+            body_search(db, "zebra", 16)
 
 
 @pytest.mark.parametrize("invalid", ["version", "fingerprint", "size", "positional", "identity"])

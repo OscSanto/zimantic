@@ -30,6 +30,23 @@ brew install ffmpeg tesseract tesseract-lang unar
 
 On Windows, install ffmpeg and Tesseract from their official builds and put `ffmpeg.exe`, `ffprobe.exe`, and `tesseract.exe` on `PATH`. `lsar` is optional on every platform.
 
+### Derived-text workers
+
+`workers` under `[derived_text]` accepts `"auto"` (the default) or a positive
+integer. OCR, ASR, and embedded-caption extraction run in a build-wide process
+pool shared by every source, so one slow page does not block another source's
+reader thread. Inputs are spooled to a private file before submission; only the
+path and validated options cross the process boundary. The built-in SubRip and
+WebVTT parser always runs in-process because it is pure Python.
+
+`"auto"` sizes the pool from usable cores minus one and currently available
+memory (512 MiB per worker, with headroom). If no worker fits, the engine-backed
+operations are reported unavailable instead of risking memory pressure; the
+built-in caption parser still works. A single source still reads and extracts
+its entries sequentially; the pool overlaps extraction across concurrently
+built sources. Use the benchmark in `tests/benchmarks/run_derived.py` to compare
+pool sizes on the target hardware.
+
 ### Quick start: remote Kiwix
 
 Install `kiwix-serve` from [kiwix.org](https://kiwix.org/en/applications/) and start it with a library XML file:

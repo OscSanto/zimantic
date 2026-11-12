@@ -7,7 +7,9 @@ that the unfiltered listing already publishes participates in a text match.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
+from functools import lru_cache
 from typing import Any
 
 from ..media_types import MEDIA_TYPE_ORDER
@@ -89,6 +91,27 @@ def _text_values(record: Mapping[str, Any]) -> list[str]:
     ]
 
 
+@lru_cache(maxsize=64)
+def _text_query(
+    query: str,
+) -> tuple[tuple[re.Pattern[str], ...], tuple[re.Pattern[str], ...]]:
+    """Split a listing query into required and excluded word-prefix patterns.
+
+    The browser applies the same rule: every bare term must match at the start
+    of a word, and a ``-term`` removes records that match. Keeping both sides
+    identical means an exclusion-only query such as ``-ted`` filters here
+    instead of returning an empty page that the browser cannot recover from.
+    """
+    includes: list[re.Pattern[str]] = []
+    excludes: list[re.Pattern[str]] = []
+    for term in str(query).casefold().split():
+        if term.startswith("-") and len(term) > 1:
+            excludes.append(re.compile(r"(?<![\w])" + re.escape(term[1:])))
+        elif term:
+            includes.append(re.compile(r"(?<![\w])" + re.escape(term)))
+    return tuple(includes), tuple(excludes)
+
+
 def _matches_text(
     record: Mapping[str, Any],
     query: str | None,
@@ -96,9 +119,19 @@ def _matches_text(
 ) -> bool:
     if not query:
         return True
-    needle = query.casefold()
-    values = [*_text_values(record), *extra]
-    return any(needle in str(value).casefold() for value in values if value)
+    includes, excludes = _text_query(str(query))
+    values = [
+        str(value).casefold()
+        for value in (*_text_values(record), *extra)
+        if value
+    ]
+
+    def matches(pattern: re.Pattern[str]) -> bool:
+        return any(pattern.search(value) for value in values)
+
+    return all(matches(pattern) for pattern in includes) and not any(
+        matches(pattern) for pattern in excludes
+    )
 
 
 def _matches_source(

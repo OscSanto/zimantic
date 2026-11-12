@@ -221,8 +221,13 @@ def body_search(
             "ORDER BY bm25(body), rowid LIMIT ?",
             (expression, max(1, int(limit))),
         ).fetchall()
-    except sqlite3.Error:
-        return []
+    except sqlite3.OperationalError as error:
+        # An index that never had a body channel is title-only, not broken.
+        # Any other SQLite failure (corruption, a malformed body table) must
+        # reach the caller so the source reports an operation-scoped error.
+        if "no such table" in str(error).casefold() and "body" in str(error).casefold():
+            return []
+        raise
     return [(int(row[0]), float(position)) for position, row in enumerate(rows, 1)]
 
 

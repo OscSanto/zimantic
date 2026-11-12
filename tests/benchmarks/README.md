@@ -69,7 +69,7 @@ See the [native-only matrix](results/native-workers-2026-11-08.json), [resident-
 
 ### Reader GIL/thread results, November 9, 2026
 
-The [81-trial report](results/native-threads-2026-11-09.json) preserves original installed-stack baselines, controlled original-reader baselines on the same native dependencies, the process/thread matrix, and four-source-thread Pi-budget confirmation. Summaries are medians of three fresh-service trials. Absolute binding paths are removed; source revisions and native dependency versions identify each stack. The installed distribution version can differ from a locally overridden binding.
+The 81-trial report (regenerate with the command below) preserves original installed-stack baselines, controlled original-reader baselines on the same native dependencies, the process/thread matrix, and four-source-thread Pi-budget confirmation. Summaries are medians of three fresh-service trials. Absolute binding paths are removed; source revisions and native dependency versions identify each stack. The installed distribution version can differ from a locally overridden binding.
 
 The main measured-stack command is:
 
@@ -113,3 +113,23 @@ Reports include end-to-end and pre-hydration p50/p95, CPU/query, throughput, pre
 For four concurrent uncached queries on this desktop, use `--clients 4 --workers 8 --source-workers 8 --limits 20:8192 --cache miss --requests 48`. Also repeat with one ZIM file: a selective-prefetch win from overlapping work across several sources need not survive a single-source search. These are native-only search/preview pipeline measurements: no model, SQLite title/body channels, phrase enrichment, HTTP, or whole-server startup. Shared host caches are never dropped; CPU quotas do not emulate Pi hardware.
 
 See the [75-trial results and recommendation](../../docs/architecture.md#snippet-prefetch-comparison-november-9-2026).
+
+## Derived-text worker pool
+
+`run_derived.py` measures the process pool used for OCR, ASR, and embedded
+caption extraction. It runs the committed Tesseract fixture sequentially and
+through increasing pool sizes, and checks that every configuration returns the
+same text digest.
+
+```sh
+uv run python tests/benchmarks/run_derived.py \
+    --count 32 --repeats 5 --workers 2,4,8 \
+    --json-out tests/benchmarks/results/derived-workers-2026-11-11.json
+```
+
+The November 11, 2026 desktop run (20 logical CPUs, Tesseract `eng`, 32 OCR
+tasks) measured 1.97 s sequential, 1.11 s with two workers (1.77×), 0.65 s with
+four (3.04×), and 0.46 s with eight (4.30×). All runs produced the same text
+digest. This measures engine dispatch only. The production pool is shared by
+concurrent source builds; a single source still reads and extracts its entries
+sequentially. Do not treat the synthetic speedup as a whole-build prediction.

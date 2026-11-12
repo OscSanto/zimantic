@@ -102,7 +102,7 @@ def _sources_from_entries(
 ) -> tuple[SourceInfo, ...]:
     """Build a deterministic source tuple and reject key collisions."""
     by_key: dict[str, SourceInfo] = {}
-    for entry in entries:
+    for position, entry in enumerate(entries):
         source = source_from_entry(collection, entry, server=server)
         previous = by_key.get(source.key)
         if previous is not None:
@@ -111,6 +111,10 @@ def _sources_from_entries(
                     f"Kiwix source key collision for {source.key!r}"
                 )
             continue
+        # Preserve the catalog position separately from the display title sort
+        # that the library applies later. Explicit collection caps are defined
+        # in catalog order, not title order.
+        object.__setattr__(source, "_catalog_order", position)
         by_key[source.key] = source
     return tuple(
         sorted(

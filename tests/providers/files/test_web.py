@@ -80,8 +80,8 @@ def test_browsing_uses_published_path_only_indexes_and_source_filters(files_site
     assert runtime.indexes[key].db_path is not None
     for mode in ("random", "rare"):
         response = client.get(
-            "/browse",
-            params={"mode": mode, "seed": 7, "source": key, "limit": 2},
+            "/search",
+            params={"q": "", "sort": mode, "seed": 7, "source": key, "limit": 2},
         )
         assert response.status_code == 200
         results = response.json()

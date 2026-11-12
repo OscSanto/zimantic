@@ -16,7 +16,7 @@ Semantic search has the best coverage in widely spoken languages. Coverage varie
 
 - Semantic search matches articles from questions and descriptions when the query and the title share no words.
 - Alternate names and misspellings work: "diabetis" finds *Diabetes*, and "Leber's disease" finds *Leber's hereditary optic neuropathy*.
-- A multilingual query uses one model that covers more than 100 languages. A query in one language finds articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
+- A multilingual query uses one model; the default covers 50 languages and the optional e5 models cover more than 100. A query in one language finds articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
 - Collections and sources provide several scopes. Browse the library by collection and provider, search one collection as a unit, or combine individual sources. See [Source selection](docs/usage.md#source-selection).
 - Files collections search and serve one configured directory tree, such as an offline copy of `/library/www/html/modules`, as one collection with a fixed scope. See [Files collections](docs/collections.md#files-collections).
 - Kolibri installations are searched and served directly. Each installed channel is one collection, and each top-level topic is one source. See [Kolibri installations](docs/collections.md#kolibri-installations).

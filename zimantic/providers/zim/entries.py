@@ -36,6 +36,22 @@ def _setting(cfg: Mapping[str, Any] | None, key: str, default: int) -> int:
     return int(value)
 
 
+def _validate_entry_record(row: EntryRecord, index: int) -> None:
+    """Reject provider identities that cannot be stored without remapping."""
+    if row.id < 0 or row.id > MAX_ROW_ID:
+        raise ValueError(
+            f"ZIM entry {index} has an unsafe row id {row.id}; refusing to "
+            "merge or remap provider identities"
+        )
+    if row.target_id is not None and (
+        row.target_id < 0 or row.target_id > MAX_ROW_ID
+    ):
+        raise ValueError(
+            f"ZIM entry {index} redirects to an unsafe row id "
+            f"{row.target_id}; refusing to merge or remap provider identities"
+        )
+
+
 class ArchiveEntryProducer:
     """Bounded, resumable sequence of rows from one ZIM archive."""
 
@@ -146,10 +162,9 @@ class ArchiveEntryProducer:
     def entry_at(self, index: int) -> EntryRecord | None:
         if not isinstance(index, int) or index < 0 or index >= self.count:
             return None
-        archive = self._open()
-        entry_id = int(self._order[index]) if self._order is not None else index
+        entry_id = self.entry_id_at(index)
         row = read_entry(
-            archive,
+            self._open(),
             entry_id,
             fast=self.fast,
             max_html_bytes=self.max_html_bytes,
@@ -159,19 +174,31 @@ class ArchiveEntryProducer:
         )
         if row is None:
             return None
-        if row.id < 0 or row.id > MAX_ROW_ID:
-            raise ValueError(
-                f"ZIM entry {index} has an unsafe row id {row.id}; refusing to "
-                "merge or remap provider identities"
-            )
-        if row.target_id is not None and (
-            row.target_id < 0 or row.target_id > MAX_ROW_ID
-        ):
-            raise ValueError(
-                f"ZIM entry {index} redirects to an unsafe row id "
-                f"{row.target_id}; refusing to merge or remap provider identities"
-            )
+        _validate_entry_record(row, index)
         return row
+
+    def entry_id_at(self, index: int) -> int:
+        """Return the native entry id for one position in the build order."""
+        return int(self._order[index]) if self._order is not None else index
+
+    def parallel_reader(
+        self,
+        *,
+        workers: int,
+        start: int = 0,
+        chunk_size: int = 16,
+        view: Any | None = None,
+    ):
+        """Open a process pool that reads and extracts entries in parallel."""
+        if getattr(self.entry_at, "__func__", None) is not ArchiveEntryProducer.entry_at:
+            # A test or subclass replaced entry_at; the process reader would
+            # silently bypass that behavior.
+            return None
+        from .parallel import ParallelEntryReader
+
+        return ParallelEntryReader(
+            view or self, workers=workers, start=start, chunk_size=chunk_size
+        )
 
     def modified_at(self, index: int) -> int | None:
         if not isinstance(index, int) or index < 0 or index >= self.count:

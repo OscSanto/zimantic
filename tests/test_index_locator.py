@@ -1,6 +1,9 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from zimantic.indexing import locator as locator_module
 from zimantic.indexing.locator import IndexLocator
 
 
@@ -89,3 +92,39 @@ def test_cleanup_keeps_the_current_generation(tmp_path):
 
 def test_missing_generation_returns_none(tmp_path):
     assert IndexLocator(tmp_path).paths(_Source()) is None
+
+
+def test_repeated_pins_reuse_a_verified_digest_receipt(tmp_path, monkeypatch):
+    source = _Source()
+    locator = IndexLocator(tmp_path)
+    published = locator.publish(source, _database(tmp_path / "source.sqlite", 1))
+    published.close()
+
+    calls = []
+    actual = locator_module._file_digest
+
+    def counting(path):
+        calls.append(path)
+        return actual(path)
+
+    monkeypatch.setattr(locator_module, "_file_digest", counting)
+    for _ in range(2):
+        lease = locator.paths(source)
+        assert lease is not None
+        lease.close()
+    # The publish receipt already covers the unchanged files.
+    assert calls == []
+
+
+def test_digest_receipt_is_invalidated_when_the_file_changes(tmp_path):
+    source = _Source()
+    locator = IndexLocator(tmp_path)
+    published = locator.publish(source, _database(tmp_path / "source.sqlite", 1))
+    published.close()
+
+    with sqlite3.connect(published.sqlite_path) as db:
+        db.execute("UPDATE meta SET value = '2' WHERE key = 'done'")
+    with pytest.raises(
+        locator_module.IndexLocatorError, match="could not pin a stable index generation"
+    ):
+        locator.paths(source)

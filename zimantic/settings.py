@@ -3,7 +3,6 @@
 import os
 import sys
 import tomllib
-from collections.abc import Mapping
 from pathlib import Path
 
 from . import hardware
@@ -13,19 +12,14 @@ from .searching.config import DEFAULT_MAX_ARTICLE_BYTES
 
 DEFAULT_EMBEDDING_TOKENS = 256
 MAX_AUTO_FULLTEXT_WORKERS = 8
+MAX_AUTO_READER_PROCESSES = 16
 MAX_AUTO_SOURCE_QUERY_THREADS = 8
 MAX_AUTO_ONNX_QUERY_THREADS = 4
 
-RESOURCE_KEY_ALIASES = {
-    "embed_threads": "onnx_query_threads",
-    "search_workers": "source_query_threads",
-    "fulltext_workers": "libzim_search_processes",
-    "build_embed_threads": "onnx_build_threads",
-    "embedding_workers": "onnx_build_workers",
-}
 _AUTOMATIC_RESOURCE_KEYS = frozenset(
     {
         "build_workers",
+        "reader_processes",
         "onnx_build_workers",
         "onnx_query_threads",
         "source_query_threads",
@@ -149,27 +143,8 @@ PROFILES = {"mobile": MOBILE, "desktop": DESKTOP, "supercomputer": SUPERCOMPUTER
 # but remain user-settable, so they must stay known.
 KNOWN_KEYS = (
     frozenset(key for profile in PROFILES.values() for key in profile)
-    | SCOPED_KEYS | frozenset(RESOURCE_KEY_ALIASES) | _OPTIONAL_INT_KEYS
+    | SCOPED_KEYS | _OPTIONAL_INT_KEYS
 )
-
-
-def normalize_resource_settings(values: Mapping, warn=None) -> dict:
-    """Accept renamed resource keys without retaining duplicate settings."""
-    normalized = dict(values)
-    for old, new in RESOURCE_KEY_ALIASES.items():
-        if old not in normalized:
-            continue
-        value = normalized.pop(old)
-        duplicate = new in normalized
-        if not duplicate:
-            normalized[new] = value
-        if warn is not None:
-            suffix = "; the new key takes precedence" if duplicate else ""
-            warn(
-                f"zimantic: warning: config key {old!r} is deprecated; "
-                f"use {new!r}{suffix}"
-            )
-    return normalized
 
 
 def _coerce_config_value(key: str, value: object, default: object) -> object | None:
@@ -270,10 +245,32 @@ def default_build_workers(cores: int | None = None, memory_gb: float | None = No
     return min(8, cpu_limit, memory_limit)
 
 
+def default_reader_processes(
+    cores: int | None = None,
+    memory_gb: float | None = None,
+) -> int:
+    """Choose how many helper processes may parse HTML for one source.
+
+    HTML extraction is CPU-bound Python traversal, so processes scale it where
+    threads cannot. Leave one physical core for the embedding/writer stages and
+    reserve the parent plus a model-sized working set before admitting workers.
+    A value below two means the pool is not worth starting.
+    """
+    hw = hardware.detect() if cores is None or memory_gb is None else None
+    cores = max(1, cores if cores is not None else hw.cores)
+    available = (
+        int(memory_gb * (1 << 30)) if memory_gb is not None else hw.ram_available
+    )
+    cpu_limit = max(1, cores - 1)
+    per_worker = 96 << 20
+    reserve = 256 << 20
+    memory_limit = max(0, (available - reserve) // per_worker)
+    return min(MAX_AUTO_READER_PROCESSES, cpu_limit, max(1, memory_limit))
+
+
 def default_embedding_workers(
     cores: int | None = None,
     memory_gb: float | None = None,
-    build_workers: int | None = None,
     build_embed_threads: int | None = None,
     token_budget: int = 1000,
 ) -> int:
@@ -339,8 +336,9 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
 
     Unix uses the XDG config path; Windows uses config.toml in the current
     directory. A missing or unreadable config is a warning, not an error.
-    Unknown global keys and malformed ``[[collections]]`` values are fatal
-    schema errors.
+    Unknown global keys are fatal schema errors. A malformed ``[[collections]]``
+    entry is reported as a diagnostic and omitted, leaving the rest of the
+    library loadable.
     """
     if warn is None:
         def warn_to_stderr(message):
@@ -384,7 +382,6 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
     # afterwards contradicts that message.
     if loaded and not user:
         warn(f"zimantic: warning: {config_path} is empty; using {profile} defaults")
-    user = normalize_resource_settings(user, warn)
     from .providers.config import RuntimeConfig, parse_collections
 
     config_dir = Path(config_path).resolve().parent
@@ -473,13 +470,13 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         cfg["onnx_query_threads"] = default_onnx_query_threads(hw.cores)
     if "build_workers" not in cfg:
         cfg["build_workers"] = default_build_workers(hw.threads, available_gb)
+    if "reader_processes" not in cfg:
+        cfg["reader_processes"] = default_reader_processes(hw.cores, available_gb)
     if "onnx_build_workers" not in cfg:
-        build_workers = cfg.get("build_workers")
         build_embed_threads = cfg.get("onnx_build_threads")
         cfg["onnx_build_workers"] = default_embedding_workers(
             cores=hw.cores,
             memory_gb=available_gb,
-            build_workers=build_workers if isinstance(build_workers, int) else None,
             build_embed_threads=build_embed_threads if isinstance(build_embed_threads, int) else None,
             token_budget=cfg["embedding_batch_tokens"],
         )
@@ -504,11 +501,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
 
     try:
         derived_text = parse_derived_text(envelope.get("derived_text"))
-        overrides = parse_source_overrides(
-            envelope.get("sources"),
-            collection_names=[entry.name for entry in collections],
-            warn=warn,
-        )
+        overrides = parse_source_overrides(envelope.get("sources"))
         collection_operations = {}
         for entry in collections:
             derived = getattr(entry, "derived_text", None)
@@ -524,7 +517,11 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         from .providers.config import ConfigValidationError
 
         raise ConfigValidationError(f"derived_text: {error}") from error
-    derived_workers, worker_bound = resolve_workers(derived_text.workers)
+    derived_workers, worker_bound = resolve_workers(
+        derived_text.workers,
+        usable_cores=hw.threads,
+        available_memory=hw.ram_available,
+    )
     envelope["derived_text_workers"] = {
         "configured": derived_text.workers,
         "resolved": derived_workers,

@@ -835,11 +835,6 @@ def open_files_index(
             threading.Lock(),
             db_path=_index_uri(db_path),
             db_signature=_file_signature(db_path),
-            faiss_signature=(
-                _file_signature(faiss_path)
-                if options.semantic and not options.defer_faiss and faiss_path
-                else None
-            ),
             done=done,
             source_size=None,
             lease=lease,

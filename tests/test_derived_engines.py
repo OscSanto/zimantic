@@ -224,3 +224,79 @@ def test_whisper_cpp_converts_to_wav_and_reads_txt(monkeypatch):
     assert cli[0] == "/usr/bin/whisper-cli"
     assert Path(cli[cli.index("-m") + 1]) == Path("/models/ggml-base.en.bin")
     assert "-otxt" in cli
+
+
+class _FakeFuture:
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def result(self, timeout: float | None = None) -> str:
+        return self._value
+
+
+class _RecordingPool:
+    def __init__(self, value: str = "pool text") -> None:
+        self.value = value
+        self.calls: list[tuple[str, str, str, dict]] = []
+
+    def submit(self, operation, engine, payload, options):
+        self.calls.append((operation, engine, str(payload), dict(options)))
+        return _FakeFuture(self.value)
+
+
+class _ImageInput:
+    kind = "image"
+    mimetype = "image/png"
+    size = 4
+
+    def open(self):
+        import io
+
+        return io.BytesIO(b"png!")
+
+
+def test_derived_stage_routes_ocr_to_the_worker_pool():
+    from zimantic.indexing.derived import (
+        DerivedTextConfig,
+        DerivedTextStage,
+        SourceDerivedOperations,
+    )
+
+    pool = _RecordingPool("zebra from worker")
+    stage = DerivedTextStage(
+        DerivedTextConfig(ocr_languages=("eng",)),
+        operations=SourceDerivedOperations(ocr="tesseract"),
+        engines={"ocr": lambda _data, **_options: "inline"},
+        worker_pool=pool,
+    )
+    result = stage.process(0, "", [_ImageInput()])
+    assert [item.text for item in result.contributions] == ["zebra from worker"]
+    assert pool.calls[0][0:2] == ("ocr", "tesseract")
+    assert pool.calls[0][3]["ocr_languages"] == ["eng"]
+
+
+def test_derived_cache_identity_ignores_scheduling_options():
+    from zimantic.indexing.derived import DerivedTextConfig, DerivedTextStage
+
+    one = DerivedTextStage(DerivedTextConfig(workers=1))
+    many = DerivedTextStage(DerivedTextConfig(workers=8))
+    assert one._options() == many._options()
+    assert "workers" not in one._options()
+    assert "cache" not in one._options()
+
+
+@pytest.mark.skipif(
+    shutil.which("tesseract") is None, reason="tesseract is unavailable"
+)
+def test_worker_pool_runs_real_ocr_in_a_spawned_process():
+    from zimantic.indexing.derived import DerivedWorkerPool
+
+    payload = sample("image/scan.png").read_bytes()
+    pool = DerivedWorkerPool(1)
+    try:
+        future = pool.submit(
+            "ocr", "tesseract", payload, {"ocr_languages": ["eng"]}
+        )
+        assert "zebra OCR fixture" in future.result(timeout=60)
+    finally:
+        pool.close()

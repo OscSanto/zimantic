@@ -11,8 +11,9 @@
 # On Linux and other XDG platforms, omitted global data paths default under
 # $XDG_DATA_HOME/zimantic (normally ~/.local/share/zimantic).
 # Relative global path overrides (model_dir/index_dir) are relative to that
-# data directory. An existing config.toml in the current directory keeps its
-# historical current-directory-relative behavior.
+# data directory. On Windows the default config is config.toml in the current
+# directory; Unix platforms never read a config.toml from the current
+# directory.
 #
 # Keep global scalar keys before the first [[collections]] or [derived_text]
 # header. After a table header, TOML keys belong to that table.
@@ -245,6 +246,11 @@ port = 8090
 # Independent source builds. Automatic = up to 8, allowing four usable logical
 # CPU threads and four GiB of available RAM per worker, at least one.
 # build_workers = 2
+#
+# Helper processes that read and extract HTML for one source build. Automatic =
+# up to 16, bounded by usable physical cores minus one and available RAM,
+# reserving 256 MiB plus 96 MiB per helper. 1 disables the pool.
+# reader_processes = 8
 #
 # ONNX threads inside each BUILD model call. Profile defaults: desktop 1,
 # mobile 2, supercomputer 8, bounded by usable physical cores. The Pi 5/500

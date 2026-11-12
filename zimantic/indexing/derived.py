@@ -47,18 +47,6 @@ OPERATION_STATES = frozenset(
 )
 
 DERIVED_ORDER = ("captions", "ocr", "asr")
-_CAPTION_MIMETYPES = frozenset(
-    {
-        "application/x-subrip",
-        "application/srt",
-        "text/srt",
-        "text/vtt",
-        "text/webvtt",
-        "application/ass",
-        "text/x-ass",
-        "text/x-ssa",
-    }
-)
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -340,17 +328,13 @@ def parse_source_override(
 
 def parse_source_overrides(
     collections: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
-    *,
-    collection_names: Iterable[str] = (),
-    warn: Callable[[str], None] | None = None,
 ) -> dict[str, SourceDerivedOperations]:
     """Normalize per-source overrides, rejecting conflicting duplicates.
 
-    Stale-key diagnostics must be deferred until discovery has completed, so an
+    Stale-key diagnostics are deferred until discovery has completed, so an
     unknown key is retained here rather than being reported as an error during
     config loading.
     """
-    set(collection_names)
     result: dict[str, SourceDerivedOperations] = {}
     configured_keys: set[str] = set()
     if isinstance(collections, Mapping):
@@ -682,9 +666,15 @@ def spool_input(
 
 
 class DerivedWorkerPool:
-    """Lazy shared process pool for native OCR/ASR engines."""
+    """Lazy shared process pool for native OCR/ASR engines.
 
-    def __init__(self, workers: int, *, max_tasks_per_child: int | None = 1) -> None:
+    The pool is shared by every source build in one command, so a single slow
+    OCR page does not block another source's reader thread. The input is
+    spooled to a private file before submission; only the path and validated
+    options cross the process boundary.
+    """
+
+    def __init__(self, workers: int, *, max_tasks_per_child: int | None = None) -> None:
         if workers < 1:
             raise ValueError("a derived worker pool needs at least one worker")
         context = multiprocessing.get_context("spawn")
@@ -693,16 +683,31 @@ class DerivedWorkerPool:
             mp_context=context,
             max_tasks_per_child=max_tasks_per_child,
         )
+        self._closed = False
 
-    def submit(self, operation: str, engine: str, payload: bytes, options: Mapping[str, Any]):
+    def submit(
+        self,
+        operation: str,
+        engine: str,
+        payload: bytes | str | os.PathLike[str],
+        options: Mapping[str, Any],
+    ):
+        if self._closed:
+            raise RuntimeError("derived worker pool is closed")
         return self._executor.submit(
             _worker_extract, operation, engine, payload, dict(options)
         )
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self._executor.shutdown(wait=True, cancel_futures=True)
 
     def terminate(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         processes = list(getattr(self._executor, "_processes", {}).values())
         self._executor.shutdown(wait=False, cancel_futures=True)
         for process in processes:
@@ -718,17 +723,25 @@ class DerivedWorkerPool:
 
 
 def _worker_extract(
-    operation: str, engine: str, payload: bytes, options: Mapping[str, Any]
+    operation: str,
+    engine: str,
+    payload: bytes | str | os.PathLike[str],
+    options: Mapping[str, Any],
 ) -> str:
     """Spawn-safe worker entry point; engines are created inside the worker."""
-    if operation == "ocr" and engine == "tesseract":
-        try:
-            import pymupdf  # noqa: F401
-        except Exception as error:
-            raise RuntimeError(f"OCR engine unavailable: {error}") from error
-        raise RuntimeError("OCR engine is not configured for this build")
-    if operation == "asr" and engine == "whisper":
-        raise RuntimeError("ASR engine is not configured for this build")
+    from . import engines as engine_module
+
+    data = Path(payload).read_bytes() if not isinstance(payload, bytes) else payload
+    if operation == "ocr":
+        if engine != "tesseract":
+            raise RuntimeError(f"unsupported OCR engine {engine!r}")
+        return engine_module.extract_ocr(data, **dict(options))
+    if operation == "asr":
+        if engine != "whisper":
+            raise RuntimeError(f"unsupported ASR engine {engine!r}")
+        return engine_module.extract_asr(data, **dict(options))
+    if operation == "captions" and engine == "ffmpeg":
+        return engine_module.extract_embedded_captions(data, **dict(options))
     raise RuntimeError(f"unsupported derived operation {operation!r}")
 
 
@@ -800,7 +813,12 @@ class DerivedTextStage:
         return states
 
     def _options(self) -> dict[str, Any]:
-        return self.config.to_dict()
+        values = self.config.to_dict()
+        # These control scheduling and storage, not extraction output, so they
+        # must not change the digest-keyed cache identity.
+        values.pop("workers", None)
+        values.pop("cache", None)
+        return values
 
     def _failure_state(self, operation: str) -> str:
         return (
@@ -939,6 +957,36 @@ class DerivedTextStage:
             )
         return result
 
+    def _poolable(self, operation: str, engine: str) -> bool:
+        if self.worker_pool is None:
+            return False
+        if operation in {"ocr", "asr"}:
+            return True
+        return operation == "captions" and engine == "ffmpeg"
+
+    def _invoke_engine(
+        self,
+        operation: str,
+        engine: str,
+        spool: Path,
+        options: Mapping[str, Any],
+        *,
+        engine_function: Callable[..., str],
+    ) -> str:
+        if not self._poolable(operation, engine):
+            return engine_function(spool.read_bytes(), **options)
+        future = self.worker_pool.submit(operation, engine, str(spool), options)
+        timeout = (
+            float(options.get("task_timeout_seconds", 7200)) + 60.0
+        )
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError as error:
+            future.cancel()
+            raise RuntimeError(
+                f"{operation} worker timed out after {timeout:g}s"
+            ) from error
+
     def _extract(
         self,
         input: DerivedTextInput,
@@ -970,8 +1018,9 @@ class DerivedTextStage:
                         digest, operation, engine, options
                     ).name
                     return cached, None
-            data = spool.read_bytes()
-            text = engine_function(data, **options)
+            text = self._invoke_engine(
+                operation, engine, spool, options, engine_function=engine_function
+            )
             text = str(text or "")
             if self.cache is not None and text:
                 stored = self.cache.put(digest, operation, engine, options, text)

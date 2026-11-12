@@ -13,6 +13,7 @@ from zimantic.settings import (
     default_fulltext_workers,
     default_max_concurrent_searches,
     default_onnx_query_threads,
+    default_reader_processes,
     default_source_query_threads,
     load_config,
     normalize_web_base_path,
@@ -58,6 +59,14 @@ class HardwareProfileTests(unittest.TestCase):
         ):
             self.assertEqual(default_build_workers(), 1)
 
+    def test_reader_processes_leave_a_core_and_respect_memory(self):
+        self.assertEqual(default_reader_processes(4, 8), 3)
+        self.assertEqual(default_reader_processes(8, 8), 7)
+        self.assertEqual(default_reader_processes(20, 32), 16)
+        self.assertEqual(default_reader_processes(64, 256), 16)
+        self.assertEqual(default_reader_processes(4, 0.5), 2)
+        self.assertEqual(default_reader_processes(4, 0.25), 1)
+
     def test_serving_defaults_bound_cpu_without_conflating_thread_layers(self):
         with patch.object(
             hardware, "detect", return_value=Hardware(4, 8, 1 << 30, 384 << 20)
@@ -68,12 +77,12 @@ class HardwareProfileTests(unittest.TestCase):
             self.assertEqual(default_fulltext_workers(), 1)
 
     def test_embedding_workers_respect_thread_budget(self):
-        self.assertEqual(default_embedding_workers(4, 0.5, 1, 2), 1)
-        self.assertEqual(default_embedding_workers(20, 32, 5, None), 8)
-        self.assertEqual(default_embedding_workers(32, 128, 8, 8), 3)
-        self.assertEqual(default_embedding_workers(4, 8, 1, None), 3)
-        self.assertEqual(default_embedding_workers(20, 0.5, 5, None), 1)
-        self.assertEqual(default_embedding_workers(20, 1, 5, None, 8000), 1)
+        self.assertEqual(default_embedding_workers(4, 0.5, 2), 1)
+        self.assertEqual(default_embedding_workers(20, 32, None), 8)
+        self.assertEqual(default_embedding_workers(32, 128, 8), 3)
+        self.assertEqual(default_embedding_workers(4, 8, None), 3)
+        self.assertEqual(default_embedding_workers(20, 0.5, None), 1)
+        self.assertEqual(default_embedding_workers(20, 1, None, 8000), 1)
 
     def test_fulltext_workers_respect_cpu_memory_and_cgroups(self):
         from zimantic.hardware import Hardware
@@ -151,44 +160,24 @@ class LoadConfigTests(unittest.TestCase):
                     )
                     self.assertEqual(bool(warnings), value == "invalid")
 
-    def test_renamed_resource_keys_accept_legacy_configs(self):
-        for old, new in (
-            ("embed_threads", "onnx_query_threads"),
-            ("search_workers", "source_query_threads"),
-            ("fulltext_workers", "libzim_search_processes"),
-            ("build_embed_threads", "onnx_build_threads"),
-            ("embedding_workers", "onnx_build_workers"),
-        ):
-            with self.subTest(old=old), tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / "config.toml"
-                path.write_text(f"{old} = 3\n", encoding="utf-8")
-                warnings = []
-                cfg = load_config(path, warn=warnings.append)
-                self.assertEqual(cfg[new], 3)
-                self.assertEqual(cfg["runtime_config"].settings[new], 3)
-                self.assertNotIn(old, cfg)
-                self.assertNotIn(old, cfg["runtime_config"].settings)
-                self.assertEqual(len(warnings), 1)
-                self.assertIn(old, warnings[0])
-                self.assertIn(new, warnings[0])
+    def test_removed_resource_aliases_are_unknown_keys(self):
+        from zimantic.providers.config import ConfigValidationError
 
-    def test_canonical_key_wins_over_alias_regardless_of_order_or_validity(self):
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.object(hardware, "detect", return_value=Hardware(1, 1, 512 << 20, 384 << 20)),
-        ):
+        with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
-            for text, expected in (
-                ("search_workers = 3\nsource_query_threads = 5\n", 5),
-                ('source_query_threads = 5\nsearch_workers = "bad"\n', 5),
-                ("source_query_threads = 0\nsearch_workers = 3\n", 1),
+            for old in (
+                "embed_threads",
+                "search_workers",
+                "fulltext_workers",
+                "build_embed_threads",
+                "embedding_workers",
             ):
-                with self.subTest(text=text):
-                    path.write_text(text, encoding="utf-8")
-                    warnings = []
-                    cfg = load_config(path, warn=warnings.append)
-                    self.assertEqual(cfg["source_query_threads"], expected)
-                    self.assertTrue(any("takes precedence" in message for message in warnings))
+                with self.subTest(old=old):
+                    path.write_text(f"{old} = 3\n", encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        ConfigValidationError, "unknown config key"
+                    ):
+                        load_config(path, warn=lambda _: None)
 
     def test_invalid_serving_counts_warn_and_resolve_automatically(self):
         with (
@@ -205,16 +194,6 @@ class LoadConfigTests(unittest.TestCase):
                         self.assertEqual(cfg[key], 1)
                         self.assertEqual(len(warnings), 1)
                         self.assertIn(key, warnings[0])
-
-    def test_runtime_config_normalizes_legacy_keys_without_mutating_input(self):
-        from zimantic.providers.config import RuntimeConfig
-
-        values = {"embed_threads": 2, "fulltext_workers": 3}
-        runtime = RuntimeConfig(settings=values)
-        self.assertEqual(dict(runtime.settings), {
-            "onnx_query_threads": 2, "libzim_search_processes": 3,
-        })
-        self.assertEqual(values, {"embed_threads": 2, "fulltext_workers": 3})
 
     def test_dotted_traversal_limits_apply_to_each_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,7 +497,6 @@ class LoadConfigTests(unittest.TestCase):
                     workers.assert_called_once_with(
                         cores=8,
                         memory_gb=16.0,
-                        build_workers=5,
                         build_embed_threads=expected,
                         token_budget=1000,
                     )

@@ -27,7 +27,6 @@ from .content.store import (
     ArticleTooLargeError,
     ArticleUnavailableError,
     ContentEntry,
-    ContentRange,
     ContentStore,
 )
 from .contracts import SourceInfo, SourceResult
@@ -89,7 +88,6 @@ __all__ = [
 
 DEFAULT_CANDIDATES = 16
 DEFAULT_SOURCE_TIMEOUT = 12
-DEFAULT_MAX_CONCURRENT_SEARCHES = 4
 DEFAULT_MAX_STREAM_RANKS = 16
 # A slow source must not leave the page looking frozen. While a search is
 # running, snapshots are also emitted on this cadence (whenever at least one
@@ -208,14 +206,8 @@ class Search:
 
     @property
     def stream_update_interval(self) -> float:
-        if "_stream_update_interval" in self.__dict__:
-            return self.__dict__["_stream_update_interval"]
-        return _float_config(
-            self.cfg,
-            "stream_update_interval",
-            DEFAULT_STREAM_UPDATE_INTERVAL,
-            0.0,
-            math.inf,
+        return self.__dict__.get(
+            "_stream_update_interval", DEFAULT_STREAM_UPDATE_INTERVAL
         )
 
     @stream_update_interval.setter
@@ -329,13 +321,6 @@ class Search:
         )
         self.max_stream_ranks = _int_config(
             cfg, "max_stream_ranks", DEFAULT_MAX_STREAM_RANKS
-        )
-        self.stream_update_interval = _float_config(
-            cfg,
-            "stream_update_interval",
-            DEFAULT_STREAM_UPDATE_INTERVAL,
-            0.0,
-            math.inf,
         )
         self._search_slots = threading.BoundedSemaphore(self.max_concurrent_searches)
         # Bound the number of requests parked waiting for a search slot. Without
@@ -590,6 +575,19 @@ class Search:
                 self.refresh_collections(wait=True)
             else:
                 self._publish_runtime_sources()
+            # An explicit rescan is the recovery path after a transient archive
+            # failure (fixed permissions, remounted drive, or repaired file).
+            # Keep the handle but clear its latched open failure so the next
+            # use retries instead of staying unavailable until restart.
+            with self._state_lock:
+                kept_indexes = [
+                    index
+                    for runtime in self.runtimes.values()
+                    if isinstance(runtime, IndexedRuntime)
+                    for index in runtime.indexes.values()
+                ]
+            for index in kept_indexes:
+                index.allow_reopen()
             with self._state_lock:
                 new_keys = set(self.sources)
                 new_indexes = set(_index_tokens())
@@ -1279,32 +1277,6 @@ class Search:
     ) -> ArticleData:
         return self.read_article(source_key, path, head_only=True)
 
-    def read_content_range(
-        self,
-        source_key: str,
-        path: str,
-        *,
-        start: int,
-        end: int,
-        max_bytes: int | None = None,
-    ) -> ContentRange:
-        """Read an inclusive byte range of one unchanged representation."""
-        limit = (
-            self.max_article_bytes
-            if max_bytes is None
-            else min(int(max_bytes), self.max_article_bytes)
-        )
-        store = self.content_store(source_key)
-        try:
-            return store.read_range(
-                path,
-                start=start,
-                end=end,
-                max_bytes=limit,
-            )
-        finally:
-            store.close()
-
     def article_path_exists(self, source_key: str, path: str) -> bool:
         """Whether ``path`` resolves to a source entry."""
         try:
@@ -1607,7 +1579,15 @@ class Search:
         ):
             cap = max(1, int(getattr(self, "max_explicit_collection_sources", 500)))
             if len(candidates) > cap:
-                candidates = candidates[:cap]
+                # The cap is defined in catalog order. ``candidates`` follows
+                # the title-sorted library order used by the UI.
+                candidates = sorted(
+                    candidates,
+                    key=lambda source: (
+                        getattr(source, "_catalog_order", len(candidates)),
+                        source.key,
+                    ),
+                )[:cap]
                 capped = True
         return _ResolvedScope(
             sources=candidates,
@@ -2308,10 +2288,17 @@ class Search:
         cancelled = any(
             result.status == "cancelled" for result in source_results
         )
+        failed = any(
+            result.status == "error" for result in source_results
+        )
+        # A source error is operation-scoped: keep it out of the complete cache
+        # so the next request retries that source instead of replaying a
+        # transient failure until eviction or reload.
         complete_cacheable = (
             not partial
             and (deadline is None or time.monotonic() < deadline)
             and not cancelled
+            and not failed
         )
         if (
             cacheable
@@ -2893,10 +2880,22 @@ class Search:
     def _hydrate_results(
         self,
         docs: list[dict[str, Any]],
+        *,
+        deadline: float | None = None,
     ) -> None:
-        """Populate previews for the displayed page, in parallel by source."""
+        """Populate previews for the displayed page, in parallel by source.
+
+        Previews get their own budget rather than inheriting the search
+        deadline. The search deadline may already be near expiry when the
+        final page is ranked, and cutting every preview off there would make
+        the excerpt depend on how long the source fan-out took.
+        """
         if self.preview_limit <= 0:
             return
+        if deadline is None:
+            deadline = time.monotonic() + max(
+                1.0, float(getattr(self, "search_timeout_seconds", 30.0))
+            )
         docs = docs[: self.preview_limit]
         with self._state_lock:
             sources = dict(self.sources)
@@ -2936,16 +2935,19 @@ class Search:
             runtime = runtimes.get(source.collection_key) if source else None
             if source is None or runtime is None:
                 return source_key, source_docs, {}
-            previews: dict[str, tuple[str, str | None]] = {}
+            previews: dict[str, tuple[str, str | None, bool]] = {}
             settings = resolve_settings(self.cfg, source)
             for doc in source_docs:
+                if time.monotonic() >= deadline:
+                    break
+                cacheable = True
                 try:
                     lead, mimetype = runtime.preview(
                         source,
                         doc,
                         max_chars=settings.get("max_preview_chars", self.preview_chars),
                         max_bytes=min(settings.get("max_html_bytes", PREVIEW_HTML_BYTES), PREVIEW_HTML_BYTES),
-                        deadline=None,
+                        deadline=deadline,
                     )
                 except Exception as error:
                     logger.warning(
@@ -2955,7 +2957,13 @@ class Search:
                     )
                     logger.debug("preview failed for %s: %s", source.key, error)
                     lead, mimetype = "", doc.get("mimetype")
-                previews[doc["id"]] = (lead, mimetype)
+                    cacheable = False
+                else:
+                    # An extraction that ran past its budget may be partial;
+                    # do not freeze that result into the preview cache.
+                    if time.monotonic() >= deadline:
+                        cacheable = False
+                previews[doc["id"]] = (lead, mimetype, cacheable)
             return source_key, source_docs, previews
 
         futures = {
@@ -2965,20 +2973,37 @@ class Search:
             )
             for source_key, source_docs in grouped.items()
         }
-        for future in as_completed(futures):
-            source_key, source_docs, previews = future.result()
-            source = sources.get(source_key)
-            for doc in source_docs:
-                lead, mimetype = previews.get(doc["id"], ("", doc.get("mimetype")))
-                doc["lead"] = lead
-                if mimetype:
-                    doc["mimetype"] = mimetype
-                if source is not None:
-                    preview_cache.put(
-                        cache_key(source, doc),
-                        (lead, doc.get("mimetype")),
-                        quotas=self._cache_quotas([source]),
-                    )
+        remaining = set(futures)
+        try:
+            completed = as_completed(
+                remaining,
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            for future in completed:
+                remaining.discard(future)
+                source_key, source_docs, previews = future.result()
+                source = sources.get(source_key)
+                for doc in source_docs:
+                    entry = previews.get(doc["id"])
+                    if entry is None:
+                        continue
+                    lead, mimetype, cacheable = entry
+                    doc["lead"] = lead
+                    if mimetype:
+                        doc["mimetype"] = mimetype
+                    if cacheable and source is not None:
+                        preview_cache.put(
+                            cache_key(source, doc),
+                            (lead, doc.get("mimetype")),
+                            quotas=self._cache_quotas([source]),
+                        )
+        except TimeoutError:
+            for future in remaining:
+                future.cancel()
+            logger.debug(
+                "preview extraction reached its %.1fs budget",
+                float(getattr(self, "search_timeout_seconds", 30.0)),
+            )
 
     def _enrich_pool(
         self,

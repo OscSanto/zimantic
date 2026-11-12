@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,10 @@ from .._fs import fsync_path
 
 MANIFEST_VERSION = 1
 _SAFE = re.compile(r"[^a-z0-9._-]+")
+# Per-generation memo of a verified digest plus the file identity it covered.
+# Discovery pins hundreds of generations, and re-hashing every published index
+# on each build/startup costs more than many builds themselves.
+_DIGEST_RECEIPT = ".digest-cache.json"
 
 
 class IndexLocatorError(RuntimeError):
@@ -38,6 +43,38 @@ def _file_digest(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _digest_identity(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "inode": int(stat.st_ino),
+    }
+
+
+def _verified_digest(path: Path, expected: str, cached: Any) -> dict[str, int] | None:
+    """Return digest identity, reusing a receipt when the file is unchanged.
+
+    The receipt stores the manifest digest together with size/mtime/inode.
+    Any change to those requires a fresh hash, so a replaced or edited file
+    cannot inherit an earlier verification. Reusing a receipt is an integrity
+    cache, not a substitute for the digest at publication time.
+    """
+    try:
+        identity = _digest_identity(path)
+    except OSError:
+        return None
+    if (
+        isinstance(cached, dict)
+        and cached.get("digest") == expected
+        and all(cached.get(key) == value for key, value in identity.items())
+    ):
+        return identity
+    if _file_digest(path) != expected:
+        return None
+    return identity
 
 
 def _lock_shared(fd: int) -> bool:
@@ -122,6 +159,30 @@ class IndexLocator:
             raise IndexLocatorError("unsupported index manifest version")
         return data
 
+    def _read_digest_receipt(self, generation_dir: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(
+                (generation_dir / _DIGEST_RECEIPT).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_digest_receipt(
+        self, generation_dir: Path, receipt: Mapping[str, Any]
+    ) -> None:
+        path = generation_dir / _DIGEST_RECEIPT
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(receipt, sort_keys=True), encoding="utf-8"
+            )
+            os.replace(temporary, path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+
     def _validate_generation(
         self,
         directory: Path,
@@ -145,19 +206,36 @@ class IndexLocator:
             raise IndexLocatorError("index.sqlite must not be a symlink")
         if not sqlite_path.is_file():
             raise IndexLocatorError("index generation is missing index.sqlite")
+        receipt = self._read_digest_receipt(generation_dir)
+        updated: dict[str, Any] = dict(receipt)
         sqlite_digest = str(manifest.get("sqlite_digest") or "")
-        if not sqlite_digest or _file_digest(sqlite_path) != sqlite_digest:
+        sqlite_identity = (
+            _verified_digest(sqlite_path, sqlite_digest, receipt.get("sqlite"))
+            if sqlite_digest
+            else None
+        )
+        if sqlite_identity is None:
             raise IndexLocatorError("index.sqlite digest does not match the manifest")
+        updated["sqlite"] = {"digest": sqlite_digest, **sqlite_identity}
         faiss_digest = manifest.get("faiss_digest")
         if faiss_digest:
             if faiss_path.is_symlink():
                 raise IndexLocatorError("index.faiss must not be a symlink")
             if not faiss_path.is_file():
                 raise IndexLocatorError("index generation is missing index.faiss")
-            if verify_faiss and _file_digest(faiss_path) != str(faiss_digest):
-                raise IndexLocatorError("index.faiss digest does not match the manifest")
+            if verify_faiss:
+                faiss_identity = _verified_digest(
+                    faiss_path, str(faiss_digest), receipt.get("faiss")
+                )
+                if faiss_identity is None:
+                    raise IndexLocatorError(
+                        "index.faiss digest does not match the manifest"
+                    )
+                updated["faiss"] = {"digest": str(faiss_digest), **faiss_identity}
         else:
             faiss_path = None
+        if updated != receipt:
+            self._write_digest_receipt(generation_dir, updated)
         return sqlite_path, faiss_path, sqlite_digest, (
             str(faiss_digest) if faiss_digest else None
         )
@@ -265,6 +343,18 @@ class IndexLocator:
             )
         os.replace(staging, generation_dir)
         fsync_path(generation_dir.parent)
+        receipt: dict[str, Any] = {
+            "sqlite": {
+                "digest": sqlite_digest,
+                **_digest_identity(generation_dir / "index.sqlite"),
+            }
+        }
+        if faiss_digest:
+            receipt["faiss"] = {
+                "digest": faiss_digest,
+                **_digest_identity(generation_dir / "index.faiss"),
+            }
+        self._write_digest_receipt(generation_dir, receipt)
         manifest = {
             "version": MANIFEST_VERSION,
             "provider": provider,

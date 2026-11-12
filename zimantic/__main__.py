@@ -200,6 +200,38 @@ def _find_downloading_sizes(zim_sizes: dict[Path, int]) -> set[Path]:
     return downloading
 
 
+def _wait_for_configured_zim_downloads(entries: list) -> None:
+    """Apply ``--wait-stable`` to configured ZIM collections.
+
+    The positional build already polls the ZIM files named on the command
+    line. Configured builds reached the same code path without ever reading
+    the flag, so the deploy units passed it with no effect.
+    """
+    paths: set[Path] = set()
+    for entry in entries:
+        if getattr(entry, "kind", None) != "zim":
+            continue
+        path = Path(getattr(entry, "path", "") or "")
+        try:
+            if path.is_file():
+                paths.add(path)
+            elif path.is_dir():
+                paths.update(_collect_zims([path], path))
+        except OSError:
+            continue
+    sizes: dict[Path, int] = {}
+    for path in paths:
+        try:
+            sizes[path] = path.stat().st_size
+        except OSError:
+            continue
+    if not sizes:
+        return
+    downloading = _find_downloading_sizes(sizes)
+    if downloading:
+        _wait_for_stable_sizes(downloading)
+
+
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="zimantic")
     _add_verbosity_argument(parser, default=0)
@@ -594,46 +626,6 @@ def _select_zim_paths(zims: list[Path], zim_sizes: dict[Path, int]) -> list[Path
     return sorted(accepted, key=zim_sizes.__getitem__)
 
 
-def _configured_files_collections(cfg: dict) -> list:
-    return [
-        entry
-        for entry in cfg.get("collections") or ()
-        if getattr(entry, "kind", None) == "files"
-    ]
-
-
-def _configured_kolibri_collections(cfg: dict) -> list:
-    return [
-        entry
-        for entry in cfg.get("collections") or ()
-        if getattr(entry, "kind", None) == "kolibri"
-    ]
-
-
-def _collect_zims_from_roots(
-    paths: list[Path], roots: list[Path]
-) -> list[Path]:
-    selected: list[Path] = []
-    seen: set[Path] = set()
-    for root in roots:
-        for zim in _collect_zims([root], root):
-            resolved = zim.resolve()
-            if resolved not in seen:
-                seen.add(resolved)
-                selected.append(zim)
-    if paths:
-        selected = _collect_zims(paths, roots[0] if roots else ".")
-    return selected
-
-
-def _slug_collection_name(path: Path) -> str:
-    import re
-
-    stem = path.stem if path.is_file() else path.name
-    text = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._") or "zim"
-    if not text[0].isalnum():
-        text = "zim-" + text
-    return text[:64]
 
 
 def _build_producer_for_zim(zim: Path, cfg: dict, *, fast: bool):
@@ -679,190 +671,6 @@ def _build_config(cfg: dict, fast: bool) -> dict:
 
         values["derived_engines"] = available_derived_engines()
     return values
-
-
-def _build_files_collections(
-    cfg: dict,
-    args,
-    embedder,
-    embedding_pipeline,
-    failures: list[tuple[Path, BaseException]],
-) -> None:
-    """Build every configured files collection through the generic pipeline."""
-    from .diagnostics import public_cause
-    from .indexing.locator import IndexLocator
-    from .indexing.pipeline import build_index
-    from .providers.base import ProviderContext
-    from .providers.files import FilesProvider
-    from .settings import normalize_web_base_path
-
-    entries = _configured_files_collections(cfg)
-    if not entries:
-        return
-    runtime_config = cfg.get("runtime_config")
-    ctx = ProviderContext(
-        config=runtime_config,
-        index_dir=Path(cfg["index_dir"]),
-        web_base_path=normalize_web_base_path(cfg.get("web_base_path")),
-        logger=logger,
-        persist_catalog=False,
-    )
-    build_cfg = _build_config(cfg, args.fast)
-    build_cfg["embedding_pipeline"] = embedding_pipeline
-    for entry in entries:
-        try:
-            batch = FilesProvider().discover(entry, ctx)
-        except Exception as error:
-            logger.error(
-                "zimantic: files collection %s discovery failed: %s",
-                getattr(entry, "name", "files"),
-                public_cause(error),
-            )
-            logger.debug("files collection discovery error: %s", error)
-            failures.append((Path(entry.path), error))
-            continue
-        try:
-            for collection in batch.collections:
-                runtime = None
-                try:
-                    runtime = batch.open(collection)
-                    if runtime.snapshot.error:
-                        logger.warning(
-                            "zimantic: files collection %s: %s",
-                            collection.label,
-                            runtime.snapshot.error,
-                        )
-                    sources = list(runtime.library_sources())
-                    if not sources and runtime.snapshot.error:
-                        failures.append(
-                            (Path(entry.path), RuntimeError(runtime.snapshot.error))
-                        )
-                    for source in sources:
-                        try:
-                            producer = runtime.entry_producer(
-                                source, fast=args.fast
-                            )
-                            build_index(
-                                producer,
-                                IndexLocator(cfg["index_dir"]),
-                                embedder,
-                                build_cfg,
-                                fast=args.fast,
-                                force=args.force,
-                            )
-                        except Exception as error:
-                            logger.error(
-                                "zimantic: failed to index %s: %s",
-                                source.key,
-                                public_cause(error),
-                            )
-                            logger.debug("files source build error: %s", error)
-                            failures.append((Path(entry.path), error))
-                except Exception as error:
-                    logger.error(
-                        "zimantic: files collection %s failed: %s",
-                        collection.label,
-                        public_cause(error),
-                    )
-                    logger.debug("files collection error: %s", error)
-                    failures.append((Path(entry.path), error))
-                finally:
-                    if runtime is not None:
-                        runtime.close()
-        finally:
-            batch.close()
-
-
-def _build_kolibri_collections(
-    cfg: dict,
-    args,
-    embedder,
-    embedding_pipeline,
-    failures: list[tuple[Path, BaseException]],
-) -> None:
-    """Build every configured Kolibri channel through the generic pipeline."""
-    from .diagnostics import public_cause
-    from .indexing.locator import IndexLocator
-    from .indexing.pipeline import build_index
-    from .providers.base import ProviderContext
-    from .providers.kolibri import KolibriProvider
-    from .settings import normalize_web_base_path
-
-    entries = _configured_kolibri_collections(cfg)
-    if not entries:
-        return
-    runtime_config = cfg.get("runtime_config")
-    ctx = ProviderContext(
-        config=runtime_config,
-        index_dir=Path(cfg["index_dir"]),
-        web_base_path=normalize_web_base_path(cfg.get("web_base_path")),
-        logger=logger,
-        persist_catalog=False,
-    )
-    build_cfg = _build_config(cfg, args.fast)
-    build_cfg["embedding_pipeline"] = embedding_pipeline
-    for entry in entries:
-        try:
-            batch = KolibriProvider().discover(entry, ctx)
-        except Exception as error:
-            logger.error(
-                "zimantic: Kolibri collection %s discovery failed: %s",
-                getattr(entry, "name", "kolibri"),
-                public_cause(error),
-            )
-            logger.debug("Kolibri collection discovery error: %s", error)
-            failures.append((Path(entry.path), error))
-            continue
-        try:
-            for collection in batch.collections:
-                runtime = None
-                try:
-                    runtime = batch.open(collection)
-                    if runtime.snapshot.error:
-                        logger.warning(
-                            "zimantic: Kolibri collection %s: %s",
-                            collection.label,
-                            runtime.snapshot.error,
-                        )
-                    sources = list(runtime.library_sources())
-                    if not sources and runtime.snapshot.error:
-                        failures.append(
-                            (Path(entry.path), RuntimeError(runtime.snapshot.error))
-                        )
-                    for source in sources:
-                        try:
-                            producer = runtime.entry_producer(
-                                source, fast=args.fast
-                            )
-                            build_index(
-                                producer,
-                                IndexLocator(cfg["index_dir"]),
-                                embedder,
-                                build_cfg,
-                                fast=args.fast,
-                                force=args.force,
-                            )
-                        except Exception as error:
-                            logger.error(
-                                "zimantic: failed to index %s: %s",
-                                source.key,
-                                public_cause(error),
-                            )
-                            logger.debug("Kolibri source build error: %s", error)
-                            failures.append((Path(entry.path), error))
-                except Exception as error:
-                    logger.error(
-                        "zimantic: Kolibri collection %s failed: %s",
-                        collection.label,
-                        public_cause(error),
-                    )
-                    logger.debug("Kolibri collection error: %s", error)
-                    failures.append((Path(entry.path), error))
-                finally:
-                    if runtime is not None:
-                        runtime.close()
-        finally:
-            batch.close()
 
 
 def _provider_kinds() -> tuple[str, ...]:
@@ -1293,6 +1101,44 @@ def _build_tasks(
         )
 
     build_cfg = _build_config(cfg, args.fast)
+    derived_pool = None
+    if not args.fast:
+        from .indexing.derived import DerivedWorkerPool, resolve_workers
+
+        derived_engines = build_cfg.get("derived_engines") or {}
+        resolved_workers = None
+        worker_info = cfg.get("derived_text_workers")
+        if isinstance(worker_info, dict):
+            resolved_workers = worker_info.get("resolved")
+        if resolved_workers is None:
+            from .hardware import detect
+
+            hw = detect()
+            resolved_workers, _bound = resolve_workers(
+                getattr(cfg.get("derived_text"), "workers", "auto"),
+                usable_cores=hw.threads,
+                available_memory=hw.ram_available,
+            )
+        operations_enabled = any(
+            ops.any_enabled
+            for key in ("derived_collection_operations", "derived_source_operations")
+            for ops in (cfg.get(key) or {}).values()
+        )
+        if derived_engines and resolved_workers and operations_enabled:
+            derived_pool = DerivedWorkerPool(int(resolved_workers))
+            build_cfg["derived_worker_pool"] = derived_pool
+            logger.info(
+                "zimantic: using %d derived-text worker(s)",
+                int(resolved_workers),
+            )
+        elif derived_engines and operations_enabled:
+            # No worker fits the current CPU/memory budget. Disable only the
+            # engine-backed operations; the built-in caption parser still runs.
+            build_cfg["derived_engines"] = {}
+            logger.warning(
+                "zimantic: no derived-text worker fits in available memory; "
+                "OCR, ASR, and embedded caption extraction are unavailable"
+            )
     build_cfg["embedding_pipeline"] = embedding_pipeline
     build_cfg["interrupt_event"] = _BUILD_STOP_EVENT or threading.Event()
     # When several source builds already run concurrently, source-level overlap
@@ -1302,6 +1148,7 @@ def _build_tasks(
         1 if workers == 1 or len(tasks) == 1 else min(workers, len(tasks))
     )
     build_cfg["_stage_split"] = concurrent_sources == 1
+    build_cfg["_concurrent_sources"] = concurrent_sources
     locator = IndexLocator(cfg["index_dir"])
     overall = _AllFilesProgress(len(tasks))
 
@@ -1389,6 +1236,11 @@ def _build_tasks(
         raise
     finally:
         overall.close()
+        if derived_pool is not None:
+            if interrupted:
+                derived_pool.terminate()
+            else:
+                derived_pool.close()
         if embedding_pipeline is not None:
             embedding_pipeline.close(wait=not interrupted)
     if failures:
@@ -1445,6 +1297,9 @@ def _run_configured_build(
             )
         logger.info("zimantic: no local sources to index")
         return
+
+    if args.wait_stable and not args.list and paths is None:
+        _wait_for_configured_zim_downloads(buildable)
 
     if args.list:
         with discover_collections(
@@ -1561,13 +1416,13 @@ def _run_positional_zim_build(
             )
 
         embedder = _LazyEmbedder(_make_embedder)
-        if workers > 1 and len(zims) > 1:
+        if workers >= 1:
             embedding_workers = int(cfg.get("onnx_build_workers", 2))
             if embedding_workers < 1:
                 parser.error("onnx_build_workers must be at least 1")
             embedding_pipeline = EmbeddingPipeline(
                 embedder,
-                workers=min(embedding_workers, workers),
+                workers=min(embedding_workers, max(1, workers)),
                 queue_size=_embedding_queue_size(
                     cfg, workers, getattr(args, "device", None)
                 ),

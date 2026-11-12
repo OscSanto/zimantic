@@ -65,9 +65,9 @@ See [Architecture](architecture.md) for the provider model.
 | OCR pages / pixels / output | 20 / 50 MP / 256 KiB | OCR stage and image guard |
 | ASR media | 1 h / 1 GiB | ASR stage |
 | Derived-text workers | `"auto"` | memory/CPU-derived; unavailable if none fits |
-| Discovery time per provider | 10 s startup budget | serving starts before optional/remote discovery completes |
+| Discovery time per provider | `search_timeout_seconds` (30 s) | serving starts before optional/remote discovery completes |
 | Entries/traversal time | 1,000,000 / 300 s | per-provider walk with limits |
-| Search timeout | `search_timeout_seconds` (30 s) | admitted search scheduling, ranking, and previews; the partial pool is reused for `partial_cache_seconds` (60 s) |
-| Listing page size | `page_size`, maximum 200 | collection/source/library JSON |
+| Search timeout | `search_timeout_seconds` (30 s) | admitted search scheduling and ranking; the partial pool is reused for `partial_cache_seconds` (60 s). Preview extraction gets its own separate budget of the same length after ranking. |
+| Listing page size | `page_size`, maximum 200 for `/sources` and `/collections.json`, 1000 for `/library.json` | listing JSON |
 
 A provider that reaches a limit logs one time and degrades; index truncation never truncates serving. A traversal budget that prevents a complete discovery is an explicit partial/error state, not a complete prefix.

@@ -27,7 +27,6 @@ from ...media_types import MEDIA_TYPE_ORDER
 # Path rules
 # ---------------------------------------------------------------------------
 
-_HIDDEN_NAME = re.compile(r"^\.+$")
 _SYSTEM_NAMES = frozenset({"__pycache__"})
 _TRACK_EXTENSIONS = frozenset({".srt", ".vtt"})
 

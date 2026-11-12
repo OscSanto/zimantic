@@ -4312,7 +4312,7 @@
                 // and Back/Forward just work.
                 const url = new URL(location.href);
                 const resolvedBrowse = browse === undefined
-                    ? current?.browse || url.searchParams.get("sort") || url.searchParams.get("browse")
+                    ? current?.browse || url.searchParams.get("sort")
                     : browse;
                 const resolvedSeed = seed ?? current?.seed ?? url.searchParams.get("seed") ?? 0;
                 const hasSearch = Boolean(question || resolvedBrowse || current || url.searchParams.has("q"));
@@ -4407,7 +4407,7 @@
                 const collection = params.get("collection") || null;
                 const scopeSources = sourceValues;
                 const question = (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH);
-                const requestedSort = params.get("sort") || (!question ? params.get("browse") : null);
+                const requestedSort = params.get("sort");
                 const defaultSort = !question && params.has("q") && (!requestedSort || requestedSort === "relevance");
                 const browse = defaultSort
                     ? defaultBrowseMode()

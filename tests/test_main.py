@@ -160,6 +160,32 @@ class StableSizeTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, 2)
         sleep.assert_called_with(main_module.STABLE_POLL_SECONDS)
 
+    def test_configured_wait_stable_scans_zim_collection_roots(self):
+        import zimantic.__main__ as main_module
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zim = root / "manual.zim"
+            zim.write_bytes(b"x")
+            entries = [
+                SimpleNamespace(kind="zim", path=str(root)),
+                SimpleNamespace(kind="files", path=str(root)),
+            ]
+            with (
+                patch.object(
+                    main_module,
+                    "_find_downloading_sizes",
+                    return_value={zim},
+                ) as find_sizes,
+                patch.object(
+                    main_module, "_wait_for_stable_sizes"
+                ) as wait_sizes,
+            ):
+                main_module._wait_for_configured_zim_downloads(entries)
+        self.assertEqual(set(find_sizes.call_args.args[0]), {zim})
+        wait_sizes.assert_called_once_with({zim})
+
 
 class BuildWorkerTests(unittest.TestCase):
     def test_collect_zims_prefers_the_largest_conflicting_stem(self):

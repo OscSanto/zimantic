@@ -17,24 +17,21 @@ DEFAULT_NPROBE_FRACTION = 0.06
 
 @dataclass
 class IndexLocks:
-    """Lifecycle, SQLite-read, and close locks for one index handle."""
+    """Lifecycle and SQLite-read locks for one index handle."""
 
     lifecycle: threading.Condition = field(
         default_factory=threading.Condition, repr=False
     )
     # Bulk archive reads are serialized so they do not stall full-text search.
     read: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    close: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 @dataclass
 class IndexHandle:
     """Open resources and lifecycle state for one provider-neutral index.
 
-    ``store`` is borrowed from the runtime; an ``IndexHandle`` never closes it.
     ``generation``/``lease`` pin one immutable generation for this handle's
-    lifetime.  ``read_only=True`` additionally forbids repair, lease creation,
-    cleanup, and cache writes on the read/reuse path.
+    lifetime.
     """
 
     db: sqlite3.Connection | None
@@ -44,7 +41,6 @@ class IndexHandle:
     lock: threading.Lock = field(default_factory=threading.Lock)
     db_path: str | Path | None = None  # read-only sqlite URI or path
     db_signature: tuple[int, int, int, int] | None = None
-    faiss_signature: tuple[int, int, int, int] | None = None
     _thread: threading.local = field(default_factory=threading.local)
     _conns: list[sqlite3.Connection] = field(default_factory=list)
     _active_searches: int = 0
@@ -75,33 +71,11 @@ class IndexHandle:
     # Immutable generation lease pinned for the lifetime of this index handle.
     lease: Any | None = field(default=None, repr=False, compare=False)
     generation: str | None = None
-    # Provider-neutral additions.  ``store`` is borrowed, never closed here.
-    store: Any | None = field(default=None, repr=False, compare=False)
+    # Provider-neutral additions.  ``native`` is the generic full-text seam
+    # used by the indexing contract; no provider currently sets it.
     native: Any | None = None
-    faiss_path: Path | None = None
-    signatures: tuple[int, int, int, int] | None = None
     locks: IndexLocks = field(default_factory=IndexLocks, repr=False)
-    read_only: bool = False
     index_meta: dict[str, str] = field(default_factory=dict, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.signatures is None:
-            db_stat = self._artifact_signature(self.db_path)
-            faiss_stat = self._artifact_signature(self.faiss_path)
-            self.signatures = (db_stat[0], db_stat[1], faiss_stat[0], faiss_stat[1])
-
-    @staticmethod
-    def _artifact_signature(path: Any) -> tuple[int, int]:
-        if path is None:
-            return (0, 0)
-        text = str(path)
-        if "?" in text or text.startswith("file:"):
-            return (0, 0)
-        try:
-            stat = Path(text).stat()
-        except (OSError, TypeError, ValueError):
-            return (0, 0)
-        return (stat.st_size, round(stat.st_mtime_ns / 1_000_000_000))
 
     def ensure_open(self) -> Archive | None:
         """Open the archive on first use, not at server startup."""

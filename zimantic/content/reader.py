@@ -341,8 +341,13 @@ class _TextExtractor:
 
     def _separate(self) -> None:
         for block in self.active:
-            if not block.get("overflow"):
-                block["parts"].append(" ")
+            if block.get("overflow"):
+                continue
+            parts = block["parts"]
+            # Back-to-back block boundaries are common (nested divs, <br>).
+            # One separator is enough; _text normalizes whitespace anyway.
+            if not parts or parts[-1] != " ":
+                parts.append(" ")
 
     def handle_starttag(self, tag, attrs):
         if self.skipping:
@@ -370,10 +375,12 @@ class _TextExtractor:
                 "overflow": len(self.active) >= MAX_ACTIVE_DEPTH,
                 "parts": [],
             }
-            match = _ELEMENT_LANG.search(attributes.get("class") or "")
-            if match:
-                block["lang"] = match.group(1)
-                self._saw_lang = True
+            classes = attributes.get("class") or ""
+            if "lang-" in classes:
+                match = _ELEMENT_LANG.search(classes)
+                if match:
+                    block["lang"] = match.group(1)
+                    self._saw_lang = True
             self.blocks.append(block)
             self.active.append(block)
             self.block_order += 1
@@ -406,7 +413,7 @@ class _TextExtractor:
             self._separate()
 
     def handle_data(self, data):
-        if self.skipping:
+        if self.skipping or not self.active:
             return
         for block in self.active:
             if not block.get("overflow"):
@@ -414,7 +421,17 @@ class _TextExtractor:
 
     @staticmethod
     def _text(parts):
-        text = BOILERPLATE.sub(" ", "".join(parts))
+        text = "".join(parts)
+        # The boilerplate regex is much more expensive than a substring probe,
+        # and almost every block has none of its phrases.
+        folded = text.casefold()
+        if (
+            "stub" in folded
+            or "expanding the article" in folded
+            or "robots.txt" in folded
+            or "spamming" in folded
+        ):
+            text = BOILERPLATE.sub(" ", text)
         return " ".join(text.split())
 
     def candidates(self) -> list[str]:
@@ -633,6 +650,40 @@ def extract_excerpt(
     if not candidates:
         return ""
     return _join_blocks(candidates, max_chars)
+
+
+def extract_excerpt_and_body(
+    html: bytes,
+    max_preview_chars: int = DEFAULT_PREVIEW_CHARS,
+    max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
+    deadline: float | None = None,
+    *,
+    input_truncated: bool = False,
+) -> tuple[str, str, bool]:
+    """Return the preview excerpt and lexical body from one HTML traversal.
+
+    Indexing stores both a short embedding excerpt and a much longer body, so
+    parsing the page twice repeats native DOM construction, traversal, and
+    per-block normalization. Collecting the blocks once makes the two bounds
+    derive from the same parse; the result is the same as calling
+    :func:`extract_excerpt` and :func:`extract_body` separately.
+    """
+    preview_chars = max(1, int(max_preview_chars))
+    body_chars = max(1, int(max_body_text_bytes))
+    candidates = list(
+        iter_text_blocks(
+            html, max_chars=max(preview_chars, body_chars), deadline=deadline
+        )
+    )
+    if not candidates:
+        return "", "", input_truncated
+    excerpt = _join_blocks(candidates, preview_chars)
+    joined = (
+        excerpt if body_chars == preview_chars else _join_blocks(candidates, body_chars)
+    )
+    body, byte_truncated = truncate_utf8(joined, body_chars)
+    filled = len(joined) >= body_chars
+    return excerpt, body, bool(byte_truncated or input_truncated or filled)
 
 
 def extract_html_summary(
@@ -1591,7 +1642,13 @@ def _read_html_entry(
         if excerpt:
             return with_body(entry.title, excerpt)
 
-    excerpt = extract_excerpt(html, max_preview_chars=max_preview_chars, deadline=deadline)
+    excerpt, body, body_truncated = extract_excerpt_and_body(
+        html,
+        max_preview_chars=max_preview_chars,
+        max_body_text_bytes=max_body_text_bytes,
+        deadline=deadline,
+        input_truncated=truncated,
+    )
     if is_javascript_shell(html, excerpt):
         # An app shell with no article text: nothing useful to index.
         return None
@@ -1615,7 +1672,9 @@ def _read_html_entry(
                 return None
     disambiguation = is_disambiguation(entry.title, excerpt, html)
     title = disambiguation_title(entry.title) if disambiguation else entry.title
-    return with_body(title, excerpt)
+    return with_body(
+        title, excerpt, body=body, body_truncated=body_truncated
+    )
 
 
 def read_entry(
