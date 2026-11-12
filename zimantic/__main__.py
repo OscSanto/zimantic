@@ -1121,6 +1121,12 @@ def _build_tasks(
     embedder, embedding_pipeline = _make_build_embedding_context(cfg, args, parser)
 
     build_cfg = _build_config(cfg, args.fast)
+    # When several source builds already run concurrently, source-level overlap
+    # fills the shared inference pool; per-source stage threads only add CPU
+    # contention.  A single active source uses the reader/preparer/writer split.
+    concurrent_sources = (
+        1 if workers == 1 or len(tasks) == 1 else min(workers, len(tasks))
+    )
     derived_pool = None
     if not args.fast:
         from .indexing.derived import DerivedWorkerPool, resolve_workers
@@ -1145,11 +1151,15 @@ def _build_tasks(
             for ops in (cfg.get(key) or {}).values()
         )
         if derived_engines and resolved_workers and operations_enabled:
-            derived_pool = DerivedWorkerPool(int(resolved_workers))
+            # DerivedTextStage submits and awaits one task per reader thread, so
+            # at most one task per concurrently built source is in flight.
+            # Extra workers would sit idle and reserve memory for nothing.
+            pool_workers = min(int(resolved_workers), concurrent_sources)
+            derived_pool = DerivedWorkerPool(pool_workers)
             build_cfg["derived_worker_pool"] = derived_pool
             logger.info(
                 "zimantic: using %d derived-text worker(s)",
-                int(resolved_workers),
+                pool_workers,
             )
         elif derived_engines and operations_enabled:
             # No worker fits the current CPU/memory budget. Disable only the
@@ -1161,12 +1171,6 @@ def _build_tasks(
             )
     build_cfg["embedding_pipeline"] = embedding_pipeline
     build_cfg["interrupt_event"] = _BUILD_STOP_EVENT or threading.Event()
-    # When several source builds already run concurrently, source-level overlap
-    # fills the shared inference pool; per-source stage threads only add CPU
-    # contention.  A single active source uses the reader/preparer/writer split.
-    concurrent_sources = (
-        1 if workers == 1 or len(tasks) == 1 else min(workers, len(tasks))
-    )
     build_cfg["_stage_split"] = concurrent_sources == 1
     build_cfg["_concurrent_sources"] = concurrent_sources
     locator = IndexLocator(cfg["index_dir"])

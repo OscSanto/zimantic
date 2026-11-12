@@ -303,6 +303,43 @@ class BuildWorkerTests(unittest.TestCase):
             self.assertEqual(pipeline.call_args.kwargs["workers"], 3)
             self.assertEqual(pipeline.call_args.kwargs["queue_size"], 32)
 
+    def test_derived_pool_is_bounded_by_concurrent_sources(self):
+        import zimantic.__main__ as main_module
+
+        build_module = importlib.import_module("zimantic.indexing.pipeline")
+        runtime = types.SimpleNamespace(entry_producer=lambda *_args, **_kwargs: object())
+        operations = {
+            "media": types.SimpleNamespace(any_enabled=True)
+        }
+        build_cfg = {"derived_engines": {"ocr": object()}}
+        config = {
+            "index_dir": "/unused/indexes",
+            "derived_text_workers": {"resolved": 8},
+            "derived_collection_operations": operations,
+        }
+        args = types.SimpleNamespace(workers=8, fast=False, force=False)
+        with (
+            patch.object(
+                main_module,
+                "_make_build_embedding_context",
+                return_value=(None, None),
+            ),
+            patch.object(main_module, "_build_config", return_value=build_cfg),
+            patch(
+                "zimantic.indexing.derived.DerivedWorkerPool"
+            ) as pool,
+            patch.object(
+                build_module, "build_index", return_value=_build_report()
+            ),
+        ):
+            main_module._build_tasks(
+                [("one", runtime, object())],
+                config,
+                args,
+                argparse.ArgumentParser(),
+            )
+        pool.assert_called_once_with(1)
+
     def test_build_stability_wait_is_opt_in(self):
         import zimantic.__main__ as main_module
         from zimantic import settings
