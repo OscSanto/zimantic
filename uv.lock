@@ -1041,8 +1041,7 @@ dev = [
 requires-dist = [
     { name = "faiss-cpu" },
     { name = "fastapi" },
-    { name = "libzim", specifier = ">=3" },
-    { name = "libzim", marker = "platform_machine not in 'arm armhf armv5l armv5tel armv6b armv6l armv7b armv7l armv8b armv8l i386 i486 i586 i686 x86 x86_32 mips mipsel ppc powerpc riscv32 s390 sh4 sparc m68k'", specifier = ">=4.1.0" },
+    { name = "libzim", specifier = ">=4.1.0" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "puremagic", specifier = ">=1.30" },
