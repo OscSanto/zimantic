@@ -843,6 +843,19 @@ def parse_collections(
             )
             continue
         if "sources" in entry:
+            if spec.kind in {"zim", "kiwix"}:
+                from ..indexing.derived import DERIVED_ORDER, DERIVED_TEXT_KEYS
+
+                derived_keys = set(DERIVED_ORDER) | DERIVED_TEXT_KEYS
+                for override in entry["sources"]:
+                    if (
+                        isinstance(override, Mapping)
+                        and set(override) & derived_keys
+                    ):
+                        raise ConfigValidationError(
+                            f"collection {name!r}: {spec.kind} collections do "
+                            "not support derived-text source overrides"
+                        )
             envelope.setdefault("sources", {})[name] = entry["sources"]
         normalized.append((index, parsed))
 

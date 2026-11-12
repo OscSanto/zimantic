@@ -606,6 +606,27 @@ class LoadConfigTests(unittest.TestCase):
             "asr": "whisper",
         })
 
+    def test_zim_and_kiwix_reject_derived_source_overrides(self):
+        from zimantic.providers.config import ConfigValidationError
+
+        for kind, extra in (
+            ("zim", 'path = "zims"\n'),
+            ("kiwix", 'server = "http://localhost:8085"\n'),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.toml"
+                path.write_text(
+                    f'[[collections]]\ntype = "{kind}"\nname = "lib"\n'
+                    f'{extra}'
+                    'sources = [{ key = "' + kind + ':lib:item", ocr = "tesseract" }]\n',
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ConfigValidationError,
+                    f"{kind} collections do not support derived-text",
+                ):
+                    load_config(path, warn=lambda _: None)
+
     def test_unknown_global_keys_are_fatal(self):
         from zimantic.providers.config import ConfigValidationError
 
