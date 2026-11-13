@@ -23,12 +23,9 @@
 # Kolibri, and Kiwix collection needs an explicit entry. Each configured
 # root/server is one collection; a ZIM archive or a files/Kolibri source is one
 # source. `zimantic sources --json` prints the discovered hierarchy.
-# Add a local ZIM collection (downloaded from https://library.kiwix.org):
-#
-# [[collections]]
-# type = "zim"
-# name = "library"
-# path = "zims"
+# Add a local ZIM collection below (downloaded from https://library.kiwix.org).
+# Use an absolute path for provider paths: relative paths resolve against this
+# config file's directory, not the data directory.
 #
 # Must contain model.onnx and either vocab.txt (WordPiece; used by the static
 # default and English e5-v2) or sentencepiece.bpe.model (multilingual-e5).
@@ -280,11 +277,11 @@ port = 8090
 # [[collections]]
 # type = "zim"
 # name = "library"
-# path = "zims"
+# path = "/path/to/zims"
 # label = "ZIM files"
 # max_entries = 100000
-# max_visited_entries = 1000000
-# traversal_timeout_seconds = 300
+# traversal.max_visited_entries = 1000000
+# traversal.traversal_timeout_seconds = 300
 #
 # [[collections]]
 # type = "kiwix"

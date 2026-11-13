@@ -15,7 +15,7 @@ port = 8090
 # [[collections]]
 # type = "zim"
 # name = "library"
-# path = "zims"
+# path = "/path/to/zims"
 
 page_size = 10
 max_results = 100

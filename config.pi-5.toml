@@ -47,10 +47,11 @@ cache_bytes = 33_554_432  # 32 MiB per cache
 # this file is the XDG config). Use an absolute path when the ZIMs live in the
 # data directory, for example:
 #   path = "/home/pi/.local/share/zimantic/zims"
+# "~" is expanded before the path is resolved.
 [[collections]]
 type = "zim"
 name = "library"
-path = "./zims"
+path = "~/.local/share/zimantic/zims"
 
 # [[collections]]
 # type = "kiwix"

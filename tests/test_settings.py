@@ -690,6 +690,32 @@ class LoadConfigTests(unittest.TestCase):
         for key in ("batch_size", "max_entry_bytes", "cache_size"):
             self.assertEqual(cfg[key], PROFILES["mobile"][key])
 
+    def test_shipped_config_zim_example_is_usable_when_uncommented(self):
+        root_config = Path(__file__).resolve().parents[1] / "config.toml"
+        text = root_config.read_text(encoding="utf-8")
+        block = (
+            '# [[collections]]\n'
+            '# type = "zim"\n'
+            '# name = "library"\n'
+            '# path = "/path/to/zims"\n'
+            '# label = "ZIM files"\n'
+            '# max_entries = 100000\n'
+            '# traversal.max_visited_entries = 1000000\n'
+            '# traversal.traversal_timeout_seconds = 300'
+        )
+        self.assertIn(block, text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                text.replace(block, block.replace("# ", ""), 1),
+                encoding="utf-8",
+            )
+            cfg = load_config(path, warn=lambda _message: None)
+        self.assertEqual([(entry.name, entry.kind) for entry in cfg["collections"]], [
+            ("library", "zim"),
+        ])
+        self.assertEqual(cfg["config_diagnostics"], ())
+
     def test_shipped_presets_do_not_pin_serving_concurrency(self):
         root = Path(__file__).resolve().parents[1]
         with patch.object(

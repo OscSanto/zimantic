@@ -27,7 +27,7 @@ Zimantic has one configuration schema for every in-tree provider. A `[[collectio
 [[collections]]
 type = "zim"
 name = "library"
-path = "./zims"
+path = "/path/to/zims"
 label = "ZIM files"
 
 [[collections]]
@@ -55,7 +55,7 @@ catalog_limit = 1000
 max_catalog_entries = 50000
 ```
 
-Provider `path` values, including `database_path` and `storage`, resolve one time against the directory that holds the active config file, even through a symlink. CLI path operands resolve against the working directory. Zimantic keeps the resolved choice when an ad-hoc ZIM build saves a collection entry, so the entry points at the same files on the next invocation. Do not put global scalar keys after a table header; after `[[collections]]` or `[derived_text]`, a key belongs to that table. Unknown global keys are fatal configuration errors.
+Provider `path` values, including `database_path` and `storage`, resolve one time against the directory that holds the active config file, even through a symlink. Use an absolute path (or a `~` path) for trees under `$XDG_DATA_HOME`; the examples above use absolute placeholders. CLI path operands resolve against the working directory. Zimantic keeps the resolved choice when an ad-hoc ZIM build saves a collection entry, so the entry points at the same files on the next invocation. Do not put global scalar keys after a table header; after `[[collections]]` or `[derived_text]`, a key belongs to that table. Unknown global keys are fatal configuration errors.
 
 Provider limits have defaults, and each entry accepts overrides (`max_sources`, `max_entries`, `max_file_bytes`, `traversal.max_visited_entries`, `traversal.traversal_timeout_seconds`, Kiwix `catalog_limit`/`max_catalog_entries`, and the Kolibri snapshot/HTML5 zip limits). `max_sources` and `max_entries` limit discovery and indexing, not serving: a permitted file stays browsable even when indexing is limited. Exceeding `max_sources` collapses a files/Kolibri collection to one source with a distinct key and a warning; exceeding `max_entries` marks the source truncated. Rebuild the index when the source collapses or returns to its normal state.
 
@@ -99,7 +99,7 @@ cache_bytes = 33_554_432
 [[collections]]
 type = "files"
 name = "media"
-path = "./media"
+path = "/path/to/media"
 max_body_text_bytes = 262_144
 source_timeout = 3.5
 index_exclude = ["**/drafts/**"]
@@ -122,7 +122,7 @@ Derived text has three independent opt-ins, all off by default. Files and Kolibr
 [[collections]]
 type = "files"
 name = "media"
-path = "./media"
+path = "/path/to/media"
 derived_text = { captions = "index", ocr = "tesseract", asr = "whisper" }
 ```
 
@@ -148,7 +148,7 @@ asr_model = "base"
 [[collections]]
 type = "files"
 name = "media"
-path = "./media"
+path = "/path/to/media"
 derived_text = { captions = "index", ocr = "tesseract", ocr_languages = ["fra"], asr = "whisper" }
 sources = [
   { key = "files:media:french", asr_model = "small" },
