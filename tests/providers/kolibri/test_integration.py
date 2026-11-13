@@ -29,6 +29,13 @@ def _search(tmp_path, config):
     )
 
 
+def test_runtime_declares_content_enrichment():
+    from zimantic.providers.base import EnrichingRuntime
+    from zimantic.providers.kolibri.provider import KolibriRuntime
+
+    assert issubclass(KolibriRuntime, EnrichingRuntime)
+
+
 def test_source_metadata_and_public_payload_hide_locators(tmp_path):
     fixture = make_two_channel_fixture(tmp_path)
     index_dir = tmp_path / "indexes"

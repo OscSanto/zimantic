@@ -63,6 +63,7 @@ from .discovery import (
     files_collection_key,
     open_files_index,
 )
+from .common import phrase_in_text
 from .entries import FilesEntryProducer
 from .store import FilesContentStore
 
@@ -418,7 +419,7 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
                         flags=re.IGNORECASE | re.DOTALL,
                     )
                     text = re.sub(r"<[^>]+>", " ", text)
-                hit = _phrase_in_text(text.casefold(), phrase_words)
+                hit = phrase_in_text(text.casefold(), phrase_words)
                 if source_doc is not None:
                     source_doc["_content_phrase"] = hit
                 if hit:
@@ -896,7 +897,8 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
                 "fast": str(getattr(index, "done", "") or "") == "fast",
                 "capabilities": {
                     "title": index.db_path is not None,
-                    "fulltext": index.db_path is not None,
+                    "fulltext": index.db_path is not None
+                    and str(getattr(index, "done", "") or "") != "fast",
                     "semantic": index.faiss_index is not None,
                 },
             }
@@ -929,15 +931,6 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
     def index_names(self) -> list[str]:
         with self._lock:
             return sorted(self.indexes)
-
-
-def _phrase_in_text(text: str, phrase_words: list[str]) -> bool:
-    if not phrase_words:
-        return True
-    pattern = r"(?<!\w)" + r"\s+".join(
-        re.escape(word) for word in phrase_words
-    ) + r"(?!\w)"
-    return re.search(pattern, text) is not None
 
 
 class FilesDiscoveryBatch(DiscoveryBatch):

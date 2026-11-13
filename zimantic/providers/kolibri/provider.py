@@ -36,18 +36,25 @@ from ...diagnostics import public_cause
 from ...indexing import search as generic_search
 from ...indexing.derived import derived_text_preview
 from ...indexing.locator import IndexLocator
+from ...model_meta import (
+    MODEL_PROBE_SHAPE_KEY,
+    MODEL_PROBE_TEXTS_KEY,
+    MODEL_PROBE_VECTORS_KEY,
+)
 from ..base import (
     CollectionInfo,
     CollectionRuntime,
     CollectionSnapshot,
     ContentStore,
     DiscoveryBatch,
+    EnrichingRuntime,
     IndexedRuntime,
     IndexSummary,
     ProviderContext,
     SourceQuery,
 )
 from ..config import ConfigValidationError, KolibriConfig, ProviderConfig
+from ..files.common import phrase_in_text
 from ..files.discovery import (
     FilesIndexOptions,
     apply_index_metadata,
@@ -108,7 +115,7 @@ def _paths(config: KolibriConfig) -> tuple[Path, Path, Path]:
     return home, database, storage
 
 
-class KolibriRuntime(IndexedRuntime):
+class KolibriRuntime(IndexedRuntime, EnrichingRuntime):
     """One installed channel: sources, indexes, and content serving."""
 
     def __init__(
@@ -452,6 +459,78 @@ class KolibriRuntime(IndexedRuntime):
             index=index,
         )
 
+    def enrich(
+        self,
+        source: SourceInfo,
+        result_docs: list[dict[str, Any]],
+        source_docs: dict[str, dict[str, Any]],
+        *,
+        phrase_ids: set[str],
+        phrase_words: list[str],
+        max_html_bytes: int,
+        max_article_bytes: int,
+    ) -> bool:
+        """Fill MIME types and run the content-phrase check for this channel."""
+        if self._closed or not result_docs:
+            return False
+        try:
+            store = self.content_store(source)
+        except (ArticleNotFoundError, ArticleUnavailableError):
+            return False
+        found = False
+        try:
+            for result in result_docs:
+                path = str(result.get("path") or "")
+                if not path:
+                    continue
+                try:
+                    entry = store.resolve(path)
+                except (
+                    ArticleNotFoundError,
+                    ArticleUnavailableError,
+                    OSError,
+                    ValueError,
+                ):
+                    continue
+                result["mimetype"] = entry.mimetype
+                source_doc = source_docs.get(result.get("id"))
+                if source_doc is not None:
+                    source_doc["mimetype"] = entry.mimetype
+                if result.get("id") not in phrase_ids:
+                    continue
+                if entry.mimetype not in _PHRASE_MIMETYPES:
+                    continue
+                if entry.size is not None and entry.size > max_article_bytes:
+                    continue
+                try:
+                    data = store.read(
+                        path,
+                        head_only=True,
+                        max_bytes=min(max_html_bytes, max_article_bytes),
+                    )
+                except (
+                    ArticleNotFoundError,
+                    ArticleTooLargeError,
+                    ArticleUnavailableError,
+                    OSError,
+                    ValueError,
+                ):
+                    continue
+                text = data.content.decode("utf-8", "ignore")
+                if entry.mimetype in {"text/html", "application/xhtml+xml"}:
+                    text = re.sub(
+                        r"<(script|style)\b[^>]*>.*?</\1>",
+                        " ",
+                        text,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    text = re.sub(r"<[^>]+>", " ", text)
+                if phrase_in_text(text.casefold(), phrase_words):
+                    found = True
+        finally:
+            store.close()
+        return found
+
     def max_sources_per_search(self) -> int | None:
         return None
 
@@ -585,6 +664,65 @@ class KolibriRuntime(IndexedRuntime):
             )
             self._logger.debug("Kolibri FAISS reopen error: %s", error)
 
+    def _probe_compatible(
+        self, db: sqlite3.Connection, db_path: Path
+    ) -> tuple[bool, str]:
+        rows = dict(
+            db.execute(
+                "SELECT key, value FROM meta WHERE key IN (?, ?, ?)",
+                (
+                    MODEL_PROBE_TEXTS_KEY,
+                    MODEL_PROBE_VECTORS_KEY,
+                    MODEL_PROBE_SHAPE_KEY,
+                ),
+            ).fetchall()
+        )
+        if not rows:
+            return False, "no compatibility probes"
+        ready_getter = self._embedder_ready_getter
+        if ready_getter is not None:
+            state = ready_getter()
+            if (
+                isinstance(state, tuple)
+                and len(state) == 2
+                and state[1]
+                and state[0] is not None
+            ):
+                if not state[0].wait(timeout=60):
+                    return False, "timed out waiting for the embedding model"
+        getter = self._embedder_getter
+        embedder = getter() if getter is not None else None
+        if embedder is None:
+            return False, "embedding model is unavailable"
+        from ...embed import (
+            embed_probe_texts,
+            load_model_probes,
+            model_probes_match,
+        )
+
+        probes = load_model_probes(rows)
+        if probes is None:
+            return False, "unreadable compatibility probes"
+        texts, stored_vectors = probes
+        key = tuple(texts)
+        with self._probe_cache_lock:
+            current = self._probe_cache.get(key)
+            if current is None:
+                try:
+                    current = embed_probe_texts(embedder, texts)
+                except Exception as error:
+                    return False, f"probe embedding failed: {error}"
+                self._probe_cache[key] = current
+        try:
+            compatible, mean_cosine, min_cosine = model_probes_match(
+                texts, stored_vectors, current=current
+            )
+        except Exception as error:
+            return False, f"probe comparison failed: {error}"
+        return compatible, (
+            f"mean cosine {mean_cosine:.4f}, minimum {min_cosine:.4f}"
+        )
+
     # -- discovery / lifecycle --------------------------------------------
 
     def refresh(self, *, wait: bool = True) -> bool:
@@ -684,6 +822,7 @@ class KolibriRuntime(IndexedRuntime):
                 defer_faiss=self._defer_faiss or self._metadata_only,
                 model_fingerprint=self._model_fingerprint,
                 cfg=self._cfg,
+                probe_compatible=self._probe_compatible,
             )
             new_indexes: dict[str, Any] = {}
             searchable: list[KolibriSource] = []
@@ -898,7 +1037,8 @@ class KolibriRuntime(IndexedRuntime):
                 "fast": str(getattr(index, "done", "") or "") == "fast",
                 "capabilities": {
                     "title": index.db_path is not None,
-                    "fulltext": index.db_path is not None,
+                    "fulltext": index.db_path is not None
+                    and str(getattr(index, "done", "") or "") != "fast",
                     "semantic": index.faiss_index is not None,
                 },
             }

@@ -31,6 +31,16 @@ _SYSTEM_NAMES = frozenset({"__pycache__"})
 _TRACK_EXTENSIONS = frozenset({".srt", ".vtt"})
 
 
+def phrase_in_text(text: str, phrase_words: Sequence[str]) -> bool:
+    """True when every word appears in order as a whole-word phrase."""
+    if not phrase_words:
+        return True
+    pattern = r"(?<!\w)" + r"\s+".join(
+        re.escape(word) for word in phrase_words
+    ) + r"(?!\w)"
+    return re.search(pattern, text) is not None
+
+
 class FilesPathError(ValueError):
     """A path is not a valid collection-relative POSIX path."""
 

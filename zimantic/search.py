@@ -3239,7 +3239,7 @@ class Search:
                 if not isinstance(runtime, IndexedRuntime):
                     continue
                 index = runtime.indexes.get(source.key)
-                if index is None or index.ensure_open() is None:
+                if index is None:
                     continue
                 if _phrase(query_terms, _content_terms(result["title"])):
                     continue
