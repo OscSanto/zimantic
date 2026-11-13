@@ -549,16 +549,14 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
                     and source is not None
                     and self._can_reuse_index(existing, record, source)
                 ):
-                    # Locator-only changes keep the index and its caches but
-                    # must refresh the archive handle used for content serving.
+                    # A locator-only change keeps the index and its caches but
+                    # must drop the archive handle opened from the old path.
                     if record is not None and record.path:
-                        existing.zim_path = record.path
                         try:
-                            existing.zim_signature = _file_signature(
-                                Path(record.path)
-                            )
+                            signature = _file_signature(Path(record.path))
                         except OSError:
-                            existing.zim_signature = None
+                            signature = None
+                        existing.refresh_locator(record.path, signature)
                     installed[key] = existing
                     discarded.append(fresh)
                 else:
@@ -587,8 +585,12 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
             }
             self._unreadable = dict(scan.unreadable)
             self._last_refresh = time.time()
-            self._error = None
-            self._state = "ready"
+            if scan.complete:
+                # An incomplete first scan still publishes its catalog rows for
+                # the library, but it must not erase the error that explains
+                # why the collection is unavailable.
+                self._error = None
+                self._state = "ready"
             if changed:
                 self._version += 1
         for index in discarded:
@@ -631,6 +633,13 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
             and index.source_size != record.size
         ):
             return False
+        if index.zim_signature is not None:
+            try:
+                current_signature = _file_signature(Path(record.path))
+            except OSError:
+                return False
+            if index.zim_signature != current_signature:
+                return False
         if index.generation is not None:
             try:
                 lease = IndexLocator(self.index_dir).paths(

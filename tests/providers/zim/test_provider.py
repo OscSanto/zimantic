@@ -198,6 +198,39 @@ def _open(tmp_path: Path, root: Path, *, index_dir: Path | None = None):
     return config, batch, runtime
 
 
+def test_missing_root_reports_error_state(tmp_path):
+    _, batch, runtime = _open(tmp_path, tmp_path / "missing")
+    try:
+        assert runtime.discovery_state == "error"
+        assert runtime.snapshot.error
+        assert runtime.snapshot.source_count == 0
+    finally:
+        runtime.close()
+        batch.close()
+
+
+def test_refresh_locator_drops_the_archive_opened_from_the_old_path(tmp_path):
+    from zimantic.searching.index import IndexHandle
+
+    zim = tmp_path / "book.zim"
+    _create_zim(zim)
+    archive = Archive(zim)
+    handle = IndexHandle(
+        db=None,
+        faiss_index=None,
+        archive=archive,
+        zim_path=str(zim),
+        zim_signature=(1, 2, 3, 4),
+    )
+    try:
+        handle.refresh_locator(str(tmp_path / "moved.zim"), (5, 6, 7, 8))
+        assert handle.archive is None
+        assert handle.zim_path == str(tmp_path / "moved.zim")
+        assert handle.zim_signature == (5, 6, 7, 8)
+    finally:
+        handle.close()
+
+
 def test_runtime_borrows_pool_without_closing_or_resetting_other_sources(tmp_path):
     from unittest.mock import Mock
 

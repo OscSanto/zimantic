@@ -111,6 +111,36 @@ class IndexHandle:
         self.open_failed = False
         self.error = None
 
+    def refresh_locator(
+        self,
+        zim_path: str | None,
+        zim_signature: tuple[int, int, int, int] | None,
+    ) -> None:
+        """Point this handle at a moved archive without discarding its index.
+
+        The SQLite and FAISS payloads stay valid when the same archive moves.
+        Native handles, though, were opened from the old path and must be
+        dropped so the next read opens the new location. Readers that already
+        hold a reference keep it alive; this method never closes it underneath
+        them.
+        """
+        with self.lock:
+            if self.zim_path == zim_path:
+                self.zim_signature = zim_signature
+                return
+            self.archive = None
+            self.searcher = None
+            self.open_failed = False
+            self.error = None
+            self.random_article_ids = None
+            self.browse_rankings.clear()
+            self.browse_total = None
+            self.browse_centroid = None
+            # The new archive may or may not carry a native full-text index.
+            self.has_fulltext_index = None
+            self.zim_path = zim_path
+            self.zim_signature = zim_signature
+
     def ensure_searcher(self) -> Searcher | None:
         """Create the libzim full-text searcher on first use."""
         if self.has_fulltext_index is False:
