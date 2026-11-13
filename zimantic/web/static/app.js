@@ -578,7 +578,7 @@
                 headingTitle.textContent = title;
                 heading.appendChild(headingTitle);
                 const subtitle = [
-                    source.creator && `By ${source.creator}`,
+                    source.creator && `${t("By")} ${source.creator}`,
                     source.date && String(source.date),
                     libraryLanguage(source, true),
                 ].filter(Boolean).join(" · ");
@@ -1078,7 +1078,7 @@
                     if (source.creator) {
                         const creator = document.createElement("p");
                         creator.className = "library-card-creator";
-                        creator.textContent = `By ${source.creator}`;
+                        creator.textContent = `${t("By")} ${source.creator}`;
                         body.appendChild(creator);
                     }
                     const actions = document.createElement("div");
@@ -1880,13 +1880,17 @@
                             other.setAttribute("aria-pressed", "false");
                         }
                         if (layout.query) {
-                            other.textContent = `Show ${group.other.length} more`;
+                            other.textContent =
+                                `${t("Show")} ${group.other.length} ${t("more")}`;
                         } else {
                             const count = group.other.length;
-                            other.textContent = `Other: ${count} source${count === 1 ? "" : "s"}`;
+                            other.textContent =
+                                `${t("Other")}: ${count} ${t(
+                                    count === 1 ? "source" : "sources",
+                                )}`;
                             other.title =
-                                `Show ${count} more sources ` +
-                                `(${group.otherCount} results)`;
+                                `${t("Show")} ${count} ${t("more")} ` +
+                                `${t("sources")} (${group.otherCount} ${t("results")})`;
                         }
                         groupOptions.appendChild(other);
                     }
@@ -3259,7 +3263,9 @@
                         .join("");
                 } else {
                     snippet.className = pendingPreview ? "result-snippet" : "result-snippet none";
-                    snippet.textContent = pendingPreview ? "" : "No preview available for this result.";
+                    snippet.textContent = pendingPreview
+                        ? ""
+                        : t("No preview available for this result.");
                 }
                 setResultDebug(node, item);
                 let thumb = node.querySelector(".result-thumb");
@@ -3441,10 +3447,12 @@
             }
 
             function pageRangeText(total, page) {
-                if (!total) return "No results";
+                if (!total) return t("No results");
                 const from = page * PAGE_SIZE + 1;
                 const to = Math.min((page + 1) * PAGE_SIZE, total);
-                return `${from}–${to} of ${total} result${total === 1 ? "" : "s"}`;
+                return `${from}–${to} ${t("of")} ${total} ${t(
+                    total === 1 ? "result" : "results",
+                )}`;
             }
 
             function syncPage(pageNumber) {
@@ -3558,22 +3566,30 @@
                     }
                     return link;
                 };
-                const prev = pageLink("← Previous", current.page - 1, current.page === 0);
-                const next = pageLink("Next →", current.page + 1, current.page >= pageCount - 1);
+                const prev = pageLink(
+                    `← ${t("Previous")}`,
+                    current.page - 1,
+                    current.page === 0,
+                );
+                const next = pageLink(
+                    `${t("Next")} →`,
+                    current.page + 1,
+                    current.page >= pageCount - 1,
+                );
                 const label = document.createElement("span");
                 const from = total ? current.page * PAGE_SIZE + 1 : 0;
                 const to = Math.min((current.page + 1) * PAGE_SIZE, total);
-                label.textContent = `${from}–${to} of ${total}`;
+                label.textContent = `${from}–${to} ${t("of")} ${total}`;
                 pager.append(prev, label, next);
                 if (current.page > 0) {
                     // Shortcut back to the first page from anywhere in the pager.
-                    pager.prepend(pageLink("« First", 0, false));
+                    pager.prepend(pageLink(`« ${t("First")}`, 0, false));
                 }
                 if (focusLabel) {
                     const links = [...pager.querySelectorAll("a[data-page]")];
                     const target =
                         links.find((link) => link.textContent.trim() === focusLabel) ||
-                        (focusLabel.includes("Next")
+                        (focusLabel.includes(t("Next"))
                             ? links[links.length - 1]
                             : links[0]);
                     if (target) target.focus({ preventScroll: true });
@@ -4186,7 +4202,7 @@
                     current.searchCollection,
                 );
                 dedupeParams(params, "source");
-                $("status").textContent = "Loading page…";
+                $("status").textContent = t("Loading page…");
                 try {
                     let response;
                     let busyRetries = 0;

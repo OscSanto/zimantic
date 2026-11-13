@@ -683,6 +683,7 @@ let current = {{
 let pageController = null, requestController = null, searchSequence = 1;
 const PAGE_SIZE = 10, debugMode = false, BUSY_RETRY_LIMIT = 0;
 const requests = [];
+const t = (text) => text;
 const $ = () => ({{textContent: ""}});
 const appPath = (path) => "/zimantic" + path;
 const renderView = () => {{}};
@@ -2287,6 +2288,33 @@ console.log(JSON.stringify({{
         )
         self.assertEqual(payload["validBrowse"]["browse"], "rare")
         self.assertEqual(payload["explicitRelevance"]["browse"], None)
+
+    def test_result_range_uses_translated_result_nouns(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const PAGE_SIZE = 10;
+const catalog = {{
+  "of": "de", "result": "resultado", "results": "resultados",
+  "No results": "Sin resultados",
+}};
+const t = (text) => catalog[text] || text;
+{_function_source(source, "function pageRangeText(", "function syncPage(")}
+console.log(JSON.stringify({{
+  many: pageRangeText(65, 0),
+  one: pageRangeText(1, 0),
+  none: pageRangeText(0, 0),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["many"], "1–10 de 65 resultados")
+        self.assertEqual(payload["one"], "1–1 de 1 resultado")
+        self.assertEqual(payload["none"], "Sin resultados")
 
     def test_modified_heading_click_opens_search_in_new_tab(self):
         source = APP_JS.read_text(encoding="utf-8")
