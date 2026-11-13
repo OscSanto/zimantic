@@ -742,9 +742,6 @@ ol.results {
     font-size: 4rem;
     font-weight: 700;
 }
-.library-card-unavailable {
-    opacity: 0.55;
-}
 .library-card-body {
     display: flex;
     flex: 1;
@@ -767,8 +764,7 @@ ol.results {
     -webkit-line-clamp: 3;
 }
 .library-card-details,
-.library-card-creator,
-.library-card-tags {
+.library-card-creator {
     color: var(--muted);
     font-size: 0.74rem;
     margin: 0 0 8px;

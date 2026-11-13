@@ -128,7 +128,6 @@
             const libraryLanguageOptions = new Set();
             const libraryLanguageDisplayNames = new Map();
             let libraryCardCache = new WeakMap();
-            const libraryCollectionRefreshes = new Map();
             let libraryLoadSequence = 0;
             let libraryRequestController = null;
             let libraryFilterTimer = null;
@@ -5719,7 +5718,32 @@
                         await loadConfig();
                         await loadLibraryData({ reset: false });
                     } else {
-                        await Promise.all([loadConfig(), loadSearchData()]);
+                        // A plain unscoped query needs no discovery data. Start
+                        // it before the source listing finishes so a deep link
+                        // is not blocked by library paging. Scoped links still
+                        // load discovery in parallel and validate it first.
+                        const earlyQuery = Boolean(
+                            state.question &&
+                                !state.browse &&
+                                !state.collection &&
+                                !state.scopeSources.length &&
+                                !state.modal,
+                        );
+                        if (earlyQuery) {
+                            await loadConfig();
+                            runSearch(
+                                state.question,
+                                [],
+                                state.page,
+                                [],
+                                null,
+                                null,
+                                state.seed,
+                            );
+                            await loadSearchData();
+                        } else {
+                            await Promise.all([loadConfig(), loadSearchData()]);
+                        }
                     }
                 } catch (error) {
                     const target = libraryView ? $("libraryStatus") : $("status");

@@ -56,13 +56,27 @@
     (document.head || document.documentElement).appendChild(brokenImageStyle);
   }
   document.addEventListener("DOMContentLoaded", scanBrokenImages, { once: true });
-  let imageScanTimer = null;
-  const scheduleImageScan = () => {
-    clearTimeout(imageScanTimer);
-    imageScanTimer = setTimeout(scanBrokenImages, 100);
+  const scanAddedImages = nodes => {
+    for (const node of nodes || []) {
+      if (!node || node.nodeType !== 1) continue;
+      if (node.tagName === "IMG") {
+        markBrokenImage(node);
+      } else if (typeof node.querySelectorAll === "function") {
+        for (const image of node.querySelectorAll("img")) {
+          markBrokenImage(image);
+        }
+      }
+    }
   };
   if (typeof MutationObserver === "function" && document.documentElement) {
-    new MutationObserver(scheduleImageScan).observe(document.documentElement, {
+    // Scan only inserted subtrees. Re-scanning every image after each DOM
+    // mutation made script-driven captures schedule a full-document sweep
+    // every 100 ms.
+    new MutationObserver(mutations => {
+      for (const mutation of mutations) {
+        scanAddedImages(mutation.addedNodes);
+      }
+    }).observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
