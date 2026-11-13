@@ -260,21 +260,40 @@ script[data-zimantic-toolbar] { display: none !important; }
   [data-zimantic-toolbar] .zimantic-toolbar-suggestion-title { color: #1b1f24 !important; }
   [data-zimantic-toolbar] .zimantic-toolbar-suggestion-path { color: #5d6673 !important; }
 }
-/* Phones: a wrapped toolbar eats a big slice of an already short viewport.
-   Keep it to one line that scrolls sideways instead, with finger-sized
-   targets and the short labels. */
+/* Tablets: keep every control reachable. Long article paths used to make the
+   nowrap nav group wider than the viewport and push the action group off
+   screen with no way to scroll to it. Give the nav and action groups their
+   own rows and let the breadcrumb trail wrap within the nav row. */
+@media (max-width: 768px) {
+  nav[data-zimantic-toolbar] {
+    flex-wrap: wrap !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-nav,
+  [data-zimantic-toolbar] .zimantic-toolbar-actions {
+    flex: 1 1 100% !important;
+    flex-wrap: wrap !important;
+    margin-left: 0 !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-breadcrumbs {
+    flex: 1 1 220px !important;
+    max-width: 100% !important;
+  }
+  [data-zimantic-toolbar] .zimantic-toolbar-zim-search {
+    flex: 1 1 220px !important;
+    max-width: 100% !important;
+  }
+}
+
+/* Phones: finger-sized targets and the short labels. The toolbar wraps
+   instead of scrolling sideways, so the ZIM-scoped search box stays visible
+   and every navigation control remains reachable. */
 @media (max-width: 640px) {
   nav[data-zimantic-toolbar] {
-    -webkit-overflow-scrolling: touch !important;
-    flex-wrap: nowrap !important;
     gap: 4px !important;
-    overflow-x: auto !important;
     padding:
       6px max(8px, env(safe-area-inset-right))
       6px max(8px, env(safe-area-inset-left)) !important;
-    scrollbar-width: none !important;
   }
-  nav[data-zimantic-toolbar]::-webkit-scrollbar { display: none !important; }
   [data-zimantic-toolbar] a,
   [data-zimantic-toolbar] button {
     min-height: 40px !important;
@@ -282,13 +301,9 @@ script[data-zimantic-toolbar] { display: none !important; }
   }
   [data-zimantic-toolbar] .zimantic-toolbar-nav,
   [data-zimantic-toolbar] .zimantic-toolbar-actions {
-    flex: 0 0 auto !important;
+    flex: 1 1 100% !important;
   }
-  [data-zimantic-toolbar] .zimantic-toolbar-actions {
-    margin-left: 8px !important;
-  }
-  [data-zimantic-toolbar] .zimantic-toolbar-actions > .zimantic-toolbar-search,
-  [data-zimantic-toolbar] .zimantic-toolbar-actions > .zimantic-toolbar-zim-search {
+  [data-zimantic-toolbar] .zimantic-toolbar-actions > .zimantic-toolbar-search {
     display: none !important;
   }
   [data-zimantic-toolbar] .zimantic-toolbar-home-full,
