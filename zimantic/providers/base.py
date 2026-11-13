@@ -52,6 +52,7 @@ __all__ = [
     "DiscoveryBatch",
     "DiscoveryState",
     "EnrichingRuntime",
+    "IndexSummary",
     "IndexedRuntime",
     "IsolatedFulltextRuntime",
     "ProviderContext",
@@ -86,6 +87,22 @@ class ProviderContext:
     # scope (currently ZIM) resolve only these sources and never scan a
     # configured collection.  Other providers ignore it.
     open_scope: Any | None = None
+    # Read-only listing commands keep index metadata but must not pin every
+    # generation or keep native archives open.  Providers close each index
+    # immediately and retain only an ``IndexSummary``.
+    metadata_only: bool = False
+
+
+@dataclass(frozen=True)
+class IndexSummary:
+    """Index fields retained after metadata-only discovery closes the index."""
+
+    done: str
+    index_meta: Mapping[str, str] = field(default_factory=dict)
+    generation: str | None = None
+
+    def close(self) -> None:
+        """Match ``IndexHandle.close`` for runtimes that discard summaries."""
 
 
 @dataclass(frozen=True)

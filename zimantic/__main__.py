@@ -1327,7 +1327,11 @@ def _run_configured_build(
 
     if args.list:
         with discover_collections(
-            cfg, entries=buildable, wait=True, persist_catalog=False
+            cfg,
+            entries=buildable,
+            wait=True,
+            persist_catalog=False,
+            metadata_only=True,
         ) as result:
             _log_discovery_diagnostics(result, cfg)
             source_selectors = set(args.source)
@@ -1652,7 +1656,11 @@ def _run_sources(args, cfg: dict) -> None:
     except ConfigValidationError as error:
         sys.exit(f"zimantic: {error}")
     result = discover_collections(
-        cfg, entries=entries, wait=True, persist_catalog=False
+        cfg,
+        entries=entries,
+        wait=True,
+        persist_catalog=False,
+        metadata_only=True,
     )
     try:
         _log_discovery_diagnostics(result, cfg)
@@ -1775,7 +1783,11 @@ def _run_catalog(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
     except ConfigValidationError as error:
         parser.error(str(error))
     with discover_collections(
-        cfg, entries=entries, wait=True, persist_catalog=False
+        cfg,
+        entries=entries,
+        wait=True,
+        persist_catalog=False,
+        metadata_only=True,
     ) as result:
         _log_discovery_diagnostics(result, cfg)
         collections: list[dict[str, Any]] = []
@@ -2292,6 +2304,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     log_level = _get_log_level(args.command, args.verbose)
     _configure_logging(log_level)
+    from .resources import raise_nofile_limit
+
+    raise_nofile_limit()
 
     # `reload` only needs the PID file, and `model --list` only needs the registry.
     if args.command in {"build", "serve", "open", "sources", "catalog", "prune"} or (

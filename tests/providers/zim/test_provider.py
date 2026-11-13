@@ -232,6 +232,28 @@ def test_source_key_uses_basename_for_a_single_file_collection(tmp_path):
         batch.close()
 
 
+def test_metadata_only_discovery_keeps_summaries_without_open_indexes(tmp_path):
+    from dataclasses import replace
+
+    from zimantic.providers.base import IndexSummary
+
+    zims = tmp_path / "zims"
+    zims.mkdir()
+    _create_zim(zims / "manual.zim")
+    config = ZimConfig(name="library", path=str(zims))
+    ctx = replace(_context(tmp_path / "indexes"), metadata_only=True)
+    batch = ZimProvider().discover(config, ctx)
+    runtime = batch.open(batch.collections[0])
+    try:
+        source = runtime.library_sources()[0]
+        assert source.searchable is True
+        assert isinstance(runtime.indexes[source.key], IndexSummary)
+        assert runtime.indexes[source.key].done == "filesystem"
+    finally:
+        runtime.close()
+        batch.close()
+
+
 def test_duplicate_stems_get_distinct_stable_keys(tmp_path):
     zims = tmp_path / "zims"
     (zims / "a").mkdir(parents=True)

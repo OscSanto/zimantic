@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from ...indexing import schema
 from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
+from ..base import IndexSummary
 from .metadata import metadata_from_archive, perma_ref, source_info_from_record
 
 logger = logging.getLogger(__name__)
@@ -740,17 +741,26 @@ def discover_source_indexes(
     archive_factory: Any | None = None,
     unreadable: dict[str, str] | None = None,
     order: dict[str, int] | None = None,
-) -> tuple[list[Any], list[Any], dict[str, IndexHandle]]:
+    metadata_only: bool = False,
+) -> tuple[list[Any], list[Any], dict[str, Any]]:
     """Build searchable/library sources and open their indexes.
 
     Returns ``(sources, library_sources, indexes)``.  A source is searchable
     only when it has a finished index or a native full-text index.  ``order``
     preserves an explicit command-line scope instead of title order.
+
+    With ``metadata_only`` each index is opened to read its metadata and then
+    closed immediately.  The returned ``indexes`` values are lightweight
+    summaries, so read-only listing commands never pin hundreds of leases or
+    archives at once.
     """
     unreadable = unreadable or {}
     sources = []
     library_sources = []
-    indexes: dict[str, IndexHandle] = {}
+    indexes: dict[str, Any] = {}
+    if metadata_only and not options.defer_faiss:
+        # Reading metadata never needs vector contents.
+        options = replace(options, defer_faiss=True)
     for record in records:
         path_str = record.path or ""
         readable = path_str not in unreadable
@@ -801,7 +811,18 @@ def discover_source_indexes(
             _apply_index_metadata(searchable_source, index.index_meta)
             sources.append(searchable_source)
             library_sources.append(searchable_source)
-            indexes[searchable_source.key] = index
+            if metadata_only:
+                indexes[searchable_source.key] = IndexSummary(
+                    done=str(getattr(index, "done", "") or ""),
+                    index_meta=dict(getattr(index, "index_meta", {}) or {}),
+                    generation=getattr(index, "generation", None),
+                )
+                try:
+                    index.close()
+                except Exception:
+                    pass
+            else:
+                indexes[searchable_source.key] = index
         else:
             library_sources.append(library_source)
     if order is not None:

@@ -75,6 +75,7 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
         self.collection = collection
         self.config = config
         self._ctx = ctx
+        self._metadata_only = bool(ctx.metadata_only)
         self.index_dir = Path(ctx.index_dir)
         self.web_base_path = ctx.web_base_path
         self._logger = ctx.logger
@@ -508,7 +509,7 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
         )
         options = ZimIndexOptions(
             semantic=self._semantic,
-            defer_faiss=self._defer_faiss,
+            defer_faiss=self._defer_faiss or self._metadata_only,
             model_fingerprint=self._model_fingerprint,
             cfg=self._cfg,
             probe_compatible=self._probe_compatible,
@@ -532,6 +533,7 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
             archive_factory=self._archive_factory,
             unreadable=scan.unreadable,
             order=order,
+            metadata_only=self._metadata_only,
         )
         with self._lock:
             by_key = {source.key: source for source in library_sources}
@@ -542,7 +544,8 @@ class ZimRuntime(IndexedRuntime, EnrichingRuntime, IsolatedFulltextRuntime):
                 record = self._record_by_key(scan, key)
                 existing = self.indexes.get(key)
                 if (
-                    existing is not None
+                    not self._metadata_only
+                    and existing is not None
                     and source is not None
                     and self._can_reuse_index(existing, record, source)
                 ):

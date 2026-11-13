@@ -156,6 +156,7 @@ def discover_collections(
     persist_catalog: bool = False,
     provider_kinds: Iterable[str] | None = None,
     on_sources_changed: Any | None = None,
+    metadata_only: bool = False,
 ) -> DiscoveryResult:
     """Open configured provider entries and return one bounded snapshot.
 
@@ -177,6 +178,7 @@ def discover_collections(
         logger=logger,
         persist_catalog=persist_catalog,
         on_sources_changed=on_sources_changed,
+        metadata_only=metadata_only,
     )
     diagnostics: list[str] = []
     unavailable: list[str] = []

@@ -43,6 +43,7 @@ from ..base import (
     ContentStore,
     DiscoveryBatch,
     IndexedRuntime,
+    IndexSummary,
     ProviderContext,
     SourceQuery,
 )
@@ -128,6 +129,7 @@ class KolibriRuntime(IndexedRuntime):
         _home, _database, storage = _paths(config)
         self.storage_root = storage
         self.index_dir = Path(ctx.index_dir)
+        self._metadata_only = bool(ctx.metadata_only)
         self.web_base_path = ctx.web_base_path
         self._logger = ctx.logger
         settings = _settings(ctx)
@@ -679,7 +681,7 @@ class KolibriRuntime(IndexedRuntime):
             )
             options = FilesIndexOptions(
                 semantic=self._semantic,
-                defer_faiss=self._defer_faiss,
+                defer_faiss=self._defer_faiss or self._metadata_only,
                 model_fingerprint=self._model_fingerprint,
                 cfg=self._cfg,
             )
@@ -691,7 +693,11 @@ class KolibriRuntime(IndexedRuntime):
                 info = kolibri_source.info
                 existing = self.indexes.get(info.key)
                 index = None
-                if existing is not None and self._can_reuse_index(existing, info):
+                if (
+                    not self._metadata_only
+                    and existing is not None
+                    and self._can_reuse_index(existing, info)
+                ):
                     index = existing
                 else:
                     try:
@@ -712,7 +718,18 @@ class KolibriRuntime(IndexedRuntime):
                 if index is not None:
                     object.__setattr__(info, "searchable", True)
                     apply_index_metadata(info, index.index_meta)
-                    new_indexes[info.key] = index
+                    if self._metadata_only:
+                        new_indexes[info.key] = IndexSummary(
+                            done=str(getattr(index, "done", "") or ""),
+                            index_meta=dict(getattr(index, "index_meta", {}) or {}),
+                            generation=getattr(index, "generation", None),
+                        )
+                        try:
+                            index.close()
+                        except Exception:
+                            pass
+                    else:
+                        new_indexes[info.key] = index
                     searchable.append(kolibri_source)
                 else:
                     object.__setattr__(info, "searchable", False)

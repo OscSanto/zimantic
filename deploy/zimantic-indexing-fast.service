@@ -15,6 +15,8 @@ Description=Index new ZIMs (fast) and tell Zimantic to rescan
 [Service]
 Type=oneshot
 WorkingDirectory=%h/.local/share/zimantic
+# Scanning and building a large library opens many indexes and archives.
+LimitNOFILE=65536
 # Serialize against the nightly full build: `build` takes the index lock itself,
 # and --no-wait-lock exits 75 instead of queueing when the other build holds it.
 # A skipped trigger is not an error, and reload waits for that other build.

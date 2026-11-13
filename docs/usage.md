@@ -234,6 +234,8 @@ The path-triggered fast build runs for each ZIM file in `zims/`. The full build 
 
 The server unit retries after 10 seconds but stops after three starts in ten minutes, so a server that cannot fit its ZIM files fails visibly instead of looping through OOM kills. Check `systemctl --user status zimantic` and `journalctl --user -u zimantic`; after you fix the cause, `systemctl --user reset-failed zimantic` clears the rate limit. Its header also shows `MemoryHigh`/`MemoryMax` pairs for a Pi Zero 2 W and a Pi 5; uncomment and adjust them for the device, with headroom for the OS and kiwix-serve. `MemoryHigh` throttles first; `MemoryMax` is the hard limit that OOM-kills only Zimantic.
 
+Zimantic raises its soft open-file limit to the system hard limit at startup. The units also set `LimitNOFILE=65536`, so a large library does not hit the 1024 soft limit that systemd applies to services by default.
+
 Each unit has install instructions in its header. The units use the default XDG config/data directories, `~/.config/zimantic` and `~/.local/share/zimantic`, and the CLI at `~/.local/bin/zimantic`. If you use custom XDG directories, configure them in the unit or a drop-in; update `ReadWritePaths` and `PathChanged` for a custom data directory.
 
 The units call the installed `~/.local/bin/zimantic` executable. `reload` does not need the config file. It reads the PID from `$XDG_RUNTIME_DIR/zimantic/zimantic.pid`, then from `./zimantic.pid` when present, or from the file passed with `--pid`.

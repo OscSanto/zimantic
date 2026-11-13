@@ -26,6 +26,9 @@ StartLimitBurst=3
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/zimantic
+# Discovery keeps metadata for every source; large libraries need more than
+# the 1024 soft limit that systemd applies to services by default.
+LimitNOFILE=65536
 ExecStart=%h/.local/bin/zimantic serve
 Restart=always
 RestartSec=10

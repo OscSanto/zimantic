@@ -30,6 +30,8 @@ Description=Build full Zimantic indexes at night and rescan
 [Service]
 Type=oneshot
 WorkingDirectory=%h/.local/share/zimantic
+# Scanning and building a large library opens many indexes and archives.
+LimitNOFILE=65536
 # Only the full build is allowed between 01:00 and 06:00 local time.
 ExecCondition=/bin/sh -c 'h=$(date +%H); [ "$h" -ge 1 ] && [ "$h" -lt 6 ]'
 # Serialize against the path-triggered fast build: `build` takes the index lock
