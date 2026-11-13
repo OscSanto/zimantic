@@ -1987,8 +1987,11 @@ def _run_prune(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
             from .settings import load_config
 
             try:
+                # Re-read through the same resolution path as the initial
+                # load. An explicit path would leave a relative index_dir as
+                # "./indexes" instead of resolving it under the data directory,
+                # which made this comparison fail for the default config.
                 current = load_config(
-                    config_path,
                     warn=lambda message: logger.warning("%s", message),
                 )
             except ConfigValidationError as error:
@@ -1997,6 +2000,17 @@ def _run_prune(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
                 sys.exit(
                     "zimantic: prune: the active config disappeared or became "
                     "unreadable; no indexes were deleted."
+                )
+            active_path = getattr(
+                current.get("runtime_config"), "config_path", None
+            )
+            if (
+                active_path is None
+                or Path(active_path).resolve() != Path(config_path).resolve()
+            ):
+                sys.exit(
+                    "zimantic: prune: the active config changed while waiting "
+                    "for the locks; no indexes were deleted. Re-run prune."
                 )
             if Path(current["index_dir"]) != index_dir:
                 sys.exit(

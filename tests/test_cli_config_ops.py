@@ -1006,6 +1006,30 @@ class TestSourcesAndPrune:
         assert not (tmp_path / "indexes").exists()
         assert "files:modules" in capsys.readouterr().out
 
+    @pytest.mark.skipif(os.name == "nt", reason="XDG paths are Unix-only")
+    def test_prune_yes_reloads_default_config_without_changing_index_dir(
+        self, tmp_path, monkeypatch
+    ):
+        config_home = tmp_path / "config"
+        data_home = tmp_path / "data"
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+        config_path = default_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        _write(config_path, "")
+
+        source = _source()
+        (data_home / "zimantic").mkdir(parents=True, exist_ok=True)
+        locator = _publish(data_home / "zimantic", source)
+        source_directory = locator.source_directory(
+            source.provider, source.collection_key, source.key
+        )
+        assert source_directory.exists()
+
+        main(["prune", "--yes"])
+
+        assert not source_directory.exists()
+
     def test_prune_reports_only_owned_orphans_and_respects_config(self, tmp_path):
         source = _source()
         locator = _publish(tmp_path, source)
