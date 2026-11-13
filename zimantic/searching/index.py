@@ -71,9 +71,6 @@ class IndexHandle:
     # Immutable generation lease pinned for the lifetime of this index handle.
     lease: Any | None = field(default=None, repr=False, compare=False)
     generation: str | None = None
-    # Provider-neutral additions.  ``native`` is the generic full-text seam
-    # used by the indexing contract; no provider currently sets it.
-    native: Any | None = None
     locks: IndexLocks = field(default_factory=IndexLocks, repr=False)
     index_meta: dict[str, str] = field(default_factory=dict, repr=False)
 

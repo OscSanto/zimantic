@@ -388,7 +388,7 @@ def search(
             body_docs.append((float(bm25), doc))
 
     native_docs: list[tuple[float, dict[str, Any]]] = []
-    native_searcher = native if native is not None else getattr(index, "native", None)
+    native_searcher = native
     if native_searcher is not None and query_text:
         try:
             hits = native_searcher.search(
