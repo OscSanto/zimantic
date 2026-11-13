@@ -70,7 +70,7 @@ A dedicated warm SQL-only sweep on the same physical indexes (48 queries, three 
 
 ### Tokenizers and repeated build/runtime measurements
 
-The second stage compares the dev-preferred compact layout across [Unicode61](https://www.sqlite.org/fts5.html#unicode61_tokenizer), [Porter](https://www.sqlite.org/fts5.html#porter_tokenizer), and [ASCII](https://www.sqlite.org/fts5.html#ascii_tokenizer). The tokenizer produces the same terms in either layout, and the positional row is included in the build table. The [trigram](https://www.sqlite.org/fts5.html#the_trigram_tokenizer) control is contentless with **full detail**, `columnsize=0`: SQLite rejects query tokens longer than three characters with trigram `detail=none`. It is substring retrieval, not the same word-token compact layout, and it cannot match terms shorter than three characters. Query normalization is the same in this comparison.
+The tokenizer comparison uses the dev-preferred compact layout across [Unicode61](https://www.sqlite.org/fts5.html#unicode61_tokenizer), [Porter](https://www.sqlite.org/fts5.html#porter_tokenizer), and [ASCII](https://www.sqlite.org/fts5.html#ascii_tokenizer). The tokenizer produces the same terms in either layout, and the build table includes the positional row. The [trigram](https://www.sqlite.org/fts5.html#the_trigram_tokenizer) control is contentless with **full detail**, `columnsize=0`: SQLite rejects query tokens longer than three characters with trigram `detail=none`. It performs substring retrieval, not the word-token compact layout, and cannot match terms shorter than three characters. Query normalization is the same in this comparison.
 
 Unicode61 `remove_diacritics 2` is the reference setting, chosen before test-result inspection. Bare Unicode61 and ASCII tied on English dev; Porter and trigram worsened #1. Held-out results:
 
@@ -194,7 +194,7 @@ These distillation numbers are therefore a floor, not a ceiling: they exclude To
 
 ## ZIM iteration and resource limits
 
-ZIM builds require python-libzim 4.1.0 or later and use its `iter_efficient()` iterator. This iterator follows storage order; its exact order is not part of the public contract. `iter_by_path()` and `iter_by_title()` do not follow storage order. The build records the selected order and its digest. A staged build created by a pre-4.1 release can resume in ID order; new builds never use that fallback. Resume rejects a different order or an incomplete manifest instead of applying saved row positions to a different sequence. Completed indexes stay valid.
+ZIM builds require python-libzim 4.1.0 or later and use its `iter_efficient()` iterator. This iterator follows storage order; its exact order is not part of the public contract. `iter_by_path()` and `iter_by_title()` do not follow storage order. The build records the selected order and its digest. A staged build from a pre-4.1 release can resume in ID order; a build that starts with python-libzim 4.1 or later does not use that fallback. Resume rejects a different order or an incomplete manifest instead of applying saved row positions to a different sequence. Completed indexes stay valid.
 
 Builds use row windows with limits, not article-count windows. This also limits redirect and title-only rows. A shared body-text budget limits retained text. The build flushes queued work before it waits for budget that the same build holds.
 
@@ -223,7 +223,7 @@ These are fresh-process, warm-filesystem and warm-compiled-cache builds, not reu
 | CPU int8 | 51.680 / 54.823 / 53.235 | 53.235 s |
 | GPU fp16, MIGraphX | 47.049 / 46.849 / 48.312 | 47.049 s |
 
-GPU took **11.6% less wall time** (1.13x throughput) on this workload, including against CPU with the same larger read windows and token budget. No GPU run compiled additional shapes or fell back to CPU. Per-source report durations overlap; do not sum them to compare complete commands. This shared-token-budget comparison is not the fastest CPU configuration: the CPU-specific tuning below is faster than this GPU result.
+The GPU takes **11.6% less wall time** (1.13x throughput) on this workload, including against CPU with the same larger read windows and token budget. No GPU run compiles additional shapes or falls back to CPU. Per-source report durations overlap; do not sum them to compare complete commands. This shared-token-budget comparison is not the fastest CPU configuration: the CPU-specific tuning below is faster than this GPU result.
 
 The improvements are shape-isolated compiled caches, a resident session pool with a limit, and coalescing of already queued compatible requests. With the 256-token model limit, the 1,024-token budget needs four fixed shapes: `4x256`, `8x128`, `16x64`, and `32x32`. A separate warm CMake profile spent 6.535 seconds loading sessions and 8.740 seconds in GPU calls. Small ZIM files favor CPU int8 in separate smoke runs: warm disk caches do not eliminate session-loading overhead. This is not a universal GPU speedup or a search latency result. See [GPU setup and settings](usage.md#gpu-acceleration).
 
@@ -263,7 +263,7 @@ See the [CPU configuration example](usage.md#cpu-build-tuning). Global defaults 
 
 ## Reader, preparation, and writer stage split
 
-A full build with one active source overlaps three stages without a change to batching geometry:
+A full build with one active source overlaps three stages; batching geometry does not change:
 
 ```text
 source reader (provider thread)
@@ -273,9 +273,9 @@ source reader (provider thread)
     -> ordered SQLite writer (its own staging connection)
 ```
 
-The reader keeps provider access, `modified_at()`, and derived-text extraction in the thread that owns the producer and its caches; full builds may additionally delegate entry reading and HTML extraction to helper processes (see [Parallel entry extraction](#parallel-entry-extraction-november-12-2026)). The preparation worker removes body text and submits the existing token batches without a wait for inference. The writer processes windows FIFO, awaits that window's future, calls the existing `_save_rows()` transaction, advances progress, and only then releases that window's body reservation and permit. One `max_pending_per_build` permit budget covers every in-flight window across all three queues, and the existing shared body-byte budget is the same. Commit order, canonical row/vector IDs, resume checkpoints, and publication order stay in source order.
+The reader keeps provider access, `modified_at()`, and derived-text extraction in the thread that owns the producer and its caches; full builds may additionally delegate entry reading and HTML extraction to helper processes (see [Parallel entry extraction](#parallel-entry-extraction)). The preparation worker removes body text and submits the token batches without a wait for inference. The writer processes windows FIFO, awaits that window's future, calls the `_save_rows()` transaction, advances progress, and only then releases that window's body reservation and permit. One `max_pending_per_build` permit budget covers every in-flight window across all three queues, and the shared body-byte budget is the same. Commit order, canonical row/vector IDs, resume checkpoints, and publication order stay in source order.
 
-The staged path is used when one source is actively building. When several source builds already run concurrently, source-level overlap fills the shared inference pool and the existing coupled per-source path applies; two more threads per source measured about 1.5% slower on the two-ZIM-file workload below. Fast builds keep their synchronous path; vector-reuse builds may use reader helpers but keep the existing staging connection for writes. A vector-reuse build uses the existing staging connection, so it is not moved across threads.
+The staged path is used when one source is actively building. When several source builds run concurrently, source-level overlap fills the shared inference pool and the coupled per-source path applies; two more threads per source measure about 1.5% slower on the two-ZIM-file workload below. Fast builds keep their synchronous path; vector-reuse builds may use reader helpers but keep the staging connection for writes. A vector-reuse build uses the staging connection, so it is not moved across threads.
 
 ### Complete-build measurements
 
@@ -459,28 +459,28 @@ Without `--workers`, this measures query latency. In both benchmark scripts, `--
 
 ## Reader extraction, staging writes, and discovery validation: November 11, 2026
 
-With the static default, embedding is no longer the build bottleneck. On this 20-logical-CPU Linux host (no affinity restriction), the reader that decompresses entries and extracts HTML is the critical path. Three changes reduce that path without changing stored rows.
+With the static default, the reader that decompresses entries and extracts HTML is the build critical path, not embedding. On this 20-logical-CPU Linux host (no affinity restriction), three mechanisms reduce that path without changing stored rows.
 
-`_read_html_entry` previously called `extract_excerpt()` and then `extract_body()` on the same HTML bytes. Each call constructed a Lexbor DOM, traversed it, ran the boilerplate/whitespace normalization, and applied its own character bound. `extract_excerpt_and_body()` now collects the blocks once and joins the 1,000-character excerpt and the 1 MiB body from that one traversal. Excerpts, bodies, and truncation flags matched on all **1,504 HTML pages** of the Community Building fixture, and the full rows digest (docs plus every lexical body posting) matched the previously published index. Per-block boilerplate substitution is now gated by a casefolded substring probe, and the `lang-*` class regex only runs when that substring is present. Back-to-back block separators are also coalesced.
+`_read_html_entry` calls `extract_excerpt_and_body()`, which collects the blocks one time and joins the 1,000-character excerpt and the 1 MiB body from that traversal. One Lexbor DOM construction and traversal replaces separate excerpt and body passes. Excerpts, bodies, and truncation flags match on all **1,504 HTML pages** of the Community Building fixture, and the full rows digest (docs plus every lexical body posting) matches the established index. Per-block boilerplate substitution uses a casefolded substring probe, and the `lang-*` class regex runs only when that substring is present. Back-to-back block separators are coalesced.
 
 | Community Building fixture, three fresh-process runs | Median build |
 |---|---:|
-| Before the reader changes | 6.19 s |
-| After the reader changes | 2.34 s |
+| Separate excerpt and body passes | 6.19 s |
+| Single excerpt-and-body pass | 2.34 s |
 
-This is the `scripts/bench_build.py` build interval with the int8 static default, `--threads 1 --workers 3`, 32-row windows and a 1,000-token budget, warm filesystem, no system caches dropped. It is **not a Raspberry Pi result**. Read plus extract fell from about 6.0 s to 2.3 s; vector and FAISS work was already overlapped.
+This is the `scripts/bench_build.py` build interval with the int8 static default, `--threads 1 --workers 3`, 32-row windows and a 1,000-token budget, warm filesystem, no system caches dropped. It is **not a Raspberry Pi result**. Read plus extract falls from about 6.0 s to 2.3 s; vector and FAISS work overlaps the reader.
 
-Discovery also validated every published generation by hashing each `index.sqlite` and `index.faiss` on every pin. On a library with hundreds of sources that cost more than a small source's build. `IndexLocator` now writes a `.digest-cache.json` receipt beside a generation after a successful hash, recording the manifest digest plus size, mtime, and inode. A later pin reuses it only when all four still match; any change or a different manifest digest forces a fresh hash. A generation first seen without a receipt is still hashed once. The receipt is a local integrity cache, not a replacement for the publication-time digest, and a read-only index directory simply falls back to hashing.
+Discovery validates each published generation by hashing `index.sqlite` and `index.faiss` on every pin. On a library with hundreds of sources, that cost exceeds the build of a small source. `IndexLocator` writes a `.digest-cache.json` receipt beside a generation after a successful hash, recording the manifest digest plus size, mtime, and inode. A later pin reuses it only when all four still match; any change or a different manifest digest forces a fresh hash. A generation first seen without a receipt is hashed one time. The receipt is a local integrity cache, not a replacement for the publication-time digest; a read-only index directory falls back to hashing.
 
-On a 766-source local library with about 26 GiB of published indexes, a forced rebuild of one small source measured **20.44 s** on the first run (hashing existing generations and writing receipts) and **5.58 s** on the next, where the index build itself was about 2.3 s. This is one host and one library state, not a general startup benchmark.
+On a 766-source local library with about 26 GiB of published indexes, a forced rebuild of one small source measures **20.44 s** on the first run (hashing existing generations and writing receipts) and **5.58 s** on the next, where the index build itself is about 2.3 s. This is one host and one library state, not a general startup benchmark.
 
-Build staging now opens SQLite with `journal_mode=WAL`, `synchronous=NORMAL`, and `temp_store=MEMORY`. The staging database is disposable until publication. A process crash still recovers committed windows, but a power loss can lose recent windows; resume then restarts from the last surviving `NEXT` checkpoint, and the published generation is untouched. On the same fixture the ordered row-write time fell from 1.15 s to 0.84 s, fully overlapped by the reader.
+Build staging opens SQLite with `journal_mode=WAL`, `synchronous=NORMAL`, and `temp_store=MEMORY`. The staging database is disposable until publication. A process crash recovers committed windows; a power loss can lose recent windows. Resume restarts from the last surviving `NEXT` checkpoint, and the published generation is untouched. On the same fixture, ordered row-write time is 0.84 s versus 1.15 s, fully overlapped by the reader.
 
-The reader was still single-threaded in that measurement because libzim provider access and derived-text caches are thread-affine. On the cooking Stack Exchange fixture (158,642 indexed rows), one run measured 92.0 s wall; read plus extract was **89.2 s**, ordered SQLite writes 31.3 s, ONNX 28.2 s, tokenization 4.1 s, and FAISS 1.6 s. Stage times overlap and must not be summed. The next section moves entry reading and extraction into helper processes.
+The reader is single-threaded in that measurement because libzim provider access and derived-text caches are thread-affine. On the cooking Stack Exchange fixture (158,642 indexed rows), one run measures 92.0 s wall: read plus extract **89.2 s**, ordered SQLite writes 31.3 s, ONNX 28.2 s, tokenization 4.1 s, and FAISS 1.6 s. Stage times overlap and do not sum. [Parallel entry extraction](#parallel-entry-extraction) moves entry reading and extraction into helper processes.
 
-## Parallel entry extraction: November 12, 2026
+## Parallel entry extraction
 
-The 89-second reader above spent most of its time in Python HTML traversal, which threads cannot scale because of the GIL. Full builds now give each source an optional process pool (`reader_processes`). The producer thread still owns libzim and derived-text access, but it submits bounded chunks of native entry IDs to helpers. Each helper opens its own read-only archive, decompresses one chunk, and runs the same `read_entry()` extraction in source order. Results are consumed in order, so commits, resume points, and row IDs are unchanged. Fast builds and sources with fewer than 1,000 remaining rows stay serial. Scoped builds resolve each scoped position back to its native entry ID before submitting it. The default is up to 16 helpers, limited to usable physical cores minus one and to available RAM after a 256 MiB reserve plus 96 MiB per helper; set `reader_processes = 1` to disable the pool.
+Python HTML traversal dominates the 89-second reader, and threads cannot scale it because of the GIL. Full builds give each source an optional process pool (`reader_processes`). The producer thread owns libzim and derived-text access, but submits bounded chunks of native entry IDs to helpers. Each helper opens its own read-only archive, decompresses one chunk, and runs the same `read_entry()` extraction in source order. Results are consumed in order, so commits, resume points, and row IDs do not change. Fast builds and sources with fewer than 1,000 remaining rows stay serial. Scoped builds resolve each scoped position back to its native entry ID before submission. The default is up to 16 helpers, limited to usable physical cores minus one and to available RAM after a 256 MiB reserve plus 96 MiB per helper; `reader_processes = 1` disables the pool.
 
 Measured on the same 20-logical-CPU host, no affinity restriction, static int8 default, 32-row windows and a 1,000-token budget. Community Building values are medians of five runs; cooking values are medians of three:
 
@@ -496,8 +496,8 @@ Measured on the same 20-logical-CPU host, no affinity restriction, static int8 d
 | Cooking Stack Exchange, 13 helpers (automatic) | 18.528 s |
 | Cooking Stack Exchange, 16 helpers | 17.570 s |
 
-That is **3.0x** on the small fixture and **5.0x** on the large one, or 80% less wall time for the cooking build. The cooking fixture gains 5% from 13 to 16 helpers. In a 13-helper run, ordered SQLite writes and embedding each took about 8-11 s and overlapped the reader, so they are now near the critical path rather than far behind it.
+That is **3.0x** on the small fixture and **5.0x** on the large one, or 80% less wall time for the cooking build. The cooking fixture gains 5% from 13 to 16 helpers. In a 13-helper run, ordered SQLite writes and embedding each take about 8-11 s and overlap the reader, so they are near the critical path.
 
-Both fixtures produced the same rows as before: the Community Building rows digest matched the serial build, and on cooking the full digest of docs plus every lexical body posting was identical for `reader_processes = 1` and `13`. These are build-time and output-integrity checks, not new relevance measurements.
+Both fixtures produce the same rows: the Community Building rows digest matches the serial build, and on cooking the full digest of docs plus every lexical body posting is identical for `reader_processes = 1` and `13`. These are build-time and output-integrity checks, not relevance measurements.
 
 The helper pool uses spawn semantics. Code that calls `build_index()` directly must keep its entry point behind `if __name__ == "__main__":`, or set `reader_processes = 1`. The CLI, the benchmark harnesses, and the test suite already satisfy that.

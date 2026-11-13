@@ -100,7 +100,7 @@ For a fair comparison, both runs use the same ZIM files. Each run also uses inde
 
 ### Diversity and representative browsing
 
-This section records the four-way experiment that supports the unified control. Production code exposes one adaptive Diversity order, which is also the empty-query default: semantic MMR for items with usable embeddings, lexical diversity otherwise. The four variants below are comparison controls, not separate production controls.
+The four-way experiment below supports the unified control. Production code exposes one adaptive Diversity order, which is also the empty-query default: semantic MMR for items with usable embeddings, lexical diversity otherwise. The four variants below are comparison controls, not separate production controls.
 
 `diversity.py` compares four variants: Diversity, Representative, corrected Diversity, and Semantic diversity. Capture the baseline, then reuse the same output directory:
 

@@ -102,7 +102,7 @@ uv run python tests/benchmarks/run_snippets.py \
     --output tests/benchmarks/results/snippets-single-client-2026-11-09.json
 ```
 
-Set `PYTHONPATH` and `LD_LIBRARY_PATH` to the patched binding/native builds as above. Both backends need snippet suppression; threads additionally require the native mutex fix. This runner does not change production search behavior. `deferred` uses the production `FulltextPool`; the eager variants replace only its worker cache/entry point, retaining its scheduling and JSON IPC.
+Set `PYTHONPATH` and `LD_LIBRARY_PATH` to the patched binding/native builds as above. Both backends need snippet suppression; threads additionally require the native mutex fix. This runner does not affect production search behavior. `deferred` uses the production `FulltextPool`; the eager variants replace only its worker cache/entry point, retaining its scheduling and JSON IPC.
 
 Every query searches all supplied ZIM files for 16 candidates each, ranks with the production ranker, then hydrates only the displayed ten. `native:N` keeps libzim's query-centered snippets and falls back to the normal limited reader for displayed results without one. `lead:N` uses that same reader in the search worker, preserving the existing opening-text preview. Native snippets are normally about 500 characters, versus the configured 1,000-character lead; they are not equivalent text or UX. Zimantic strips native `<b>` highlighting before reuse as plain text.
 

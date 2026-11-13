@@ -41,7 +41,7 @@ uv sync
   python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
   ```
   The harness measures ZIM files with indexes and lists the others without scoring them. Report results by language and query type, and report fixed and broken counts. For indexing work, build separate indexes on each branch. Tune with `--split dev` and report with `--split test`.
-- Documentation. Keep the README accurate for documented behavior, configuration, commands, and published measurements. Use measurements from the documented version. Write concise present-tense prose with consistent technical terms.
+- Documentation. Keep the README consistent with documented behavior, configuration, commands, and published measurements. Use measurements from the documented version. Write concise present-tense prose with consistent technical terms.
 - Compatibility. Document supported configuration, index, and command formats. Zimantic supports documented formats only; it does not guarantee backward compatibility or migrations. Reject unsupported formats with a clear diagnostic that tells users to update configuration or rebuild caches and indexes. Cross-model embedding-probe reuse is supported.
 
 ## Code style
