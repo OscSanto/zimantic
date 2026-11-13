@@ -13,6 +13,7 @@ import pytest
 from zimantic.catalog import SourceCatalog, catalog_path
 from zimantic.indexing.derived import SourceDerivedOperations
 from zimantic.providers.files import FilesProvider
+from zimantic.providers.config import TraversalLimits
 from zimantic.providers.files import discovery as files_discovery
 from zimantic.providers.files.discovery import (
     discover_sources,
@@ -30,6 +31,23 @@ def test_directory_source_key_uses_eight_character_path_digest():
     assert (
         files_dir_key("modules", "en-file_share")
         == "files:modules:dir-en-file_share-e8d62e4a"
+    )
+
+
+def test_traversal_budget_reports_partial_classification(tmp_path):
+    root = tmp_path / "modules"
+    build_tree(root)
+    config = files_config(
+        root,
+        traversal=TraversalLimits(max_visited_entries=5),
+    )
+
+    result = discover_sources(config)
+
+    assert result.sources
+    assert any(
+        "traversal reached its configured limit" in error
+        for error in result.errors
     )
 
 
