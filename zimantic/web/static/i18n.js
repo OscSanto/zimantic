@@ -134,6 +134,9 @@
             "Search failed": "La búsqueda falló",
             "Unknown source": "Fuente desconocida",
             "Choose a source from the list.": "Elige una fuente de la lista.",
+            "Unknown collection": "Colección desconocida",
+            "Choose a collection from the library.":
+                "Elige una colección de la biblioteca.",
             "One or more selected sources are not available.":
                 "Una o más fuentes seleccionadas no están disponibles.",
             "Searching for": "Buscando",

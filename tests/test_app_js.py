@@ -442,11 +442,37 @@ const state = {{
   question: ["empty", "empty-query", "failure", "browse"].includes(mode) ? "" : "original",
   browse: mode === "browse" ? "rare" : mode === "empty-query" ? "diverse" : undefined,
   seed: ["browse", "empty-query"].includes(mode) ? 0 : undefined,
-  selectedSources: [], scopeSources: [], collection: "files:modules", page: 0, modal: null,
+  selectedSources: mode === "unknown-source" ? ["missing"] : [],
+  scopeSources: mode === "unknown-source" ? ["missing"] : [],
+  collection: mode === "unknown-collection" ? "missing"
+    : mode === "unknown-source" ? null : "files:modules",
+  page: 0, modal: null,
 }};
 const normalizePageParam = () => {{}};
+const normalizeSortParam = () => {{}};
 const readLocationState = () => state;
-const applyLocationScope = (state) => {{ selectedCollectionKey = state.collection; }};
+const applyLocationScope = (state) => {{
+  selectedCollectionKey = state.collection;
+  selectedSourceKeys = new Set(state.selectedSources);
+}};
+const availableBrowseModes = new Set(["random", "rare", "outliers", "diverse", "recency"]);
+const defaultBrowseMode = () => "diverse";
+const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); }};
+const makeStateUrl = (question, selected, page, modal, scope, collection, browse, seed) => {{
+  const params = new URLSearchParams();
+  params.set("q", question);
+  if (collection) params.set("collection", collection);
+  for (const source of selected || []) params.append("source", source);
+  if (browse) params.set("sort", browse);
+  if (page > 0) params.set("page", String(page + 1));
+  if (modal) params.set("modal", modal);
+  return "/?" + params.toString();
+}};
+const renderSortControls = () => {{}};
+const renderSourceFilters = () => {{}};
+const replaceQueryParam = () => {{}};
+let replaced = null;
+const history = {{state: null, replaceState(_state, _title, url) {{ replaced = String(url); }}}};
 const setSettingsOpen = () => {{}};
 const syncArticleModal = () => {{}};
 const readCollectionCache = () => null;
@@ -489,6 +515,8 @@ const snapshot = () => ({{
   labels: $("sourceFilterOptions").children.map((button) => button.textContent),
   selectionStatus: $("sourceFilterStatus").textContent,
   loading: !$("startupStatus").hidden, question: $("question").value,
+  notice: $("notice").textContent, status: $("status").textContent,
+  replaced,
 }});
 (async () => {{
   const ready = initialize();
@@ -501,7 +529,8 @@ const snapshot = () => ({{
   if (mode === "searched") runSearch("new query", [], 0, [], "files:modules");
   config.resolve();
   if (mode === "failure") discovery.reject(new Error("offline"));
-  else discovery.resolve({{payload: [], stale: false}});
+  else discovery.resolve({{payload: mode === "unknown-source"
+    ? [{{key: "manual", provider: "files", label: "Manual"}}] : [], stale: false}});
   await ready;
   console.log(JSON.stringify({{
     early, earlyRequests, labeled, final: snapshot(), searches, status: $("status").textContent,
@@ -558,6 +587,26 @@ const snapshot = () => ({{
                         payload["searches"], [["new query", [], 0, [], "files:modules"]]
                     )
 
+    def test_unknown_source_clears_the_phantom_scope_without_searching(self):
+        payload = self._initialize_search_page("unknown-source")
+        self.assertEqual(payload["searches"], [])
+        self.assertEqual(payload["final"]["status"], "Search failed")
+        self.assertIn("Unknown source: missing", payload["final"]["notice"])
+        self.assertTrue(payload["final"]["scopeHidden"])
+        self.assertTrue(payload["final"]["selectionHidden"])
+        self.assertEqual(payload["final"]["labels"], [])
+        self.assertNotIn("source=", payload["final"]["replaced"])
+        self.assertIn("q=original", payload["final"]["replaced"])
+
+    def test_unknown_collection_clears_the_phantom_scope_without_searching(self):
+        payload = self._initialize_search_page("unknown-collection")
+        self.assertEqual(payload["searches"], [])
+        self.assertIn("Unknown collection: missing", payload["final"]["notice"])
+        self.assertTrue(payload["final"]["scopeHidden"])
+        self.assertEqual(payload["final"]["labels"], [])
+        self.assertNotIn("collection=", payload["final"]["replaced"])
+        self.assertIn("q=original", payload["final"]["replaced"])
+
     def test_startup_requires_a_query_parameter_or_explicit_order(self):
         self.assertEqual(self._initialize_search_page("empty")["searches"], [])
         self.assertEqual(
@@ -574,6 +623,7 @@ const snapshot = () => ({{
         script = f"""
 const location = new URL("http://example.test/?q=");
 const MAX_QUERY_LENGTH = 4096;
+const BROWSE_MODES = new Set(["random", "rare", "outliers", "diverse", "recency"]);
 const defaultBrowseMode = () => "diverse";
 const selectionValues = (values) => [...(values || [])];
 let current = null, selectedSourceKeys = new Set(["manual"]);
@@ -726,6 +776,7 @@ const selectedSourceKeys = new Set(["manual"]);
 const selectedCollectionKey = "files:modules";
 const nextSearchScope = (selected) => selected;
 const MAX_QUERY_LENGTH = 4096;
+const BROWSE_MODES = new Set(["random", "rare", "outliers", "diverse", "recency"]);
 const commitAutoSearchHistory = () => {{}};
 const currentUrlValue = () => location.pathname + location.search;
 const searches = [];
@@ -793,6 +844,7 @@ console.log(JSON.stringify({{
         script = f"""
 const location = new URL("http://example.test/");
 const MAX_QUERY_LENGTH = 4096;
+const BROWSE_MODES = new Set(["random", "rare", "outliers", "diverse", "recency"]);
 const defaultBrowseMode = () => "diverse";
 const appPath = (path) => path;
 const elements = {{articleModal: {{hidden: true}}, question: {{value: ""}}}};
@@ -2192,6 +2244,49 @@ console.log(JSON.stringify({{clearedQuery, typed, browsing, idle}}));
         self.assertEqual(payload["browsing"]["hidden"]["relevance"], True)
         # With no search at all, keep the default browse mode.
         self.assertEqual(payload["idle"]["value"], "diverse")
+
+    def test_location_state_ignores_unknown_sort_modes(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const BROWSE_LABELS = {{
+  random: "Random", rare: "Rare titles", outliers: "Semantic outliers",
+  diverse: "Diversity", recency: "Recency",
+}};
+const BROWSE_MODES = new Set(Object.keys(BROWSE_LABELS));
+const availableBrowseModes = BROWSE_MODES;
+const MAX_QUERY_LENGTH = 4096;
+const location = {{search: ""}};
+{_function_source(source, "function defaultBrowseMode(", "function renderSortControls(")}
+{_function_source(source, "function readLocationState(", "function syncArticleModal(")}
+const read = (search) => {{
+  location.search = search;
+  const state = readLocationState();
+  return {{question: state.question, browse: state.browse, defaultSort: state.defaultSort}};
+}};
+console.log(JSON.stringify({{
+  badQuery: read("?q=diabetes&sort=bogus"),
+  badBrowse: read("?q=&sort=bogus"),
+  validBrowse: read("?q=diabetes&sort=rare"),
+  explicitRelevance: read("?q=diabetes&sort=relevance"),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["badQuery"],
+            {"question": "diabetes", "browse": None, "defaultSort": False},
+        )
+        self.assertEqual(
+            payload["badBrowse"],
+            {"question": "", "browse": "diverse", "defaultSort": True},
+        )
+        self.assertEqual(payload["validBrowse"]["browse"], "rare")
+        self.assertEqual(payload["explicitRelevance"]["browse"], None)
 
     def test_modified_heading_click_opens_search_in_new_tab(self):
         source = APP_JS.read_text(encoding="utf-8")

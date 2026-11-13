@@ -73,7 +73,8 @@
                 diverse: "Diversity",
                 recency: "Recency",
             };
-            let availableBrowseModes = new Set(Object.keys(BROWSE_LABELS));
+            const BROWSE_MODES = new Set(Object.keys(BROWSE_LABELS));
+            let availableBrowseModes = new Set(BROWSE_MODES);
             const AUTO_SUBMIT_DELAY = 800;
             const AUTO_HISTORY_DELAY = 3000;
             let MAX_QUERY_LENGTH = 4096;
@@ -3939,7 +3940,16 @@
                 let detail = `HTTP ${response.status}`;
                 try {
                     const payload = await response.json();
-                    if (payload && payload.detail) detail = String(payload.detail);
+                    if (Array.isArray(payload?.detail)) {
+                        // FastAPI validation errors are structured objects;
+                        // String(detail) would only yield "[object Object]".
+                        detail = payload.detail
+                            .map((item) => item?.msg || String(item))
+                            .filter(Boolean)
+                            .join("; ") || detail;
+                    } else if (payload && payload.detail) {
+                        detail = String(payload.detail);
+                    }
                 } catch (_) {
                     // The response was not JSON; keep the status message.
                 }
@@ -4126,6 +4136,11 @@
                                     ? error.message
                                     : `${t("One or more selected sources are not available.")}` +
                                       (error.message ? ` (${error.message})` : "");
+                        } else if (error.status === 422) {
+                            // A validation error is usually a bad URL or a
+                            // stale cross-version link; show the reason rather
+                            // than only "Search failed".
+                            $("notice").textContent = error.message;
                         }
                         announceSearchStatus($("status").textContent);
                     }
@@ -4402,6 +4417,23 @@
                 );
             }
 
+            function normalizeSortParam() {
+                // Remove unknown sort values and an explicit relevance before
+                // the first search, so the address bar describes the request
+                // the server actually receives. A valid browse sort is left
+                // for loadConfig's availability check.
+                const params = new URLSearchParams(location.search);
+                if (!params.has("sort")) return;
+                const raw = params.get("sort");
+                if (raw === "relevance") {
+                    replaceQueryParam("sort", null);
+                    return;
+                }
+                if (!raw || !BROWSE_MODES.has(raw)) {
+                    replaceQueryParam("sort", null);
+                }
+            }
+
             function readLocationState() {
                 const params = new URLSearchParams(location.search);
                 const pageNumber = Number.parseInt(params.get("page") || "1", 10);
@@ -4412,10 +4444,17 @@
                 const scopeSources = sourceValues;
                 const question = (params.get("q") || "").trim().slice(0, MAX_QUERY_LENGTH);
                 const requestedSort = params.get("sort");
-                const defaultSort = !question && params.has("q") && (!requestedSort || requestedSort === "relevance");
-                const browse = defaultSort
-                    ? defaultBrowseMode()
-                    : requestedSort === "relevance" ? null : requestedSort || null;
+                // A hand-edited or stale URL must not turn into a blank sort
+                // control and a server 422. Unknown values fall back to
+                // relevance (or the empty-query default), exactly like an
+                // omitted sort.
+                const sortMode = requestedSort
+                    && requestedSort !== "relevance"
+                    && BROWSE_MODES.has(requestedSort)
+                    ? requestedSort
+                    : null;
+                const defaultSort = !question && params.has("q") && !sortMode;
+                const browse = defaultSort ? defaultBrowseMode() : sortMode;
                 return {
                     question,
                     browse,
@@ -5484,6 +5523,7 @@
 
             async function initialize() {
                 normalizePageParam();
+                normalizeSortParam();
                 const libraryView = location.pathname === appPath("/library");
                 const startupStatus = $("startupStatus");
                 if (libraryView) {
@@ -5562,38 +5602,86 @@
                 } finally {
                     if (startupStatus) startupStatus.hidden = true;
                 }
+                if (state.browse && !availableBrowseModes.has(state.browse)) {
+                    // A browse mode from a different server mode (for example
+                    // outliers after a --fast restart) would make the server
+                    // reject the search. Fall back instead of leaving a blank
+                    // sort control and a generic "Search failed".
+                    state.browse = null;
+                    state.defaultSort =
+                        !state.question &&
+                        new URLSearchParams(location.search).has("q");
+                    if (state.defaultSort) state.browse = defaultBrowseMode();
+                    replaceQueryParam("sort", null);
+                }
                 if (state.defaultSort) state.browse = defaultBrowseMode();
-                if (!libraryView && sources.length) {
-                    const known = new Set(sources.map((source) => source.key));
-                    const unknown = [...selectedSourceKeys].filter(
-                        (key) => !known.has(key),
+                if (!libraryView && (sources.length || collections.length)) {
+                    const knownSources = new Set(
+                        sources.map((source) => source.key),
                     );
-                    if (unknown.length) {
+                    const knownCollections = new Set(
+                        collections.map((collection) => collection.key),
+                    );
+                    const unknownSources = sources.length
+                        ? [...selectedSourceKeys].filter(
+                              (key) => !knownSources.has(key),
+                          )
+                        : [];
+                    const unknownCollection =
+                        state.collection &&
+                        collections.length &&
+                        !knownCollections.has(state.collection)
+                            ? state.collection
+                            : null;
+                    const warnings = [];
+                    if (unknownSources.length) {
                         const valid = [...selectedSourceKeys].filter((key) =>
-                            known.has(key),
+                            knownSources.has(key),
                         );
                         setSelectedSources(valid);
-                        $("notice").textContent =
-                            `${t("Unknown source")}: ${unknown.join(", ")}. ` +
-                            t("Choose a source from the list.");
-                        invalidScope = !valid.length && Boolean(state.question || state.browse);
+                        warnings.push(
+                            `${t("Unknown source")}: ${unknownSources.join(", ")}. ` +
+                                t("Choose a source from the list."),
+                        );
+                    }
+                    if (unknownCollection) {
+                        state.collection = null;
+                        selectedCollectionKey = null;
+                        warnings.push(
+                            `${t("Unknown collection")}: ${unknownCollection}. ` +
+                                t("Choose a collection from the library."),
+                        );
+                    }
+                    if (warnings.length) {
+                        // An unknown selector is an error, never an implicit
+                        // broader search. Remove only the bad parts so the
+                        // next deliberate search can succeed, and keep the
+                        // scope UI from continuing to show a phantom chip or
+                        // collection.
+                        $("notice").textContent = warnings.join(" ");
+                        invalidScope = Boolean(state.question || state.browse);
                         if (invalidScope) {
                             $("status").textContent = t("Search failed");
                         }
+                        const selected = [...selectedSourceKeys];
                         history.replaceState(
                             history.state,
                             "",
                             makeStateUrl(
                                 state.question || "",
-                                valid,
+                                selected,
                                 state.page,
                                 state.modal,
-                                valid,
+                                selected,
                                 state.collection,
                                 state.browse,
                                 state.seed,
                             ),
                         );
+                        renderSourceSelectionSummary();
+                        renderScopeLine();
+                        renderSourceFilters();
+                        renderSortControls();
                     }
                 }
                 syncArticleModal(state.modal);
