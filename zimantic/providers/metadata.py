@@ -33,7 +33,10 @@ def apply_index_metadata(source: Any, meta: Mapping[str, str]) -> None:
                 if isinstance(coverage, dict)
                 else False
             )
-            object.__setattr__(source, "index_partial", partial)
+        else:
+            # A published index without a scope manifest covers the source.
+            partial = False
+        object.__setattr__(source, "index_partial", partial)
         if schema.TRUNCATED in meta:
             object.__setattr__(
                 source,
