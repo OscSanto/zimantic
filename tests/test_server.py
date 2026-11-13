@@ -192,6 +192,13 @@ def test_inline_script_json_cannot_close_the_script_element():
 
 
 class ServerTests(unittest.TestCase):
+    def test_get_routes_accept_head_requests(self):
+        for path in ("/health", "/sources", "/collections.json", "/config"):
+            with self.subTest(path=path):
+                response = self.client.head(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.content, b"")
+
     @classmethod
     def setUpClass(cls):
         cls.search = FakeSearch()

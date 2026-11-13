@@ -65,7 +65,6 @@ class ZimOpenScope:
 @dataclass(frozen=True)
 class _CatalogMatch:
     key: str
-    collection_key: str
 
 
 def _safe_stem(value: str) -> str:
@@ -246,13 +245,13 @@ def _read_catalog_matches(
             if version != SCHEMA_VERSION or columns != set(SOURCE_COLUMNS):
                 raise OpenScopeError("catalog schema is incompatible")
             rows = connection.execute(
-                "SELECT key, collection_key, path, size, provider_id "
+                "SELECT key, path, size, provider_id "
                 "FROM sources WHERE provider = 'zim'"
             ).fetchall()
         finally:
             connection.close()
 
-    for key, collection_key, path, size, provider_id in rows:
+    for key, path, size, provider_id in rows:
         if not path or path not in wanted:
             continue
         _path, expected_size, expected_uuid = wanted[path]
@@ -260,9 +259,7 @@ def _read_catalog_matches(
             continue
         if not provider_id or str(provider_id).casefold() != expected_uuid.casefold():
             continue
-        matches.setdefault(path, []).append(
-            _CatalogMatch(str(key), str(collection_key))
-        )
+        matches.setdefault(path, []).append(_CatalogMatch(str(key)))
     return matches
 
 

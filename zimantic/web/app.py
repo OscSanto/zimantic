@@ -1143,9 +1143,17 @@ def warm_static_cache() -> None:
 def create_app(searchClass, debug: bool = False) -> FastAPI:
     app = FastAPI(title="Zimantic")
     app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
+    from fastapi.routing import APIRoute
+
     from .routes import register_routes
 
     register_routes(app, searchClass, debug)
+    # FastAPI does not add HEAD for a GET route. HEAD is part of correct HTTP
+    # semantics and cheap for these JSON/shell endpoints; content routes add
+    # their own efficient HEAD handlers.
+    for route in app.routes:
+        if isinstance(route, APIRoute) and route.methods == {"GET"}:
+            route.methods.add("HEAD")
     return app
 
 

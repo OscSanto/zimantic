@@ -274,52 +274,13 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         version,
         payload_factory,
         memos,
-        limit: int | None,
+        limit: int,
         offset: int,
         *,
         snapshot: str | None = None,
         cacheable: bool = True,
     ):
         snapshot = _snapshot_version() if snapshot is None else snapshot
-        if limit is None:
-            if cacheable:
-                response = web_app._json_response(
-                    request,
-                    memo_key,
-                    version,
-                    payload_factory,
-                    memos,
-                )
-            else:
-                payload = payload_factory()
-                body = json.dumps(
-                    payload,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                    default=str,
-                )
-                etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
-                if request.headers.get("if-none-match") == etag:
-                    return Response(
-                        status_code=304,
-                        headers={
-                            "ETag": etag,
-                            "Cache-Control": "no-cache",
-                            "X-Snapshot-Version": snapshot,
-                        },
-                    )
-                return Response(
-                    content=body,
-                    media_type="application/json",
-                    headers={
-                        "ETag": etag,
-                        "Cache-Control": "no-cache",
-                        "X-Snapshot-Version": snapshot,
-                    },
-                )
-            response.headers["X-Snapshot-Version"] = snapshot
-            return response
-
         if cacheable:
             _, payload, _, full_etag = web_app._memoized_json(
                 memo_key,
