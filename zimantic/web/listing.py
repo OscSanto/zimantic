@@ -16,12 +16,31 @@ from ..media_types import MEDIA_TYPE_ORDER
 from ..providers.config import BUILTIN_PROVIDERS
 
 
+def _visible_library_source(source: Mapping[str, Any]) -> bool:
+    return source.get("provider") != "kolibri" or source.get("item_count") != 0
+
+
 def visible_library_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    library = []
+    """Hide empty Kolibri topics from every discovery listing.
+
+    An empty topic has no searchable content and produced a zero-item card.
+    Filter both the library and the source listing so /sources, /library.json,
+    /collections.json, /config, and the library status all describe the same
+    source set. Collections lose the same hidden count from source_count.
+    """
+    sources = [
+        source
+        for source in snapshot.get("sources") or []
+        if _visible_library_source(source)
+    ]
+    library = [
+        source
+        for source in snapshot.get("library") or []
+        if _visible_library_source(source)
+    ]
     hidden_counts: dict[str, int] = {}
-    for source in snapshot.get("library") or []:
-        if source.get("provider") != "kolibri" or source.get("item_count") != 0:
-            library.append(source)
+    for source in snapshot.get("sources") or snapshot.get("library") or []:
+        if _visible_library_source(source):
             continue
         collection = source.get("collection")
         if isinstance(collection, Mapping) and collection.get("key"):
@@ -36,7 +55,12 @@ def visible_library_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "source_count": max(0, int(collection.get("source_count") or 0) - hidden),
             }
         collections.append(collection)
-    return {**snapshot, "library": library, "collections": collections}
+    return {
+        **snapshot,
+        "sources": sources,
+        "library": library,
+        "collections": collections,
+    }
 
 
 def validate_provider(value: str | None) -> str | None:

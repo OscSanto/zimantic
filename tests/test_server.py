@@ -336,12 +336,19 @@ class ServerTests(unittest.TestCase):
                 "searchable": False,
             },
         ]
+        snapshot["sources"] = list(snapshot["library"])
         with patch.object(self.search, "listing_snapshot", return_value=snapshot):
             collections = self.client.get(
                 "/collections.json", params={"provider": "kolibri"}
             )
             self.assertEqual(collections.status_code, 200)
             self.assertEqual(collections.json()[0]["source_count"], 1)
+            sources = self.client.get(
+                "/sources", params={"provider": "kolibri"}
+            )
+            self.assertEqual(sources.status_code, 200)
+            self.assertEqual([source["key"] for source in sources.json()], ["math"])
+            self.assertEqual(sources.headers["x-total-count"], "1")
             response = self.client.get(
                 "/library.json", params={"provider": "kolibri", "limit": 1}
             )
@@ -374,6 +381,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(collections.json()[0]["source_count"], 2)
         self.assertEqual(collection["source_count"], 8)
         self.assertEqual(len(snapshot["library"]), 9)
+        self.assertEqual(len(snapshot["sources"]), 9)
 
     def test_library_filters_zim_sources_by_count_based_media_types(self):
         from types import SimpleNamespace
