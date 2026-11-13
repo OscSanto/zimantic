@@ -54,6 +54,9 @@ class CatalogFetch:
 
     entries: tuple[dict[str, str], ...] | None
     error: str | None = None
+    # False for a configuration or protocol failure that a background retry
+    # cannot fix (for example a 404 catalog URL or a malformed server URL).
+    retryable: bool = True
 
     @property
     def complete(self) -> bool:
@@ -383,7 +386,9 @@ def fetch_catalog(
     try:
         origin = _validated_origin(server)
     except ValueError as error:
-        return CatalogFetch(None, f"Kiwix server is invalid: {error}")
+        return CatalogFetch(
+            None, f"Kiwix server is invalid: {error}", retryable=False
+        )
 
     budget = (
         float(total_timeout)
@@ -443,7 +448,9 @@ def fetch_catalog(
                     retryable = False
                 if not retryable:
                     return CatalogFetch(
-                        None, f"Kiwix catalog request failed: {error}"
+                        None,
+                        f"Kiwix catalog request failed: {error}",
+                        retryable=False,
                     )
                 if attempt + 1 == DEFAULT_KIWIX_CATALOG_ATTEMPTS:
                     return CatalogFetch(
@@ -463,7 +470,9 @@ def fetch_catalog(
                     )
                 sleep_fn(delay)
         if root is None:  # pragma: no cover - the loop returns or breaks
-            return CatalogFetch(None, "Kiwix catalog request failed")
+            return CatalogFetch(
+                None, "Kiwix catalog request failed", retryable=False
+            )
 
         page = _parse_entries(root)
         if not page:
@@ -474,6 +483,7 @@ def fetch_catalog(
                 None,
                 f"Kiwix catalog exceeds the {entry_bound} entry limit; "
                 "keeping the last complete catalog",
+                retryable=False,
             )
         new = [item for item in page if item["book"] not in seen_books]
         if not new:
@@ -481,6 +491,7 @@ def fetch_catalog(
                 None,
                 "Kiwix catalog paging did not advance; "
                 "keeping the last complete catalog",
+                retryable=False,
             )
         for item in new:
             seen_books.add(item["book"])
@@ -491,6 +502,7 @@ def fetch_catalog(
             None,
             f"Kiwix catalog did not finish within {DEFAULT_KIWIX_MAX_PAGES} pages; "
             "keeping the last complete catalog",
+            retryable=False,
         )
 
     entries = _finalize_entries(collected, max_entries=entry_bound)

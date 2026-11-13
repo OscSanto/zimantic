@@ -166,6 +166,7 @@ class KiwixRuntime(CollectionRuntime):
         self._closed = False
         self._failure_logged = False
         self._last_refresh: float | None = None
+        self._retryable = True
 
     # -- contracts ---------------------------------------------------------
 
@@ -348,6 +349,7 @@ class KiwixRuntime(CollectionRuntime):
             )
             if self._closed:
                 return False
+            self._retryable = result.retryable
             if result.entries is None:
                 self._publish_failure(
                     result.error or "Kiwix catalog refresh failed"
@@ -360,6 +362,7 @@ class KiwixRuntime(CollectionRuntime):
                     server=self.config.server,
                 )
             except ValueError as error:
+                self._retryable = False
                 self._publish_failure(str(error))
                 return False
             self._publish_sources(sources)
@@ -374,7 +377,7 @@ class KiwixRuntime(CollectionRuntime):
         while not self._closed:
             if self._refresh_once():
                 return
-            if self._closed:
+            if self._closed or not self._retryable:
                 return
             if self._retry_wake.wait(delay):
                 return
@@ -403,7 +406,7 @@ class KiwixRuntime(CollectionRuntime):
             self._start_retry_loop(first_attempt=True)
             return True
         ok = self._refresh_once()
-        if not ok and not self._closed:
+        if not ok and not self._closed and self._retryable:
             self._start_retry_loop(first_attempt=False)
         return ok
 

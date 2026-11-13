@@ -500,6 +500,16 @@ def discover_sources(
     max_visited, timeout = _traversal_limits(config)
     budget = _Budget(max_visited, timeout)
     errors: list[str] = []
+    partial_note_sent = False
+
+    def note_partial(partial: bool) -> None:
+        nonlocal partial_note_sent
+        if partial and not partial_note_sent:
+            errors.append(
+                "files traversal reached its configured limit; media types and "
+                "summaries may be incomplete"
+            )
+            partial_note_sent = True
 
     try:
         root_stat = root.stat()
@@ -518,7 +528,7 @@ def discover_sources(
         )
 
     if granularity != "children":
-        families, _partial = _classify(
+        families, partial = _classify(
             root,
             membership_root="",
             loose_only=False,
@@ -526,6 +536,7 @@ def discover_sources(
             budget=budget,
             errors=errors,
         )
+        note_partial(partial)
         has_icon, _icon_path = _icon(root, "")
         info = _source_info(
             config,
@@ -593,7 +604,7 @@ def discover_sources(
             label,
             max_sources,
         )
-        families, _partial = _classify(
+        families, partial = _classify(
             root,
             membership_root="",
             loose_only=False,
@@ -601,6 +612,7 @@ def discover_sources(
             budget=budget,
             errors=errors,
         )
+        note_partial(partial)
         has_icon, _icon_path = _icon(root, "")
         info = _source_info(
             config,
@@ -634,7 +646,7 @@ def discover_sources(
             )
             continue
         seen_keys[key] = relative
-        families, _partial = _classify(
+        families, partial = _classify(
             root,
             membership_root=relative,
             loose_only=False,
@@ -642,6 +654,7 @@ def discover_sources(
             budget=budget,
             errors=errors,
         )
+        note_partial(partial)
         has_icon, _icon_path = _icon(root, relative)
         info = _source_info(
             config,
@@ -662,7 +675,7 @@ def discover_sources(
 
     if loose_present:
         key = files_loose_key(collection_name)
-        families, _partial = _classify(
+        families, partial = _classify(
             root,
             membership_root="",
             loose_only=True,
@@ -670,6 +683,7 @@ def discover_sources(
             budget=budget,
             errors=errors,
         )
+        note_partial(partial)
         has_icon, _icon_path = _icon(root, "")
         info = _source_info(
             config,

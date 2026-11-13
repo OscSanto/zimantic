@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import types
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -261,6 +262,25 @@ class TestOpenScopeIdentity:
         assert lease_before == lease_after
         assert not Path(f"{database}-wal").exists()
         assert not Path(f"{database}-shm").exists()
+
+    @pytest.mark.skipif(
+        os.name == "nt" or getattr(os, "geteuid", lambda: 1)() == 0,
+        reason="requires a non-root POSIX read-only lease",
+    )
+    def test_read_only_lease_still_keeps_the_canonical_key(self, tmp_path):
+        zims = tmp_path / "zims"
+        zims.mkdir()
+        archive = _create_zim(zims / "manual.zim", title="Manual")
+        catalog = _scan(tmp_path, "library")
+        catalog.close()
+        lease = catalog_path(tmp_path / "indexes").parent / ".catalog.lock"
+        lease.chmod(0o444)
+        try:
+            scope = build_open_scope([archive], _config(tmp_path))
+        finally:
+            lease.chmod(0o644)
+
+        assert scope.keys == (zim_source_key("library", "manual.zim"),)
 
     def test_absent_lease_uses_fallback_keys(self, tmp_path):
         zims = tmp_path / "zims"

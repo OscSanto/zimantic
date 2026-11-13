@@ -8,7 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -233,6 +233,23 @@ def test_background_retry_recovers_after_a_failed_refresh():
             time.sleep(0.01)
         assert [source.title for source in runtime.sources] == ["Manual"]
         assert runtime.snapshot.discovery_state == "ready"
+    finally:
+        runtime.close()
+
+
+def test_permanent_catalog_error_does_not_start_a_background_retry():
+    requests: list[str] = []
+
+    def not_found(request, timeout=None):
+        requests.append(request.full_url)
+        raise HTTPError(request.full_url, 404, "not found", None, None)
+
+    runtime = _runtime(not_found, retry_backoff=0.01)
+    try:
+        runtime.refresh(wait=False)
+        time.sleep(0.1)
+        assert len(requests) == 1
+        assert runtime.snapshot.discovery_state == "error"
     finally:
         runtime.close()
 

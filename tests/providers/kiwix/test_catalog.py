@@ -133,6 +133,7 @@ def test_catalog_refresh_does_not_retry_non_retryable_4xx():
     )
 
     assert result.entries is None
+    assert result.retryable is False
     assert "404" in (result.error or "")
     assert len(calls) == 1
 

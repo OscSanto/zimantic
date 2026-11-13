@@ -171,8 +171,13 @@ def _unlock(fd: int) -> None:
 
 @contextmanager
 def _existing_shared_lease(lease_path: Path) -> Iterator[None]:
-    """Hold an existing catalog lease through a lockable descriptor."""
-    fd = os.open(lease_path, os.O_RDWR)
+    """Hold an existing catalog lease through a read-only descriptor.
+
+    Shared locking does not need write access; a read-only descriptor is what
+    lets ``zimantic open`` reuse canonical keys when the index directory is on
+    read-only media.
+    """
+    fd = os.open(lease_path, os.O_RDONLY)
     try:
         _lock_shared(fd)
         yield
