@@ -505,7 +505,12 @@
                 modal.hidden = true;
                 document.body.classList.remove("library-info-open");
                 const wrap = document.querySelector(".wrap");
-                if (wrap) wrap.inert = false;
+                const articleModal = $("articleModal");
+                if (wrap) {
+                    wrap.inert = Boolean(
+                        articleModal && !articleModal.hidden
+                    );
+                }
                 if (
                     libraryInfoPreviousFocus &&
                     typeof libraryInfoPreviousFocus.focus === "function"
