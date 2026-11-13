@@ -1969,10 +1969,17 @@ class Search:
     def _unpack_cache(cached: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         return list(cached.get("pool", [])), list(cached.get("sources", []))
 
-    def _query_vector(self, sources: list[SourceInfo], query: str):
+    def _query_vector(
+        self,
+        sources: list[SourceInfo],
+        query: str,
+        *,
+        deadline: float | None = None,
+    ):
         """Embed the query only when a selected source actually has vectors.
 
-        A failed embedding degrades to title + full-text rather than failing.
+        A failed or over-deadline embedding degrades to title + full-text
+        rather than failing or holding the admission slot indefinitely.
         """
         embedder = self.embedder
         if embedder is None or not self.semantic:
@@ -1990,9 +1997,38 @@ class Search:
                 break
         if not wants_semantic:
             return None
-        try:
+
+        def _embed():
             prefix = getattr(embedder, "query_prefix", "query: ")
             return embedder.embed([prefix + query])
+
+        executor = getattr(self, "_executor", None)
+        if executor is None:
+            try:
+                return _embed()
+            except Exception as error:
+                logger.warning(
+                    "zimantic: query embedding failed (%s); falling back to "
+                    "title and full-text (lexical) search",
+                    self.public_error(error),
+                )
+                logger.debug("query embedding failed: %s", error)
+                return None
+        future = executor.submit(_embed)
+        timeout = (
+            max(0.0, deadline - time.monotonic())
+            if deadline is not None
+            else None
+        )
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            logger.warning(
+                "zimantic: query embedding exceeded the search deadline; "
+                "falling back to title and full-text (lexical) search"
+            )
+            return None
         except Exception as error:
             logger.warning(
                 "zimantic: query embedding failed (%s); falling back to title "
@@ -2583,7 +2619,9 @@ class Search:
                 1.0, getattr(self, "search_timeout_seconds", 30.0)
             )
             query_vector = (
-                None if browse is not None else self._query_vector(sources, query)
+                None
+                if browse is not None
+                else self._query_vector(sources, query, deadline=deadline)
             )
 
             title_query = _title_query(query)
