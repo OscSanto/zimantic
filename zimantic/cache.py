@@ -80,6 +80,13 @@ class QueryCache:
             self.hits += 1
             return self._data[key]
 
+    def peek(self, key: Any) -> Any | None:
+        """Return an entry without changing recency or hit/miss counters."""
+        if self.disabled:
+            return None
+        with self._lock:
+            return self._data.get(key)
+
     def _discard(self, key: Any) -> None:
         self._data.pop(key, None)
         self._bytes -= self._sizes.pop(key, 0)

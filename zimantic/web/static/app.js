@@ -3450,7 +3450,7 @@
                 if (!total) return t("No results");
                 const from = page * PAGE_SIZE + 1;
                 const to = Math.min((page + 1) * PAGE_SIZE, total);
-                return `${from}–${to} ${t("of")} ${total} ${t(
+                return `${from.toLocaleString()}–${to.toLocaleString()} ${t("of")} ${total.toLocaleString()} ${t(
                     total === 1 ? "result" : "results",
                 )}`;
             }
@@ -3579,7 +3579,7 @@
                 const label = document.createElement("span");
                 const from = total ? current.page * PAGE_SIZE + 1 : 0;
                 const to = Math.min((current.page + 1) * PAGE_SIZE, total);
-                label.textContent = `${from}–${to} ${t("of")} ${total}`;
+                label.textContent = `${from.toLocaleString()}–${to.toLocaleString()} ${t("of")} ${total.toLocaleString()}`;
                 pager.append(prev, label, next);
                 if (current.page > 0) {
                     // Shortcut back to the first page from anywhere in the pager.

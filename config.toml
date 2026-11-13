@@ -73,7 +73,11 @@ port = 8090
 # results per page; the rest keep an empty lead. 0 disables preview hydration.
 # preview_limit = 10
 
-# Largest ranked result pool kept and served. Pages are drawn from this pool.
+# Ranked result block unit for the default relevance order. The first response
+# ranks max_results * 2 results (capped by the true candidate total), so
+# ordinary next/previous paging reuses one cache entry. Deeper pages rank
+# another block on demand without widening source retrieval. Alternate sorts
+# and browse modes keep the single bounded block. This also caps one page.
 # Desktop 100, mobile 50, supercomputer 200.
 # max_results = 100
 

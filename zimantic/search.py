@@ -101,6 +101,10 @@ DEFAULT_PARTIAL_CACHE_SECONDS = 60.0
 DEFAULT_MIN_COSINE_SIMILARITY = 0.85
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
+# The first response keeps a larger ranked block than one page so the common
+# next/previous paging path does not re-run the source fan-out. Deeper pages
+# grow the ranked block in whole multiples of this initial block.
+DEFAULT_INITIAL_POOL_FACTOR = 2
 # The UI shows this many source chips per collection group until the reader
 # asks for the rest. It is a display budget, never a search-scope promotion.
 DEFAULT_SOURCE_FILTER_LIMIT = 10
@@ -1682,6 +1686,123 @@ class Search:
             self.max_results,
         )
 
+    @staticmethod
+    def _uses_deep_query_paging(
+        query: str, browse: str | None, sort: str | None,
+    ) -> bool:
+        """True when a query ranking is a stable prefix over more pages.
+
+        Only the default relevance order is guaranteed to be a prefix when the
+        ranked block grows. Browse orders and seeded random resumes are not
+        stable prefixes, and the alternative query sorts reorder a pool whose
+        membership can change with depth, so they keep the bounded block.
+        """
+        return (
+            browse is None
+            and bool(query)
+            and (sort is None or sort == "relevance")
+        )
+
+    def _initial_pool_target(
+        self,
+        *,
+        query: str = "",
+        browse: str | None = None,
+        sort: str | None = None,
+    ) -> int:
+        """Ranked results kept for the first page of a query search."""
+        if not self._uses_deep_query_paging(query, browse, sort):
+            return self._pool_target()
+        return max(
+            self._pool_target(),
+            self.max_results * DEFAULT_INITIAL_POOL_FACTOR,
+        )
+
+    def _pool_target_for(
+        self,
+        offset: int,
+        page_size: int,
+        *,
+        query: str = "",
+        browse: str | None = None,
+        sort: str | None = None,
+    ) -> int:
+        """Ranked block needed to answer one requested page."""
+        if not self._uses_deep_query_paging(query, browse, sort):
+            return self._pool_target()
+        initial = self._initial_pool_target(
+            query=query, browse=browse, sort=sort,
+        )
+        required = max(1, int(offset) + int(page_size))
+        if required <= initial:
+            return initial
+        return initial * math.ceil(required / initial)
+
+    @staticmethod
+    def _candidate_total(source_results: list[SourceResult]) -> int:
+        """Unique retrieved candidates before the ranked-pool cut.
+
+        Source result IDs include the source key, and each source result
+        deduplicates its semantic/title/full-text hits in ``items``. After
+        merging, the distinct IDs are the real size of the candidate set, not
+        the size of the display pool.
+        """
+        return len({
+            doc["id"]
+            for result in source_results
+            for doc in result.items
+        })
+
+    def _result_total(
+        self,
+        source_results: list[SourceResult],
+        pool: list[dict[str, Any]],
+        *,
+        query: str,
+        browse: str | None,
+        sort: str | None,
+    ) -> int:
+        if self._uses_deep_query_paging(query, browse, sort):
+            return max(len(pool), self._candidate_total(source_results))
+        return len(pool)
+
+    @staticmethod
+    def _cache_pool_size(cached: Any) -> int:
+        if not isinstance(cached, dict):
+            return 0
+        pool = cached.get("pool")
+        return len(pool) if isinstance(pool, list) else 0
+
+    @classmethod
+    def _cache_covers(cls, cached: Any, required_pool: int) -> bool:
+        """True when a cached pool can answer the requested page."""
+        if not isinstance(cached, dict):
+            return False
+        required_pool = max(1, int(required_pool))
+        total = cached.get("total")
+        if isinstance(total, int) and total >= 0:
+            required_pool = min(required_pool, total)
+        return cls._cache_pool_size(cached) >= required_pool
+
+    def _search_inflight_key(
+        self,
+        generation: int,
+        cache_key: Any,
+        offset: int,
+        page_size: int,
+        *,
+        query: str = "",
+        browse: str | None = None,
+        sort: str | None = None,
+    ) -> tuple:
+        """Depth-bucketed inflight key for one ranked-block size."""
+        initial = self._initial_pool_target(
+            query=query, browse=browse, sort=sort,
+        )
+        required = max(1, int(offset) + int(page_size))
+        bucket = max(0, math.ceil(required / initial) - 1)
+        return (generation, cache_key, bucket)
+
     def _source_limit(
         self, total_sources: int, source: SourceInfo | None = None
     ) -> int:
@@ -1755,9 +1876,17 @@ class Search:
         offset: int,
         page_size: int,
         debug: bool,
+        *,
+        total: int | None = None,
     ) -> dict[str, Any]:
-        """Slice one page out of the ranked pool."""
-        total = len(pool)
+        """Slice one page out of the ranked pool.
+
+        ``total`` may be larger than ``pool`` for query searches: the reported
+        total is the number of unique retrieved candidates, while the pool is
+        the ranked prefix currently materialized for paging. A page beyond the
+        materialized prefix triggers a larger ranked block before this runs.
+        """
+        total = len(pool) if total is None else max(0, int(total))
         # Clamp an out-of-range offset to the last real page here, where the
         # total is known. Callers can then show real results and report the
         # effective offset instead of fetching an empty page and correcting it
@@ -1986,7 +2115,10 @@ class Search:
     ) -> Iterator[dict[str, Any]]:
         """Replay a cached pool as a finished stream (progress + one page)."""
         pool, cached_sources = self._unpack_cache(cached)
-        state = self._page_state(pool, offset, page_size, debug)
+        cached_total = cached.get("total") if isinstance(cached, dict) else None
+        state = self._page_state(
+            pool, offset, page_size, debug, total=cached_total,
+        )
         self._hydrate_results(state["results"])
         total_sources = len(sources)
         yield {
@@ -2064,12 +2196,20 @@ class Search:
         cache_key: Any,
         inflight_key: Any,
         generation: int,
+        required_pool: int = 1,
     ) -> tuple[Any | None, Future | None]:
-        """Return a cached result or claim ownership of an in-flight query."""
+        """Return a cached result or claim ownership of an in-flight query.
+
+        A cached pool that is too short for the requested page is treated as a
+        miss, so the owner ranks a larger block. The caller supplies a depth
+        bucket in ``inflight_key`` when it needs a block larger than the first
+        one, which keeps a deep page from waiting on an unrelated first-page
+        computation.
+        """
         deadline = time.monotonic() + SEARCH_CLAIM_WAIT_SECONDS
         while True:
             cached = self._cached_for_generation(cache_key, generation)
-            if cached is not None:
+            if self._cache_covers(cached, required_pool):
                 return cached, None
             with self._inflight_lock:
                 existing = self._inflight.get(inflight_key)
@@ -2093,6 +2233,7 @@ class Search:
                 and isinstance(cached, dict)
                 and cached.get("generation") == generation
                 and self._cache_entry_fresh(cached)
+                and self._cache_covers(cached, required_pool)
             ):
                 return cached, None
 
@@ -2111,12 +2252,17 @@ class Search:
     ) -> Iterator[dict[str, Any]]:
         """Yield source progress and one page of the ranked pool.
 
-        Ranking runs once to a fixed pool (`max_results`, at least
-        `candidate_count`); `limit`/`offset` only slice that pool for the
-        response. The pool is cached by query, expanded source keys, and the
-        publication generation. An explicit source/collection selection defines
-        the whole scope directly; it is never promoted to a broader search.
-        Concurrent identical queries share a single computation.
+        The first response ranks a block larger than one page (the initial pool
+        target); ``limit``/``offset`` slice that block. For a query search,
+        ``total`` is the number of unique retrieved candidates, and a page
+        beyond the materialized block causes a larger block to be ranked and
+        cached. Source retrieval stays at the configured candidate budget, so
+        this only expands ranking, not the fan-out. Browsing and seeded random
+        resumes keep the single-block behavior. The pool is cached by query,
+        expanded source keys, and the publication generation. An explicit
+        source/collection selection defines the whole scope directly; it is
+        never promoted to a broader search. Concurrent identical queries share
+        a single computation.
         """
         if browse is None:
             query, sort = self._validate_search(query, sort, seed)
@@ -2174,8 +2320,17 @@ class Search:
                     and index.faiss_index is not None
                 ))
             cache_key = ("diversity", semantic_sources, cache_key)
-        inflight_key = (generation, cache_key)
-        cached, pending = self._claim_search(cache_key, inflight_key, generation)
+        required_pool = offset + page_size
+        pool_target = self._pool_target_for(
+            offset, page_size, query=query, browse=browse, sort=sort,
+        )
+        inflight_key = self._search_inflight_key(
+            generation, cache_key, offset, page_size,
+            query=query, browse=browse, sort=sort,
+        )
+        cached, pending = self._claim_search(
+            cache_key, inflight_key, generation, required_pool=required_pool,
+        )
         if cached is not None:
             yield from self._cached_events(
                 cached,
@@ -2211,6 +2366,7 @@ class Search:
             browse=browse,
             seed=seed,
             sort=sort,
+            pool_target=pool_target,
         )
 
     def _finalize_search(
@@ -2231,6 +2387,7 @@ class Search:
         sort: str | None = None,
         seed: int = 0,
         query_vector=None,
+        browse: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Rank, enrich, hydrate and cache one finished search.
 
@@ -2246,7 +2403,10 @@ class Search:
         pool = self._enrich_pool(source_results, query, pool, pool_target)
         if query and sort and sort != "relevance":
             pool = self._sort_results(pool, sort, seed, deadline, query_vector=query_vector)
-        state = self._page_state(pool, offset, page_size, debug)
+        total = self._result_total(
+            source_results, pool, query=query, browse=browse, sort=sort,
+        )
+        state = self._page_state(pool, offset, page_size, debug, total=total)
         self._hydrate_results(state["results"])
         hydrated = {doc["id"]: doc.get("lead", "") for doc in state["results"]}
         for doc in pool:
@@ -2260,6 +2420,7 @@ class Search:
         cache_value = {
             "generation": generation,
             "pool": pool,
+            "total": state["total"],
             "sources": [
                 result.to_event(reported_counts.get(result.source.key))
                 for result in source_results
@@ -2293,10 +2454,18 @@ class Search:
             and not cancelled
             and not failed
         )
+        existing = self.cache.peek(cache_key)
+        already_larger = (
+            isinstance(existing, dict)
+            and "expires_at" not in existing
+            and self._cache_pool_size(existing) >= len(pool)
+            and int(existing.get("total") or 0) >= state["total"]
+        )
         if (
             cacheable
             and current_generation == generation
             and (cache_partial or complete_cacheable)
+            and not already_larger
         ):
             self.cache.put(
                 cache_key, cache_value,
@@ -2322,10 +2491,14 @@ class Search:
         browse: str | None = None,
         seed: int = 0,
         sort: str | None = None,
+        pool_target: int | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Run one uncached search and publish progress to waiting callers."""
         total_sources = len(sources)
-        inflight_key = (generation, cache_key)
+        inflight_key = self._search_inflight_key(
+            generation, cache_key, offset, page_size,
+            query=query, browse=browse, sort=sort,
+        )
         acquired = False
         futures: list[Future[SourceResult]] = []
         completed: list[SourceResult] = []
@@ -2365,6 +2538,7 @@ class Search:
                 cache_value = {
                     "generation": generation,
                     "pool": [],
+                    "total": 0,
                     "sources": [],
                     "scope": empty_scope,
                 }
@@ -2404,7 +2578,7 @@ class Search:
 
             title_query = _title_query(query)
             fulltext_query = _fulltext_query(query)
-            pool_target = self._pool_target()
+            pool_target = pool_target or self._pool_target()
             max_stream_ranks = max(1, self.max_stream_ranks)
             rank_interval = max(1, math.ceil(total_sources / max_stream_ranks))
             update_interval = self.stream_update_interval
@@ -2577,7 +2751,19 @@ class Search:
                             "total_sources": total_sources,
                         }
                         if should_rank:
-                            state = self._page_state(pool, offset, page_size, debug)
+                            state = self._page_state(
+                                pool,
+                                offset,
+                                page_size,
+                                debug,
+                                total=self._result_total(
+                                    completed,
+                                    pool,
+                                    query=query,
+                                    browse=browse,
+                                    sort=sort,
+                                ),
+                            )
                             signature = self._page_signature(state)
                             include_results = debug or signature != last_page_signature
                             last_page_signature = signature
@@ -2606,7 +2792,19 @@ class Search:
                     pool = rank_pool()
                     last_rank_at = now
                     unranked = 0
-                    state = self._page_state(pool, offset, page_size, debug)
+                    state = self._page_state(
+                        pool,
+                        offset,
+                        page_size,
+                        debug,
+                        total=self._result_total(
+                            completed,
+                            pool,
+                            query=query,
+                            browse=browse,
+                            sort=sort,
+                        ),
+                    )
                     signature = self._page_signature(state)
                     include_results = debug or signature != last_page_signature
                     last_page_signature = signature
@@ -2670,6 +2868,7 @@ class Search:
                 sort=sort,
                 seed=seed,
                 query_vector=query_vector,
+                browse=browse,
             )
             if time.monotonic() >= deadline and not deadline_hit:
                 scope["status"] = "partial"

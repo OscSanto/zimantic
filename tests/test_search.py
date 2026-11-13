@@ -3370,6 +3370,79 @@ class PaginationTests(unittest.TestCase):
             self.assertNotEqual(first[0]["id"], second[0]["id"])
             search._executor.shutdown(wait=True)
 
+    def test_true_total_and_deep_pages_expand_the_ranked_block(self):
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 31)]
+            for name in ("alpha", "beta", "gamma", "delta"):
+                _write_index(tmp, name, rows=rows)
+            search = _bare_search(
+                {**self._cfg(tmp), "max_results": 10, "candidate_count": 16}
+            )
+            self.addCleanup(search.close)
+            _attach_index_fixtures(search)
+            search.refresh_sources()
+
+            first = search.search_page("tire change", limit=2, offset=0)
+            self.assertEqual(len(first["results"]), 2)
+            # Four sources each retrieve up to 16 distinct candidates, so the
+            # true candidate total is much larger than the initial block.
+            self.assertGreater(first["total"], 25)
+            self.assertEqual(
+                first["page_count"],
+                (first["total"] + 1) // 2,
+            )
+            self.assertTrue(first["has_more"])
+            initial = search.cache.get(search._cache_key("tire change", None))
+            self.assertEqual(len(initial["pool"]), 20)
+            self.assertEqual(initial["total"], first["total"])
+
+            # A page inside the first block is served from the same cache.
+            inside = search.search_page("tire change", limit=2, offset=18)
+            self.assertEqual(inside["total"], first["total"])
+            self.assertIs(
+                search.cache.get(search._cache_key("tire change", None)), initial,
+            )
+
+            # The next page needs more than the initial block. The owner ranks
+            # a larger block without changing the true candidate total.
+            deep = search.search_page("tire change", limit=2, offset=20)
+            self.assertEqual(deep["total"], first["total"])
+            self.assertEqual(len(deep["results"]), 2)
+            expanded = search.cache.get(search._cache_key("tire change", None))
+            self.assertGreater(len(expanded["pool"]), len(initial["pool"]))
+            self.assertEqual(expanded["total"], first["total"])
+            search._executor.shutdown(wait=True)
+
+    def test_alternate_sorts_and_browse_keep_the_bounded_block(self):
+        # Only the default relevance order is a stable prefix when the ranked
+        # block grows. Recency/rare/diversity and browse modes keep the old
+        # bounded total so a deeper page cannot silently reorder earlier pages.
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 31)]
+            _write_index(tmp, "manual", rows=rows)
+            search = _bare_search(
+                {**self._cfg(tmp), "max_results": 5, "candidate_count": 2}
+            )
+            self.addCleanup(search.close)
+            _attach_index_fixtures(search)
+            search.refresh_sources()
+
+            for kwargs in (
+                {"sort": "rare"},
+                {"sort": "recency"},
+                {"sort": "random", "seed": 7},
+                {"browse": "rare"},
+            ):
+                with self.subTest(**kwargs):
+                    page = search.search_page("tire change" if "browse" not in kwargs else "", **kwargs)
+                    self.assertLessEqual(page["total"], 5)
+                    self.assertEqual(
+                        page["page_count"], max(1, (page["total"] + 1) // 2),
+                    )
+            search._executor.shutdown(wait=True)
+
     def test_explicit_source_scope_searches_only_selected_sources(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
