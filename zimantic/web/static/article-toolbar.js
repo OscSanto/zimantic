@@ -137,13 +137,19 @@
       [parentPrevious, "previous"],
       [parentNext, "next"],
     ];
+    const translate = text => {
+      const catalog = window.zimanticI18n;
+      return catalog && typeof catalog.translate === "function"
+        ? catalog.translate(text)
+        : text;
+    };
     const announce = message => {
-      if (status) status.textContent = message;
+      if (status) status.textContent = translate(message);
     };
     const showPermalinkCopied = () => {
       if (!permalink) return;
       clearTimeout(permalinkResetTimer);
-      permalink.textContent = "Link copied";
+      permalink.textContent = translate("Link copied");
       permalinkResetTimer = setTimeout(() => {
         permalinkResetTimer = null;
         if (permalink && permalink.isConnected) {
@@ -217,36 +223,6 @@
       }
       if (event.data?.type !== "zimantic-article-selection") return;
       setArticleSelection(event.data.text);
-    });
-    // The raw article iframe cannot see or update this toolbar, so its bridge
-    // asks us to navigate the whole shell. Reloading keeps breadcrumbs, the
-    // permalink and the modal URL in sync, exactly like a normal page load.
-    const contentUrl = value => {
-      let target;
-      try {
-        target = new URL(String(value || ""), location.href);
-      } catch (_) {
-        return null;
-      }
-      // Compare parsed URLs rather than relying on location.origin, which is
-      // null for any shell that is served in a secure-mode article sandbox.
-      if (target.origin !== shellUrl.origin) return null;
-      const path = localPath(target.pathname);
-      if (path !== "/content" && !(path && path.startsWith("/content/"))) {
-        return null;
-      }
-      return target;
-    };
-    window.addEventListener("message", event => {
-      if (event.data?.type !== "zimantic-shell-navigate") return;
-      const target = contentUrl(event.data.url);
-      if (!target) return;
-      offlineRequest += 1;
-      if (window.parent !== window) {
-        location.replace(target.href);
-      } else {
-        location.href = target.href;
-      }
     });
     // A directly loaded /content/ view should make the same choice as the
     // modal: use the captured copy when it exists, and only go online when the
@@ -738,6 +714,14 @@
         control.classList.toggle("compact", control.scrollWidth > available);
       }
     };
+    let toolbarFitFrame = null;
+    const scheduleFitToolbarLabels = () => {
+      if (toolbarFitFrame !== null) return;
+      toolbarFitFrame = requestAnimationFrame(() => {
+        toolbarFitFrame = null;
+        fitToolbarLabels();
+      });
+    };
     const selectedText = () => {
       const selection = typeof window.getSelection === "function"
         ? window.getSelection()
@@ -864,10 +848,10 @@
         }
       }
     });
-    fitToolbarLabels();
-    window.addEventListener("resize", fitToolbarLabels);
+    scheduleFitToolbarLabels();
+    window.addEventListener("resize", scheduleFitToolbarLabels);
     if (window.ResizeObserver) {
-      new ResizeObserver(fitToolbarLabels).observe(toolbar);
+      new ResizeObserver(scheduleFitToolbarLabels).observe(toolbar);
     }
     if (window.parent !== window) {
       const iconLink = document.querySelector("link[data-zimantic-article-icon]");

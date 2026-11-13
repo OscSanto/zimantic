@@ -1,5 +1,6 @@
 nav[data-zimantic-toolbar] {
   align-items: center !important;
+  color-scheme: dark;
   background: #171a21 !important;
   border-bottom: 1px solid #2a2f3a !important;
   box-shadow: 0 1px 5px rgba(0, 0, 0, .25) !important;
@@ -227,6 +228,7 @@ script[data-zimantic-toolbar] { display: none !important; }
 }
 @media (prefers-color-scheme: light) {
   nav[data-zimantic-toolbar] {
+    color-scheme: light;
     background: #fff !important;
     border-color: #dde1e7 !important;
     box-shadow: 0 1px 5px rgba(0, 0, 0, .12) !important;

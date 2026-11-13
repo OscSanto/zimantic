@@ -86,6 +86,7 @@ class Node {{
     this.classList = {{toggle: (name, enabled) =>
       enabled ? this.classes.add(name) : this.classes.delete(name)}};
   }}
+  setAttribute() {{}}
   replaceChildren(...children) {{ this.children = children; }}
   append(...children) {{ this.children.push(...children); }}
   appendChild(child) {{ this.append(child); }}
@@ -342,6 +343,7 @@ class Node {{
     this.handlers = {{}};
     this.classList = {{add() {{}}, remove() {{}}}};
   }}
+  setAttribute() {{}}
   replaceChildren(...children) {{ this.children = children; }}
   setAttribute() {{}}
   querySelectorAll() {{ return this.children; }}
@@ -420,6 +422,7 @@ class Node {{
     this.children = []; this.dataset = {{}}; this.hidden = true; this.value = "";
     this.classList = {{add() {{}}, remove() {{}}}};
   }}
+  setAttribute() {{}}
   replaceChildren(...children) {{ this.children = children; }}
   setAttribute() {{}}
   focus() {{}}
@@ -1359,6 +1362,7 @@ const PAGE_SIZE = 10, COLLECTION_SOURCE_LIMIT = 1000;
 const COLLECTION_CACHE_KEY = "collections", LIBRARY_PAGE_CACHE_KEY = "pages";
 const libraryCollectionPages = new Map();
 let collections = [], libraryCollections = [], librarySources = [], libraryLoadSequence = 0;
+let libraryRequestController = null;
 let filters = {{provider: "", media: "", language: "", q: ""}};
 const libraryLanguageOptions = new Set();
 const elements = {{
@@ -1909,6 +1913,7 @@ class Node {{
     this.children = []; this.dataset = {{}}; this.hidden = false;
     this.textContent = ""; this.classList = {{remove() {{}}}};
   }}
+  setAttribute() {{}}
   replaceChildren(...children) {{ this.children = children; }}
   contains() {{ return false; }}
   querySelectorAll() {{ return []; }}
@@ -1969,6 +1974,7 @@ class Node {{
     this.children = []; this.dataset = {{}}; this.hidden = false;
     this.textContent = ""; this.classList = {{remove() {{}}, add() {{}}}};
   }}
+  setAttribute() {{}}
   replaceChildren(...children) {{ this.children = children; }}
   contains() {{ return false; }}
   querySelectorAll() {{ return []; }}

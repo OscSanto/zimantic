@@ -67,6 +67,7 @@
             "Open the next link in the parent page": "Abrir el siguiente enlace de la página principal",
             "Search your library": "Buscar en tu biblioteca",
             "Link copied": "Enlace copiado",
+            "Copying…": "Copiando…",
             "Copy unavailable": "No se pudo copiar el enlace",
             "Details": "Detalles",
             "Open": "Abrir",

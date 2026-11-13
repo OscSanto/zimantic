@@ -54,11 +54,16 @@
                     if (url.searchParams.get(name) === value) return;
                     url.searchParams.set(name, value);
                 }
-                history.replaceState(
-                    history.state,
-                    "",
-                    url.pathname + url.search + url.hash,
-                );
+                try {
+                    history.replaceState(
+                        history.state,
+                        "",
+                        url.pathname + url.search + url.hash,
+                    );
+                } catch (_) {
+                    // Safari rate-limits history writes. The filter still
+                    // works; only the address bar stays one step behind.
+                }
             }
 
             let PAGE_SIZE = 10; // replaced with the server's page_size at startup
@@ -125,6 +130,7 @@
             let libraryCardCache = new WeakMap();
             const libraryCollectionRefreshes = new Map();
             let libraryLoadSequence = 0;
+            let libraryRequestController = null;
             let libraryFilterTimer = null;
             let current = null;
             let previousHeadingSearch = null;
@@ -805,6 +811,7 @@
                     language = "",
                     q = "",
                     collection = "",
+                    signal = undefined,
                 } = {},
             ) {
                 const url = new URL(path, location.href);
@@ -819,7 +826,10 @@
                 })) {
                     url.searchParams.set(key, value);
                 }
-                const response = await fetch(url, { cache: "no-cache" });
+                const response = await fetch(url, {
+                    cache: "no-cache",
+                    signal,
+                });
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const payload = await response.json();
                 if (!Array.isArray(payload)) throw new Error("invalid JSON payload");
@@ -1809,7 +1819,9 @@
                     : `${sourceLabel}: ${count}`;
                 const stem = sourceStemName(outcome.source);
                 if (stem) button.title = stem;
-                button.disabled = isFailed;
+                // Keep a failed source focusable so keyboard and screen-reader
+                // users can read the reason carried in its label.
+                button.setAttribute("aria-disabled", isFailed ? "true" : "false");
                 button.setAttribute(
                     "aria-pressed",
                     selectedSourceKeys.has(outcome.source.key) ? "true" : "false",
@@ -1866,6 +1878,7 @@
                     section.appendChild(header);
                     const groupOptions = document.createElement("div");
                     groupOptions.className = "source-filter-group-options";
+                    groupOptions.id = `source-filter-options-${encodeURIComponent(group.key)}`;
                     groupOptions.append(
                         ...group.visible.map((outcome) =>
                             sourceFilterButton(outcome, layout),
@@ -1876,9 +1889,8 @@
                         other.className = "source-filter-option ok";
                         other.type = "button";
                         other.dataset.sourceAction = layout.query ? "more" : "other";
-                        if (!layout.query) {
-                            other.setAttribute("aria-pressed", "false");
-                        }
+                        other.setAttribute("aria-expanded", "false");
+                        other.setAttribute("aria-controls", groupOptions.id);
                         if (layout.query) {
                             other.textContent =
                                 `${t("Show")} ${group.other.length} ${t("more")}`;
@@ -3246,6 +3258,21 @@
                 }
             });
 
+            function resultRenderSignature(item) {
+                return JSON.stringify([
+                    item.title,
+                    item.url,
+                    item.mimetype,
+                    item.lead,
+                    item.source,
+                    item.source_key,
+                    item.resource,
+                    item.ranking,
+                    Boolean(current?.streaming),
+                    current?.terms,
+                ]);
+            }
+
             function setResultNode(node, item) {
                 node.dataset.key = resultKey(item);
                 node.classList.toggle("result-linked", Boolean(item.url));
@@ -3395,11 +3422,14 @@
                     $("results").appendChild(resultList);
                 }
                 const existing = new Map([...resultList.children].map((node) => [node.dataset.key, node]));
-                const before = new Map(
-                    [...resultList.children].map((node) => [node.dataset.key, node.getBoundingClientRect()]),
-                );
-                const wanted = new Set(items.map(resultKey));
                 const animateChanges = !current?.streaming;
+                const measureLayout = animateChanges && !reducedMotion();
+                const before = measureLayout
+                    ? new Map(
+                          [...resultList.children].map((node) => [node.dataset.key, node.getBoundingClientRect()]),
+                      )
+                    : null;
+                const wanted = new Set(items.map(resultKey));
                 existing.forEach((node, key) => {
                     if (!wanted.has(key)) animateRemoval(node, animateChanges);
                 });
@@ -3407,15 +3437,21 @@
                 items.forEach((item) => {
                     const key = resultKey(item);
                     const node = existing.get(key) || newResultNode(item);
-                    setResultNode(node, item);
+                    const signature = resultRenderSignature(item);
+                    if (node.dataset.renderSignature !== signature) {
+                        setResultNode(node, item);
+                        node.dataset.renderSignature = signature;
+                    }
                     if (!existing.has(key)) added.push(node);
                     resultList.appendChild(node);
                 });
-                const after = new Map(
-                    [...resultList.children].map((node) => [node.dataset.key, node.getBoundingClientRect()]),
-                );
+                const after = measureLayout
+                    ? new Map(
+                          [...resultList.children].map((node) => [node.dataset.key, node.getBoundingClientRect()]),
+                      )
+                    : null;
                 if (!reducedMotion()) {
-                    if (animateChanges) {
+                    if (animateChanges && before && after) {
                         for (const [key, node] of [...resultList.children].map((node) => [
                             node.dataset.key,
                             node,
@@ -4560,7 +4596,13 @@
                 const button = event.target.closest(
                     "button[data-source], button[data-source-action], button[data-source-collection]",
                 );
-                if (!button || button.disabled) return;
+                if (
+                    !button ||
+                    button.disabled ||
+                    button.getAttribute?.("aria-disabled") === "true"
+                ) {
+                    return;
+                }
                 const key = button.dataset.source || null;
                 const collectionKey = button.dataset.sourceCollection || null;
                 const focusButton = (wanted) => {
@@ -4573,7 +4615,11 @@
                                 (item) =>
                                     sourceFilterControlKey(item) === wanted,
                             )) ||
-                        buttons.find((item) => !item.disabled);
+                        buttons.find(
+                            (item) =>
+                                !item.disabled &&
+                                item.getAttribute?.("aria-disabled") !== "true",
+                        );
                     if (next) next.focus({ preventScroll: true });
                     else $("question").focus();
                 };
@@ -5351,7 +5397,14 @@
 
             async function loadCollectionSources(
                 key,
-                { append = false, filters = currentLibraryFilters(), sequence = 0, retry = false } = {},
+                {
+                    append = false,
+                    filters = currentLibraryFilters(),
+                    sequence = 0,
+                    retry = false,
+                    render = true,
+                    signal = undefined,
+                } = {},
             ) {
                 if (!key) return;
                 const collection = collectionByKey(key);
@@ -5375,6 +5428,7 @@
                         limit: Math.min(COLLECTION_SOURCE_LIMIT, 1000),
                         offset,
                         collection: key,
+                        signal,
                         ...filters,
                     });
                     if (sequence && sequence !== libraryLoadSequence) return;
@@ -5417,6 +5471,7 @@
                         error: null,
                     });
                 } catch (error) {
+                    if (error.name === "AbortError") return;
                     if (sequence && sequence !== libraryLoadSequence) return;
                     libraryCollectionPages.set(key, {
                         ...state,
@@ -5425,12 +5480,20 @@
                         error: error.message || "load failed",
                     });
                 }
-                refreshLibrarySourceList();
-                renderLibrary();
+                if (render) {
+                    refreshLibrarySourceList();
+                    renderLibrary();
+                }
             }
 
             async function loadLibraryData({ reset = true } = {}) {
                 const sequence = ++libraryLoadSequence;
+                if (libraryRequestController) {
+                    libraryRequestController.abort();
+                }
+                const controller = new AbortController();
+                libraryRequestController = controller;
+                const signal = controller.signal;
                 const filters = currentLibraryFilters();
                 const filtered = Boolean(
                     filters.provider || filters.media || filters.language || filters.q,
@@ -5444,6 +5507,7 @@
                     const records = await fetchPagedJson(appPath("/collections.json"), {
                         ...filters,
                         limit: Math.max(50, PAGE_SIZE),
+                        signal,
                     });
                     if (sequence !== libraryLoadSequence) return;
                     if (!records.every(isCanonicalCollectionRecord)) {
@@ -5466,12 +5530,17 @@
                                 append: false,
                                 filters,
                                 sequence,
+                                render: false,
+                                signal,
                             }),
                     );
+                    refreshLibrarySourceList();
+                    renderLibrary();
                     if (!libraryCollections.length) {
                         const fallback = await fetchPagedJson(appPath("/library.json"), {
                             ...filters,
                             limit: Math.min(COLLECTION_SOURCE_LIMIT, 1000),
+                            signal,
                         });
                         if (sequence !== libraryLoadSequence) return;
                         if (!fallback.every(isCanonicalSourceRecord)) {
@@ -5497,6 +5566,7 @@
                         );
                     }
                 } catch (error) {
+                    if (error.name === "AbortError") return;
                     if (sequence !== libraryLoadSequence) return;
                     renderLibrary();
                     $("libraryStatus").textContent =
