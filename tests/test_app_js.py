@@ -695,7 +695,7 @@ const fetch = async (url) => {{
   requests.push(url);
   return {{
     ok: true, json: async () => [{{id: "item"}}],
-    headers: new Map([["X-Total-Count", "20"], ["X-Page", "1"]]),
+    headers: new Map([["X-Total-Count", "20"], ["X-Page", "1"], ["X-Page-Count", "2"]]),
   }};
 }};
 const dedupeParams = () => {{}};
@@ -712,6 +712,7 @@ loadPage(1).then(() => console.log(JSON.stringify({{requests, current}})));
             ["/zimantic/search?q=&sort=random&seed=7&limit=10&offset=10&collection=files%3Amodules"],
         )
         self.assertEqual(payload["current"]["page"], 1)
+        self.assertEqual(payload["current"]["pageCount"], 2)
         self.assertEqual(payload["current"]["pageItems"], [{"id": "item"}])
 
     def test_sort_controls_visibility_tracks_results_and_relevance_availability(self):

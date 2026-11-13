@@ -2603,12 +2603,12 @@
                         ? libraryModalNavigation()
                         : unavailable;
                 }
-                const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
                 if (activeSearchResult.page !== current.page) {
                     return {
                         ...unavailable,
                         previousAvailable: activeSearchResult.page > 0,
-                        nextAvailable: activeSearchResult.page < pageCount - 1,
+                        nextAvailable:
+                            activeSearchResult.page < current.pageCount - 1,
                     };
                 }
                 const links = articleResultLinks();
@@ -2623,7 +2623,8 @@
                     return {
                         ...unavailable,
                         previousAvailable: activeSearchResult.page > 0,
-                        nextAvailable: activeSearchResult.page < pageCount - 1,
+                        nextAvailable:
+                            activeSearchResult.page < current.pageCount - 1,
                     };
                 }
                 const urlFor = (offset) => {
@@ -2636,7 +2637,9 @@
                     previous,
                     next,
                     previousAvailable: Boolean(previous) || activeSearchResult.page > 0,
-                    nextAvailable: Boolean(next) || activeSearchResult.page < pageCount - 1,
+                    nextAvailable:
+                        Boolean(next) ||
+                        activeSearchResult.page < current.pageCount - 1,
                 };
             }
 
@@ -2654,9 +2657,8 @@
                     return;
                 }
                 if (!activeSearchResult || !current) return;
-                const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
                 const page = activeSearchResult.page + (direction === "next" ? 1 : -1);
-                if (page < 0 || page >= pageCount) return;
+                if (page < 0 || page >= current.pageCount) return;
                 const sequence = searchSequence;
                 await loadPage(page);
                 if (sequence !== searchSequence || !current || current.page !== page) return;
@@ -3466,6 +3468,7 @@
                 if (current) {
                     current.pageItems = [];
                     current.total = 0;
+                    current.pageCount = 1;
                     current.matchedBy = null;
                 }
                 renderMatchedBy();
@@ -3568,7 +3571,7 @@
                         ? focused.dataset.pagerAction || ""
                         : "";
                 pager.innerHTML = "";
-                if (total <= PAGE_SIZE && pageCount <= 1) {
+                if (pageCount <= 1) {
                     if (focusAction) {
                         const firstResult = $("results").querySelector(
                             ".result-title a[href]",
@@ -3633,13 +3636,12 @@
             function renderView() {
                 if (!current) return;
                 renderSortControls();
-                // The server already sliced this page and clamped any
-                // out-of-range offset; there is nothing to re-slice here.
-                const pageCount = Math.max(1, Math.ceil(current.total / PAGE_SIZE));
+                // The server already sliced this page, clamped any out-of-range
+                // offset, and reported the resulting page count.
                 renderSourceFilters();
                 renderScopeLine();
                 renderFilterLine(current.total);
-                renderPager(current.total, pageCount);
+                renderPager(current.total, current.pageCount);
                 renderResults(current.pageItems);
                 renderMatchedBy();
                 const articleUrl = readModalUrl(activeModalUrl);
@@ -3834,6 +3836,7 @@
                     // page we already have instead of clearing it.
                     if (Array.isArray(event.results)) current.pageItems = event.results;
                     current.total = event.total || 0;
+                    current.pageCount = event.page_count || 1;
                     syncPage(event.page);
                     if (event.counts) current.counts = event.counts;
                     if (event.matched_by) current.matchedBy = event.matched_by;
@@ -4065,6 +4068,7 @@
                     pageItems: [],
                     matchedBy: null,
                     total: 0,
+                    pageCount: 1,
                     completed: 0,
                     sourcesTotal: 0,
                     streaming: true,
@@ -4283,6 +4287,8 @@
                     current.page = pageIndex;
                     current.pageItems = items;
                     current.total = Number(response.headers.get("X-Total-Count") || items.length);
+                    current.pageCount =
+                        Number(response.headers.get("X-Page-Count")) || 1;
                     syncPage(response.headers.get("X-Page"));
                     if (debugMode) {
                         const matchedBy = response.headers.get("X-Matched-By");
