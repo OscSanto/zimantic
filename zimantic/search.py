@@ -3313,8 +3313,15 @@ class Search:
             try:
                 for future in as_completed(remaining, timeout=timeout):
                     remaining.discard(future)
-                    if future.result():
-                        found = True
+                    try:
+                        if future.result():
+                            found = True
+                    except Exception as error:
+                        logger.warning(
+                            "content enrichment failed (%s)",
+                            self.public_error(error),
+                        )
+                        logger.debug("content enrichment error: %s", error)
             except TimeoutError:
                 for future in remaining:
                     future.cancel()
@@ -3328,8 +3335,15 @@ class Search:
                         "content enrichment reached its deadline; using current results"
                     )
                     break
-                if enrich_source(source_key, result_docs):
-                    found = True
+                try:
+                    if enrich_source(source_key, result_docs):
+                        found = True
+                except Exception as error:
+                    logger.warning(
+                        "content enrichment failed (%s)",
+                        self.public_error(error),
+                    )
+                    logger.debug("content enrichment error: %s", error)
         return (
             self._rank_results(source_results, query, limit, deadline=deadline)
             if found
