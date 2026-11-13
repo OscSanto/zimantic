@@ -336,7 +336,10 @@ class ServerTests(unittest.TestCase):
                 "searchable": False,
             },
         ]
-        snapshot["sources"] = list(snapshot["library"])
+        # Hidden Kolibri topics are absent from the searchable source listing in
+        # production; keep only the non-empty source there so the count has to
+        # come from the full library snapshot.
+        snapshot["sources"] = [snapshot["library"][-1]]
         with patch.object(self.search, "listing_snapshot", return_value=snapshot):
             collections = self.client.get(
                 "/collections.json", params={"provider": "kolibri"}
@@ -381,7 +384,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(collections.json()[0]["source_count"], 2)
         self.assertEqual(collection["source_count"], 8)
         self.assertEqual(len(snapshot["library"]), 9)
-        self.assertEqual(len(snapshot["sources"]), 9)
+        self.assertEqual(len(snapshot["sources"]), 1)
 
     def test_library_filters_zim_sources_by_count_based_media_types(self):
         from types import SimpleNamespace

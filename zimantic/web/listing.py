@@ -39,7 +39,10 @@ def visible_library_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         if _visible_library_source(source)
     ]
     hidden_counts: dict[str, int] = {}
-    for source in snapshot.get("sources") or snapshot.get("library") or []:
+    # The library carries every discovered source, including non-searchable
+    # hidden ones. Prefer it over the searchable-only source list so the hidden
+    # count does not depend on whether an unrelated source is searchable.
+    for source in snapshot.get("library") or snapshot.get("sources") or []:
         if _visible_library_source(source):
             continue
         collection = source.get("collection")
