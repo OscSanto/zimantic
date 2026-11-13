@@ -2460,6 +2460,12 @@
                     zimanticModalNavigation: navigationKind,
                     zimanticLinkedArticle: articleRouteValue(articleUrl),
                 };
+                // Count the article entries above the search/library entry so
+                // Close can return there in one step instead of leaving a
+                // duplicate entry that makes the next Back appear to do nothing.
+                const depth = Number(history.state?.zimanticModalDepth);
+                state.zimanticModalDepth =
+                    Number.isInteger(depth) && depth >= 0 ? depth + 1 : 0;
                 const parent = readModalUrl(parentUrl);
                 if (parent) {
                     state.zimanticParent = articleUrlValue(parent);
@@ -2489,8 +2495,10 @@
                     readModalUrl(navigationKind === "parent" ? parentUrl || activeParentUrl : parentUrl);
                 const entry = modalStateEntry(articleUrl, navigationKind, fixedParentUrl);
                 // Each article gets its own history entry, so Back/Forward walks
-                // through everything the reader visited. Close only drops the
-                // modal from the current entry; it does not discard that trail.
+                // through everything the reader visited. Close returns to the
+                // entry where that trail started, leaving the visited articles
+                // available in Forward history instead of pinning a duplicate
+                // entry on top of the search page.
                 const newArticle =
                     !modalOpen ||
                     !activeArticleUrl ||
@@ -3047,9 +3055,24 @@
             function closeArticleModal({ navigateHistory = true } = {}) {
                 const modal = $("articleModal");
                 if (!modal || modal.hidden) return;
+                const state = history.state;
+                const depth = Number(state?.zimanticModalDepth);
+                const tracked = Boolean(state?.zimanticModal) &&
+                    Number.isInteger(depth) && depth >= 0;
+                if (navigateHistory && tracked) {
+                    // Return to the search/library entry that started this
+                    // article trail. This consumes the pushed modal entry, so
+                    // the next Back leaves the search instead of landing on an
+                    // identical URL and looking broken. The visited articles
+                    // remain reachable with Forward.
+                    hideArticleModal();
+                    history.go(-(depth + 1));
+                    return;
+                }
                 if (navigateHistory && new URL(location.href).searchParams.has("modal")) {
-                    // Close is a local action: clear the modal from this entry
-                    // while leaving the reader's earlier articles in history.
+                    // A direct /?modal=... link has no in-app trail to return
+                    // to. Clear the modal from this entry instead of walking
+                    // out of the application.
                     const url = new URL(location.href);
                     url.searchParams.delete("modal");
                     history.replaceState(history.state, "", url.pathname + url.search + url.hash);
@@ -3102,7 +3125,9 @@
                     // the whole page there instead of showing a frame error.
                     const url = readExternalUrl(event.data.url);
                     if (!url) return;
-                    closeArticleModal();
+                    // The whole page is leaving for the external server, so do
+                    // not schedule a history walk that races the navigation.
+                    closeArticleModal({ navigateHistory: false });
                     location.assign(url.href);
                     return;
                 }

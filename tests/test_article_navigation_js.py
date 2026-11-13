@@ -550,6 +550,67 @@ console.log(JSON.stringify({{sameOrigin, crossOrigin: location.href}}));
         self.assertEqual(payload["sameOrigin"], "http://example.test/library")
         self.assertEqual(payload["crossOrigin"], "http://example.test/?q=q")
 
+    def test_close_returns_to_the_article_trail_base_in_one_history_step(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        payload = _run_node(f"""
+const elements = {{articleModal: {{hidden: false}}}};
+const $ = (id) => elements[id];
+let hideCalls = 0;
+const hideArticleModal = () => {{ hideCalls++; elements.articleModal.hidden = true; }};
+const location = new URL("http://example.test/?q=topic");
+const history = {{
+  state: null,
+  pushes: [], replaces: [], goes: [],
+  pushState(state, _title, url) {{ this.state = state; this.pushes.push([state, String(url)]); }},
+  replaceState(state, _title, url) {{ this.state = state; this.replaces.push([state, String(url)]); }},
+  go(delta) {{ this.goes.push(delta); }},
+}};
+const current = null;
+const selectedSourceKeys = new Set();
+const readLocationState = () => ({{question: "topic", selectedSources: [], page: 0}});
+const readModalUrl = (value) => value ? new URL(value, location.href) : null;
+const articleUrlValue = (url) => url.pathname + url.search + url.hash;
+const articleRouteValue = (url) => url.pathname + url.search;
+const makeStateUrl = (_question, _sources, _page, modal) => `/?q=topic&modal=${{encodeURIComponent(modal)}}`;
+{_section(source, "function modalStateEntry(", "function navigateArticleModal(")}
+{_section(source, "function closeArticleModal(", "bindArticleFrameLoad();")}
+const one = new URL("http://example.test/content/manual/One");
+const two = new URL("http://example.test/content/manual/Two");
+const first = modalStateEntry(one, "search");
+history.state = first.state;
+const second = modalStateEntry(two, "follow");
+// Simulate the deeper article entry being current.
+history.state = second.state;
+elements.articleModal.hidden = false;
+closeArticleModal();
+const deepClose = {{
+  go: [...history.goes], replaces: history.replaces.length, hidden: elements.articleModal.hidden,
+}};
+// A direct /?modal=... load has no in-app trail; keep replaceState fallback.
+history.goes.length = 0;
+history.replaces.length = 0;
+hideCalls = 0;
+elements.articleModal.hidden = false;
+history.state = null;
+location.href = "http://example.test/?q=topic&modal=%2Fcontent%2Fmanual%2FTwo";
+closeArticleModal();
+const directClose = {{
+  go: [...history.goes], replaces: history.replaces.map((entry) => entry[1]),
+  hidden: elements.articleModal.hidden, hideCalls,
+}};
+console.log(JSON.stringify({{
+  depths: [first.state.zimanticModalDepth, second.state.zimanticModalDepth],
+  deepClose, directClose,
+}}));
+""")
+        self.assertEqual(payload["depths"], [0, 1])
+        self.assertEqual(payload["deepClose"], {"go": [-2], "replaces": 0, "hidden": True})
+        self.assertEqual(payload["directClose"]["go"], [])
+        self.assertEqual(
+            payload["directClose"]["replaces"], ["/?q=topic"],
+        )
+        self.assertTrue(payload["directClose"]["hidden"])
+
     def test_modal_article_changes_discard_child_history_and_stale_frame_events(self):
         source = APP_JS.read_text(encoding="utf-8")
         payload = _run_node(f"""
