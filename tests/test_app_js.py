@@ -2134,6 +2134,65 @@ console.log(JSON.stringify({{inside, outside, narrowed, same, cleared}}));
         self.assertEqual(payload["same"], ["load", 1])
         self.assertEqual(payload["cleared"], ["run", "q", [], 0, []])
 
+    def test_sort_control_keeps_the_rendered_mode_until_a_new_search_starts(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const select = {{
+  options: ["relevance", "diverse", "rare"].map((value) => ({{
+    value, hidden: false, disabled: false,
+  }})),
+  value: "",
+}};
+const question = {{value: ""}};
+const sortControls = {{hidden: true}};
+const nodes = {{sortSelect: select, question, sortControls}};
+const $ = (id) => nodes[id];
+let current = null;
+const availableBrowseModes = new Set(["diverse", "rare"]);
+{_function_source(source, "function defaultBrowseMode(", "function renderSortControls(")}
+{_function_source(source, "function renderSortControls(", "function setSettingsOpen(")}
+const snapshot = () => ({{
+  value: select.value,
+  hidden: Object.fromEntries(select.options.map((option) => [option.value, option.hidden])),
+  controlsHidden: sortControls.hidden,
+}});
+current = {{question: "water", browse: null, pageItems: [{{}}]}};
+question.value = "";
+renderSortControls();
+const clearedQuery = snapshot();
+question.value = "new query";
+renderSortControls();
+const typed = snapshot();
+current = {{question: "", browse: "diverse", pageItems: [{{}}]}};
+question.value = "";
+renderSortControls();
+const browsing = snapshot();
+current = null;
+question.value = "";
+renderSortControls();
+const idle = snapshot();
+console.log(JSON.stringify({{clearedQuery, typed, browsing, idle}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script],
+            check=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        # Clearing the box while the q=water page is still rendered must not
+        # pretend the results are now an empty-query Diversity browse.
+        self.assertEqual(payload["clearedQuery"]["value"], "relevance")
+        self.assertEqual(payload["clearedQuery"]["hidden"]["relevance"], False)
+        self.assertEqual(payload["clearedQuery"]["controlsHidden"], False)
+        # Typing a new query is also still a relevance search.
+        self.assertEqual(payload["typed"]["value"], "relevance")
+        # Once an empty-query browse is the active search, show Diversity.
+        self.assertEqual(payload["browsing"]["value"], "diverse")
+        self.assertEqual(payload["browsing"]["hidden"]["relevance"], True)
+        # With no search at all, keep the default browse mode.
+        self.assertEqual(payload["idle"]["value"], "diverse")
+
     def test_modified_heading_click_opens_search_in_new_tab(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""

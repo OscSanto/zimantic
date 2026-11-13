@@ -3914,16 +3914,20 @@
                 const select = $("sortSelect");
                 if (!select) return;
                 $("sortControls").hidden = !current?.pageItems?.length;
-                const question = $("question").value.trim();
+                const typedQuestion = $("question").value.trim();
+                // An empty box is a pending edit, not a new empty-query browse.
+                // Keep showing the mode that produced the results still on
+                // screen until a search actually starts for the new scope.
+                const activeQuestion = typedQuestion || current?.question || "";
                 for (const option of select.options) {
                     option.hidden = option.value === "relevance"
-                        ? !question : !availableBrowseModes.has(option.value);
+                        ? !activeQuestion : !availableBrowseModes.has(option.value);
                     option.disabled = option.hidden;
                 }
-                const startingSearchFromBrowse = question && current?.question === "";
+                const startingSearchFromBrowse = typedQuestion && current?.question === "";
                 select.value = startingSearchFromBrowse
                     ? "relevance"
-                    : current?.browse || (question ? "relevance" : defaultBrowseMode());
+                    : current?.browse || (activeQuestion ? "relevance" : defaultBrowseMode());
             }
 
             function setSettingsOpen(open) {
