@@ -3538,13 +3538,13 @@
             function renderPager(total, pageCount) {
                 const pager = $("pager");
                 const focused = document.activeElement;
-                const focusLabel =
+                const focusAction =
                     focused instanceof HTMLElement && pager.contains(focused)
-                        ? focused.textContent.trim()
+                        ? focused.dataset.pagerAction || ""
                         : "";
                 pager.innerHTML = "";
                 if (total <= PAGE_SIZE && pageCount <= 1) {
-                    if (focusLabel) {
+                    if (focusAction) {
                         const firstResult = $("results").querySelector(
                             ".result-title a[href]",
                         );
@@ -3552,8 +3552,9 @@
                     }
                     return;
                 }
-                const pageLink = (text, page, disabled) => {
+                const pageLink = (action, text, page, disabled) => {
                     const link = document.createElement(disabled ? "span" : "a");
+                    link.dataset.pagerAction = action;
                     link.textContent = text;
                     if (disabled) {
                         link.className = "disabled";
@@ -3567,11 +3568,13 @@
                     return link;
                 };
                 const prev = pageLink(
+                    "prev",
                     `← ${t("Previous")}`,
                     current.page - 1,
                     current.page === 0,
                 );
                 const next = pageLink(
+                    "next",
                     `${t("Next")} →`,
                     current.page + 1,
                     current.page >= pageCount - 1,
@@ -3583,13 +3586,19 @@
                 pager.append(prev, label, next);
                 if (current.page > 0) {
                     // Shortcut back to the first page from anywhere in the pager.
-                    pager.prepend(pageLink(`« ${t("First")}`, 0, false));
+                    pager.prepend(pageLink("first", `« ${t("First")}`, 0, false));
                 }
-                if (focusLabel) {
+                if (focusAction) {
                     const links = [...pager.querySelectorAll("a[data-page]")];
+                    // A rebuild can remove the focused control (First on page 0)
+                    // or turn it into a disabled span (Previous on page 0, Next
+                    // on the last page). Fall back to the nearest enabled link
+                    // in the same direction.
                     const target =
-                        links.find((link) => link.textContent.trim() === focusLabel) ||
-                        (focusLabel.includes(t("Next"))
+                        links.find(
+                            (link) => link.dataset.pagerAction === focusAction,
+                        ) ||
+                        (focusAction === "next"
                             ? links[links.length - 1]
                             : links[0]);
                     if (target) target.focus({ preventScroll: true });
