@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import secrets
 import sqlite3
 import threading
 import time
@@ -37,11 +36,6 @@ from ...diagnostics import public_cause
 from ...indexing import search as generic_search
 from ...indexing.derived import derived_text_preview
 from ...indexing.locator import IndexLocator
-from ...model_meta import (
-    MODEL_PROBE_SHAPE_KEY,
-    MODEL_PROBE_TEXTS_KEY,
-    MODEL_PROBE_VECTORS_KEY,
-)
 from ..base import (
     CollectionInfo,
     CollectionRuntime,
@@ -50,20 +44,18 @@ from ..base import (
     DiscoveryBatch,
     EnrichingRuntime,
     IndexedRuntime,
-    IndexSummary,
     ProviderContext,
     SourceQuery,
 )
 from ..config import ConfigValidationError, FilesConfig, ProviderConfig
+from ..local_runtime import LocalIndexedRuntimeMixin, prepare_local_indexes
+from .common import phrase_in_text
 from .discovery import (
     FilesIndexOptions,
     FilesSource,
-    apply_index_metadata,
     discover_sources,
     files_collection_key,
-    open_files_index,
 )
-from .common import phrase_in_text
 from .entries import FilesEntryProducer
 from .store import FilesContentStore
 
@@ -94,8 +86,11 @@ def _float_setting(settings: dict[str, Any], key: str, default: float) -> float:
     return float(value)
 
 
-class FilesRuntime(IndexedRuntime, EnrichingRuntime):
+class FilesRuntime(LocalIndexedRuntimeMixin, IndexedRuntime, EnrichingRuntime):
     """One configured files directory: sources, indexes, and serving."""
+
+    _provider_label = "files"
+    _serving_label = "files"
 
     def __init__(
         self,
@@ -544,101 +539,6 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
             self.config,
         )
 
-    def start_faiss(self) -> None:
-        # bind_search(defer_faiss=False) runs before this, so do not gate on it.
-        if not self._semantic:
-            return
-        try:
-            import faiss  # noqa: F401
-        except Exception as error:
-            self._logger.warning(
-                "zimantic: semantic search disabled: FAISS unavailable (%s); "
-                "falling back to lexical search",
-                public_cause(error),
-            )
-            logger.debug("files FAISS load error: %s", error)
-            return
-        getter = self._model_fingerprint_getter
-        if getter is not None:
-            try:
-                self._model_fingerprint = getter()
-            except Exception as error:
-                self._logger.warning(
-                    "zimantic: could not fingerprint the embedding model (%s); "
-                    "vectors will not be checked against it",
-                    public_cause(error),
-                )
-                logger.debug("files model fingerprint error: %s", error)
-        with self._lock:
-            self._defer_faiss = False
-        try:
-            self._reopen_indexes()
-        except Exception as error:
-            self._logger.warning(
-                "zimantic: semantic search disabled for %s (%s); falling back "
-                "to lexical search",
-                self.collection.label,
-                public_cause(error),
-            )
-            self._logger.debug("files FAISS reopen error: %s", error)
-
-    def _probe_compatible(
-        self, db: sqlite3.Connection, db_path: Path
-    ) -> tuple[bool, str]:
-        rows = dict(
-            db.execute(
-                "SELECT key, value FROM meta WHERE key IN (?, ?, ?)",
-                (
-                    MODEL_PROBE_TEXTS_KEY,
-                    MODEL_PROBE_VECTORS_KEY,
-                    MODEL_PROBE_SHAPE_KEY,
-                ),
-            ).fetchall()
-        )
-        if not rows:
-            return False, "no compatibility probes"
-        ready_getter = self._embedder_ready_getter
-        if ready_getter is not None:
-            state = ready_getter()
-            if (
-                isinstance(state, tuple)
-                and len(state) == 2
-                and state[1]
-                and state[0] is not None
-            ):
-                if not state[0].wait(timeout=60):
-                    return False, "timed out waiting for the embedding model"
-        getter = self._embedder_getter
-        embedder = getter() if getter is not None else None
-        if embedder is None:
-            return False, "embedding model is unavailable"
-        from ...embed import embed_probe_texts, load_model_probes, model_probes_match
-
-        probes = load_model_probes(rows)
-        if probes is None:
-            return False, "unreadable compatibility probes"
-        texts, stored_vectors = probes
-        key = tuple(texts)
-        with self._probe_cache_lock:
-            current = self._probe_cache.get(key)
-            if current is None:
-                try:
-                    current = embed_probe_texts(embedder, texts)
-                except Exception as error:
-                    return False, f"probe embedding failed: {error}"
-                self._probe_cache[key] = current
-        try:
-            compatible, mean_cosine, min_cosine = model_probes_match(
-                texts, stored_vectors, current=current
-            )
-        except Exception as error:
-            return False, f"probe comparison failed: {error}"
-        return compatible, (
-            f"mean cosine {mean_cosine:.4f}, minimum {min_cosine:.4f}"
-        )
-
-    # -- discovery / lifecycle --------------------------------------------
-
     def refresh(self, *, wait: bool = True) -> bool:
         if wait:
             return self._refresh_once(wait=True)
@@ -712,59 +612,21 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
                 cfg=self._cfg,
                 probe_compatible=self._probe_compatible,
             )
-            new_indexes: dict[str, Any] = {}
-            searchable: list[FilesSource] = []
-            library: list[FilesSource] = []
-            discarded: list[Any] = []
-            for files_source in discovery.sources:
-                info = files_source.info
-                existing = self.indexes.get(info.key)
-                index = None
-                if (
-                    not self._metadata_only
-                    and existing is not None
-                    and self._can_reuse_index(existing, info)
-                ):
-                    index = existing
-                else:
-                    try:
-                        index = open_files_index(
-                            info, index_dir=self.index_dir, options=options
-                        )
-                    except Exception as error:
-                        self._logger.warning(
-                            "%s: index open failed (%s); serving files without "
-                            "an index until it is rebuilt",
-                            info.key,
-                            public_cause(error),
-                        )
-                        self._logger.debug(
-                            "files index open error for %s: %s", info.key, error
-                        )
-                        index = None
-                if index is not None:
-                    object.__setattr__(info, "searchable", True)
-                    apply_index_metadata(info, index.index_meta)
-                    if self._metadata_only:
-                        new_indexes[info.key] = IndexSummary(
-                            done=str(getattr(index, "done", "") or ""),
-                            index_meta=dict(getattr(index, "index_meta", {}) or {}),
-                            generation=getattr(index, "generation", None),
-                        )
-                        try:
-                            index.close()
-                        except Exception:
-                            pass
-                    else:
-                        new_indexes[info.key] = index
-                    searchable.append(files_source)
-                else:
-                    object.__setattr__(info, "searchable", False)
-                library.append(files_source)
-            for key, old in self.indexes.items():
-                replacement = new_indexes.get(key)
-                if replacement is not old:
-                    discarded.append(old)
+            prepared = prepare_local_indexes(
+                list(discovery.sources),
+                existing=self.indexes,
+                index_dir=self.index_dir,
+                options=options,
+                metadata_only=self._metadata_only,
+                can_reuse=self._can_reuse_index,
+                provider_label=self._provider_label,
+                serving_label=self._serving_label,
+                logger=self._logger,
+            )
+            new_indexes = prepared.indexes
+            searchable = prepared.searchable
+            library = prepared.library
+            discarded = prepared.discarded
             with self._lock:
                 changed = (
                     tuple(source.info for source in library)
@@ -802,59 +664,6 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
         finally:
             self._refresh_lock.release()
 
-    def _can_reuse_index(self, index: Any, source: SourceInfo) -> bool:
-        if getattr(index, "generation", None) is None:
-            return False
-        try:
-            lease = IndexLocator(self.index_dir).paths(
-                source, verify_faiss=False
-            )
-        except Exception:
-            return False
-        if lease is None:
-            return False
-        try:
-            return lease.generation == index.generation
-        finally:
-            lease.close()
-
-    def _reopen_indexes(self) -> None:
-        with self._lock:
-            old = dict(self.indexes)
-            self.indexes = {}
-        try:
-            self._refresh_once(wait=True)
-        finally:
-            with self._lock:
-                live = {id(index) for index in self.indexes.values()}
-            for index in old.values():
-                if id(index) not in live:
-                    try:
-                        index.close()
-                    except Exception:
-                        pass
-
-    def _report_stale_overrides(self) -> None:
-        operations = self._cfg.get("derived_source_operations") or {}
-        prefix = f"files:{self.config.name}:"
-        with self._lock:
-            known = set(self._by_key)
-        for key in operations:
-            if not str(key).startswith(prefix) or key in known:
-                continue
-            if key in self._stale_logged:
-                continue
-            self._stale_logged.add(key)
-            self._logger.warning(
-                "zimantic: files collection %s has a stale source override %r; "
-                "it was not applied (source keys change after collapse or "
-                "recovery; rebuild and update the key)",
-                self.collection.label,
-                key,
-            )
-
-    # -- build / content ---------------------------------------------------
-
     def entry_producer(self, source: SourceInfo, *, fast: bool):
         with self._lock:
             files_source = self._by_key.get(source.key)
@@ -869,68 +678,6 @@ class FilesRuntime(IndexedRuntime, EnrichingRuntime):
             fast=fast,
             cfg=self._cfg,
         )
-
-    def random_source(self) -> SourceInfo:
-        with self._lock:
-            candidates = [
-                source.info for source in self._library if source.info.homepage
-            ]
-        if not candidates:
-            raise ArticleNotFoundError("no files source has a homepage")
-        return secrets.choice(candidates)
-
-    def health(self) -> list[dict[str, Any]]:
-        with self._lock:
-            entries = sorted(self.indexes.items())
-            sources = {source.info.key: source.info for source in self._library}
-        reports: list[dict[str, Any]] = []
-        from ...indexing import schema
-
-        for key, index in entries:
-            meta = getattr(index, "index_meta", None) or {}
-            report: dict[str, Any] = {
-                "name": key,
-                "status": "ok",
-                "index_file": index.db_path is not None,
-                "archive": True,
-                "done": str(getattr(index, "done", "") or ""),
-                "fast": str(getattr(index, "done", "") or "") == "fast",
-                "capabilities": {
-                    "title": index.db_path is not None,
-                    "fulltext": index.db_path is not None
-                    and str(getattr(index, "done", "") or "") != "fast",
-                    "semantic": index.faiss_index is not None,
-                },
-            }
-            source = sources.get(key)
-            if source is not None:
-                report["homepage"] = source.homepage
-                report["item_count"] = source.item_count
-            try:
-                if schema.INDEXED_COUNT in meta:
-                    report["indexed_count"] = schema.decode_int(
-                        meta[schema.INDEXED_COUNT]
-                    )
-                if schema.TRUNCATED in meta:
-                    report["truncated"] = schema.decode_bool(
-                        meta[schema.TRUNCATED]
-                    )
-                if schema.BODY_TRUNCATED_COUNT in meta:
-                    report["body_truncated_count"] = schema.decode_int(
-                        meta[schema.BODY_TRUNCATED_COUNT]
-                    )
-                if schema.DERIVED_TEXT in meta:
-                    report["derived_text"] = schema.decode_json(
-                        meta[schema.DERIVED_TEXT]
-                    )
-            except (KeyError, TypeError, ValueError):
-                pass
-            reports.append(report)
-        return reports
-
-    def index_names(self) -> list[str]:
-        with self._lock:
-            return sorted(self.indexes)
 
 
 class FilesDiscoveryBatch(DiscoveryBatch):

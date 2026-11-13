@@ -844,6 +844,148 @@ console.log(JSON.stringify({{
         self.assertTrue(payload["semanticHidden"])
         self.assertTrue(payload["additionalModesVisible"])
 
+    def test_library_info_close_preserves_article_inert_and_history(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const elements = new Map();
+const wrap = {{inert: false}};
+const calls = [];
+const previous = {{focus() {{ calls.push("focus"); }}}};
+const articleModal = {{hidden: false}};
+const libraryInfoModal = {{hidden: false}};
+elements.set("articleModal", articleModal);
+elements.set("libraryInfoModal", libraryInfoModal);
+const document = {{
+  body: {{classList: {{remove() {{ calls.push("class"); }}}}}},
+  querySelector(selector) {{ return selector === ".wrap" ? wrap : null; }},
+}};
+const $ = id => elements.get(id);
+const location = new URL("http://example.test/library");
+let libraryInfoHistoryPushed = false;
+let libraryInfoCurrentKey = "source";
+let libraryInfoPreviousFocus = previous;
+const history = {{
+  state: {{zimanticLibraryInfo: "source"}},
+  back() {{ calls.push("back"); }},
+  replaceState(state, _title, url) {{ calls.push(["replace", state, url]); }},
+}};
+{_function_source(source, "function closeLibraryInfo(", "function syncLibraryInfo(")}
+
+closeLibraryInfo();
+const openArticle = {{
+  hidden: libraryInfoModal.hidden,
+  inert: wrap.inert,
+  calls: [...calls],
+}};
+
+// Closing the details layer while the article is still open must not let Tab
+// escape into the page behind it.
+libraryInfoModal.hidden = false;
+wrap.inert = true;
+articleModal.hidden = false;
+libraryInfoPreviousFocus = previous;
+history.state = {{zimanticLibraryInfo: "source"}};
+libraryInfoHistoryPushed = false;
+const beforeSecond = calls.length;
+closeLibraryInfo();
+const closedOverArticle = {{
+  inert: wrap.inert,
+  calls: calls.slice(beforeSecond),
+}};
+
+// Without the article layer, closing restores the page and its previous focus.
+libraryInfoModal.hidden = false;
+wrap.inert = true;
+articleModal.hidden = true;
+libraryInfoPreviousFocus = previous;
+libraryInfoHistoryPushed = false;
+const beforeThird = calls.length;
+closeLibraryInfo({{navigateHistory: false}});
+const closedAlone = {{
+  inert: wrap.inert,
+  calls: calls.slice(beforeThird),
+}};
+
+// A pushed entry is consumed with Back; a Forward arrival removes the marker
+// in place instead of adding another history entry.
+libraryInfoModal.hidden = false;
+libraryInfoHistoryPushed = true;
+history.state = {{zimanticLibraryInfo: "source"}};
+const beforeBack = calls.length;
+closeLibraryInfo();
+const usedBack = calls.slice(beforeBack);
+libraryInfoModal.hidden = false;
+libraryInfoHistoryPushed = false;
+history.state = {{keep: 1, zimanticLibraryInfo: "source"}};
+const beforeReplace = calls.length;
+closeLibraryInfo();
+const usedReplace = calls.slice(beforeReplace);
+
+console.log(JSON.stringify({{
+  openArticle, closedOverArticle, closedAlone, usedBack, usedReplace,
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=False, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["openArticle"]["hidden"])
+        self.assertTrue(payload["openArticle"]["inert"])
+        self.assertIn("focus", payload["openArticle"]["calls"])
+        self.assertTrue(payload["closedOverArticle"]["inert"])
+        self.assertFalse(payload["closedAlone"]["inert"])
+        self.assertIn("focus", payload["closedAlone"]["calls"])
+        self.assertIn("back", payload["usedBack"])
+        replace_call = next(
+            call for call in payload["usedReplace"] if call[0] == "replace"
+        )
+        self.assertNotIn("zimanticLibraryInfo", replace_call[1])
+
+    def test_modal_tab_focus_cycles_within_the_dialog(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const document = {{activeElement: null}};
+const FOCUSABLE_SELECTOR = "";
+const node = name => ({{
+  name,
+  getClientRects() {{ return [1]; }},
+  focus() {{ document.activeElement = this; }},
+}});
+const first = node("first");
+const middle = node("middle");
+const last = node("last");
+const container = {{
+  hidden: false,
+  querySelectorAll() {{ return [first, middle, last]; }},
+  contains(value) {{ return [first, middle, last].includes(value); }},
+}};
+{_function_source(source, "function trapModalTabFocus(", "function replaceQueryParam(")}
+const prevented = [];
+const event = (key, shiftKey = false) => ({{
+  key, shiftKey, preventDefault() {{ prevented.push([key, shiftKey]); }},
+}});
+
+document.activeElement = last;
+trapModalTabFocus(container, event("Tab"));
+const forward = document.activeElement.name;
+document.activeElement = first;
+trapModalTabFocus(container, event("Tab", true));
+const backward = document.activeElement.name;
+document.activeElement = {{}};
+trapModalTabFocus(container, event("Tab"));
+const fromOutside = document.activeElement.name;
+console.log(JSON.stringify({{forward, backward, fromOutside, prevented}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["forward"], "first")
+        self.assertEqual(payload["backward"], "last")
+        self.assertEqual(payload["fromOutside"], "first")
+        self.assertEqual(payload["prevented"], [["Tab", False], ["Tab", True], ["Tab", False]])
+
     def test_history_distinguishes_empty_search_from_home_and_restores_sort(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
