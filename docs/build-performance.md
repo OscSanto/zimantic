@@ -336,7 +336,7 @@ SQLite title/path/redirect rows and **all lexical body postings are identical**.
 
 ## Separate build and query thread budgets
 
-`onnx_build_threads` controls build calls and automatic embedding-worker sizing. `onnx_query_threads` controls query serving. These settings are independent. Deprecated names are accepted as configuration aliases.
+`onnx_build_threads` controls build calls and automatic embedding-worker sizing. `onnx_query_threads` controls query serving. These settings are independent. Removed names such as `embed_threads`, `search_workers`, and `build_embed_threads` are rejected as unknown keys; use the current names.
 
 The following tuning uses the same 6.33 MB ZIM file and model. Desktop affinity is CPUs 0–7: **four physical/eight logical cores**. The Pi is a **Pi 500, four ARM Cortex-A76 cores, 8 GB RAM**, with zimantic 1.0.0 and libzim 4.1.0. Its affinity is CPUs 0–2, leaving one core available for other work, and benchmarks run at lower priority. No caches are dropped. ONNX Runtime is 1.31.0 on desktop and 1.31.1 on Pi; compare configurations within each machine, not cross-platform accuracy gains.
 
@@ -420,7 +420,7 @@ taskset -c 0-2 python scripts/bench_threads.py \
 
 Text extraction prefers selectolax's Lexbor HTML5 parser for both body indexing and previews, and falls back to stdlib `HTMLParser` when Lexbor does not import. Block priorities, hidden/navigation filtering, boilerplate removal, primary-language selection and text limits do not change. The small, marker-gated meta-refresh scan uses stdlib `HTMLParser`. Zimantic does not rewrite existing indexes automatically.
 
-Automatic selectolax installation excludes known 32-bit machine names, using the same platform marker as libzim. Other machines require selectolax even when no compatible wheel is published, which needs a source build. Zimantic uses a separately installed selectolax on any platform; `pip install 'zimantic[lexbor]'` explicitly opts in on excluded machines. Platform markers cannot distinguish every interpreter bitness or libc/OS-version/ABI wheel constraint.
+Automatic selectolax installation excludes known 32-bit machine names. Unlike the unconditional `libzim` dependency, selectolax has no prebuilt wheel for those machines; they use the stdlib parser unless a separate selectolax build is installed. Zimantic uses a separately installed selectolax on any platform; `pip install 'zimantic[lexbor]'` explicitly opts in on excluded machines. Platform markers cannot distinguish every interpreter bitness or libc/OS-version/ABI wheel constraint.
 
 The fallback uses stdlib `HTMLParser`. It applies the same visibility and language rules and text limits, and it checks deadlines between input chunks. It is slower than Lexbor and does not recover malformed HTML5 markup.
 

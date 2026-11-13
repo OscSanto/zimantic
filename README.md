@@ -21,7 +21,7 @@ Semantic search has the best coverage in widely spoken languages. Coverage varie
 - A files collection searches and serves one configured directory tree, such as an offline copy of `/library/www/html/modules`, as one collection with a fixed scope. See [Files collections](docs/collections.md#files-collections).
 - Kolibri installations are searched and served directly. Each installed channel is one collection, and each top-level topic is one source. See [Kolibri installations](docs/collections.md#kolibri-installations).
 - Combined ranking orders semantic, title, and full-text results in one list. The full-text list combines SQLite body search with ZIM full-text search.
-- Merged results collapse redirects into the target article, so each article appears one time. Each result carries a size-limited preview.
+- Merged results collapse redirects into the target article, so each article appears one time. Up to `preview_limit` results per page carry a size-limited preview; the rest keep an empty lead.
 - Progressive results run sources in parallel. The page shows a provisional merged list as each source finishes, then reranks the list deterministically.
 - The library page at `/library` shows ZIM collections, files collections, Kolibri channels, and remote Kiwix books, grouped by collection with provider and media-type filters. See [Library view](docs/usage.md#library-view).
 - Zimantic uses about 250–325 MB while it serves, which supports devices such as a Raspberry Pi Zero 2 W (512 MB RAM). See [Measured memory use](docs/search.md#measured-memory-use).

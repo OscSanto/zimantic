@@ -89,14 +89,15 @@ port = 8090
 # embedding_batch_tokens = 1000
 
 # Embedding device. "auto" (the default) tries every accelerated provider the
-# installed ONNX Runtime build exposes (CUDA, ROCm, DirectML, OpenVINO) and
-# otherwise runs on the CPU. "gpu" requires an accelerated provider; "cpu"
-# forces the CPU. Other values: cuda, rocm, directml/dml (Windows), openvino
+# installed ONNX Runtime build exposes (CUDA, ROCm, MIGraphX, DirectML, OpenVINO)
+# and otherwise runs on the CPU. "gpu" tries the same accelerated providers and
+# falls back to the CPU with a warning when none is available; "cpu" forces the
+# CPU. Other values: cuda, rocm, migraphx, directml/dml (Windows), openvino
 # (Intel, OpenVINO AUTO device selection) or coreml (Apple, must be requested
 # explicitly). GPU support comes from the ONNX Runtime package, not this
 # setting: replace onnxruntime with onnxruntime-gpu (CUDA), onnxruntime-rocm,
-# onnxruntime-directml or onnxruntime-openvino. An unavailable device, or a run
-# that fails on it, falls back to the CPU with a warning.
+# onnxruntime-migraphx, onnxruntime-directml or onnxruntime-openvino. An
+# unavailable device, or a run that fails on it, falls back to the CPU.
 # `zimantic build --device ...` and `zimantic serve --device ...` override this
 # setting.
 # embed_device = "auto"

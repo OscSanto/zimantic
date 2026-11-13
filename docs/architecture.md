@@ -14,7 +14,7 @@ Configuration uses `[[collections]]` entries. Source selection uses canonical so
 
 ## Content safety and operation
 
-- Local stores confine reads to the configured root and reject traversal, encoded separators, backslashes, NUL bytes, symlinks, hidden paths, and configured excludes. Directory requests do not create listings.
+- Local stores confine reads to the configured root and reject traversal, encoded separators, backslashes, NUL bytes, symlinks, hidden paths, and configured excludes. A directory without an index page opens a bounded generated listing that omits hidden, excluded, and symlinked entries.
 - HTML5 zip files use a validated manifest, member and output limits, and a read deadline. Unsafe paths, links, duplicate members, overlapping members, and oversized output fail closed.
 - MIME classification uses file extensions and constrained content detection. Unknown binaries are attachments. Provider content sends `X-Content-Type-Options: nosniff`. A response supports one validated, size-limited byte range; partial responses do not use gzip.
 - Kiwix XML rejects DTD and entity declarations in UTF-8 and UTF-16. Zimantic validates redirect origins before the next request.

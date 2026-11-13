@@ -462,7 +462,7 @@ def _make_parser() -> argparse.ArgumentParser:
     catalog_cmd.add_argument(
         "query",
         nargs="?",
-        help="case-insensitive substring of source or collection display metadata",
+        help="case-insensitive word-boundary terms from source or collection display metadata",
     )
     catalog_cmd.add_argument("--json", action="store_true", help="write metadata and paths as JSON")
     catalog_cmd.add_argument(
