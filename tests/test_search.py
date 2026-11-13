@@ -390,6 +390,22 @@ class RuntimeCapabilityTests(unittest.TestCase):
         finally:
             search._executor.shutdown(wait=True)
 
+    def test_deferred_faiss_ready_invalidates_cached_results(self):
+        search = _bare_search({})
+        runtime = search.runtimes[""]
+        search._defer_faiss = True
+        search._cache_generation = 0
+        search.cache.put("cached", {"generation": 0})
+        try:
+            with patch.object(runtime, "start_faiss"):
+                with patch("zimantic.search.threading.Thread") as thread:
+                    search.start_faiss()
+                    thread.call_args.kwargs["target"]()
+            self.assertIsNone(search.cache.get("cached"))
+            self.assertEqual(search._cache_generation, 1)
+        finally:
+            search._executor.shutdown(wait=True)
+
     def test_late_discovery_loads_vectors_only_after_faiss_is_ready(self):
         for semantic, deferred in ((True, False), (True, True), (False, False)):
             with self.subTest(semantic=semantic, deferred=deferred):
@@ -1421,7 +1437,7 @@ class SearchContractTests(unittest.TestCase):
                 patch.object(
                     search,
                     "_enrich_pool",
-                    lambda results, query, pool, limit: pool,
+                    lambda results, query, pool, limit, **_kwargs: pool,
                 ),
                 patch.object(search, "_hydrate_results", lambda docs, *_args: None),
                 patch.object(search_module, "as_completed", new=fake_as_completed),
@@ -1494,7 +1510,7 @@ class SearchContractTests(unittest.TestCase):
                 # Every pass ranks to the same single page.
                 patch.object(search, "_rank_results", return_value=[dict(stable_doc)]),
                 patch.object(
-                    search, "_enrich_pool", lambda results, query, pool, limit: pool
+                    search, "_enrich_pool", lambda results, query, pool, limit, **_kwargs: pool
                 ),
                 patch.object(search, "_hydrate_results", lambda docs, *_args: None),
             ):
@@ -2212,6 +2228,53 @@ class GracefulDegradationTests(unittest.TestCase):
 
             self.assertTrue(any(str(model_path) in line for line in logs.output))
 
+    def test_embedder_becoming_ready_invalidates_cached_results(self):
+        with _temp_dir(self) as tmp:
+            search = _bare_search(self._cfg(tmp))
+            self.addCleanup(search._executor.shutdown, wait=True)
+            search._cache_generation = 0
+            search.cache.put("cached", {"generation": 0})
+
+            search.start_embedder(lambda: object())
+            self.assertTrue(search._embedder_ready.wait(timeout=2))
+
+            self.assertIsNone(search.cache.get("cached"))
+            self.assertEqual(search._cache_generation, 1)
+
+    def test_complete_answer_with_past_deadline_is_still_cached(self):
+        search = _bare_search({})
+        self.addCleanup(search._executor.shutdown, wait=True)
+        scope = {
+            "status": "complete",
+            "requested": 1,
+            "scheduled": 1,
+            "completed": 1,
+            "limit_reason": None,
+        }
+        doc = {
+            "id": "manual:tire",
+            "source_key": "manual",
+            "title": "Tire",
+            "path": "tire",
+        }
+
+        search._finalize_search(
+            "tire",
+            [],
+            0,
+            10,
+            False,
+            10,
+            {},
+            0,
+            "complete-after-deadline",
+            scope,
+            pool=[doc],
+            deadline=time.monotonic() - 1,
+        )
+
+        self.assertIsNotNone(search.cache.get("complete-after-deadline"))
+
     def test_index_without_vectors_still_serves_title_results(self):
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
@@ -2763,7 +2826,7 @@ class GracefulDegradationTests(unittest.TestCase):
                 patch.object(
                     search,
                     "_enrich_pool",
-                    lambda results, query, pool, limit: pool,
+                    lambda results, query, pool, limit, **_kwargs: pool,
                 ),
                 patch.object(search, "_hydrate_results", lambda docs, *_args: None),
             ):
@@ -2836,7 +2899,7 @@ class GracefulDegradationTests(unittest.TestCase):
         search = _bare_search(cfg)
         self.addCleanup(search.close)
         search.sources = {source.key: source for source in sources}
-        search._enrich_pool = lambda results, query, pool, limit: pool
+        search._enrich_pool = lambda results, query, pool, limit, **_kwargs: pool
         search._hydrate_results = lambda docs, *_args: None
 
         def result_for(source):
@@ -3260,7 +3323,7 @@ class BrowseSearchTests(unittest.TestCase):
         search = self.make_search()
         with (
             patch.object(search, "_query_vector", return_value=None),
-            patch.object(search, "_enrich_pool", side_effect=lambda results, query, pool, limit: pool[:3]),
+            patch.object(search, "_enrich_pool", side_effect=lambda results, query, pool, limit, **_kwargs: pool[:3]),
         ):
             relevance = search.search_page("topic", limit=5)["results"]
             random = search.search_page("topic", sort="random", seed=7, limit=5)["results"]

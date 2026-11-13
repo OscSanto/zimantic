@@ -404,6 +404,9 @@ class Search:
             else:
                 with self._state_lock:
                     self.embedder = embedder
+                # Results cached before the model loaded are lexical-only and
+                # must not keep winning over now-available semantic matches.
+                self._invalidate_search_cache()
                 logger.info("zimantic: embedding model ready; semantic search enabled")
             finally:
                 self._embedder_ready.set()
@@ -493,6 +496,9 @@ class Search:
                     self._bind_runtime(runtime)
             for runtime in runtimes:
                 self._start_runtime_faiss(runtime)
+            # Semantic ability changed again when FAISS and the vector indexes
+            # became available. Drop any lexical answer cached in between.
+            self._invalidate_search_cache()
             with self._state_lock:
                 semantic_indexes = sum(
                     1
@@ -1637,6 +1643,19 @@ class Search:
                 "semantic browsing is unavailable when semantic search is disabled"
             )
 
+    def _invalidate_search_cache(self) -> None:
+        """Invalidate cached answers after search capability changes.
+
+        Semantic availability is not part of the per-source settings key, so
+        an answer produced while the model or FAISS was still loading would
+        otherwise keep replaying the lexical-only pool until eviction.
+        """
+        with self._state_lock:
+            self._cache_generation = getattr(self, "_cache_generation", 0) + 1
+        cache = getattr(self, "cache", None)
+        if cache is not None:
+            cache.clear()
+
     def _cache_key(
         self,
         query: str,
@@ -2400,7 +2419,9 @@ class Search:
         """
         if pool is None:
             pool = self._rank_results(source_results, query, pool_target, deadline=deadline)
-        pool = self._enrich_pool(source_results, query, pool, pool_target)
+        pool = self._enrich_pool(
+            source_results, query, pool, pool_target, deadline=deadline
+        )
         if query and sort and sort != "relevance":
             pool = self._sort_results(pool, sort, seed, deadline, query_vector=query_vector)
         total = self._result_total(
@@ -2448,12 +2469,7 @@ class Search:
         # A source error is operation-scoped: keep it out of the complete cache
         # so the next request retries that source instead of replaying a
         # transient failure until eviction or reload.
-        complete_cacheable = (
-            not partial
-            and (deadline is None or time.monotonic() < deadline)
-            and not cancelled
-            and not failed
-        )
+        complete_cacheable = not partial and not cancelled and not failed
         existing = self.cache.peek(cache_key)
         already_larger = (
             isinstance(existing, dict)
@@ -2572,6 +2588,13 @@ class Search:
                 )
                 return
 
+            # Start the admitted-search clock before query embedding. A slow
+            # model call then consumes the same deadline as source fan-out
+            # instead of running outside it while holding an admission slot.
+            started_at = time.monotonic()
+            deadline = started_at + max(
+                1.0, getattr(self, "search_timeout_seconds", 30.0)
+            )
             query_vector = (
                 None if browse is not None else self._query_vector(sources, query)
             )
@@ -2584,10 +2607,6 @@ class Search:
             update_interval = self.stream_update_interval
             pool: list[dict[str, Any]] = []
             counts: dict[str, int] = {}
-            started_at = time.monotonic()
-            deadline = started_at + max(
-                1.0, getattr(self, "search_timeout_seconds", 30.0)
-            )
 
             def rank_pool() -> list[dict[str, Any]]:
                 ranked = self._rank_results(completed, query, pool_target, deadline=deadline)
@@ -2828,11 +2847,10 @@ class Search:
                         "elapsed": round(now - started_at, 1),
                     }
 
-            deadline_hit = (
-                bool(remaining)
-                or any(queues.values())
-                or time.monotonic() >= deadline
-            )
+            # Partiality describes source scheduling only. Preview extraction
+            # has its own budget after ranking and must not turn an answer with
+            # every source completed into a "partial" search.
+            deadline_hit = bool(remaining) or any(queues.values())
             if deadline_hit:
                 stop.set()
                 for future in remaining:
@@ -2870,9 +2888,6 @@ class Search:
                 query_vector=query_vector,
                 browse=browse,
             )
-            if time.monotonic() >= deadline and not deadline_hit:
-                scope["status"] = "partial"
-                scope["limit_reason"] = "deadline"
             # Ranking and hydration are done. Release admission before the
             # final event so a slow or abandoned reader cannot occupy a search
             # slot that another user could use.
@@ -3069,12 +3084,7 @@ class Search:
             result.error = str(self.public_text(result.error))
         return result
 
-    def _hydrate_results(
-        self,
-        docs: list[dict[str, Any]],
-        *,
-        deadline: float | None = None,
-    ) -> None:
+    def _hydrate_results(self, docs: list[dict[str, Any]]) -> None:
         """Populate previews for the displayed page, in parallel by source.
 
         Previews get their own budget rather than inheriting the search
@@ -3088,10 +3098,9 @@ class Search:
             doc.setdefault("lead", "")
         if self.preview_limit <= 0:
             return
-        if deadline is None:
-            deadline = time.monotonic() + max(
-                1.0, float(getattr(self, "search_timeout_seconds", 30.0))
-            )
+        deadline = time.monotonic() + max(
+            1.0, float(getattr(self, "search_timeout_seconds", 30.0))
+        )
         docs = docs[: self.preview_limit]
         with self._state_lock:
             sources = dict(self.sources)
@@ -3207,6 +3216,8 @@ class Search:
         query: str,
         pool: list[dict[str, Any]],
         limit: int,
+        *,
+        deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         """Fill MIME types and run the content-phrase check through runtimes."""
         phrase_words = _phrase_words(query)
@@ -3268,14 +3279,37 @@ class Search:
                 executor.submit(enrich_source, source_key, result_docs)
                 for source_key, result_docs in grouped.items()
             ]
-            for future in as_completed(futures):
-                if future.result():
-                    found = True
+            remaining = set(futures)
+            timeout = (
+                max(0.0, deadline - time.monotonic())
+                if deadline is not None
+                else None
+            )
+            try:
+                for future in as_completed(remaining, timeout=timeout):
+                    remaining.discard(future)
+                    if future.result():
+                        found = True
+            except TimeoutError:
+                for future in remaining:
+                    future.cancel()
+                logger.debug(
+                    "content enrichment reached its deadline; using current results"
+                )
         else:
             for source_key, result_docs in grouped.items():
+                if deadline is not None and time.monotonic() >= deadline:
+                    logger.debug(
+                        "content enrichment reached its deadline; using current results"
+                    )
+                    break
                 if enrich_source(source_key, result_docs):
                     found = True
-        return self._rank_results(source_results, query, limit) if found else pool
+        return (
+            self._rank_results(source_results, query, limit, deadline=deadline)
+            if found
+            else pool
+        )
 
     def _sort_results(
         self,
