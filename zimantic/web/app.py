@@ -668,6 +668,11 @@ def _xml_safe_styles(markup: str) -> str:
     return _STYLE_BLOCK.sub(replace, markup)
 
 
+def _json_for_script(value) -> str:
+    """Serialize a value for an inline script without allowing ``</script>``."""
+    return json.dumps(value).replace("<", "\\u003c")
+
+
 def _decorate_article_bridge(
     content: bytes | memoryview, zim: str, base_path: str = "", xhtml: bool = False
 ) -> bytes | memoryview:
@@ -689,14 +694,14 @@ def _decorate_article_bridge(
     # Install the storage shims before the page's own scripts: an inline script
     # that reads localStorage or opens IndexedDB would otherwise throw before
     # the shim exists.
-    early = ARTICLE_INDEXEDDB_LOADER % json.dumps(
+    early = ARTICLE_INDEXEDDB_LOADER % _json_for_script(
         f"{base_path}/indexeddb-shim.js"
     ) + ARTICLE_STORAGE_SHIM
     additions = (
         ARTICLE_COOKIE_SHIM
         + mobile_head
         + ARTICLE_NAV_BRIDGE_SCRIPT.replace(
-            "__BASE_PATH_JSON__", json.dumps(base_path)
+            "__BASE_PATH_JSON__", _json_for_script(base_path)
         )
     )
     if xhtml:
@@ -822,9 +827,10 @@ def _content_attachment_panel(
     """Explain a non-inline attachment instead of loading a blank iframe."""
 
     kind = html_escape(str(mimetype or "file"), quote=True)
+    title_html = html_escape(str(title), quote=False)
     return (
         '<div class="zimantic-shell-attachment" role="region">'
-        f'<h1 class="zimantic-shell-attachment-title">{html_escape(title)}</h1>'
+        f'<h1 class="zimantic-shell-attachment-title">{title_html}</h1>'
         '<p data-i18n="This file cannot be displayed in the offline viewer.">'
         "This file cannot be displayed in the offline viewer.</p>"
         f'<p class="zimantic-shell-attachment-type"><code>{kind}</code></p>'
@@ -917,7 +923,7 @@ def _content_shell(
             _content_error_panel(error, base_path)
             if error
             else _content_attachment_panel(
-                title, iframe_url, article.get("mimetype")
+                parsed_title or entry_title, iframe_url, article.get("mimetype")
             )
             if attachment
             else (
@@ -945,7 +951,7 @@ def _content_shell(
         )
         + "</main>"
         + ARTICLE_TOOLBAR_SCRIPT.replace(
-            "__APP_BASE_PATH_JSON__", json.dumps(base_path)
+            "__APP_BASE_PATH_JSON__", _json_for_script(base_path)
         ).replace(
             "__SECURE_BROWSING_JSON__", json.dumps(bool(secure_browsing))
         )

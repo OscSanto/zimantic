@@ -19,6 +19,30 @@ from zimantic.providers.zim.discovery import zim_source_key
 from zimantic.search import Search
 from zimantic.web.app import create_app
 
+def test_attachment_panel_escapes_the_title_once():
+    from zimantic.web.app import _content_attachment_panel
+
+    panel = _content_attachment_panel(
+        "A & B <draft>", "/article/source/file.bin", "application/octet-stream"
+    )
+
+    assert "A &amp; B &lt;draft&gt;" in panel
+    assert "&amp;amp;" not in panel
+
+
+def test_content_disposition_replaces_control_characters():
+    from zimantic.content.serving import content_disposition
+
+    value = content_disposition(
+        "application/octet-stream", 'report\r\n2026\x00"\\.zip'
+    )
+
+    assert "\r" not in value
+    assert "\n" not in value
+    assert "\x00" not in value
+    assert 'filename="report__2026___.zip"' in value
+
+
 HOME_HTML = b"<html><head><title>Home</title></head><body>Home body</body></html>"
 ALPHA_HTML = b"<html><head><title>Alpha</title></head><body>Alpha body</body></html>"
 BETA_HTML = b"<html><head><title>Beta</title></head><body>Beta body</body></html>"
@@ -365,9 +389,11 @@ def test_oversized_item_returns_too_large_with_cors(tmp_path):
         assert ranged.status_code == 413
         assert ranged.headers["access-control-allow-origin"] == "*"
 
-        # The shell only needs a bounded prefix, so a large item still opens.
+        # The shell cannot load an over-limit article into the iframe, so it
+        # reports the documented error panel instead of embedding a 413 body.
         shell = client.get(f"/content/{quote(key, safe='')}/Alpha")
-        assert shell.status_code == 200
+        assert shell.status_code == 413
+        assert b"zimantic-shell-error" in shell.content
     finally:
         client.close()
         search.close()

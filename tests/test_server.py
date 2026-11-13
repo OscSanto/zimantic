@@ -185,6 +185,12 @@ class FakeSearch:
         }
 
 
+def test_inline_script_json_cannot_close_the_script_element():
+    from zimantic.web.app import _json_for_script
+
+    assert "</script>" not in _json_for_script("</script>")
+
+
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

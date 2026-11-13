@@ -1190,6 +1190,12 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                         head = read_head(source, path)
                     else:
                         head = search_class.read_article(source, path)
+                    total = getattr(head, "total", None)
+                    limit = _article_limit()
+                    if total is not None and int(total) > limit:
+                        raise ArticleTooLargeError(
+                            f"article exceeds the {limit} byte serving limit"
+                        )
                     article_dict.update(_article_dict(head))
             elif callable(read_head):
                 article_dict = _article_dict(read_head(source, path))

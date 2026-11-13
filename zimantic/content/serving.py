@@ -68,7 +68,14 @@ def content_disposition(mimetype: str | None, filename: str | None = None) -> st
         return "inline"
     if not filename:
         return "attachment"
-    safe = str(filename).replace("\\", "_").replace('"', "_").replace("\n", "_")
+    safe = str(filename).replace("\\", "_").replace('"', "_")
+    # h11 rejects raw control characters in a header value. Replace them here
+    # rather than letting an archive-controlled name turn a download into a
+    # failed response.
+    safe = "".join(
+        "_" if ord(character) < 0x20 or ord(character) == 0x7F else character
+        for character in safe
+    )
     ascii_name = safe.encode("ascii", "replace").decode("ascii")
     return (
         f'attachment; filename="{ascii_name}"; '
