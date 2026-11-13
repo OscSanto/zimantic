@@ -18,6 +18,18 @@ from zimantic.indexing.engines import (
 )
 
 
+def test_srt_numeric_subtitle_text_is_not_dropped_as_a_cue_number():
+    from zimantic.indexing.derived import parse_caption_bytes
+
+    text = parse_caption_bytes(
+        b"1\n00:00:01,000 --> 00:00:02,000\n1984\n\n"
+        b"2\n00:00:03,000 --> 00:00:04,000\nA real caption line.\n"
+    )
+
+    assert "1984" in text
+    assert "A real caption line." in text
+
+
 def test_available_engines_requires_local_executables(monkeypatch):
     monkeypatch.setattr(engines_module.shutil, "which", lambda _name: None)
     assert available_derived_engines() == {}

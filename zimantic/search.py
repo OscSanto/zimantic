@@ -1027,29 +1027,16 @@ class Search:
         happen on this snapshot, so a page cannot mix records from two
         different discovery revisions.
         """
-        for _attempt in range(2):
-            with self._state_lock:
-                before = self._aggregate_revision
-            library = self._library_records()
-            with self._state_lock:
-                if self._aggregate_revision != before:
-                    continue
-                return {
-                    "sources": [
-                        source.to_dict(include_metadata=True)
-                        for source in self.sources.values()
-                    ],
-                    "library": library,
-                    "collections": self.collection_dicts(),
-                    "token": (self._process_token, self._aggregate_revision),
-                }
+        # Hold the publication lock for the whole capture. The previous
+        # retry-and-fallback could still mix a library list from one revision
+        # with sources from the next under continuous discovery.
         with self._state_lock:
             return {
                 "sources": [
                     source.to_dict(include_metadata=True)
                     for source in self.sources.values()
                 ],
-                "library": library,
+                "library": self._library_records(),
                 "collections": self.collection_dicts(),
                 "token": (self._process_token, self._aggregate_revision),
             }

@@ -118,8 +118,8 @@ def parse_caption_bytes(data: bytes, **_options: Any) -> str:
     except UnicodeDecodeError:
         text = data.decode("utf-16", "ignore")
     lines: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
+    raw_lines = [value.strip() for value in text.splitlines()]
+    for position, line in enumerate(raw_lines):
         if not line:
             continue
         upper = line.upper()
@@ -128,7 +128,19 @@ def parse_caption_bytes(data: bytes, **_options: Any) -> str:
         if "-->" in line:
             continue
         if line.isdigit():
-            continue
+            # SRT cue numbers are a digit-only line immediately before a
+            # timestamp. A subtitle line that is itself a number ("1984") must
+            # survive.
+            following = next(
+                (
+                    value
+                    for value in raw_lines[position + 1 :]
+                    if value
+                ),
+                "",
+            )
+            if "-->" in following:
+                continue
         if upper.startswith(("NOTE ", "STYLE", "REGION")):
             continue
         line = _CAPTION_TAG.sub(" ", line)

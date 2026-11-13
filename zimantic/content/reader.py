@@ -1443,6 +1443,8 @@ def _read_plain_text_entry(
     raw: bytes,
     max_preview_chars: int,
     max_body_text_bytes: int = DEFAULT_MAX_BODY_TEXT_BYTES,
+    *,
+    input_truncated: bool = False,
 ) -> EntryRecord | None:
     # Bundled licenses, dotfiles and configs are text/plain too; only real
     # article text should become a search result.
@@ -1461,8 +1463,10 @@ def _read_plain_text_entry(
     full_text = " ".join(raw.decode("utf-8", "ignore").split())
     body = truncate_at_word_boundary(full_text, max_body_text_bytes)
     body, truncated = truncate_utf8(body, max_body_text_bytes)
-    truncated = truncated or len(full_text.encode("utf-8")) > len(
-        body.encode("utf-8")
+    truncated = (
+        truncated
+        or input_truncated
+        or len(full_text.encode("utf-8")) > len(body.encode("utf-8"))
     )
     return EntryRecord(
         entry_id, title, excerpt, entry.path, None, body, truncated
@@ -1791,7 +1795,12 @@ def read_entry(
         )
     if mimetype == "text/plain":
         return _read_plain_text_entry(
-            entry, i, raw, max_preview_chars, max_body_text_bytes
+            entry,
+            i,
+            raw,
+            max_preview_chars,
+            max_body_text_bytes,
+            input_truncated=truncated,
         )
     return _read_html_entry(
         cast(Any, zim),

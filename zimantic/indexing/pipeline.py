@@ -923,6 +923,11 @@ def _read_entry(
                                 contribution.cache_key,
                             )
                         )
+                        if derived_metadata is not None:
+                            derived_metadata["cache_references"] = (
+                                int(derived_metadata.get("cache_references", 0))
+                                + 1
+                            )
                 if outcome.errors:
                     derived_metadata["partial"] = True
                     derived_metadata.setdefault("errors", []).extend(
@@ -1278,6 +1283,9 @@ def _index_entries_staged(
                 batch.append(row)
                 if derived_refs is not None and row.id in derived_refs:
                     window_refs[row.id] = list(derived_refs[row.id])
+                    # The window owns its copy; do not retain one list per
+                    # enriched row for the rest of a large build.
+                    derived_refs.pop(row.id, None)
             index += 1
             if len(batch) >= batch_size:
                 flush(index)
@@ -1445,6 +1453,9 @@ def _index_entries(
         batch_modified = {}
         reserved = 0
         save_batch(rows, modified, next_entry, reservation)
+        if derived_refs is not None:
+            for row in rows:
+                derived_refs.pop(row.id, None)
 
     for index in range(start, count):
         try:
@@ -1715,6 +1726,7 @@ def _derived_baseline(
         "operations": states,
         "contributors": [],
         "partial": False,
+        "cache_references": 0,
         "build_mode": "fast" if fast else "full",
     }
 
@@ -2020,12 +2032,7 @@ def build_index(
                 fast=fast,
                 model_fingerprint=fingerprint,
                 model_probes=model_probes,
-                derived_text={
-                    **derived_metadata,
-                    "cache_references": sum(
-                        len(refs) for refs in derived_refs.values()
-                    ),
-                },
+                derived_text=dict(derived_metadata),
                 reuse_vectors=reuse_vectors,
             )
         if not producer.validate_snapshot():

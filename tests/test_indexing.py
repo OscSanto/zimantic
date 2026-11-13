@@ -881,6 +881,25 @@ def test_clear_staging_removes_sqlite_sidecars(tmp_path):
     assert all(not path.exists() for path in sidecars)
 
 
+def test_plain_text_truncation_includes_a_truncated_input_prefix():
+    from types import SimpleNamespace
+
+    from zimantic.content.reader import _read_plain_text_entry
+
+    entry = SimpleNamespace(path="notes.txt", title="Notes")
+    row = _read_plain_text_entry(
+        entry,
+        0,
+        b"Some sufficiently long plain text for a readable article body. " * 4,
+        60,
+        10,
+        input_truncated=True,
+    )
+
+    assert row is not None
+    assert row.body_truncated is True
+
+
 def test_shared_index_metadata_reads_partial_build_scope():
     source = SourceInfo(key="partial-source", provider="zim")
     apply_index_metadata(

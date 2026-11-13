@@ -564,7 +564,7 @@ def suggest(
             ):
                 break
             window = min(max_window, window * 2)
-        return suggestions
+        return suggestions[:remaining]
     except sqlite3.Error as error:
         logger.warning(
             "zimantic: title suggestions unavailable for %s: %s",
