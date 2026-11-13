@@ -103,6 +103,15 @@ class ScopedEntryProducer:
     def entry_id_at(self, index: int) -> int:
         return self._producer.entry_id_at(self._indices[index])
 
+    def modified_at(self, index: int) -> int | None:
+        """Map the scoped position to the underlying producer's position."""
+        modified_at = getattr(self._producer, "modified_at", None)
+        if not callable(modified_at):
+            return None
+        if index < 0 or index >= self.count:
+            return None
+        return modified_at(self._indices[index])
+
     def parallel_reader(
         self, *, workers: int, start: int = 0, chunk_size: int = 16
     ):

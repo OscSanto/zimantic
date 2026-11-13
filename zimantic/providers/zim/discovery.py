@@ -26,6 +26,7 @@ from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
 from ..base import IndexSummary
+from ..metadata import apply_index_metadata
 from .metadata import metadata_from_archive, perma_ref, source_info_from_record
 
 logger = logging.getLogger(__name__)
@@ -696,40 +697,6 @@ def open_native_index(
     )
 
 
-def _apply_index_metadata(source: Any, meta: dict[str, str]) -> None:
-    """Populate SourceInfo's published-index fields without inventing values."""
-    from ...indexing import schema
-
-    try:
-        if schema.INDEXED_COUNT in meta:
-            object.__setattr__(source, "index_partial", False)
-            object.__setattr__(
-                source,
-                "indexed_count",
-                schema.decode_int(meta[schema.INDEXED_COUNT]),
-            )
-        if schema.TRUNCATED in meta:
-            object.__setattr__(
-                source,
-                "truncated",
-                schema.decode_bool(meta[schema.TRUNCATED]),
-            )
-        if schema.BODY_TRUNCATED_COUNT in meta:
-            object.__setattr__(
-                source,
-                "body_truncated_count",
-                schema.decode_int(meta[schema.BODY_TRUNCATED_COUNT]),
-            )
-        if schema.DERIVED_TEXT in meta:
-            value = schema.decode_json(meta[schema.DERIVED_TEXT])
-            if isinstance(value, dict):
-                object.__setattr__(source, "derived_text", value)
-        if meta:
-            object.__setattr__(source, "index_freshness", "unknown")
-    except (KeyError, TypeError, ValueError):
-        return
-
-
 def discover_source_indexes(
     records: list[SourceRecord],
     *,
@@ -808,7 +775,7 @@ def discover_source_indexes(
                 searchable=True,
                 web_base_path=web_base_path,
             )
-            _apply_index_metadata(searchable_source, index.index_meta)
+            apply_index_metadata(searchable_source, index.index_meta)
             sources.append(searchable_source)
             library_sources.append(searchable_source)
             if metadata_only:

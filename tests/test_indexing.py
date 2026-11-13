@@ -17,8 +17,10 @@ from zimantic.indexing.search import (
     body_search,
     search,
 )
+from zimantic.indexing.scope import ScopedEntryProducer
 from zimantic.indexing.types import EntryRecord
 from zimantic.providers.base import SourceQuery
+from zimantic.providers.metadata import apply_index_metadata
 from zimantic.searching.index import IndexHandle
 
 
@@ -877,6 +879,58 @@ def test_clear_staging_removes_sqlite_sidecars(tmp_path):
     assert not db_path.exists()
     assert not faiss_path.exists()
     assert all(not path.exists() for path in sidecars)
+
+
+def test_shared_index_metadata_reads_partial_build_scope():
+    source = SourceInfo(key="partial-source", provider="zim")
+    apply_index_metadata(
+        source,
+        {
+            schema.INDEXED_COUNT: schema.encode_int(2),
+            schema.BUILD_SCOPE: schema.encode_json(
+                {"paths": [{"path": "a", "recursive": False}], "partial": True}
+            ),
+            schema.TRUNCATED: schema.encode_bool(False),
+            schema.BODY_TRUNCATED_COUNT: schema.encode_int(1),
+        },
+    )
+
+    assert source.indexed_count == 2
+    assert source.index_partial is True
+    assert source.truncated is False
+    assert source.body_truncated_count == 1
+    assert source.index_freshness == "unknown"
+
+
+def test_scoped_producer_maps_modified_at_to_the_underlying_entry():
+    class _Producer:
+        count = 3
+        truncated = False
+        fingerprint = "fp"
+        path_scope_membership = ""
+
+        def entry_paths(self, index):
+            return (f"page-{index}",)
+
+        def modified_at(self, index):
+            return 100 + index
+
+        def entry_at(self, index):
+            return None
+
+        def entry_id_at(self, index):
+            return index
+
+        def derived_text_inputs(self, index):
+            return ()
+
+    scoped = ScopedEntryProducer(
+        _Producer(), [{"path": "page-1", "recursive": False}]
+    )
+
+    assert scoped.count == 1
+    assert scoped.entry_id_at(0) == 1
+    assert scoped.modified_at(0) == 101
 
 
 def test_spooled_input_is_private_and_bounded():

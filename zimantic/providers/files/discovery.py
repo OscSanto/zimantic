@@ -36,6 +36,7 @@ from ...indexing import schema
 from ...indexing.locator import IndexLocator, IndexLocatorError
 from ...searching.config import _file_signature
 from ...searching.index import IndexHandle, _nprobe
+from ..metadata import apply_index_metadata
 from .common import (
     FilesConfinedError,
     confined_stat,
@@ -707,29 +708,6 @@ class FilesIndexOptions:
 
 def _index_uri(db_path: Path) -> str:
     return db_path.resolve().as_uri() + "?mode=ro&immutable=1"
-
-
-def apply_index_metadata(source: SourceInfo, meta: Mapping[str, str]) -> None:
-    """Populate fields from already validated published-index metadata."""
-    object.__setattr__(
-        source, "indexed_count", schema.decode_int(meta[schema.INDEXED_COUNT])
-    )
-    object.__setattr__(
-        source, "truncated", schema.decode_bool(meta[schema.TRUNCATED])
-    )
-    object.__setattr__(
-        source, "index_partial",
-        schema.decode_json(meta[schema.BUILD_SCOPE])["partial"]
-        if schema.BUILD_SCOPE in meta else False,
-    )
-    if schema.BODY_TRUNCATED_COUNT in meta:
-        object.__setattr__(
-            source, "body_truncated_count",
-            schema.decode_int(meta[schema.BODY_TRUNCATED_COUNT]),
-        )
-    if schema.DERIVED_TEXT in meta:
-        object.__setattr__(source, "derived_text", schema.decode_json(meta[schema.DERIVED_TEXT]))
-    object.__setattr__(source, "index_freshness", "unknown")
 
 
 def open_files_index(
