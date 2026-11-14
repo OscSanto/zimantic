@@ -934,7 +934,7 @@ class Embedder:
                 # Gather/Loop stack.
                 raise RuntimeError(
                     "token ids exceed the embedding table in "
-                    f"{self.model_dir}; the folder probably mixes vocabulary "
+                    f"{self.model_dir}; the directory probably mixes vocabulary "
                     "files from different models (remove the stale "
                     f"sentencepiece.bpe.model or vocab.txt and rebuild): {error}"
                 ) from error

@@ -12,7 +12,7 @@ def listing_row(
 ) -> str:
     href = escape(base_url + quote(path, safe="/"), quote=True)
     label = escape(name + ("/" if directory else ""))
-    kind = "Folder" if directory else "File"
+    kind = "Directory" if directory else "File"
     display_size = "-"
     if not directory:
         value = float(size)
@@ -40,7 +40,7 @@ def directory_page(title: str, path: str, base_url: str, rows: list[str]) -> byt
             base_url + quote("/".join(parts[: index + 1]) + "/", safe="/"), quote=True
         )
         crumbs.append(f'<a href="{href}">{escape(part)}</a>')
-    empty = "" if rows else "<p>This folder is empty.</p>"
+    empty = "" if rows else "<p>This directory is empty.</p>"
     return (
         """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -71,13 +71,13 @@ tbody tr:hover { background: light-dark(#f1f5fa, #232b35); }
 #count { color: light-dark(#555, #bbb); }
 @media (max-width: 36rem) { body { padding: 1rem; } th, td { padding: .6rem; } }
 </style></head><body>
-<nav aria-label="Folders">"""
+<nav aria-label="Directories">"""
         + " ".join(crumbs)
         + """</nav>
 <h1>"""
         + escape(title)
         + """</h1>
-<div class="tools"><label>Filter files <input id="filter" type="search" placeholder="File or folder name"></label>
+<div class="tools"><label>Filter files <input id="filter" type="search" placeholder="File or directory name"></label>
 <label>Sort <select id="sort"><option value="name">Name</option><option value="size">Size</option>
 <option value="modified">Modified</option></select></label>
 <span id="count" role="status">"""
@@ -102,8 +102,8 @@ function update() {
     const query = filter.value.toLocaleLowerCase();
     const key = sort.value;
     rows.sort((a, b) => {
-        const folders = (b.cells[1].textContent === "Folder") - (a.cells[1].textContent === "Folder");
-        return folders || (key === "name"
+        const directories = (b.cells[1].textContent === "Directory") - (a.cells[1].textContent === "Directory");
+        return directories || (key === "name"
             ? a.cells[0].textContent.localeCompare(b.cells[0].textContent, undefined, {numeric: true})
             : Number(b.dataset[key]) - Number(a.dataset[key]));
     });

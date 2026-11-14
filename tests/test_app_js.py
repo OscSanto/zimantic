@@ -322,7 +322,7 @@ console.log(JSON.stringify({{cardTaps, ignored, desktopSnippet, desktopPadding, 
             "external": [5, 4, 5],
         })
 
-    def test_directory_listing_filters_names_and_sorts_folders_first(self):
+    def test_directory_listing_filters_names_and_sorts_directories_first(self):
         page = directory_page("Files", "", "/article/files/", []).decode()
         listing_script = page.split("<script>", 1)[1].split("</script>", 1)[0]
         script = """
@@ -332,7 +332,7 @@ const makeRow = (name, kind, size, modified) => ({
 });
 const rows = [
   makeRow("notes.txt", "File", 100, 20),
-  makeRow("Folder/", "Folder", 0, 10),
+  makeRow("Folder/", "Directory", 0, 10),
   makeRow("big.txt", "File", 10, 30),
 ];
 const body = {

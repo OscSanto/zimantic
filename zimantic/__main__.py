@@ -236,7 +236,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="zimantic")
     _add_verbosity_argument(parser, default=0)
 
-    # subcommands: build (files/folders, default zim_dir), serve, reload
+    # subcommands: build (files/directories, default zim_dir), serve, reload
     commands = parser.add_subparsers(dest="command", required=True)
 
     serve_cmd = commands.add_parser("serve", help="start the search page and JSON API")
@@ -271,7 +271,7 @@ def _make_parser() -> argparse.ArgumentParser:
         nargs="+",
         type=Path,
         metavar="PATH",
-        help="ZIM file or folder; folders are searched recursively for *.zim files",
+        help="ZIM file or directory; directories are searched recursively for *.zim files",
     )
     open_cmd.add_argument(
         "--port",
@@ -304,7 +304,7 @@ def _make_parser() -> argparse.ArgumentParser:
         type=int,
         default=64,
         metavar="N",
-        help="reject folders with more than N archives (default: 64)",
+        help="reject directories with more than N ZIM files (default: 64)",
     )
 
     diagnose_cmd = commands.add_parser(
@@ -313,7 +313,7 @@ def _make_parser() -> argparse.ArgumentParser:
     _add_verbosity_argument(diagnose_cmd)
     diagnose_cmd.add_argument(
         "paths", nargs="+", type=Path, metavar="PATH",
-        help="ZIM file or folder; does not load config or write indexes/catalogs",
+        help="ZIM file or directory; does not load config or write indexes/catalogs",
     )
     diagnose_cmd.add_argument(
         "--query", action="append", metavar="TEXT",
@@ -321,11 +321,11 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     diagnose_cmd.add_argument(
         "--checksum", action="store_true",
-        help="also verify the archive checksum (reads the entire archive)",
+        help="also verify the ZIM file checksum (reads the entire file)",
     )
     diagnose_cmd.add_argument(
         "--timeout", type=float, default=30.0, metavar="SECONDS",
-        help="time limit for all checks on each archive (default: 30)",
+        help="time limit for all checks on each ZIM file (default: 30)",
     )
     diagnose_cmd.add_argument(
         "--limit", type=int, default=16, metavar="N",
@@ -334,7 +334,7 @@ def _make_parser() -> argparse.ArgumentParser:
     diagnose_cmd.add_argument("--json", action="store_true", help="write reports as JSON")
     diagnose_cmd.add_argument(
         "--max-sources", type=int, default=64, metavar="N",
-        help="reject selections with more than N archives (default: 64)",
+        help="reject selections with more than N ZIM files (default: 64)",
     )
 
     build = commands.add_parser(
@@ -347,7 +347,7 @@ def _make_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help=(
-            "local files or folders; match configured collections or register "
+            "local files or directories; match configured collections or register "
             "new ZIM/files collections. Subpaths build cumulative partial indexes. "
             "With no paths, build every configured collection. "
             "Do not combine paths with selectors."
@@ -572,7 +572,7 @@ def _make_parser() -> argparse.ArgumentParser:
 
 
 def _collect_zims(paths: list[Path], default_dir: str | Path) -> list[Path]:
-    """Expand CLI files and folders into unique ZIM paths."""
+    """Expand CLI files and directories into unique ZIM paths."""
     from .providers.zim.discovery import is_zim_filename, iter_zim_files
 
     zims: list[Path] = []
@@ -2232,12 +2232,12 @@ def _run_model(args, cfg: dict) -> None:
 
     for precision, directory in downloads:
         print(f"zimantic: {model} {precision} -> {directory}")
-    folders = [directory for _precision, directory in downloads]
-    if len(folders) == 1 and folders[0] != configured_dir:
-        print(f'zimantic: set model_dir = "{folders[0]}" to use this export')
-    elif len(folders) > 1:
+    directories = [directory for _precision, directory in downloads]
+    if len(directories) == 1 and directories[0] != configured_dir:
+        print(f'zimantic: set model_dir = "{directories[0]}" to use this export')
+    elif len(directories) > 1:
         print(
-            "zimantic: point model_dir at one of these folders; "
+            "zimantic: point model_dir at one of these directories; "
             "use a separate index_dir when switching models and rebuild"
         )
 
@@ -2251,7 +2251,7 @@ def _run_reload(pid_file: Path | None) -> None:
     except (OSError, ValueError):
         sys.exit(
             f"zimantic: no server PID in {pid_file}; "
-            f"Is `zimantic serve` running from this folder (or pass --pid)?"
+            f"Is `zimantic serve` running from this directory (or pass --pid)?"
         )
     sighup = getattr(signal, "SIGHUP", None)
     if sighup is None:

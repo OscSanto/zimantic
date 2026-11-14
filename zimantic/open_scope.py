@@ -79,11 +79,11 @@ def expand_open_paths(
     max_visited_entries: int = DEFAULT_EXPANSION_MAX_ENTRIES,
     timeout_seconds: float = DEFAULT_EXPANSION_TIMEOUT_SECONDS,
 ) -> list[Path]:
-    """Expand files and folders into ordered, deduplicated resolved ZIM paths.
+    """Expand files and directories into ordered, deduplicated resolved ZIM paths.
 
-    File arguments keep their command-line order.  Folders contribute their ZIM
+    File arguments keep their command-line order.  Directories contribute their ZIM
     files in recursive, sorted order.  The traversal budget counts every
-    visited entry (not only ZIM files) so a huge or slow folder fails explicitly
+    visited entry (not only ZIM files) so a huge or slow directory fails explicitly
     instead of producing a silently incomplete scope.
     """
     from .providers.zim.discovery import is_zim_filename
@@ -100,13 +100,13 @@ def expand_open_paths(
         visited += 1
         if visited > max_visited_entries:
             raise OpenScopeError(
-                "ZIM folder expansion exceeded the "
+                "ZIM directory expansion exceeded the "
                 f"{max_visited_entries}-entry limit; use a narrower path or "
                 "`zimantic serve` for a whole library"
             )
         if time.monotonic() - started > timeout_seconds:
             raise OpenScopeError(
-                "ZIM folder expansion exceeded the "
+                "ZIM directory expansion exceeded the "
                 f"{timeout_seconds:g}-second limit; use a narrower path or "
                 "`zimantic serve` for a whole library"
             )
