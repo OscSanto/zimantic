@@ -313,4 +313,4 @@ This command writes `queries/<zim>/readme.pt.jsonl`. Each English query appears 
 
 ## Licenses
 
-The generated queries quote text from Wikipedia, Wikibooks and Stack Exchange, which is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/): attribution to their contributors, through the Kiwix ZIM files named in each query. The TED queries describe talks in our own words. The code in this directory is GPL-3.0-or-later, like the rest of Zimantic.
+The generated queries quote text from Wikipedia, Wikibooks and Stack Exchange, which is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/): attribution to their contributors, through the Kiwix ZIM files named in each query. The TED queries paraphrase the talks. The code in this directory is GPL-3.0-or-later, like the rest of Zimantic.
