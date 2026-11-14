@@ -39,6 +39,10 @@ dev = [
     "pytest",
     "httpx2",
 ]
+# README screenshot capture; browsers come from `playwright install chromium`.
+screenshots = [
+    "playwright>=1.40",
+]
 
 [project.scripts]
 zimantic = "zimantic.__main__:main"

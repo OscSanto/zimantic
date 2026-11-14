@@ -89,6 +89,16 @@ Provider, path, MIME, range, XML, SQLite, and build/index changes pass these che
 
 The mixed-library benchmark fixture is versioned under `tests/fixtures/mixed_library/`, and the harness is under `tests/benchmarks/`. Generate the fixture with `python tests/fixtures/mixed_library/generate.py --root /tmp/zimantic-mixed --force`. Record Raspberry Pi 4 results with `tests/benchmarks/run_mixed.py`. A missing hardware result is unverified, not a pass. Document required configuration, catalog, and index rebuilds, and unsupported compatibility paths.
 
+## Updating screenshots
+
+README screenshots live in `docs/images/` and are generated from the fixtures in `evaluation.zims/`:
+
+```bash
+uv run --group screenshots python scripts/screenshots.py
+```
+
+The script starts `zimantic serve` on a free port with a temporary configuration that exposes only the evaluation ZIM collection, builds any missing indexes under `$XDG_DATA_HOME/zimantic`, and writes the search, library, and article images. Use `--skip-build` to reuse existing indexes, `--base-url http://127.0.0.1:8090` to capture an already running server, or `--only search-results` to refresh one image. When Playwright's bundled browser is unavailable, set `ZIMANTIC_SCREENSHOT_BROWSER` to a Chromium executable.
+
 ## Release and deploy
 
 The Makefile increments the patch version, updates `uv.lock`, commits, and publishes an annotated tag:

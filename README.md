@@ -12,6 +12,10 @@ Semantic search has the best coverage in widely spoken languages. Coverage varie
 
 *Searched in WikiMed, the Wikipedia medical encyclopedia ZIM file.*
 
+![Zimantic search results for the misspelled query "diabetis", scoped to WikiMed](docs/images/search-results.png)
+
+*The misspelled query "diabetis" finds Diabetes with no shared words. The search is scoped to WikiMed.*
+
 ## Features
 
 - Semantic search matches articles from questions and descriptions when the query and the title share no words.
@@ -149,6 +153,10 @@ Core search does not require external tools. Local caption extraction, OCR, ASR,
 
 Zimantic uses explicit `[[collections]]` entries for ZIM files, remote Kiwix, files trees, and Kolibri installations. The [collections guide](docs/collections.md) has minimal examples, path behavior, provider limits, and advanced overrides.
 
+![Library view with ZIM collections and provider filters](docs/images/library.png)
+
+*The library groups sources by collection and filters them by provider, media type, language, or text.*
+
 ## Usage
 
 ```bash
@@ -159,6 +167,10 @@ zimantic reload
 ```
 
 A build with no arguments indexes configured local collections. For command options, build behavior, GPU setup, hardware tuning, and systemd examples, see [Usage and operations](docs/usage.md). The [web interface guide](docs/usage.md#source-selection) covers source selection and the library. The [API reference](docs/api.md) documents the HTTP endpoints.
+
+![An article served directly from a ZIM file](docs/images/article.png)
+
+*Result links open articles, assets, and homepages directly from the ZIM file, without `kiwix-serve`.*
 
 ## Security and limitations
 
