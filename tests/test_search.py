@@ -3477,14 +3477,14 @@ class PaginationTests(unittest.TestCase):
             self.assertEqual(expanded["total"], first["total"])
             search._executor.shutdown(wait=True)
 
-    def test_alternate_sorts_and_browse_keep_the_bounded_block(self):
-        # Only the default relevance order is a stable prefix when the ranked
-        # block grows. Recency/rare/diversity and browse modes keep the old
-        # bounded total so a deeper page cannot silently reorder earlier pages.
+    def test_alternate_sorts_page_past_the_initial_block_while_browse_stays_bounded(self):
+        # Alternate query sorts report the full candidate total and can page
+        # beyond max_results; empty-query browse remains a bounded sequence.
         with _temp_dir(self) as tmp:
             tmp = Path(tmp)
             rows = [(i, f"Tire Change {i}", f"tire-{i}", None) for i in range(1, 31)]
-            _write_index(tmp, "manual", rows=rows)
+            for name in ("alpha", "beta", "gamma", "delta"):
+                _write_index(tmp, name, rows=rows)
             search = _bare_search(
                 {**self._cfg(tmp), "max_results": 5, "candidate_count": 2}
             )
@@ -3496,14 +3496,23 @@ class PaginationTests(unittest.TestCase):
                 {"sort": "rare"},
                 {"sort": "recency"},
                 {"sort": "random", "seed": 7},
-                {"browse": "rare"},
             ):
                 with self.subTest(**kwargs):
-                    page = search.search_page("tire change" if "browse" not in kwargs else "", **kwargs)
-                    self.assertLessEqual(page["total"], 5)
-                    self.assertEqual(
-                        page["page_count"], max(1, (page["total"] + 1) // 2),
+                    first = search.search_page("tire change", limit=2, **kwargs)
+                    self.assertEqual(first["total"], 8)
+                    self.assertEqual(first["page_count"], 4)
+                    self.assertEqual(len(first["results"]), 2)
+                    deep = search.search_page(
+                        "tire change", limit=2, offset=6, **kwargs
                     )
+                    self.assertEqual(deep["total"], first["total"])
+                    self.assertEqual(len(deep["results"]), 2)
+
+            browse = search.search_page("", browse="rare", limit=2)
+            self.assertLessEqual(browse["total"], 5)
+            self.assertEqual(
+                browse["page_count"], max(1, (browse["total"] + 1) // 2),
+            )
             search._executor.shutdown(wait=True)
 
     def test_explicit_source_scope_searches_only_selected_sources(self):

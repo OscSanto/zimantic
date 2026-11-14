@@ -18,6 +18,14 @@ from .search import SearchLimits, fetch_docs, vector_search
 
 BROWSE_MODES = ("random", "rare", "outliers", "diverse", "recency")
 SEMANTIC_BROWSE_MODES = frozenset({"outliers"})
+# Above this many vectors, reuse a persistent id lookup for reconstruction
+# instead of scanning every id on each query. Small indexes are cheap to scan
+# and caching them would cost more memory than it saves.
+ID_LOOKUP_MIN_VECTORS = 4096
+# Reconstructing every vector to compute an IVF centroid is a first-request
+# cost that scales with the whole archive. Above this size, use the trained
+# coarse centroids weighted by list population as the mean direction instead.
+CENTROID_APPROX_MIN_VECTORS = 4_096
 
 
 def _check_deadline(deadline: float | None) -> None:
@@ -140,13 +148,15 @@ def _rare_rows(
         "CREATE VIRTUAL TABLE temp.zimantic_candidate_docs USING fts5("
         f"title, tokenize='{DOCS_TOKENIZER}')"
     )
-    db.execute(
-        "INSERT INTO temp.zimantic_candidate_docs(rowid, title) "
-        "SELECT rowid, title FROM docs WHERE rowid IN ("
-        + ",".join("?" for _ in rowids)
-        + ")",
-        list(rowids),
-    )
+    for start in range(0, len(rowids), 900):
+        batch = list(rowids[start : start + 900])
+        db.execute(
+            "INSERT INTO temp.zimantic_candidate_docs(rowid, title) "
+            "SELECT rowid, title FROM docs WHERE rowid IN ("
+            + ",".join("?" for _ in batch)
+            + ")",
+            batch,
+        )
     db.execute(
         "CREATE VIRTUAL TABLE temp.zimantic_candidate_terms "
         "USING fts5vocab(temp, zimantic_candidate_docs, instance)"
@@ -167,15 +177,29 @@ def _rare_rows(
 def _recent_rows(
     db: sqlite3.Connection, count: int, rowids: list[int] | None = None
 ) -> list[tuple[float, int]]:
-    selection = (
-        " AND rowid IN (" + ",".join("?" for _ in rowids) + ")"
-        if rowids is not None else ""
-    )
-    rows = db.execute(
-        "SELECT rowid, modified FROM docs WHERE target IS NULL"
-        f"{selection} ORDER BY modified IS NULL, modified DESC, rowid LIMIT ?",
-        [*(rowids or []), count],
-    ).fetchall()
+    if rowids is None:
+        rows = db.execute(
+            "SELECT rowid, modified FROM docs WHERE target IS NULL "
+            "ORDER BY modified IS NULL, modified DESC, rowid LIMIT ?",
+            (count,),
+        ).fetchall()
+    else:
+        rows = []
+        for start in range(0, len(rowids), 900):
+            batch = list(rowids[start : start + 900])
+            rows.extend(db.execute(
+                "SELECT rowid, modified FROM docs WHERE target IS NULL "
+                "AND rowid IN (" + ",".join("?" for _ in batch) + ")",
+                batch,
+            ).fetchall())
+        rows.sort(
+            key=lambda row: (
+                row[1] is None,
+                -(row[1] or 0),
+                row[0],
+            )
+        )
+        rows = rows[:count]
     return [
         (float(modified) if modified is not None else -1.0, int(rowid))
         for rowid, modified in rows
@@ -190,6 +214,63 @@ def _centroid(index: Any, deadline: float | None):
 
     vectors = index.faiss_index
     total = np.zeros(vectors.d, dtype=np.float64)
+    if (
+        hasattr(vectors, "invlists")
+        and int(getattr(vectors, "ntotal", 0)) >= CENTROID_APPROX_MIN_VECTORS
+        and hasattr(vectors, "quantizer")
+    ):
+        try:
+            quantizer = faiss.downcast_index(vectors.quantizer)
+            coarse = np.asarray(
+                quantizer.reconstruct_n(0, int(quantizer.ntotal)),
+                dtype=np.float32,
+            ).reshape(int(quantizer.ntotal), int(vectors.d))
+            weights = np.fromiter(
+                (
+                    vectors.invlists.list_size(list_no)
+                    for list_no in range(int(vectors.nlist))
+                ),
+                dtype=np.float64,
+                count=int(vectors.nlist),
+            )
+            total = (coarse * weights[:, None]).sum(
+                axis=0, dtype=np.float64
+            )
+            norm = np.linalg.norm(total)
+            if norm > 0 and np.isfinite(norm):
+                index.browse_centroid = (total / norm).astype(
+                    np.float32
+                ).reshape(1, -1)
+                return index.browse_centroid
+        except Exception:
+            # Fall through to the exact path when a quantizer layout is not
+            # one of the standard flat coarse indexes.
+            total = np.zeros(vectors.d, dtype=np.float64)
+    if (
+        int(getattr(vectors, "ntotal", 0)) >= CENTROID_APPROX_MIN_VECTORS
+        and not hasattr(vectors, "invlists")
+    ):
+        try:
+            base = (
+                faiss.downcast_index(vectors.index)
+                if hasattr(vectors, "index") else vectors
+            )
+            count = min(int(base.ntotal), 8192)
+            offsets = np.linspace(
+                0, int(base.ntotal) - 1, count, dtype=np.int64
+            )
+            sample = np.asarray(base.reconstruct_batch(offsets), dtype=np.float32)
+            norms = np.linalg.norm(sample, axis=1, keepdims=True)
+            np.divide(sample, norms, out=sample, where=norms != 0)
+            total = sample.sum(axis=0, dtype=np.float64)
+            norm = np.linalg.norm(total)
+            if norm > 0 and np.isfinite(norm):
+                index.browse_centroid = (total / norm).astype(
+                    np.float32
+                ).reshape(1, -1)
+                return index.browse_centroid
+        except Exception:
+            total = np.zeros(vectors.d, dtype=np.float64)
     if hasattr(vectors, "invlists"):
         vector = np.empty(vectors.d, dtype=np.float32)
         position = 0
@@ -236,6 +317,59 @@ def _doc_rows(db, docs: list[dict[str, Any]]) -> dict[int, str]:
     return rows
 
 
+def _build_id_lookup(index: Any, vectors: Any):
+    """Build an id -> vector-offset lookup for one FAISS index.
+
+    The lookup is stored on the index handle, so a broad sorted query pays the
+    one-time scan once instead of rescanning every vector id for every source
+    on every request.
+    """
+    import faiss
+    import numpy as np
+
+    if hasattr(vectors, "id_map"):
+        ids = faiss.vector_to_array(vectors.id_map).astype(np.int64, copy=False)
+        order = np.argsort(ids, kind="stable")
+        entry = ("idmap", ids[order], order)
+    elif hasattr(vectors, "invlists"):
+        id_chunks: list[Any] = []
+        code_chunks: list[Any] = []
+        for list_no in range(int(vectors.nlist)):
+            size = vectors.invlists.list_size(list_no)
+            if not size:
+                continue
+            pointer = vectors.invlists.get_ids(list_no)
+            try:
+                ids = faiss.rev_swig_ptr(pointer, size).astype(
+                    np.int64, copy=True
+                )
+            finally:
+                vectors.invlists.release_ids(list_no, pointer)
+            id_chunks.append(ids)
+            # The package has fewer than 2**32 vectors per list. Encode the
+            # inverted-list coordinates in one integer alongside the sorted id.
+            code_chunks.append(
+                (np.int64(list_no) << 32) | np.arange(size, dtype=np.int64)
+            )
+        if not id_chunks:
+            return None
+        ids = np.concatenate(id_chunks)
+        codes = np.concatenate(code_chunks)
+        order = np.argsort(ids, kind="stable")
+        entry = ("ivf", ids[order], codes[order])
+    else:
+        entry = ("direct", None, None)
+    index.browse_id_lookup = entry
+    return entry
+
+
+def _id_lookup(index: Any, vectors: Any):
+    cached = getattr(index, "browse_id_lookup", None)
+    if cached is not None:
+        return cached
+    return _build_id_lookup(index, vectors)
+
+
 def _reconstruct_rows(index: Any, rows: dict[int, str], deadline: float | None):
     import faiss
     import numpy as np
@@ -244,38 +378,84 @@ def _reconstruct_rows(index: Any, rows: dict[int, str], deadline: float | None):
         return {}
     vectors = index.faiss_index
     wanted = np.array(list(rows), dtype=np.int64)
+    lookup = None
+    if hasattr(vectors, "id_map") or hasattr(vectors, "invlists"):
+        if int(getattr(vectors, "ntotal", 0)) >= ID_LOOKUP_MIN_VECTORS:
+            lookup = _id_lookup(index, vectors)
     reconstructed = {}
     if hasattr(vectors, "invlists"):
-        vector = np.empty(vectors.d, dtype=np.float32)
-        for list_no in range(vectors.nlist):
-            _check_deadline(deadline)
-            size = vectors.invlists.list_size(list_no)
-            if not size:
-                continue
-            pointer = vectors.invlists.get_ids(list_no)
-            try:
-                ids = faiss.rev_swig_ptr(pointer, size)
-                offsets = np.flatnonzero(np.isin(ids, wanted))
-                matching = ids[offsets].copy()
-            finally:
-                vectors.invlists.release_ids(list_no, pointer)
-            # IVF search_and_reconstruct cannot combine an ID selector with
-            # store_pairs. Read matching offsets without a mutable direct map.
-            for offset, rowid in zip(offsets, matching):
+        if lookup is not None:
+            sorted_ids, codes = lookup[1], lookup[2]
+            positions = np.searchsorted(sorted_ids, wanted)
+            valid = positions < len(sorted_ids)
+            valid[valid] &= sorted_ids[positions[valid]] == wanted[valid]
+            vector = np.empty(vectors.d, dtype=np.float32)
+            for rowid, code in zip(wanted[valid], codes[positions[valid]]):
                 _check_deadline(deadline)
+                list_no = int(code >> 32)
+                offset = int(code & 0xFFFFFFFF)
                 vectors.reconstruct_from_offset(
-                    list_no, int(offset), faiss.swig_ptr(vector),
+                    list_no, offset, faiss.swig_ptr(vector),
                 )
                 reconstructed[int(rowid)] = vector.copy()
+        else:
+            vector = np.empty(vectors.d, dtype=np.float32)
+            for list_no in range(vectors.nlist):
+                _check_deadline(deadline)
+                size = vectors.invlists.list_size(list_no)
+                if not size:
+                    continue
+                pointer = vectors.invlists.get_ids(list_no)
+                try:
+                    ids = faiss.rev_swig_ptr(pointer, size)
+                    offsets = np.flatnonzero(np.isin(ids, wanted))
+                    matching = ids[offsets].copy()
+                finally:
+                    vectors.invlists.release_ids(list_no, pointer)
+                # IVF search_and_reconstruct cannot combine an ID selector
+                # with store_pairs. Read matching offsets without a mutable
+                # direct map.
+                for offset, rowid in zip(offsets, matching):
+                    _check_deadline(deadline)
+                    vectors.reconstruct_from_offset(
+                        list_no, int(offset), faiss.swig_ptr(vector),
+                    )
+                    reconstructed[int(rowid)] = vector.copy()
     else:
-        base = faiss.downcast_index(vectors.index) if hasattr(vectors, "index") else vectors
-        ids = (
-            faiss.vector_to_array(vectors.id_map)
-            if hasattr(vectors, "id_map") else np.arange(base.ntotal)
+        base = (
+            faiss.downcast_index(vectors.index)
+            if hasattr(vectors, "index") else vectors
         )
-        for offset in np.flatnonzero(np.isin(ids, wanted)):
-            _check_deadline(deadline)
-            reconstructed[int(ids[offset])] = base.reconstruct(int(offset))
+        if lookup is not None:
+            sorted_ids, offsets = lookup[1], lookup[2]
+            positions = np.searchsorted(sorted_ids, wanted)
+            valid = positions < len(sorted_ids)
+            valid[valid] &= sorted_ids[positions[valid]] == wanted[valid]
+            selected = offsets[positions[valid]]
+            if len(selected):
+                _check_deadline(deadline)
+                try:
+                    batch = base.reconstruct_batch(
+                        np.asarray(selected, dtype=np.int64)
+                    )
+                except Exception:
+                    batch = None
+                if batch is None:
+                    for rowid, offset in zip(wanted[valid], selected):
+                        reconstructed[int(rowid)] = base.reconstruct(
+                            int(offset)
+                        )
+                else:
+                    for rowid, vector in zip(wanted[valid], batch):
+                        reconstructed[int(rowid)] = vector
+        else:
+            ids = (
+                faiss.vector_to_array(vectors.id_map)
+                if hasattr(vectors, "id_map") else np.arange(base.ntotal)
+            )
+            for offset in np.flatnonzero(np.isin(ids, wanted)):
+                _check_deadline(deadline)
+                reconstructed[int(ids[offset])] = base.reconstruct(int(offset))
     result = {}
     for rowid, vector in reconstructed.items():
         norm = np.linalg.norm(vector)
@@ -351,24 +531,17 @@ def sort_scores(
                 if rowid not in {candidate for _, candidate in ranked}
             )
         else:
-            import faiss
-            import numpy as np
-
             centroid = _centroid(index, deadline)
-            query = -centroid
-            selector = faiss.IDSelectorBatch(np.array(list(rows), dtype=np.int64))
-            vectors = index.faiss_index
-            params = (
-                faiss.SearchParametersIVF(sel=selector, nprobe=vectors.nlist)
-                if hasattr(vectors, "nlist")
-                else faiss.SearchParameters(sel=selector)
-            )
-            scores, ids = vectors.search(query, len(rows), params=params)
-            ranked = [
-                (float(score), int(rowid))
-                for score, rowid in zip(scores[0], ids[0])
-                if rowid in rows and math.isfinite(float(score))
-            ]
+            vectors_by_path = _reconstruct_rows(index, rows, deadline)
+            ranked = []
+            for rowid, path in rows.items():
+                vector = vectors_by_path.get(path)
+                if vector is None:
+                    continue
+                score = -float(vector @ centroid[0])
+                if math.isfinite(score):
+                    ranked.append((score, int(rowid)))
+            ranked.sort(key=lambda item: item[0], reverse=True)
         _check_deadline(deadline)
         scores_by_path: dict[str, float] = {}
         for score, rowid in ranked:

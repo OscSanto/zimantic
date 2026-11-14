@@ -105,6 +105,11 @@ DEFAULT_MAX_RESULTS = 100
 # next/previous paging path does not re-run the source fan-out. Deeper pages
 # grow the ranked block in whole multiples of this initial block.
 DEFAULT_INITIAL_POOL_FACTOR = 2
+# Alternate query sorts must see more than one relevance page before they cut
+# down to the display pool, or "rarest"/"most diverse" can only rearrange the
+# same small prefix. They keep a larger single block; deeper pages expand it in
+# multiples, so the full candidate total remains pageable.
+SORT_INITIAL_POOL_FACTOR = 4
 # The UI shows this many source chips per collection group until the reader
 # asks for the rest. It is a display budget, never a search-scope promotion.
 DEFAULT_SOURCE_FILTER_LIMIT = 10
@@ -1696,18 +1701,13 @@ class Search:
     def _uses_deep_query_paging(
         query: str, browse: str | None, sort: str | None,
     ) -> bool:
-        """True when a query ranking is a stable prefix over more pages.
+        """True when a query ranking can grow its materialized block.
 
-        Only the default relevance order is guaranteed to be a prefix when the
-        ranked block grows. Browse orders and seeded random resumes are not
-        stable prefixes, and the alternative query sorts reorder a pool whose
-        membership can change with depth, so they keep the bounded block.
+        Query orders reuse the same candidate ranking, so a larger block is a
+        prefix of the same order. Browse orders and seeded random resumes are
+        separate, bounded sequences and keep the old single-block behavior.
         """
-        return (
-            browse is None
-            and bool(query)
-            and (sort is None or sort == "relevance")
-        )
+        return browse is None and bool(query)
 
     def _initial_pool_target(
         self,
@@ -1719,10 +1719,12 @@ class Search:
         """Ranked results kept for the first page of a query search."""
         if not self._uses_deep_query_paging(query, browse, sort):
             return self._pool_target()
-        return max(
-            self._pool_target(),
-            self.max_results * DEFAULT_INITIAL_POOL_FACTOR,
+        factor = (
+            DEFAULT_INITIAL_POOL_FACTOR
+            if sort in (None, "relevance")
+            else SORT_INITIAL_POOL_FACTOR
         )
+        return max(self._pool_target(), self.max_results * factor)
 
     def _pool_target_for(
         self,
@@ -2440,13 +2442,27 @@ class Search:
         Partial pools get a short TTL so a reload reuses them instead of
         repeating a deadline-limited fan-out.
         """
+        alternate_sort = bool(query and sort and sort != "relevance")
         if pool is None:
-            pool = self._rank_results(source_results, query, pool_target, deadline=deadline)
-        pool = self._enrich_pool(
-            source_results, query, pool, pool_target, deadline=deadline
-        )
-        if query and sort and sort != "relevance":
-            pool = self._sort_results(pool, sort, seed, deadline, query_vector=query_vector)
+            pool = self._rank_results(
+                source_results, query, pool_target, deadline=deadline
+            )
+        if alternate_sort:
+            # Sort the larger candidate block before cutting it down to the
+            # display pool. Enrichment stays bounded because it opens archives;
+            # the sort block is already the materialized prefix needed for this
+            # page and expands on deeper pages.
+            pool = self._enrich_pool(
+                source_results, query, pool, pool_target, deadline=deadline,
+            )
+            pool = self._sort_results(
+                pool, sort, seed, deadline,
+                query_vector=query_vector, limit=pool_target,
+            )
+        else:
+            pool = self._enrich_pool(
+                source_results, query, pool, pool_target, deadline=deadline
+            )
         total = self._result_total(
             source_results, pool, query=query, browse=browse, sort=sort,
         )
@@ -3244,17 +3260,22 @@ class Search:
         *,
         deadline: float | None = None,
     ) -> list[dict[str, Any]]:
-        """Fill MIME types and run the content-phrase check through runtimes."""
+        """Fill MIME types and run the content-phrase check through runtimes.
+
+        ``limit`` bounds how many of the supplied candidates are read from the
+        archive. Sorted queries use their larger relevance block as the limit.
+        """
         phrase_words = _phrase_words(query)
         query_terms = _query_terms(query)
         phrase_active = len(phrase_words) >= 2 and bool(pool)
         _, _, _, docs, source_by_key = _collect_ranked_candidates(source_results)
         with self._state_lock:
             runtimes = dict(self.runtimes)
+        enrich_pool = pool[: max(0, int(limit))]
 
         phrase_ids: set[str] = set()
         if phrase_active:
-            for result in pool:
+            for result in enrich_pool:
                 if len(phrase_ids) >= MAX_PHRASE_CANDIDATES:
                     break
                 source = source_by_key.get(result.get("source_key"))
@@ -3271,7 +3292,7 @@ class Search:
                 phrase_ids.add(result["id"])
 
         grouped: dict[str, list[dict[str, Any]]] = {}
-        for result in pool:
+        for result in enrich_pool:
             source = source_by_key.get(result.get("source_key"))
             if source is None:
                 continue
@@ -3404,6 +3425,8 @@ class Search:
                     for doc in docs if doc["path"] in by_path
                 })
         ordered = sorted(pool, key=lambda doc: -scores.get(doc["id"], -math.inf))
+        if limit is not None:
+            ordered = ordered[: max(0, int(limit))]
         return [
             {
                 **doc,
@@ -3495,7 +3518,7 @@ class Search:
         self,
         source_results: list[SourceResult],
         query: str,
-        limit: int,
+        limit: int | None,
         *,
         deadline: float | None = None,
     ) -> list[dict[str, Any]]:

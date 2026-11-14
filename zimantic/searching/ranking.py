@@ -301,9 +301,15 @@ def _render_ranked_document(assessment: _RankedAssessment) -> dict[str, Any]:
 def rank_results(
     source_results: list[SourceResult],
     query: str,
-    limit: int,
+    limit: int | None,
     candidate_count: int,
 ) -> list[dict[str, Any]]:
+    """Rank candidates, optionally without cutting the result list.
+
+    ``limit=None`` keeps every retrieved candidate and gives every channel hit
+    an RRF contribution. Callers that need to order a complete candidate set
+    before their own display cut can use that form.
+    """
     query_words = _query_terms(query)
     semantic, keyword, fulltext, docs, source_by_key = _collect_ranked_candidates(
         source_results
@@ -311,7 +317,7 @@ def rank_results(
     scores, rrf_details, fulltext_weight = _rrf_scores(
         (semantic, keyword, fulltext),
         query,
-        max(candidate_count, limit),
+        len(docs) if limit is None else max(candidate_count, limit),
     )
     assessed = [
         _assess_ranked_document(
@@ -338,7 +344,8 @@ def rank_results(
         )
     )
     ranked = []
-    for final_rank, assessment in enumerate(assessed[:limit], 1):
+    selected = assessed if limit is None else assessed[:limit]
+    for final_rank, assessment in enumerate(selected, 1):
         output = _render_ranked_document(assessment)
         output["ranking"]["final_rank"] = final_rank
         ranked.append(output)

@@ -62,6 +62,12 @@ class IndexHandle:
     )
     browse_total: int | None = field(default=None, repr=False, compare=False)
     browse_centroid: Any | None = field(default=None, repr=False, compare=False)
+    # Cached FAISS id lookup so diversity reconstruction does not rescan every
+    # vector id for each query. Guarded by browse_lock like the other browse
+    # caches above.
+    browse_id_lookup: Any | None = field(
+        default=None, repr=False, compare=False
+    )
     source_size: int | None = None
     zim_path: str | None = None
     zim_signature: tuple[int, int, int, int] | None = None
@@ -133,6 +139,7 @@ class IndexHandle:
             self.browse_rankings.clear()
             self.browse_total = None
             self.browse_centroid = None
+            self.browse_id_lookup = None
             # The new archive may or may not carry a native full-text index.
             self.has_fulltext_index = None
             self.zim_path = zim_path
@@ -209,6 +216,7 @@ class IndexHandle:
         self.browse_rankings.clear()
         self.browse_total = None
         self.browse_centroid = None
+        self.browse_id_lookup = None
 
     @staticmethod
     def _close_connections(connections: list[sqlite3.Connection | None]) -> None:
