@@ -38,7 +38,7 @@ onnx_build_threads = 1
 
 # Serving concurrency remains automatic.
 # nprobe = 64
-min_cosine_similarity = 0.85
+min_cosine_similarity = 0.0
 
 candidate_count = 16
 max_stream_ranks = 16

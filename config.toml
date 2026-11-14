@@ -182,11 +182,10 @@ port = 8090
 # nprobe = 64
 
 # Meaning matches below this cosine similarity are discarded when the source
-# also has a title or full-text match. A meaning-only query keeps its best
-# candidates regardless, so this cannot turn it into an empty result list.
-# Lower it (0.80) when a lexical match should not suppress broader meaning
-# matches, for example for cross-language queries.
-# min_cosine_similarity = 0.85
+# also has a title or full-text match. The default of 0 keeps every semantic
+# candidate in the ranking. Raise it (0.80-0.85) to suppress weak semantic
+# matches for same-language queries.
+# min_cosine_similarity = 0.0
 
 # Maximum admitted user searches, not source threads or libzim processes.
 # Profile ceilings (desktop 4, mobile 2, supercomputer 8) are automatically

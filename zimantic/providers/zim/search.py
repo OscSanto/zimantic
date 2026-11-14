@@ -27,7 +27,7 @@ from ...searching.ranking import source_items
 logger = logging.getLogger(__name__)
 
 PREVIEW_HTML_BYTES = 32 << 10
-DEFAULT_MIN_COSINE_SIMILARITY = 0.85
+DEFAULT_MIN_COSINE_SIMILARITY = 0.0
 MAX_PHRASE_CANDIDATES = 32
 
 _PHRASE_MIMETYPES = frozenset(

@@ -30,7 +30,7 @@ from .native import coerce_native_hits
 from .types import NativeHit
 
 RRF_K = 60
-DEFAULT_MIN_COSINE_SIMILARITY = 0.85
+DEFAULT_MIN_COSINE_SIMILARITY = 0.0
 logger = logging.getLogger(__name__)
 
 

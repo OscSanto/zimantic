@@ -29,7 +29,7 @@ max_preview_chars = 1_000
 # physical cores; query embeddings have their own automatic thread budget.
 
 # nprobe = 64
-min_cosine_similarity = 0.85
+min_cosine_similarity = 0.0
 
 # Source threads, native processes and user-search admission stay automatic.
 candidate_count = 16

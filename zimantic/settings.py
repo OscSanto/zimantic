@@ -79,7 +79,7 @@ _COMMON = {
     # never removes searchable postings.
     "max_derived_cache_bytes_per_source": 536_870_912,
     "preview_limit": 10,
-    "min_cosine_similarity": 0.85,
+    "min_cosine_similarity": 0.0,
     "source_timeout": 12,
     # Monotonic deadline for one admitted search: source scheduling, ranking,
     # and bounded preview work all share it.

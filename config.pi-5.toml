@@ -32,7 +32,7 @@ onnx_build_threads = 3
 # onnx_build_workers = 1
 
 # nprobe = 64
-min_cosine_similarity = 0.85
+min_cosine_similarity = 0.0
 
 # Source threads, native processes and user-search admission stay automatic.
 candidate_count = 16

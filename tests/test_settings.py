@@ -49,6 +49,11 @@ class HardwareProfileTests(unittest.TestCase):
                 ):
                     self.assertEqual(profile_for_hardware(), expected)
 
+    def test_semantic_similarity_floor_defaults_to_zero(self):
+        for profile in ("mobile", "desktop", "supercomputer"):
+            with self.subTest(profile=profile):
+                self.assertEqual(PROFILES[profile]["min_cosine_similarity"], 0.0)
+
     def test_build_workers_scale_with_cpu_and_memory(self):
         self.assertEqual(default_build_workers(4, 0.5), 1)
         self.assertEqual(default_build_workers(8, 8), 2)

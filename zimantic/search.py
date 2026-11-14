@@ -99,7 +99,7 @@ DEFAULT_STREAM_UPDATE_INTERVAL = 0.7
 # Reusing that pool briefly makes a page reload much cheaper without pinning an
 # incomplete answer for long; the next attempt can complete the missing sources.
 DEFAULT_PARTIAL_CACHE_SECONDS = 60.0
-DEFAULT_MIN_COSINE_SIMILARITY = 0.85
+DEFAULT_MIN_COSINE_SIMILARITY = 0.0
 DEFAULT_PAGE_SIZE = 10
 DEFAULT_MAX_RESULTS = 100
 # The first response keeps a larger ranked block than one page so the common
