@@ -6686,5 +6686,21 @@
                 }
             });
 
+            const themePicker = $("themePicker");
+            if (themePicker) {
+                themePicker.value = window.zimanticTheme?.theme || "system";
+                themePicker.addEventListener("change", () => {
+                    const theme =
+                        window.zimanticTheme?.set(themePicker.value) ||
+                        themePicker.value;
+                    // The article shell lives in its own document and reads the
+                    // saved theme on load; keep an already-open one in sync.
+                    $("articleModalFrame")?.contentWindow?.postMessage(
+                        { type: "zimantic-theme", theme },
+                        "*",
+                    );
+                });
+            }
+
             initialize();
         })();

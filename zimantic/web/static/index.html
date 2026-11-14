@@ -9,6 +9,7 @@
         <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
         <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
         <link rel="manifest" href="site.webmanifest" />
+        <script src="theme.js"></script>
         <link rel="stylesheet" href="app.css" />
     </head>
     <body>
@@ -178,6 +179,14 @@
                     <select id="localePicker" aria-label="Language" data-i18n-aria-label="Language">
                         <option value="en">English</option>
                         <option value="es">Español</option>
+                    </select>
+                </label>
+                <label>
+                    <span data-i18n="Theme">Theme</span>
+                    <select id="themePicker" aria-label="Theme" data-i18n-aria-label="Theme">
+                        <option value="system" data-i18n="System">System</option>
+                        <option value="light" data-i18n="Light">Light</option>
+                        <option value="dark" data-i18n="Dark">Dark</option>
                     </select>
                 </label>
             </details>

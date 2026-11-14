@@ -347,6 +347,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
         ("/app.css", web_app.APP_CSS, "text/css", True),
         ("/app.js", web_app.APP_JS, "application/javascript", True),
         ("/i18n.js", web_app.I18N, "application/javascript", True),
+        ("/theme.js", web_app.THEME, "application/javascript", True),
         (
             "/indexeddb-shim.js",
             web_app.INDEXEDDB_SHIM,

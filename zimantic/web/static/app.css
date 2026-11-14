@@ -11,10 +11,11 @@
     --ok-border: #2e5c3f;
     --err: #e06a6a;
     --err-border: #5c2e2e;
+    --overlay-bg: rgba(15, 17, 21, 0.7);
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: light) {
-    :root {
+    :root:not([data-theme]) {
         color-scheme: light;
         --bg: #f6f7f9;
         --panel: #fff;
@@ -27,7 +28,26 @@
         --ok-border: #a8d8b8;
         --err: #b42318;
         --err-border: #f0b4ae;
+        --overlay-bg: rgba(255, 255, 255, 0.7);
     }
+}
+:root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f6f7f9;
+    --panel: #fff;
+    --border: #dde1e7;
+    --text: #1b1f24;
+    --muted: #5d6673;
+    --accent: #1f6fd6;
+    --mark-bg: rgba(31, 111, 214, 0.12);
+    --ok: #1f7a3d;
+    --ok-border: #a8d8b8;
+    --err: #b42318;
+    --err-border: #f0b4ae;
+    --overlay-bg: rgba(255, 255, 255, 0.7);
+}
+:root[data-theme="dark"] {
+    color-scheme: dark;
 }
 * {
     box-sizing: border-box;
@@ -1056,7 +1076,7 @@ body.modal-open {
 }
 .external-link-notice {
     align-items: center;
-    background: rgba(255, 255, 255, 0.7);
+    background: var(--overlay-bg);
     display: flex;
     flex: 1;
     flex-direction: column;
@@ -1071,11 +1091,11 @@ body.modal-open {
     display: none;
 }
 .external-link-notice-panel {
-    background: #fff;
-    border: 1px solid #dde1e7;
+    background: var(--panel);
+    border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
-    color: #1b1f24;
+    color: var(--text);
     display: flex;
     flex-direction: column;
     max-width: 680px;
@@ -1095,7 +1115,7 @@ body.modal-open {
     margin-bottom: 16px;
 }
 .external-link-notice-panel .external-link-url {
-    color: #5d6673;
+    color: var(--muted);
     font: 0.85rem var(--mono);
     overflow-wrap: anywhere;
 }
@@ -1103,11 +1123,6 @@ body.modal-open {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-}
-@media (prefers-color-scheme: dark) {
-    .external-link-notice {
-        background: rgba(15, 17, 21, 0.7);
-    }
 }
 .empty {
     color: var(--muted);

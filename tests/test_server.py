@@ -523,6 +523,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn('href="app.css?v=', page.text)
         self.assertIn('src="app.js?v=', page.text)
         self.assertIn('src="i18n.js?v=', page.text)
+        self.assertIn('src="theme.js?v=', page.text)
         self.assertEqual(page.headers["cache-control"], "no-cache")
         self.assertNotIn('id="libraryRandom"', page.text)
         self.assertIn('id="articleModalFrame"', page.text)
@@ -548,6 +549,11 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(i18n.status_code, 200)
         self.assertTrue(i18n.headers["content-type"].startswith("application/javascript"))
         self.assertIn("data-i18n", i18n.text)
+
+        theme = self.client.get("/theme.js")
+        self.assertEqual(theme.status_code, 200)
+        self.assertTrue(theme.headers["content-type"].startswith("application/javascript"))
+        self.assertIn("zimantic.theme", theme.text)
 
         shim = self.client.get("/indexeddb-shim.js")
         self.assertEqual(shim.status_code, 200)
@@ -586,6 +592,7 @@ class ServerTests(unittest.TestCase):
             "/app.css",
             "/app.js",
             "/i18n.js",
+            "/theme.js",
             "/indexeddb-shim.js",
         ):
             with self.subTest(path=path):

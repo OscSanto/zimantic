@@ -227,41 +227,75 @@ script[data-zimantic-toolbar] { display: none !important; }
   white-space: nowrap !important;
 }
 @media (prefers-color-scheme: light) {
-  nav[data-zimantic-toolbar] {
+  :root:not([data-theme="dark"]) nav[data-zimantic-toolbar] {
     color-scheme: light;
     background: #fff !important;
     border-color: #dde1e7 !important;
     box-shadow: 0 1px 5px rgba(0, 0, 0, .12) !important;
     color: #1b1f24 !important;
   }
-  [data-zimantic-toolbar] a,
-  [data-zimantic-toolbar] button {
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] a,
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] button {
     border-color: #b8c0cc !important;
     color: #1f5fae !important;
   }
-  [data-zimantic-toolbar] a:hover,
-  [data-zimantic-toolbar] button:hover { background: #eef5ff !important; }
-  [data-zimantic-toolbar] .zimantic-toolbar-separator { color: #5d6673 !important; }
-  [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input {
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] a:hover,
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] button:hover { background: #eef5ff !important; }
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-separator { color: #5d6673 !important; }
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input {
     background: #fff !important;
     border-color: #b8c0cc !important;
     color: #1b1f24 !important;
   }
-  [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input::placeholder {
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input::placeholder {
     color: #5d6673 !important;
   }
-  [data-zimantic-toolbar] .zimantic-toolbar-suggestions {
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-suggestions {
     background: #fff !important;
     border-color: #b8c0cc !important;
     box-shadow: 0 6px 18px rgba(0, 0, 0, .15) !important;
   }
-  [data-zimantic-toolbar] .zimantic-toolbar-suggestion:hover,
-  [data-zimantic-toolbar] .zimantic-toolbar-suggestion[aria-selected="true"] {
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-suggestion:hover,
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-suggestion[aria-selected="true"] {
     background: #eef5ff !important;
   }
-  [data-zimantic-toolbar] .zimantic-toolbar-suggestion-title { color: #1b1f24 !important; }
-  [data-zimantic-toolbar] .zimantic-toolbar-suggestion-path { color: #5d6673 !important; }
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-suggestion-title { color: #1b1f24 !important; }
+  :root:not([data-theme="dark"]) [data-zimantic-toolbar] .zimantic-toolbar-suggestion-path { color: #5d6673 !important; }
 }
+:root[data-theme="light"] nav[data-zimantic-toolbar] {
+  color-scheme: light;
+  background: #fff !important;
+  border-color: #dde1e7 !important;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .12) !important;
+  color: #1b1f24 !important;
+}
+:root[data-theme="light"] [data-zimantic-toolbar] a,
+:root[data-theme="light"] [data-zimantic-toolbar] button {
+  border-color: #b8c0cc !important;
+  color: #1f5fae !important;
+}
+:root[data-theme="light"] [data-zimantic-toolbar] a:hover,
+:root[data-theme="light"] [data-zimantic-toolbar] button:hover { background: #eef5ff !important; }
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-separator { color: #5d6673 !important; }
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input {
+  background: #fff !important;
+  border-color: #b8c0cc !important;
+  color: #1b1f24 !important;
+}
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-zim-search-input::placeholder {
+  color: #5d6673 !important;
+}
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-suggestions {
+  background: #fff !important;
+  border-color: #b8c0cc !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .15) !important;
+}
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-suggestion:hover,
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-suggestion[aria-selected="true"] {
+  background: #eef5ff !important;
+}
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-suggestion-title { color: #1b1f24 !important; }
+:root[data-theme="light"] [data-zimantic-toolbar] .zimantic-toolbar-suggestion-path { color: #5d6673 !important; }
 /* Tablets: keep every control reachable. Long article paths used to make the
    nowrap nav group wider than the viewport and push the action group off
    screen with no way to scroll to it. Give the nav and action groups their

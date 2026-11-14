@@ -37,6 +37,7 @@ PAGE = ASSET_DIR / "index.html"
 APP_CSS = ASSET_DIR / "app.css"
 APP_JS = ASSET_DIR / "app.js"
 I18N = ASSET_DIR / "i18n.js"
+THEME = ASSET_DIR / "theme.js"
 INDEXEDDB_SHIM = ASSET_DIR / "indexeddb-shim.js"
 FAVICON = ASSET_DIR / "favicon.ico"
 FAVICON_SVG = ASSET_DIR / "favicon.svg"
@@ -157,7 +158,7 @@ def _static_version() -> str:
     deployed. The asset's own ETag still hashes its bytes.
     """
     digest = hashlib.sha1()
-    for path in (APP_CSS, APP_JS, I18N):
+    for path in (APP_CSS, APP_JS, I18N, THEME):
         stat = path.stat()
         digest.update(f"{path}:{stat.st_mtime_ns}:{stat.st_size}".encode())
     return digest.hexdigest()[:12]
@@ -177,6 +178,7 @@ def _versioned_page() -> bytes:
     )
     document = document.replace('src="app.js"', f'src="app.js?v={version}"')
     document = document.replace('src="i18n.js"', f'src="i18n.js?v={version}"')
+    document = document.replace('src="theme.js"', f'src="theme.js?v={version}"')
     return document.encode("utf-8")
 
 
@@ -256,6 +258,14 @@ CONTENT_SHELL_STYLE = (
     '<style data-zimantic-shell>\n'
     + _read_static_text("content-shell.css")
     + "\n</style>"
+)
+
+# The article shell is its own document; apply the saved theme before its
+# toolbar styles paint so an explicit light/dark choice is not lost there.
+CONTENT_SHELL_THEME = (
+    '<script data-zimantic-theme>\n'
+    + _read_static_text("theme.js")
+    + "\n</script>"
 )
 
 
@@ -923,6 +933,7 @@ def _content_shell(
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{title}</title>\n"
         + icon_link
+        + CONTENT_SHELL_THEME
         + ARTICLE_TOOLBAR_STYLE
         + CONTENT_SHELL_STYLE
         + "\n</head>\n<body>\n"
@@ -1151,6 +1162,7 @@ def warm_static_cache() -> None:
         (APP_CSS, "text/css"),
         (APP_JS, "application/javascript"),
         (I18N, "application/javascript"),
+        (THEME, "application/javascript"),
         (INDEXEDDB_SHIM, "application/javascript"),
     ):
         _cached_asset(_static_key(path), path.read_bytes, media_type)

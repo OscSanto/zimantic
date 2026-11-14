@@ -4,8 +4,16 @@ html, body {
   max-width: 100%;
   overflow: hidden;
 }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --shell-bg: #0f1115;
+  }
+}
+:root[data-theme="dark"] {
+  --shell-bg: #0f1115;
+}
 body {
-  background: #fff;
+  background: var(--shell-bg, #fff);
   display: flex;
   flex-direction: column;
 }
