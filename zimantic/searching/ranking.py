@@ -1,5 +1,7 @@
 """Pure ranking and scoring helpers for hybrid search."""
 
+import hashlib
+import heapq
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -91,6 +93,7 @@ def _rrf_scores(
     ranked_lists,
     query: str,
     candidate_limit: int,
+    wanted: set[str] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict[str, dict[str, Any]]], float]:
     scores: dict[str, float] = {}
     fulltext_weight = (
@@ -105,9 +108,12 @@ def _rrf_scores(
         (ranked_lists[2], "fulltext", fulltext_weight),
     ):
         for rank, (raw_score, _, doc) in enumerate(ranked[:candidate_limit]):
+            identity = doc["id"]
             contribution = weight / (RRF_K + rank + 1)
-            scores[doc["id"]] = scores.get(doc["id"], 0.0) + contribution
-            details.setdefault(doc["id"], {})[method] = {
+            scores[identity] = scores.get(identity, 0.0) + contribution
+            if wanted is not None and identity not in wanted:
+                continue
+            details.setdefault(identity, {})[method] = {
                 "rank": rank + 1,
                 "score": round(raw_score, 6),
                 "weight": weight,
@@ -346,6 +352,59 @@ def rank_results(
     ranked = []
     selected = assessed if limit is None else assessed[:limit]
     for final_rank, assessment in enumerate(selected, 1):
+        output = _render_ranked_document(assessment)
+        output["ranking"]["final_rank"] = final_rank
+        ranked.append(output)
+    return ranked
+
+
+def rank_random_results(
+    source_results: list[SourceResult],
+    query: str,
+    seed: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Sample the full retrieved candidate set in deterministic random order.
+
+    Random does not need relevance ordering. Selecting the top ``limit`` ids by
+    the same seeded hash used by the sort keeps a stable prefix for paging while
+    avoiding ranking metadata for candidates outside the requested block.
+    """
+    if limit <= 0:
+        return []
+    query_words = _query_terms(query)
+    semantic, keyword, fulltext, docs, source_by_key = _collect_ranked_candidates(
+        source_results
+    )
+    if not docs:
+        return []
+
+    def random_key(doc: dict[str, Any]) -> float:
+        return int.from_bytes(
+            hashlib.blake2b(
+                f"{seed}:{doc['id']}".encode(), digest_size=8
+            ).digest()
+        ) / 2**64
+
+    selected = heapq.nlargest(
+        min(int(limit), len(docs)), docs.values(), key=random_key
+    )
+    wanted = {doc["id"] for doc in selected}
+    scores, rrf_details, fulltext_weight = _rrf_scores(
+        (semantic, keyword, fulltext), query, len(docs), wanted,
+    )
+    ranked = []
+    for final_rank, doc in enumerate(selected, 1):
+        assessment = _assess_ranked_document(
+            doc["id"],
+            doc,
+            query_words,
+            query,
+            source_by_key,
+            scores,
+            rrf_details,
+            fulltext_weight,
+        )
         output = _render_ranked_document(assessment)
         output["ranking"]["final_rank"] = final_rank
         ranked.append(output)

@@ -259,7 +259,7 @@ The source picker discovers available sources and sorts matching sources by resu
 
 ## Sorting and empty searches
 
-The **Sort by** selector below the search bar offers Relevance, Random, Rare titles, Semantic outliers, Diversity, and Recency. With a query, every order reports the full retrieved-candidate total and pages past the first display block. Relevance ranks `max_results * 2` candidates first; alternate sorts rank `max_results * 4` candidates before cutting to the page, and deeper pages expand that sorted block on demand. Items without the local statistics that an order needs follow the scored matches in relevance order.
+The **Sort by** selector below the search bar offers Relevance, Random, Rare titles, Semantic outliers, Diversity, and Recency. With a query, every order reports the full retrieved-candidate total and pages past the first display block. Relevance ranks `max_results * 2` candidates first; Rare titles, Semantic outliers, Diversity, and Recency rank `max_results * 4` candidates before cutting to the page, and deeper pages expand that block on demand. Random samples the complete retrieved set without ranking it, keeping only the materialized random block. Items without the local statistics that an order needs follow the scored matches in relevance order.
 
 Submitting an empty query, or opening `/?q=`, searches local indexes without embedding a query. Its default order is Diversity, including when semantic search is disabled. `/` opens without a search. Use `/?q=&sort=random`, `/?q=&sort=rare`, `/?q=&sort=outliers`, `/?q=&sort=diverse`, or `/?q=&sort=recency`, optionally with `source` or `collection` filters.
 

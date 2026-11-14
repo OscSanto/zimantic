@@ -68,6 +68,7 @@ from .searching.query import (
 from .searching.ranking import (
     _collect_ranked_candidates,
     matched_by,
+    rank_random_results,
     rank_results,
 )
 from .settings import (
@@ -2443,17 +2444,29 @@ class Search:
         repeating a deadline-limited fan-out.
         """
         alternate_sort = bool(query and sort and sort != "relevance")
+        random_sort = alternate_sort and sort == "random"
         if pool is None:
-            pool = self._rank_results(
-                source_results, query, pool_target, deadline=deadline
-            )
+            if random_sort:
+                # Random samples the complete retrieved set without ranking or
+                # materializing metadata for candidates outside this block.
+                pool = rank_random_results(
+                    source_results, query, seed, pool_target
+                )
+            else:
+                pool = self._rank_results(
+                    source_results, query, pool_target, deadline=deadline
+                )
         if alternate_sort:
-            # Sort the larger candidate block before cutting it down to the
-            # display pool. Enrichment stays bounded because it opens archives;
-            # the sort block is already the materialized prefix needed for this
-            # page and expands on deeper pages.
+            # Sort the candidate set before cutting it down to the display
+            # pool. Enrichment stays bounded because it opens archives; the
+            # sorted block expands on deeper pages.
             pool = self._enrich_pool(
-                source_results, query, pool, pool_target, deadline=deadline,
+                source_results,
+                query,
+                pool,
+                min(pool_target, len(pool)),
+                deadline=deadline,
+                rerank=not random_sort,
             )
             pool = self._sort_results(
                 pool, sort, seed, deadline,
@@ -3259,11 +3272,14 @@ class Search:
         limit: int,
         *,
         deadline: float | None = None,
+        rerank: bool = True,
     ) -> list[dict[str, Any]]:
         """Fill MIME types and run the content-phrase check through runtimes.
 
         ``limit`` bounds how many of the supplied candidates are read from the
         archive. Sorted queries use their larger relevance block as the limit.
+        ``rerank`` is false for a sampled random block, which must keep its
+        membership instead of being replaced by the relevance prefix.
         """
         phrase_words = _phrase_words(query)
         query_terms = _query_terms(query)
@@ -3365,6 +3381,8 @@ class Search:
                         self.public_error(error),
                     )
                     logger.debug("content enrichment error: %s", error)
+        if not rerank:
+            return pool
         return (
             self._rank_results(source_results, query, limit, deadline=deadline)
             if found

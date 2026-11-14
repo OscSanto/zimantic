@@ -72,11 +72,12 @@ port = 8090
 
 # Ranked result block unit for the default relevance order. The first response
 # ranks max_results * 2 results (capped by the true candidate total), so
-# ordinary next/previous paging reuses one cache entry. Alternate query sorts
-# rank a larger block (max_results * 4) before cutting it down to the display
-# page, and every query order reports the full candidate total. Deeper pages
-# expand the materialized block on demand without widening source retrieval.
-# Empty-query browse modes keep a single bounded block. This also caps one page.
+# ordinary next/previous paging reuses one cache entry. Rare/outlier/diversity/
+# recency sorts rank a larger block (max_results * 4) before cutting it down to
+# the display page; random samples the full retrieved set. Every query order
+# reports the full candidate total, and deeper pages expand the materialized
+# block on demand without widening source retrieval. Empty-query browse modes
+# keep a single bounded block. This also caps one page.
 # Desktop 100, mobile 50, supercomputer 200.
 # max_results = 100
 

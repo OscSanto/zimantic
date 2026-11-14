@@ -3319,17 +3319,44 @@ class BrowseSearchTests(unittest.TestCase):
         self.assertEqual([doc["title"] for doc in mixed[:2]], ["Cars", "Battery storage"])
         self.assertEqual({doc["id"] for doc in mixed}, {doc["id"] for doc in ordered})
 
-    def test_text_sorting_preserves_the_relevance_enrichment_candidates(self):
+    def test_windowed_sorts_preserve_the_relevance_enrichment_candidates(self):
         search = self.make_search()
         with (
             patch.object(search, "_query_vector", return_value=None),
             patch.object(search, "_enrich_pool", side_effect=lambda results, query, pool, limit, **_kwargs: pool[:3]),
         ):
             relevance = search.search_page("topic", limit=5)["results"]
-            random = search.search_page("topic", sort="random", seed=7, limit=5)["results"]
+            rare = search.search_page("topic", sort="rare", limit=5)["results"]
         self.assertEqual(
-            {doc["id"] for doc in random}, {doc["id"] for doc in relevance}
+            {doc["id"] for doc in rare}, {doc["id"] for doc in relevance}
         )
+
+    def test_random_sort_samples_beyond_the_initial_sort_window(self):
+        with _temp_dir(self) as tmp:
+            tmp = Path(tmp)
+            rows = [(i, f"Topic {i}", f"item-{i}", None) for i in range(1, 31)]
+            for name in ("alpha", "beta", "gamma", "delta"):
+                _write_index(tmp, name, rows=rows)
+            search = _bare_search({
+                "index_dir": str(tmp),
+                "page_size": 2,
+                "max_results": 2,
+                "candidate_count": 16,
+            })
+            self.addCleanup(search.close)
+            _attach_index_fixtures(search)
+            search.refresh_sources()
+            seen = set()
+            with patch.object(search, "_query_vector", return_value=None):
+                for seed in range(40):
+                    page = search.search_page(
+                        "topic", sort="random", seed=seed, limit=2
+                    )
+                    seen.update(doc["id"] for doc in page["results"])
+            # The initial alternate-sort block is 16 results; a windowed random
+            # order could never surface a seventeenth distinct candidate.
+            self.assertGreater(len(seen), 16)
+            search._executor.shutdown(wait=True)
 
     def test_semantic_browse_recovers_when_deferred_vectors_become_available(self):
         import faiss
