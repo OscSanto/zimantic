@@ -3886,17 +3886,32 @@
                     }
                     return link;
                 };
-                const prev = pageLink(
-                    "prev",
-                    `← ${t("Previous")}`,
-                    current.page - 1,
-                    current.page === 0,
-                );
-                const next = pageLink(
-                    "next",
-                    `${t("Next")} →`,
-                    current.page + 1,
-                    current.page >= pageCount - 1,
+                const start = document.createElement("div");
+                start.className = "pager-controls pager-controls-start";
+                const end = document.createElement("div");
+                end.className = "pager-controls pager-controls-end";
+                // First is a shortcut back to page 0, so it only appears once
+                // Previous alone would still leave two pages to skip.
+                if (current.page > 1) {
+                    start.append(pageLink("first", `« ${t("First")}`, 0, false));
+                }
+                if (current.page > 0) {
+                    start.append(
+                        pageLink(
+                            "prev",
+                            `← ${t("Previous")}`,
+                            current.page - 1,
+                            false,
+                        ),
+                    );
+                }
+                end.append(
+                    pageLink(
+                        "next",
+                        `${t("Next")} →`,
+                        current.page + 1,
+                        current.page >= pageCount - 1,
+                    ),
                 );
                 const label = document.createElement("span");
                 const from = total ? current.page * PAGE_SIZE + 1 : 0;
@@ -3904,17 +3919,15 @@
                 label.textContent = `${formatCount(from)}–${formatCount(to)} ${t(
                     "of",
                 )} ${formatCount(total)}`;
-                pager.append(prev, label, next);
-                if (current.page > 0) {
-                    // Shortcut back to the first page from anywhere in the pager.
-                    pager.prepend(pageLink("first", `« ${t("First")}`, 0, false));
-                }
+                // The label is the center column, so the result range stays
+                // centered while First and Previous come and go around it.
+                pager.append(start, label, end);
                 if (focusAction) {
                     const links = [...pager.querySelectorAll("a[data-page]")];
-                    // A rebuild can remove the focused control (First on page 0)
-                    // or turn it into a disabled span (Previous on page 0, Next
-                    // on the last page). Fall back to the nearest enabled link
-                    // in the same direction.
+                    // A rebuild can remove the focused control (First while
+                    // going back to page 1, Previous while going back to page 0)
+                    // or turn Next into a disabled span on the last page. Fall
+                    // back to the nearest enabled link in the same direction.
                     const target =
                         links.find(
                             (link) => link.dataset.pagerAction === focusAction,

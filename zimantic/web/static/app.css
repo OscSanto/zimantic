@@ -394,15 +394,28 @@ button.source-filter-collection[aria-pressed="true"] {
     margin: 0.8rem 7px 0;
 }
 .pager {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
-    justify-content: center;
     gap: 12px;
     margin: 18px 0 8px;
     font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
 }
 .pager:empty {
     display: none;
+}
+.pager-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+.pager-controls-start {
+    justify-content: flex-end;
+}
+.pager-controls-end {
+    justify-content: flex-start;
 }
 .pager a,
 .pager span {
