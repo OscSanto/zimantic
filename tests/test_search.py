@@ -3113,6 +3113,36 @@ class BrowseSearchTests(unittest.TestCase):
         self.assertNotEqual(whole["results"], reshuffled["results"])
         self.assertEqual(relevance, cached_relevance)
 
+    def test_mixed_window_can_promote_goal_items_outside_the_relevance_top(self):
+        search = self.make_search()
+        pool = [
+            {
+                "id": f"manual:item-{i}",
+                "source_key": "manual",
+                "path": f"item-{i}",
+                "title": f"Topic {i}",
+                "score": float(20 - i),
+            }
+            for i in range(1, 11)
+        ]
+        # Least-relevant docs have the highest rare scores.
+        by_path = {doc["path"]: float(doc["path"].split("-")[1]) for doc in pool}
+        with patch("zimantic.search.sort_scores", return_value=by_path):
+            mixed = search._sort_results(
+                pool, "rare", 0, None, limit=4, relevance_mix=0,
+            )
+            windowed = search._sort_results(
+                pool[:4], "rare", 0, None, limit=4,
+            )
+        self.assertEqual(
+            {doc["path"] for doc in mixed},
+            {"item-10", "item-9", "item-8", "item-7"},
+        )
+        self.assertEqual(
+            {doc["path"] for doc in windowed},
+            {"item-1", "item-2", "item-3", "item-4"},
+        )
+
     def test_text_recency_sort_reuses_hydrated_rowids_without_path_scans(self):
         search = self.make_search()
         search.semantic = False

@@ -83,7 +83,11 @@ _COMMON = {
     "source_timeout": 12,
     # Monotonic deadline for one admitted search: source scheduling, ranking,
     # and bounded preview work all share it.
-    "search_timeout_seconds": 30.0,
+    "search_timeout_seconds": 45.0,
+    # Percentage of the alternate-sort candidate window selected by hybrid
+    # relevance. The remainder follows the sort's own goal score. 100 keeps the
+    # historical relevance-only window.
+    "sort_relevance_mix": 90,
     # A search that reaches its deadline still returns the pool it ranked so
     # far. Keep that partial pool briefly so reloading the same query does not
     # repeat the whole fan-out. Complete pools are unaffected.
@@ -421,6 +425,17 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         elif key != "search_timeout_seconds" and isinstance(value, float):
             # Integers are integral; a float timeout is meaningful.
             cfg[key] = int(value)
+    mix = cfg.get("sort_relevance_mix")
+    if (
+        isinstance(mix, bool)
+        or not isinstance(mix, int)
+        or not 0 <= mix <= 100
+    ):
+        warn(
+            f"zimantic: warning: config key 'sort_relevance_mix' in {config_path} "
+            "must be an integer from 0 to 100; using the profile default"
+        )
+        cfg["sort_relevance_mix"] = PROFILES[profile]["sort_relevance_mix"]
     # Validate embed_device here rather than in embed.py: a typo should not stay
     # hidden until the first embedding call (or forever in --fast mode).
     device = cfg.get("embed_device")
@@ -561,7 +576,7 @@ def load_config(path: str | Path | None = None, warn=None) -> dict:
         collections=tuple(collections),
         config_path=Path(config_path),
         config_dir=config_dir,
-        search_timeout_seconds=float(cfg.get("search_timeout_seconds", 30.0)),
+        search_timeout_seconds=float(cfg.get("search_timeout_seconds", 45.0)),
         page_size=int(cfg.get("page_size", 10)),
         envelope=envelope,
         diagnostics=diagnostics,

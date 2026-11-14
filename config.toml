@@ -81,6 +81,13 @@ port = 8090
 # Desktop 100, mobile 50, supercomputer 200.
 # max_results = 100
 
+# Percentage of the rare-title and outlier candidate window selected by hybrid
+# relevance; the rest follows that sort's own goal score. 100 keeps the
+# historical relevance-only window. The tuned default 90 gains goal quality
+# without a median latency increase. Recency and diversity stay on the
+# relevance window because the same experiment showed no quality gain.
+# sort_relevance_mix = 90
+
 # Rows per read/commit window. Desktop 32, mobile 8, supercomputer 128.
 # Larger windows improve length sorting but retain more lexical body text.
 # batch_size = 32
@@ -199,8 +206,8 @@ port = 8090
 # The global value also bounds Kiwix catalog requests.
 # source_timeout = 12
 # Monotonic deadline for one admitted search (scheduling, ranking and bounded
-# previews). Default 30; must be positive.
-# search_timeout_seconds = 30
+# previews). Default 45; must be positive.
+# search_timeout_seconds = 45
 # A search that reaches its deadline returns the results ranked so far. Keep
 # that partial pool for this many seconds so reloading the same query is fast
 # instead of repeating the whole fan-out. Complete results are unaffected.

@@ -61,7 +61,7 @@ Provider limits have defaults, and each entry accepts overrides (`max_sources`, 
 
 Traversal limits belong to the nested `traversal` table; the dotted keys above configure it without a separate table header. Unknown collection or traversal keys reject that collection instead of silently using defaults.
 
-Global limits stay global: `max_explicit_collection_sources` (default 500) limits work for an explicitly selected Kiwix collection and reports partial scope instead of claiming completion; `search_timeout_seconds` (default 30) is the admitted-search deadline across providers and is separate from `source_timeout` and `slot_wait_seconds`; `max_body_text_bytes` (default 1 MiB) limits the lexical body per item independently of previews and item-count truncation; `max_derived_cache_bytes_per_source` limits optional preview artifacts only, never search postings.
+Global limits stay global: `max_explicit_collection_sources` (default 500) limits work for an explicitly selected Kiwix collection and reports partial scope instead of claiming completion; `search_timeout_seconds` (default 45) is the admitted-search deadline across providers and is separate from `source_timeout` and `slot_wait_seconds`; `max_body_text_bytes` (default 1 MiB) limits the lexical body per item independently of previews and item-count truncation; `max_derived_cache_bytes_per_source` limits optional preview artifacts only, never search postings.
 
 Every local indexed provider uses the same immutable generation layout:
 

@@ -372,7 +372,7 @@ class RuntimeConfig:
     collections: tuple[ProviderConfig, ...] = ()
     config_path: Path | None = None
     config_dir: Path = field(default_factory=Path.cwd)
-    search_timeout_seconds: float = 30.0
+    search_timeout_seconds: float = 45.0
     page_size: int = 10
     envelope: Mapping[str, Any] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = ()

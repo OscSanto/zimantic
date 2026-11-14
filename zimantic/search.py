@@ -111,6 +111,13 @@ DEFAULT_INITIAL_POOL_FACTOR = 2
 # same small prefix. They keep a larger single block; deeper pages expand it in
 # multiples, so the full candidate total remains pageable.
 SORT_INITIAL_POOL_FACTOR = 4
+# A mixed sort window may look at a larger relevance frontier before selecting
+# its final block. This bounds the extra goal-scoring work.
+SORT_CANDIDATE_FACTOR = 8
+# Goal-local sorts benefit from the relevance/goal mixture. Recency is
+# source-granular (all entries in a ZIM share its mtime) and diversity already
+# optimizes coverage inside the window, so neither showed a gain in benchmark.
+MIXED_SORT_MODES = frozenset({"rare", "outliers"})
 # The UI shows this many source chips per collection group until the reader
 # asks for the rest. It is a display budget, never a search-scope promotion.
 DEFAULT_SOURCE_FILTER_LIMIT = 10
@@ -298,6 +305,12 @@ class Search:
             cfg, "max_article_bytes", DEFAULT_MAX_ARTICLE_BYTES
         )
         self.max_results = _int_config(cfg, "max_results", DEFAULT_MAX_RESULTS)
+        # Percentage of the alternate-sort candidate window selected by hybrid
+        # relevance; the remainder follows the sort's own goal score.
+        self.sort_relevance_mix = max(
+            0,
+            min(100, _int_config(cfg, "sort_relevance_mix", 100, minimum=0)),
+        )
         # A page can never be larger than the ranked pool it is sliced from.
         # Clamping once here keeps /config, the page headers, and the frontend
         # pager consistent even if a hand-edited config sets page_size higher.
@@ -1421,7 +1434,7 @@ class Search:
             },
             "limits": {
                 "search_timeout_seconds": getattr(
-                    self, "search_timeout_seconds", 30.0
+                    self, "search_timeout_seconds", 45.0
                 ),
                 "source_timeout": getattr(self, "source_timeout", 12),
                 "slot_wait_seconds": getattr(self, "slot_wait_seconds", 10.0),
@@ -2445,6 +2458,12 @@ class Search:
         """
         alternate_sort = bool(query and sort and sort != "relevance")
         random_sort = alternate_sort and sort == "random"
+        relevance_mix = getattr(self, "sort_relevance_mix", 100)
+        mixture_sort = (
+            alternate_sort
+            and sort in MIXED_SORT_MODES
+            and relevance_mix < 100
+        )
         if pool is None:
             if random_sort:
                 # Random samples the complete retrieved set without ranking or
@@ -2453,10 +2472,35 @@ class Search:
                     source_results, query, seed, pool_target
                 )
             else:
-                pool = self._rank_results(
-                    source_results, query, pool_target, deadline=deadline
+                rank_target = (
+                    max(
+                        pool_target,
+                        self.max_results * SORT_CANDIDATE_FACTOR,
+                    )
+                    if mixture_sort else pool_target
                 )
-        if alternate_sort:
+                pool = self._rank_results(
+                    source_results, query, rank_target, deadline=deadline
+                )
+        if mixture_sort:
+            # Select the display block from a larger relevance frontier using
+            # the configured relevance/goal mixture, then order it purely by
+            # the sort goal and enrich only the selected block.
+            pool = self._sort_results(
+                pool, sort, seed, deadline,
+                query_vector=query_vector,
+                limit=pool_target,
+                relevance_mix=relevance_mix,
+            )
+            pool = self._enrich_pool(
+                source_results,
+                query,
+                pool,
+                min(pool_target, len(pool)),
+                deadline=deadline,
+                rerank=False,
+            )
+        elif alternate_sort:
             # Sort the candidate set before cutting it down to the display
             # pool. Enrichment stays bounded because it opens archives; the
             # sorted block expands on deeper pages.
@@ -2645,7 +2689,7 @@ class Search:
             # instead of running outside it while holding an admission slot.
             started_at = time.monotonic()
             deadline = started_at + max(
-                1.0, getattr(self, "search_timeout_seconds", 30.0)
+                1.0, getattr(self, "search_timeout_seconds", 45.0)
             )
             query_vector = (
                 None
@@ -3153,7 +3197,7 @@ class Search:
         if self.preview_limit <= 0:
             return
         deadline = time.monotonic() + max(
-            1.0, float(getattr(self, "search_timeout_seconds", 30.0))
+            1.0, float(getattr(self, "search_timeout_seconds", 45.0))
         )
         docs = docs[: self.preview_limit]
         with self._state_lock:
@@ -3261,7 +3305,7 @@ class Search:
                 future.cancel()
             logger.debug(
                 "preview extraction reached its %.1fs budget",
-                float(getattr(self, "search_timeout_seconds", 30.0)),
+                float(getattr(self, "search_timeout_seconds", 45.0)),
             )
 
     def _enrich_pool(
@@ -3399,6 +3443,7 @@ class Search:
         balance_sources: bool = False,
         limit: int | None = None,
         query_vector=None,
+        relevance_mix: int | None = None,
     ) -> list[dict[str, Any]]:
         scores: dict[str, float] = {}
         if mode == "diverse":
@@ -3442,8 +3487,48 @@ class Search:
                     doc["id"]: by_path[doc["path"]]
                     for doc in docs if doc["path"] in by_path
                 })
-        ordered = sorted(pool, key=lambda doc: -scores.get(doc["id"], -math.inf))
-        if limit is not None:
+        def goal_key(doc: dict[str, Any]):
+            return -scores.get(doc["id"], -math.inf)
+
+        ordered = sorted(pool, key=goal_key)
+        if (
+            limit is not None
+            and relevance_mix is not None
+            and 0 <= relevance_mix < 100
+        ):
+            # A larger relevance frontier feeds a mixed candidate window. The
+            # final displayed order stays purely goal-based, but window
+            # membership balances the goal score with hybrid relevance.
+            goal_values = [scores.get(doc["id"]) for doc in pool]
+            finite_goal = [
+                float(value) for value in goal_values
+                if value is not None and math.isfinite(float(value))
+            ]
+            goal_low = min(finite_goal) if finite_goal else 0.0
+            goal_span = (max(finite_goal) - goal_low) if finite_goal else 0.0
+            rel_values = [max(0.0, float(doc.get("score") or 0.0)) for doc in pool]
+            rel_low = min(rel_values) if rel_values else 0.0
+            rel_span = (max(rel_values) - rel_low) if rel_values else 0.0
+            weight = max(0.0, min(1.0, relevance_mix / 100.0))
+
+            def mixed_key(doc: dict[str, Any]):
+                goal = scores.get(doc["id"])
+                goal_norm = (
+                    (float(goal) - goal_low) / goal_span
+                    if goal is not None
+                    and math.isfinite(float(goal))
+                    and goal_span > 0
+                    else 0.0
+                )
+                rel = max(0.0, float(doc.get("score") or 0.0))
+                rel_norm = (
+                    (rel - rel_low) / rel_span if rel_span > 0 else 0.0
+                )
+                return weight * rel_norm + (1.0 - weight) * goal_norm
+
+            selected = sorted(pool, key=mixed_key, reverse=True)
+            ordered = sorted(selected[: max(0, int(limit))], key=goal_key)
+        elif limit is not None:
             ordered = ordered[: max(0, int(limit))]
         return [
             {

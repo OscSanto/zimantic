@@ -122,6 +122,22 @@ class LoadConfigTests(unittest.TestCase):
                 self.assertEqual(cfg["build_workers"], 1)
                 self.assertLessEqual(cfg["onnx_build_threads"], cores)
 
+    def test_search_timeout_and_sort_mix_defaults_and_validation(self):
+        with patch.object(
+            hardware, "detect",
+            return_value=Hardware(8, 8, 8 << 30, 8 << 30),
+        ):
+            cfg = load_config("/nonexistent/config.toml", warn=lambda _: None)
+        self.assertEqual(cfg["search_timeout_seconds"], 45.0)
+        self.assertEqual(cfg["sort_relevance_mix"], 90)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("sort_relevance_mix = 101\n", encoding="utf-8")
+            warnings = []
+            cfg = load_config(path, warn=warnings.append)
+        self.assertEqual(cfg["sort_relevance_mix"], 90)
+        self.assertTrue(any("sort_relevance_mix" in warning for warning in warnings))
+
     def test_explicit_resource_counts_override_automatic_limits(self):
         values = {
             "source_query_threads": 13,

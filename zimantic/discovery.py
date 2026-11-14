@@ -142,7 +142,7 @@ def _runtime_config(cfg: dict[str, Any], entries: Sequence[ProviderConfig]) -> R
         settings=dict(cfg),
         collections=tuple(entries),
         config_dir=config_dir,
-        search_timeout_seconds=float(cfg.get("search_timeout_seconds", 30.0)),
+        search_timeout_seconds=float(cfg.get("search_timeout_seconds", 45.0)),
         page_size=int(cfg.get("page_size", 10)),
     )
 
@@ -186,9 +186,9 @@ def discover_collections(
 
     if timeout is None:
         try:
-            timeout = float(cfg.get("search_timeout_seconds", 30.0))
+            timeout = float(cfg.get("search_timeout_seconds", 45.0))
         except (TypeError, ValueError):
-            timeout = 30.0
+            timeout = 45.0
 
     for entry in selected:
         try:
