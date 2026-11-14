@@ -11,7 +11,7 @@ Everything in this section is optional. Zimantic starts and searches without it.
 | `whisper-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | `asr = "whisper"` with `asr_engine = "whisper.cpp"` or `"auto"` | That backend is unavailable; `auto` falls through to another installed engine |
 | `whisper-ctranslate2` from [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | `asr = "whisper"` with `asr_engine = "faster-whisper"` | That backend is unavailable; it is the fastest option on CUDA GPUs |
 | `lsar` (from `unar`) | Archive-container detection for files with a missing or unknown extension | Built-in signatures and `puremagic` stay available |
-| `kiwix-serve` | A remote `type = "kiwix"` collection | Remote Kiwix sources are unavailable; local ZIM, files, and Kolibri sources work |
+| `kiwix-serve` | A remote `type = "kiwix"` collection | Remote Kiwix sources are unavailable; local ZIM, Files, and Kolibri sources work |
 | GPU ONNX Runtime wheel | Accelerated embedding during `build` and `serve` | Zimantic warns and embeds on the CPU; see [GPU acceleration](usage.md#gpu-acceleration) |
 
 On Debian or Ubuntu:
@@ -68,7 +68,7 @@ catalog_limit = 1000
 max_catalog_entries = 50000
 ```
 
-Local ZIM, files, and Kolibri sources never use `kiwix-serve`.
+Local ZIM, Files, and Kolibri sources never use `kiwix-serve`.
 
 GPU ONNX Runtime wheels are covered in [GPU acceleration](usage.md#gpu-acceleration).
 
@@ -167,7 +167,7 @@ path = "./media"
 derived_text = { ocr = "tesseract", ocr_languages = ["fra"] }
 ```
 
-OCR reads the same trained-data files as the `tesseract` command. List the languages globally or override them for a collection or exact source. Use the installed trained-data names: French is normally `fra`, not `fre`. Zimantic passes codes through without translation and does not install language data. For the example above, install `tesseract-ocr-fra`. Collection defaults are supported for files and Kolibri collections; Zimantic does not implement ZIM embedded-media enrichment.
+OCR reads the same trained-data files as the `tesseract` command. List the languages globally or override them for a collection or exact source. Use the installed trained-data names: French is normally `fra`, not `fre`. Zimantic passes codes through without translation and does not install language data. For the example above, install `tesseract-ocr-fra`. Collection defaults are supported for Files and Kolibri collections; Zimantic does not implement ZIM embedded-media enrichment.
 
 ```toml
 [derived_text]

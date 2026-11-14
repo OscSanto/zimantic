@@ -8,7 +8,7 @@ Zimantic uses one provider-neutral collection schema, one source identity, and o
 - Files collections index and serve a configured directory tree. Child source links stay within the collection. Zimantic does not serve hidden and excluded paths.
 - Kolibri collections read a supported v0.19.5 SQLite installation through private, read-only snapshots. Each channel is a collection; topics are sources. Captions, OCR, and ASR are independent build-time options.
 - Kiwix collections search remote books through the `kiwix-serve` API and return external links. They do not serve local content.
-- The library and source APIs expose `provider`, `collection`, `media_types`, `indexed_count`, `truncated`, and `body_truncated_count`. ZIM, files, and Kolibri content use `/content/{key}/{path}`.
+- The library and source APIs expose `provider`, `collection`, `media_types`, `indexed_count`, `truncated`, and `body_truncated_count`. ZIM, Files, and Kolibri content use `/content/{key}/{path}`.
 
 Configuration uses `[[collections]]` entries. Source selection uses canonical source keys and the `source` query parameter. Local content uses `/content/{key}/...` or `/article/{key}/...`.
 

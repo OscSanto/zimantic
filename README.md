@@ -42,7 +42,7 @@ Zimantic searches local ZIM files directly and does not need a separate Kiwix in
 - On 32-bit Linux platforms (armhf/armv7), the native dependencies have no prebuilt wheels. Use the distribution packages. Debian 13 (trixie) or later provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic uses them. All platforms require python-libzim 4.1 or later. Python package markers report the machine name, not the interpreter bitness. A 32-bit interpreter that reports a 64-bit machine name therefore requires a 4.1-or-newer distribution package.
 - About 110 MB for the default embedding model, plus the ZIM files. The `multilingual-e5-small` alternative uses about 120 MB, and the English-only `e5-small-v2` model uses about 35 MB on disk.
 - Wikipedia-style ZIM files. Zimantic uses their predictable HTML structure to locate useful content blocks.
-- One provider interface covers ZIM, remote Kiwix, files, and Kolibri. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
+- One provider interface covers ZIM, remote Kiwix, Files, and Kolibri. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
 - Configuration declares collections with `[[collections]]` entries for ZIM roots, Kiwix servers, directory trees, and Kolibri installations.
 - Local sources do not need `kiwix-serve`. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links from the kiwix-serve search API.
 

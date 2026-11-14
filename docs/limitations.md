@@ -53,7 +53,7 @@ See [Architecture](architecture.md) for the provider model.
 |---|---|---|
 | Sources per collection | 64 | hierarchical providers collapse; fixed-identity providers use paging/fan-out limits |
 | Sources overall | 512 | advisory target; never silently drop sources |
-| Entries per source | files 100,000 / Kolibri 500,000 / ZIM configurable | indexing reports `truncated`/`indexed_count` |
+| Entries per source | Files 100,000 / Kolibri 500,000 / ZIM configurable | indexing reports `truncated`/`indexed_count` |
 | Bytes per indexed item | `max_entry_bytes` | extraction |
 | Indexed body text per item | `max_body_text_bytes` (1 MiB) | lexical text; reports `body_truncated_count` |
 | Published index size per source | <10% of original source bytes | advisory optimization goal for SQLite + FAISS; never truncate content or reject a build to meet it |
