@@ -748,6 +748,7 @@ ol.results {
     color: var(--muted);
     font-size: 0.7rem;
     margin: 3px 0 5px;
+    overflow-wrap: anywhere;
     text-transform: uppercase;
 }
 .library-grid {
@@ -1195,10 +1196,12 @@ summary {
         border-color: var(--accent);
     }
     .site-header {
-        align-items: flex-start;
+        align-items: center;
+        gap: 10px;
     }
     .view-nav {
-        flex-direction: column;
+        flex-direction: row;
+        flex-wrap: nowrap;
     }
     .library-toolbar {
         align-items: flex-start;
