@@ -3995,7 +3995,10 @@
                 node.classList.toggle("result-linked", Boolean(item.url));
                 const title = node.querySelector(".result-title");
                 title.replaceChildren();
-                let displayTitle = item.title || "(untitled)";
+                let displayTitle = String(item.title || "")
+                    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim() || "(untitled)";
                 if (item.url) {
                     const link = document.createElement("a");
                     link.href = item.url;

@@ -396,6 +396,39 @@ def test_max_entries_marks_truncated_with_unknown_total(tmp_path):
     assert meta["indexed_count"] == "2"
 
 
+def test_pdf_titles_drop_control_characters_and_stay_bounded(tmp_path):
+    from zimantic.providers.files.entries import (
+        MAX_PDF_TITLE_CHARS,
+        _clean_title,
+        _pdf_metadata_title,
+    )
+
+    assert _clean_title("A\x08B\n\tC\x7f") == "A B C"
+    create_pdf(tmp_path / "named.pdf", "body", title="Title\x08with controls")
+    assert _pdf_metadata_title((tmp_path / "named.pdf").read_bytes()) == (
+        "Title with controls"
+    )
+
+    root = tmp_path / "modules"
+    root.mkdir()
+    create_pdf(root / "long.pdf", "A" * (MAX_PDF_TITLE_CHARS + 20))
+    config = files_config(
+        root,
+        granularity="collection",
+        include=("**/*.pdf",),
+    )
+    source = _source(config, "files:modules:root")
+    producer = _producer(root, config, source)
+    rows = {
+        row.path: row
+        for row in (producer.entry_at(index) for index in range(producer.count))
+        if row is not None
+    }
+    title = rows["long.pdf"].title
+    assert "\x08" not in title
+    assert len(title) <= MAX_PDF_TITLE_CHARS
+
+
 def test_extractors_cover_html_pdf_text_markdown_and_skip_binaries(tmp_path):
     root = tmp_path / "modules"
     root.mkdir()

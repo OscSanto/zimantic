@@ -203,13 +203,16 @@ const updatedThumb = {{
   mime: node.querySelector(".result-thumb").dataset.mimetype || null,
 }};
 setResultNode(node, {{title: "Other result", lead: "Extracted body."}});
+const linkedBeforeDirty = node.classes.has("result-linked");
+const titleChildrenBeforeDirty = parts[".result-title"].children.length;
+const thumbRemovedBeforeDirty = !node.querySelector(".result-thumb");
+setResultNode(node, {{title: "A" + String.fromCharCode(8) + "B C", url: "/content/manual/dirty"}});
 console.log(JSON.stringify({{
   initial, updatedThumb, details: parts[".result-resource"].textContent,
   detailsHidden: parts[".result-resource"].hidden,
   snippet: parts[".result-snippet"].innerHTML,
-  linked: node.classes.has("result-linked"),
-  titleChildren: parts[".result-title"].children.length,
-  thumbnailRemoved: !node.querySelector(".result-thumb"),
+  linkedBeforeDirty, titleChildrenBeforeDirty, thumbRemovedBeforeDirty,
+  dirtyTitle: parts[".result-title"].children[0].children.map((child) => child.textContent),
 }}));
 """
         result = subprocess.run(
@@ -236,9 +239,10 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["details"], "")
         self.assertTrue(payload["detailsHidden"])
         self.assertEqual(payload["snippet"], "<p>Extracted body.</p>")
-        self.assertFalse(payload["linked"])
-        self.assertEqual(payload["titleChildren"], 0)
-        self.assertTrue(payload["thumbnailRemoved"])
+        self.assertFalse(payload["linkedBeforeDirty"])
+        self.assertEqual(payload["titleChildrenBeforeDirty"], 0)
+        self.assertTrue(payload["thumbRemovedBeforeDirty"])
+        self.assertEqual(payload["dirtyTitle"], ["A B C"])
 
     def test_result_card_taps_open_headers_but_not_the_desktop_snippet(self):
         source = APP_JS.read_text(encoding="utf-8")

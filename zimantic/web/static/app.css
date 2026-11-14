@@ -504,7 +504,11 @@ ol.results {
     text-decoration: underline;
 }
 .result-title-text {
+    display: -webkit-box;
+    overflow: hidden;
     overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
 }
 .result-title a:focus-visible {
     border-radius: 4px;

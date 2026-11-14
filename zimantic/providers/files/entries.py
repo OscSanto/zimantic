@@ -189,6 +189,15 @@ def _markdown_first_heading(raw: bytes) -> str:
     return " ".join(match.group(1).split()) if match else ""
 
 
+def _clean_title(value: str) -> str:
+    """Collapse whitespace and drop layout control characters from a title."""
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or ""))
+    return " ".join(text.split())
+
+
+MAX_PDF_TITLE_CHARS = 160
+
+
 def _pdf_metadata_title(raw: bytes) -> str:
     try:
         import pymupdf
@@ -196,7 +205,7 @@ def _pdf_metadata_title(raw: bytes) -> str:
         document = pymupdf.open(stream=raw, filetype="pdf")
         try:
             metadata = document.metadata or {}
-            title = str(metadata.get("title") or "").strip()
+            title = _clean_title(metadata.get("title") or "")
             return title
         finally:
             document.close()
@@ -207,7 +216,7 @@ def _pdf_metadata_title(raw: bytes) -> str:
 def _first_text_line(raw: bytes) -> str:
     text = raw.decode("utf-8", "ignore")
     for line in text.splitlines():
-        normalized = " ".join(line.split())
+        normalized = _clean_title(line)
         if normalized:
             return normalized[:200]
     return ""
@@ -800,11 +809,16 @@ class FilesEntryProducer:
             body_truncated = truncated or len(
                 body_text.encode("utf-8", "ignore")
             ) >= self.max_body_text_bytes
+            metadata_title = _pdf_metadata_title(raw)
+            first_line = _first_text_line(excerpt.encode("utf-8", "ignore"))
             title = (
-                _pdf_metadata_title(raw)
-                or _first_text_line(excerpt.encode("utf-8", "ignore"))
-                or title_fallback
+                metadata_title
+                if metadata_title and len(metadata_title) <= MAX_PDF_TITLE_CHARS
+                else first_line
+                if first_line and len(first_line) <= MAX_PDF_TITLE_CHARS
+                else _clean_title(title_fallback)[:MAX_PDF_TITLE_CHARS]
             )
+            title = title or _clean_title(title_fallback)
             if not excerpt and not body_text:
                 if self.ocr_enabled:
                     return EntryRecord(
