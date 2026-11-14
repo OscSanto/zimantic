@@ -96,6 +96,16 @@ console.log(JSON.stringify({{
   otherMedia: ["audio/mpeg", "image/png", "text/plain", "application/octet-stream"]
     .map((mime) => mediaBadge(mime)),
   fileLabel: resultUrlLabel({{path: "folder/file.txt"}}),
+  filesLabel: resultUrlLabel({{
+    path: "en-olpc/index.html",
+    url: "/content/files%3Amodules%3Adir-en-olpc-1/en-olpc/index.html",
+    source: "en-olpc", source_key: "files:modules:dir-en-olpc-1",
+  }}),
+  filesNested: resultUrlLabel({{
+    path: "en-olpc/icdl/index.en.html",
+    url: "/content/files%3Amodules%3Adir-en-olpc-1/en-olpc/icdl/index.en.html",
+    source: "en-olpc", source_key: "files:modules:dir-en-olpc-1",
+  }}),
   pdf: mediaBadge("application/pdf"), invalid: resourceDetails(invalid),
   empty: resourceDetails({{}}),
 }}));
@@ -116,6 +126,8 @@ console.log(JSON.stringify({{
             {"icon": "File", "label": "File"},
         ])
         self.assertEqual(payload["fileLabel"], "folder › file.txt")
+        self.assertEqual(payload["filesLabel"], "index.html")
+        self.assertEqual(payload["filesNested"], "icdl › index.en.html")
         self.assertEqual(payload["pdf"], {"icon": "PDF", "label": "PDF"})
         self.assertEqual(payload["details"], [
             "Grade level: Lower Primary", "Duration: 2:05", "Language: English",
@@ -418,6 +430,7 @@ let current = null, selectedSourceKeys = new Set(), selectedCollectionKey = null
 let sourceFilterShowAll = true, sourceFilterShowOther = true;
 const setSelectedSources = (values) => {{ selectedSourceKeys = new Set(values); }};
 const sourceDisplayName = (key) => key;
+const sourceDisplayNameWithCollection = (key) => sourceDisplayName(key);
 const sourceStemName = () => "";
 const collectionDisplayName = (key) => key;
 const renderSortControls = () => {{}};
@@ -542,6 +555,7 @@ const runSearch = (...args) => {{ searches.push(args); searchSequence++; }};
 const collectionDisplayName = (key) =>
   collections.find((record) => record.key === key)?.label || key;
 const sourceDisplayName = (key) => key;
+const sourceDisplayNameWithCollection = (key) => sourceDisplayName(key);
 const sourceStemName = () => "";
 const deferred = () => {{
   let resolve, reject;
@@ -610,9 +624,10 @@ const snapshot = () => ({{
         self.assertEqual(payload["labeled"]["labels"], ["Modules"])
         self.assertFalse(payload["labeled"]["resetHidden"])
         self.assertEqual(
-            payload["labeled"]["selectionStatus"],
+            payload["labeled"]["status"],
             "1 selected collection. Type a query to search it.",
         )
+        self.assertEqual(payload["labeled"]["selectionStatus"], "")
         self.assertTrue(payload["labeled"]["loading"])
         self.assertFalse(payload["final"]["loading"])
 
@@ -2030,6 +2045,7 @@ const escapeHtml = (text) => text;
 const activeSources = () => [{{key: "a"}}, {{key: "b"}}, {{key: "c"}}];
 const appPath = (path) => path;
 const sourceDisplayName = (source) => source.key;
+const sourceDisplayNameWithCollection = (source) => sourceDisplayName(source);
 const outcome = (key) => ({{source: {{key, provider: "zim"}}, status: "ok"}});
 const requests = [];
 const fetch = async (url) => {{
@@ -2391,6 +2407,7 @@ const sourceFilterLayout = () => layout;
 const sourceFilterControlKey = () => "";
 const sourceFilterButton = () => new Node();
 const sourceDisplayName = (key) => key;
+const sourceDisplayNameWithCollection = (key) => sourceDisplayName(key);
 const collectionDisplayName = (key) => key;
 {_function_source(source, "function renderSourceFilters()", "function renderSourceSelectionSummary()")}
 {_function_source(source, "function renderScopeLine()", "function renderFilterLine(")}
@@ -2480,6 +2497,45 @@ console.log(JSON.stringify({{
         self.assertEqual(payload["descriptors"][:2], [
             "mini · 2025-09-19",
             "nopic · 2025-09-19",
+        ])
+
+    def test_duplicate_source_titles_use_edition_descriptors(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        helper = _function_source_raw(
+            source,
+            "function sourceDisplayNameWithCollection(",
+            "function setSourceMeta(",
+        )
+        script = f"""
+const records = [
+  {{key: "zim:library:wikipedia_en_medicine_mini_2025-10-a",
+    title: "WikiMed Medical Encyclopedia", descriptor: "mini · 2025-10",
+    collection: {{key: "zim:library", label: "library"}}}},
+  {{key: "zim:evaluation:wikipedia_en_medicine_maxi_2026-04-b",
+    title: "WikiMed Medical Encyclopedia", descriptor: "maxi · 2026-04",
+    collection: {{key: "zim:evaluation", label: "evaluation"}}}},
+  {{key: "zim:library:solo", title: "Solo",
+    descriptor: "", collection: {{key: "zim:library", label: "library"}}}},
+];
+const sources = records;
+const librarySources = [];
+const current = {{outcomes: new Map(records.map((record) => [record.key, {{source: record}}]))}};
+const sourceRecord = (value) =>
+  records.find((record) => record.key === value || record === value) || null;
+const sourceDisplayName = (value) => sourceRecord(value)?.title || value;
+const libraryTitle = (record) => record.title;
+const collectionLabelFor = (record) => record.collection?.label || "";
+const sourceVariantDescriptor = (record) => record.descriptor;
+{helper}
+console.log(JSON.stringify(records.map(sourceDisplayNameWithCollection)));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        self.assertEqual(json.loads(result.stdout), [
+            "WikiMed Medical Encyclopedia · mini · 2025-10",
+            "WikiMed Medical Encyclopedia · maxi · 2026-04",
+            "Solo",
         ])
 
     def test_source_filter_layout_is_bounded_per_collection_group(self):

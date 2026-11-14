@@ -2328,7 +2328,7 @@
                 if (variantKeys.length > 1) {
                     button.dataset.sourceVariants = JSON.stringify(variantKeys);
                 }
-                const sourceLabel = sourceDisplayName(outcome.source);
+                const sourceLabel = sourceDisplayNameWithCollection(outcome.source);
                 button.textContent = isFailed
                     ? `${sourceLabel}: ${outcome.error}`
                     : `${sourceLabel}: ${count}`;
@@ -2477,6 +2477,15 @@
                         toolbar.hidden = true;
                         options.replaceChildren();
                         status.textContent = "";
+                        const searchStatus = $("status");
+                        if (
+                            searchStatus?.dataset?.selectionPrompt &&
+                            searchStatus.textContent ===
+                                searchStatus.dataset.selectionPrompt
+                        ) {
+                            searchStatus.textContent = "";
+                            delete searchStatus.dataset.selectionPrompt;
+                        }
                     }
                     return;
                 }
@@ -2506,7 +2515,7 @@
                         button.dataset.sourceVariants = JSON.stringify(keys);
                     }
                     button.setAttribute("aria-pressed", "true");
-                    button.textContent = sourceDisplayName(key);
+                    button.textContent = sourceDisplayNameWithCollection(key);
                     const stem = sourceStemName(key);
                     if (stem) button.title = stem;
                     return button;
@@ -2523,13 +2532,26 @@
                     : count === 1
                       ? "source"
                       : "sources";
-                status.textContent =
+                status.textContent = "";
+                const prompt =
                     `${count} ${t("selected")} ${t(noun)}. ` +
                     t(
                         count === 1
                             ? "Type a query to search it."
                             : "Type a query to search them.",
                     );
+                const searchStatus = $("status");
+                if (
+                    searchStatus &&
+                    (!searchStatus.textContent ||
+                        searchStatus.textContent ===
+                            searchStatus.dataset.selectionPrompt)
+                ) {
+                    searchStatus.textContent = prompt;
+                    searchStatus.dataset.selectionPrompt = prompt;
+                }
+                const announcement = $("searchAnnouncement");
+                if (announcement) announcement.textContent = prompt;
             }
 
             function renderScopeLine() {
@@ -2579,7 +2601,9 @@
                 const displayKeys = collapseSelectedSourceKeys(searchKeys).map(
                     (entry) => entry.source?.key || entry.keys[0],
                 );
-                const names = displayKeys.map((key) => sourceDisplayName(key));
+                const names = displayKeys.map((key) =>
+                    sourceDisplayNameWithCollection(key),
+                );
                 const shown = names.slice(0, 3);
                 const extra = names.length - shown.length;
                 text.textContent =
@@ -2612,14 +2636,11 @@
                         libraryTitle(candidate) === name,
                 );
                 if (!duplicates.length) return name;
-                const sameCollection = duplicates.some(
-                    (candidate) =>
-                        collectionKeyFor(candidate) === collectionKeyFor(source),
-                );
-                if (sameCollection) {
-                    const descriptor = sourceVariantDescriptor(source);
-                    if (descriptor) return `${name} · ${descriptor}`;
-                }
+                // Prefer a human-readable edition descriptor (maxi · 2026-04)
+                // over internal collection keys when the editions live in
+                // different collections.
+                const descriptor = sourceVariantDescriptor(source);
+                if (descriptor) return `${name} · ${descriptor}`;
                 return `${name} · ${label}`;
             }
 
@@ -2673,9 +2694,21 @@
                     }
                 };
                 const segments = (value) => value.split("/").filter(Boolean).map(decodeSegment);
+                const pathSegments = rawPath ? segments(rawPath) : [];
+                const sourceName = String(item.source || "").trim();
+                if (
+                    pathSegments.length &&
+                    sourceName &&
+                    String(item.source_key || "").startsWith("files:") &&
+                    pathSegments[0] === sourceName
+                ) {
+                    // Files sources are rooted inside the collection, so their
+                    // item paths already start with the source directory.
+                    pathSegments.shift();
+                }
 
                 if (!rawUrl) {
-                    return segments(rawPath).join(" › ");
+                    return pathSegments.join(" › ");
                 }
 
                 try {
@@ -2684,11 +2717,11 @@
                     if (parsed.origin === location.origin && (path[0] === "article" || path[0] === "content")) {
                         // Both sides are decoded exactly once: rawPath by
                         // segments(), otherwise the already-decoded URL path.
-                        return (rawPath ? segments(rawPath) : path.slice(2)).join(" › ");
+                        return (rawPath ? pathSegments : path.slice(2)).join(" › ");
                     }
                     return [`${parsed.protocol}//${parsed.host}`, ...path].join(" › ");
                 } catch (_) {
-                    return segments(rawPath).join(" › ");
+                    return pathSegments.join(" › ");
                 }
             }
 
