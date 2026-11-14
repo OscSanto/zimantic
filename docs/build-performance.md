@@ -208,7 +208,7 @@ Fast builds commit at least 256 rows per window, independent of the selected pro
 
 Workers share one model. Embedding runs concurrently with source reading, and tokenization runs on a separate pool with a limit (at most four threads) so windows are prepared while other windows wait on inference. The inference pool runs `onnx_build_workers` calls concurrently, subject to the provider's serialization rules. The default pending-window limit scales to workers + 1, with a minimum of two, so short-text windows keep the worker pool busy. Commits preserve batch order; read-ahead and the shared body budget stay within their limits. A concurrency test verifies that later work finishes while an earlier batch is blocked, without out-of-order commits. Equal token budgets make workspace sizes and scheduling more even, not identical-cost: attention depends on sequence length and call overhead also matters. Increase the token budget for GPU throughput.
 
-Readable non-redirect entries form the article phase in native storage order. Redirects and assets follow as a separate phase. Article progress advances only after rows **and vectors** commit, including resumed work. The redirect and asset phase has no ETA. Metadata-only order preparation and final FAISS publication are outside the article ETA.
+Readable non-redirect entries form the article phase in native storage order. Redirects and assets follow as a separate phase. Article progress advances only after rows and vectors commit, including resumed work. The redirect and asset phase has no ETA. Metadata-only order preparation and final FAISS publication are outside the article ETA.
 
 ## Warm MIGraphX versus CPU builds (gfx803)
 
@@ -336,7 +336,7 @@ SQLite title/path/redirect rows and **all lexical body postings are identical**.
 
 ## Separate build and query thread budgets
 
-`onnx_build_threads` controls build calls and automatic embedding-worker sizing. `onnx_query_threads` controls query serving. These settings are independent. Removed names such as `embed_threads`, `search_workers`, and `build_embed_threads` are rejected as unknown keys; use the current names.
+`onnx_build_threads` controls build calls and automatic embedding-worker sizing. `onnx_query_threads` controls query serving. These settings are independent. Unknown keys such as `embed_threads`, `search_workers`, and `build_embed_threads` are rejected. Use the supported names.
 
 The following tuning uses the same 6.33 MB ZIM file and model. Desktop affinity is CPUs 0–7: **four physical/eight logical cores**. The Pi is a **Pi 500, four ARM Cortex-A76 cores, 8 GB RAM**, with zimantic 1.0.0 and libzim 4.1.0. Its affinity is CPUs 0–2, leaving one core available for other work, and benchmarks run at lower priority. No caches are dropped. ONNX Runtime is 1.31.0 on desktop and 1.31.1 on Pi; compare configurations within each machine, not cross-platform accuracy gains.
 
@@ -404,7 +404,7 @@ taskset -c 0-3 uv run python scripts/bench_build.py \
   --reference /tmp/zimantic-before
 ```
 
-For the baseline checkout, pass `--source-root /path/to/before-checkout --threads 4 --order id` to the same harness, omit `--reference`, and choose `--output /tmp/zimantic-before`. The ZIM file and installed dependencies must be identical. `--fixed-batch 8` performs the fixed-size ablation on the port. The Linux harness rejects ZIM files >=80 MB and records timings, peak RSS, canonical/posting digests, vectors, and retrieval quality in its output folder.
+For the baseline checkout, pass `--source-root /path/to/before-checkout --threads 4 --order id` to the same harness, omit `--reference`, and choose `--output /tmp/zimantic-before`. The ZIM file and installed dependencies must be identical. `--fixed-batch 8` performs the fixed-size ablation on the port. The Linux harness rejects ZIM files >=80 MB and records timings, peak RSS, canonical/posting digests, vectors, and retrieval quality in its output directory.
 
 Thread tuning, with a fresh process per configuration:
 

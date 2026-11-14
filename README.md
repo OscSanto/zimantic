@@ -22,12 +22,12 @@ Semantic search has the best coverage in widely spoken languages. Coverage varie
 - Alternate names and misspellings work: "diabetis" finds *Diabetes*, and "Leber's disease" finds *Leber's hereditary optic neuropathy*.
 - A multilingual query uses one model. The default covers 50 languages, and the optional e5 models cover more than 100. A query in one language finds articles written in another. Results are strongest in widely used languages; see [Compared with Kiwix search](docs/search.md#compared-with-kiwix-search).
 - Collections and sources provide several scopes. Browse the library by collection and provider, search one collection as a unit, or combine individual sources. See [Source selection](docs/usage.md#source-selection).
-- A files collection searches and serves one configured directory tree, such as an offline copy of `/library/www/html/modules`, as one collection with a fixed scope. See [Files collections](docs/collections.md#files-collections).
+- A Files collection searches and serves one configured directory tree, such as an offline copy of `/library/www/html/modules`, as one collection with a fixed scope. See [Files collections](docs/collections.md#files-collections).
 - Kolibri installations are searched and served directly. Each installed channel is one collection, and each top-level topic is one source. See [Kolibri installations](docs/collections.md#kolibri-installations).
 - Combined ranking orders semantic, title, and full-text results in one list. The full-text list combines SQLite body search with ZIM full-text search.
 - Merged results collapse redirects into the target article, so each article appears one time. Up to `preview_limit` results per page carry a size-limited preview; the rest keep an empty lead.
 - Progressive results run sources in parallel. The page shows a provisional merged list as each source finishes, then reranks the list deterministically.
-- The library page at `/library` shows ZIM collections, files collections, Kolibri channels, and remote Kiwix books, grouped by collection with provider and media-type filters. See [Library view](docs/usage.md#library-view).
+- The library page at `/library` shows ZIM collections, Files collections, Kolibri channels, and remote Kiwix books, grouped by collection with provider and media-type filters. See [Library view](docs/usage.md#library-view).
 - Zimantic uses about 250–325 MB while it serves, which supports devices such as a Raspberry Pi Zero 2 W (512 MB RAM). See [Measured memory use](docs/search.md#measured-memory-use).
 - Search without vectors uses the available indexes. Title and body search work when their indexes exist. A ZIM file without a Zimantic index uses its ZIM full-text index. If a model or FAISS file is unavailable, or model probes do not match, Zimantic uses the available lexical search. An invalid ZIM full-text index affects only that ZIM file. The server logs the error and continues. Use [`zimantic diagnose`](docs/usage.md#diagnosing-zim-files) to check suspect files without effect on the server.
 - Concurrent searches are limited by `max_concurrent_searches`. A request waits up to `slot_wait_seconds` for a free slot before it reports busy, so overlapping searches queue on slow hardware. An abandoned browser stream skips queued source work and returns its slot. Identical in-flight queries share one computation. An in-memory cache limited by `cache_size` and `cache_bytes` answers repeated queries, including deadline-limited partial pools for `partial_cache_seconds`. Zimantic caches explicit source and collection scopes by their expanded source keys and publication generation. See [Source selection](docs/usage.md#source-selection).
@@ -39,11 +39,11 @@ Zimantic searches local ZIM files directly and does not need a separate Kiwix in
 ## Requirements
 
 - Python 3.11–3.14 with native dependency wheels for the interpreter. `libzim` publishes wheels for specific Python ABIs and platforms. Select an interpreter with a compatible wheel; the range covers the interpreter versions with published native wheels.
-- On 32-bit Linux platforms (armhf/armv7), the native dependencies have no prebuilt wheels. Use the distribution packages. Debian 13 (trixie) or later provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic uses them. All platforms require python-libzim 4.1 or later. Python package markers report the machine name, not the interpreter bitness, so a 32-bit interpreter that reports a 64-bit machine name requires a 4.1-or-newer distribution package.
+- On 32-bit Linux platforms (armhf/armv7), the native dependencies have no prebuilt wheels. Use the distribution packages. Debian 13 (trixie) or later provides `python3-onnxruntime`, `python3-faiss`, `python3-libzim`, `python3-sentencepiece`, and `python3-pymupdf` for armhf. Create the environment with `--system-site-packages` so Zimantic uses them. All platforms require python-libzim 4.1 or later. Python package markers report the machine name, not the interpreter bitness. A 32-bit interpreter that reports a 64-bit machine name therefore requires a 4.1-or-newer distribution package.
 - About 110 MB for the default embedding model, plus the ZIM files. The `multilingual-e5-small` alternative uses about 120 MB, and the English-only `e5-small-v2` model uses about 35 MB on disk.
 - Wikipedia-style ZIM files. Zimantic uses their predictable HTML structure to locate useful content blocks.
 - One provider interface covers ZIM, remote Kiwix, files, and Kolibri. Source identity is a stable, URL-safe `key`; `provider` is the only discriminator.
-- Configuration declares collections with `[[collections]]` entries for ZIM roots, Kiwix servers, files trees, and Kolibri installations.
+- Configuration declares collections with `[[collections]]` entries for ZIM roots, Kiwix servers, directory trees, and Kolibri installations.
 - Local sources do not need `kiwix-serve`. A Kiwix `[[collections]]` entry discovers remote books and opens their results through links from the kiwix-serve search API.
 
 ## Install
@@ -151,7 +151,7 @@ Core search does not require external tools. Local caption extraction, OCR, ASR,
 
 ## Configuration and collections
 
-Zimantic uses explicit `[[collections]]` entries for ZIM files, remote Kiwix, files trees, and Kolibri installations. The [collections guide](docs/collections.md) has minimal examples, path behavior, provider limits, and advanced overrides.
+Zimantic uses explicit `[[collections]]` entries for ZIM files, remote Kiwix, directory trees, and Kolibri installations. The [collections guide](docs/collections.md) has minimal examples, path behavior, provider limits, and advanced overrides.
 
 ![Library view with ZIM collections and provider filters](docs/images/library.png)
 
@@ -178,4 +178,4 @@ See [Limitations](docs/limitations.md) for operational constraints and [Architec
 
 ## Search details
 
-The search examples in this README illustrate behavior; they are not a universal benchmark. See [Search, models, and ranking](docs/search.md) for model selection, ranking behavior, measured performance, and the detailed Kiwix comparison.
+The search examples illustrate behavior; they are not a universal benchmark. See [Search, models, and ranking](docs/search.md) for model selection, ranking behavior, measured performance, and the detailed Kiwix comparison.

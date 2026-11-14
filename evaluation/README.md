@@ -1,6 +1,6 @@
 # Search evaluation
 
-This folder contains a fixed search-quality evaluation. It measures the rank of the target article in the first 20 results for Zimantic and Kiwix search on configured ZIM files.
+This directory contains a fixed search-quality evaluation. It measures the rank of the target article in the first 20 results for Zimantic and Kiwix search on configured ZIM files.
 
 Unit tests (`tests/`) check code behavior. This evaluation measures ranking quality. A ranking rule can pass its tests and reduce search quality, especially for languages with few queries. Use this evaluation for ranking and indexing work.
 
@@ -80,9 +80,9 @@ python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwi
 python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
 ```
 
-`run.py` uses the Zimantic API. It reads `/sources?provider=zim` and `/config`, and it requires the selected source to be searchable. Every result carries a canonical source key; hits from another source are ignored and reported in a warning. Deprecated endpoints and source-name aliases are not supported.
+`run.py` uses the Zimantic API. It reads `/sources?provider=zim` and `/config`, and it requires the selected source to be searchable. Every result carries a canonical source key. Hits from another source are ignored and reported in a warning. Zimantic does not support endpoints outside the documented API or source-name aliases.
 
-The server limits how many results it keeps per query (`max_results` in `/config`, 100 by default) and how long a query runs; `run.py` lowers `--k` to the limit and leaves out over-long queries instead of recording a truncated or failed run. It says so when it does either.
+The server limits how many results it keeps per query (`max_results` in `/config`, 100 by default) and how long a query runs. `run.py` lowers `--k` to the limit and leaves out over-long queries instead of recording a truncated or failed run. It says so when it does either.
 
 Useful options for `run.py`: `--zims`, `--suites`, `--sets`, `--langs` (run a subset), `--split`, `--k` (results requested, default 20), `--append` (add ZIM files served by another server to the same results file), `--results-dir` (write the results somewhere other than `evaluation/results`). Results are saved as `<results-dir>/<label>.json`.
 
@@ -188,7 +188,7 @@ uv run python scripts/bench_body_quality.py \
   --output /tmp/body-quality
 ```
 
-The harness uses this runner and `compare.py`, the same dev/test split, and real HTTP search with previews and final ranking. It compares HEAD, compact contentless FTS5, and native-only body retrieval in both normal hybrid search and a semantic-disabled diagnostic. It reuses the 20 labelled Community Building questions from `tests/benchmarks/community_queries.json`, derives exact-title, keyword and misspelling queries, and uses `make_queries.py` for 20 first-sentence and 20 deep-sentence queries: 120 fixed English queries total. It writes indexes, query files, result files, method/config metadata, selected-split comparison reports, and answer-rank changes (`qualitative.json`) under the output directory, and it stops its isolated servers afterwards. Caches are disabled; all variants use the same model, thread budget and query set. This behavior intentionally overrides the multi-ZIM/multilingual release scope below: it is a quick qualitative smoke comparison, not a release gate.
+The harness uses this runner and `compare.py`, the same dev/test split, and real HTTP search with previews and final ranking. It compares HEAD, compact contentless FTS5, and native-only body retrieval in both normal hybrid search and a semantic-disabled diagnostic. It reuses the 20 labelled Community Building questions from `tests/benchmarks/community_queries.json`, derives exact-title, keyword and misspelling queries, and uses `make_queries.py` for 20 first-sentence and 20 deep-sentence queries: 120 fixed English queries total. It writes indexes, query files, result files, method/config metadata, selected-split comparison reports, and answer-rank changes (`qualitative.json`) under the output directory, and it stops its isolated servers afterwards. Caches are disabled; all variants use the same model, thread budget and query set. This comparison uses one ZIM file and English queries, so it is separate from the multi-ZIM, multilingual release scope below. It is a quick qualitative smoke comparison, not a release gate.
 
 `head` is the positional contentless layout and `compact` is the compact contentless layout. Production uses the positional layout with `unicode61 remove_diacritics 2` and BM25 candidate ordering.
 
@@ -239,7 +239,7 @@ Use `--queries` to reuse a provider-probe JSON file. These timings exclude query
   `cooking.stackexchange.com_en_all_2026-07.zim`, `ted_mul_ocean_2026-09.zim`,
   `wikibooks_en_all_nopic_2026-01.zim`
 
-  Keep them in the git-ignored `evaluation.zims/` folder rather than the normal `zims/`, and run a separate server for measurements with a ZIM collection at `./evaluation.zims` and `index_dir = "./evaluation.indexes"`, so the scored source set is only the reference ZIM files. The astronomy `2025-11` and wikibooks `2026-01` files are not available from Kiwix's server; the nearest releases are `wikipedia_en_astronomy_maxi_2026-08` and `wikibooks_en_all_nopic_2026-04`, whose article paths do not all match the queries. Ask the query-set author for the exact files, or regenerate queries for other releases (see [Building a ZIM query set](#building-a-zim-query-set)).
+  Keep them in the git-ignored `evaluation.zims/` directory rather than the normal `zims/`, and run a separate server for measurements with a ZIM collection at `./evaluation.zims` and `index_dir = "./evaluation.indexes"`, so the scored source set is only the reference ZIM files. The astronomy `2025-11` and wikibooks `2026-01` files are not available from Kiwix's server; the nearest releases are `wikipedia_en_astronomy_maxi_2026-08` and `wikibooks_en_all_nopic_2026-04`, whose article paths do not all match the queries. Ask the query-set author for the exact files, or regenerate queries for other releases (see [Building a ZIM query set](#building-a-zim-query-set)).
 - Model: multilingual-e5-small, int8 ONNX from
   [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small)
   (`onnx/model_quantized.onnx` saved as `model.onnx`), 384 dimensions, with the tokenizer from
@@ -313,4 +313,4 @@ This command writes `queries/<zim>/readme.pt.jsonl`. Each English query appears 
 
 ## Licenses
 
-The generated queries quote text from Wikipedia, Wikibooks and Stack Exchange, which is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/): attribution to their contributors, through the Kiwix ZIM files named in each query. The TED queries describe talks in our own words. The code in this folder is GPL-3.0-or-later, like the rest of Zimantic.
+The generated queries quote text from Wikipedia, Wikibooks and Stack Exchange, which is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/): attribution to their contributors, through the Kiwix ZIM files named in each query. The TED queries describe talks in our own words. The code in this directory is GPL-3.0-or-later, like the rest of Zimantic.

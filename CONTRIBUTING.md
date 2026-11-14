@@ -1,6 +1,6 @@
 # Contributing to Zimantic
 
-Zimantic is an offline, multilingual search engine for Kiwix ZIM files. It runs on small devices, including Raspberry Pi computers. Contributions include bug reports, code, documentation, evaluation queries, and features.
+Zimantic is an offline, multilingual search engine for Kiwix ZIM files and configured directory trees. It runs on small devices, including Raspberry Pi computers. Contributions include bug reports, code, documentation, evaluation queries, and features.
 
 ## Project goals
 
@@ -41,12 +41,12 @@ uv sync
   python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
   ```
   The harness measures ZIM files with indexes and lists the others without scoring them. Report results by language and query type, and report fixed and broken counts. For indexing work, build separate indexes on each branch. Tune with `--split dev` and report with `--split test`.
-- Documentation. Keep the README consistent with documented behavior, configuration, commands, and published measurements. Use measurements from the documented version. Write concise present-tense prose with consistent technical terms.
+- Documentation. Keep the README consistent with documented behavior, configuration, commands, and published measurements. Use measurements from the documented version. Write concise present-tense prose in ASD-STE100 Simplified Technical English style, with consistent technical terms.
 - Compatibility. Document supported configuration, index, and command formats. Zimantic supports documented formats only; it does not guarantee backward compatibility or migrations. Reject unsupported formats with a clear diagnostic that tells users to update configuration or rebuild caches and indexes. Cross-model embedding-probe reuse is supported.
 
 ## Code style
 
-Follow the surrounding style. Use clear Python and comments that explain why. Keep dependencies few. Check memory use for code that runs on a Raspberry Pi.
+Follow the surrounding style. Write clear Python code and comments that explain why. Keep dependencies few. Check memory use for code that runs on a Raspberry Pi.
 
 ## Provider contracts
 

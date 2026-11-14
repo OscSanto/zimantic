@@ -16,7 +16,7 @@ Zimantic supports the installed Kolibri SQLite schema from v0.19.5. It identifie
 
 ## Secure browsing
 
-`secure_browsing = true` sandboxes the article iframe inside `/content/`. A raw `/article/` document opened directly or in a permitted popup is not sandboxed. It uses the app origin and persistent browser storage. This setting is not a complete security boundary for untrusted content. Use a browser sandbox or a separate profile for untrusted file trees.
+`secure_browsing = true` sandboxes the article iframe inside `/content/`. A raw `/article/` document opened directly or in a permitted popup is not sandboxed. It uses the app origin and persistent browser storage. This setting is not a complete security boundary for untrusted content. Use a browser sandbox or a separate profile for untrusted directory trees.
 
 ## Raspberry Pi 4 benchmark
 
@@ -32,7 +32,7 @@ Collections group sources. Items stay within their source. The library loads sou
 
 ## Hardening and release gates
 
-Zimantic treats configured file trees and Kolibri installations as untrusted input. The provider boundary assumes that a provider fails, reports an unexpected MIME type, or returns a path it must not return.
+Zimantic treats configured directory trees and Kolibri installations as untrusted input. The provider boundary assumes that a provider fails, reports an unexpected MIME type, or returns a path it must not return.
 
 - Path confinement. Local stores use race-safe, root-confined, no-follow opens and reject symlinks, `..`, encoded separators, backslashes, NUL bytes, absolute paths, hidden paths, and configured excludes. A directory without an index page serves a bounded generated listing that omits those entries; the listing is not an arbitrary filesystem view.
 - Zip bounds. Zimantic validates Kolibri HTML5 zips from their end record and central directory before it reads any member. Absolute, `..`, and link members, duplicate or overlapping entries, oversized output, and zip bombs fail closed. Per-entry member, directory, total, and read-time limits are configurable.

@@ -21,7 +21,7 @@ Configuration uses `[[collections]]` entries. Source selection uses canonical so
 - Kolibri reads do not write to the installation, WAL/SHM/journal sidecars, or configured storage roots. Private snapshots are owner-only and are removed after the last reader.
 - API payloads, errors, redirects, ETags, and logs above debug level do not expose absolute configured roots or private catalog locators.
 - Discovery, search, and content failures are operation-scoped. A failed refresh keeps the last complete snapshot. A broken source does not stop other sources.
-- `secure_browsing = true` sandboxes the `/content/` shell iframe. A raw `/article/` document opened directly or in a permitted popup is not sandboxed. Treat file trees and Kolibri HTML5 apps as untrusted input.
+- `secure_browsing = true` sandboxes the `/content/` shell iframe. A raw `/article/` document opened directly or in a permitted popup is not sandboxed. Treat directory trees and Kolibri HTML5 apps as untrusted input.
 
 ## Native ZIM full-text search uses helper processes
 
@@ -31,7 +31,7 @@ An opt-in `libzim_search_backend = "threads"` uses the same server-wide worker b
 
 There are two reasons to keep the process boundary:
 
-- Crash containment. Some python-libzim C++ declarations lack `except +`, so an exception during result iteration aborts the interpreter instead of becoming a catchable Python exception. See [openzim/python-libzim#266](https://github.com/openzim/python-libzim/issues/266). On November 8, 2026, a query for `hawaii` in `osm-hawaii-2026-09-26.zim` reproduced an abort with libzim 4.1.0: `zim::EntryNotFound: Cannot find entry`. That native message does not name the ZIM file. The parent knows which ZIM file the helper searches, logs its basename, and disables ZIM full-text search for that ZIM file until reload. Other available search channels and the server stay usable.
+- Crash containment. Some python-libzim C++ declarations lack `except +`, so an exception during result iteration aborts the interpreter instead of becoming a catchable Python exception. See [openzim/python-libzim#266](https://github.com/openzim/python-libzim/issues/266). A query for `hawaii` in `osm-hawaii-2026-09-26.zim` aborts the interpreter with libzim 4.1.0: `zim::EntryNotFound: Cannot find entry`. That native message does not name the ZIM file. The parent knows which ZIM file the helper searches, logs its basename, and disables ZIM full-text search for that ZIM file until reload. Other available search channels and the server stay usable.
 - Actual parallelism with the released python-libzim 4.1.0 binding. Its reader bindings hold the GIL across native work. Threads therefore do not provide parallel ZIM full-text search, even across different ZIM files. Processes do. Threads also cannot forcibly stop a stuck native call; a helper can be terminated when its search times out.
 
 ### Process/thread comparison, November 8, 2026
@@ -57,7 +57,7 @@ Breadcrumbs plus `faulthandler` identify the Hawaii ZIM file and crashing thread
 
 `libzim_search_processes` is an independent global setting, not a multiplier per collection. Its automatic budget uses usable CPU threads, source-executor capacity, and available RAM, including ancestor cgroup quotas and memory limits, with a ceiling of eight helpers. The estimate reserves 256 MiB for the server/model and 128 MiB per helper, and it always permits at least one helper. This is a conservative heuristic, not an OOM guarantee for arbitrary ZIM files or models. An explicit positive integer overrides the automatic budget, including its CPU, memory, source-thread and eight-helper limits. Allocation of more native helpers than source threads usually wastes cache memory without an increase in parallelism. The estimate keeps server/model headroom even in `--fast` mode. A lexical-only deployment overrides it after measuring its full memory use.
 
-All hardware profiles use the same serving defaults: `source_query_threads` budgets one shared source/preview thread pool from usable logical CPUs, limited to eight, while `onnx_query_threads` budgets threads inside a query embedding from usable physical cores, leaving one and limited to four. These are separate from native subprocess memory and user-request admission. Profile selection and build budgeting use the same affinity/cgroup-aware hardware detector. Normal configs omit these counts. See [advanced resource overrides](usage.md#advanced-resource-overrides).
+All hardware profiles use the same serving defaults. `source_query_threads` budgets one shared source/preview thread pool from usable logical CPUs, limited to eight. `onnx_query_threads` budgets threads inside a query embedding from usable physical cores, leaving one and limited to four. These are separate from native subprocess memory and user-request admission. Profile selection and build budgeting use the same affinity/cgroup-aware hardware detector. Normal configs omit these counts. See [advanced resource overrides](usage.md#advanced-resource-overrides).
 
 Resource kills do not masquerade as ZIM-file corruption. Native fatal signals such as SIGABRT and SIGSEGV disable the offending ZIM file's ZIM full-text search until reload, but SIGKILL/SIGTERM do not blacklist it. Periodic collection refresh does not reset the shared broken-ZIM-file set.
 
@@ -140,7 +140,7 @@ Threads are opt-in and require the patched binding and native mutex fix. These o
 
 ### Snippet prefetch comparison, November 9, 2026
 
-The [snippet runner](../tests/benchmarks/run_snippets.py) compares deferred previews with fetching native snippets or identical HTML leads for the first four candidates per source. It also checks fetching all sixteen native snippets. These are benchmark-only alternatives; production search and its defaults stay fixed.
+The [snippet runner](../tests/benchmarks/run_snippets.py) compares deferred previews with fetching native snippets or identical HTML leads for the first four candidates per source. It also checks fetching all sixteen native snippets. These are benchmark-only alternatives. Production search uses deferred previews.
 
 The three ZIM files and twelve queries are the same as the reader comparison above. Every query searches all three ZIM files, ranks their candidates with the production ranker, and hydrates only the displayed ten. One query means one search across the library, **not one ZIM-file search**. There are 75 successful fresh-service trials, three repetitions per configuration, and 9,408 measured queries. Exact candidate/ranked identities agree across strategies; eager HTML leads and deferred previews return identical text. All trials use the same local GIL-releasing reader/native build: libzim 9.8.2, Xapian 1.4.31, ICU 78.3, and the production Lexbor preview reader.
 
@@ -172,7 +172,7 @@ The single-ZIM-file control (from `run_snippets.py`) searches astronomy alone, w
 
 Across the three-source miss cases, four-per-source prefetch generates eleven previews per query on average and reuses 7.42: about 81% of displayed previews, with 33% of prefetches wasted. Fetching sixteen generates 44 and reuses 9.17, which wastes 79%. Every prefetch is wasted in the fully cached-preview case. Native snippets also change the displayed text: this workload averages 583 characters with selective native reuse and 498 with all-native reuse, versus 943 for normal leads. They are query-centered fragments, not equivalent opening-text previews. They do not go in the query-independent preview cache without changing its key.
 
-Recommendation: deferred previews remain the default. Unconditional native snippets are not part of production search. Selective worker-side work is promising for uncached concurrent searches. A more targeted alternative sends only displayed, cache-missing paths to preview workers after ranking. It preserves the existing lead text without speculative reads and is not benchmarked here.
+Recommendation: deferred previews are the default. Production search does not use unconditional native snippets. Selective worker-side work may help uncached concurrent searches. A more targeted alternative sends only displayed, cache-missing paths to preview workers after ranking. It preserves the existing lead text without speculative reads and is not benchmarked here.
 
 These are native-only search/preview pipeline results, not full hybrid-search or HTTP measurements. They omit SQLite title/body channels, semantic models, phrase enrichment, and finalized-query caching; an exact-query cache hit skips ZIM full-text search in every strategy. The two preview-cache extremes do not establish a real hit rate or break-even point. Host caches stay warm, quotas are not Pi emulation, and memory accounting has the caveats above. Eager process PSS additionally includes the larger benchmark-worker bootstrap, so it does not isolate a production snippet implementation's memory overhead. No OOM kills occurred.
 

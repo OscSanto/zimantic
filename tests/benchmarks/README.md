@@ -18,7 +18,7 @@ python tests/benchmarks/run_mixed.py --root /tmp/zimantic-mixed \
 The report contains:
 
 - startup time until `/health` is ready with local Kiwix available;
-- cold and warm build times for the 1,000-file tree and Kolibri channel (run `--build` twice);
+- cold and warm build times for the 1,000-file directory tree and Kolibri channel (run `--build` twice);
 - search p50/p95 after one warm-up request over the fixed 100-query set;
 - `/library` payload size and render time;
 - peak process RSS (`VmHWM`) after the server handles search requests;
