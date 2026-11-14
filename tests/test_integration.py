@@ -453,11 +453,11 @@ class LocalIntegrationTests(unittest.TestCase):
             shell = client.get(f"/content/{ZIM_URL}/A/5e_Hazards")
             self.assertEqual(shell.status_code, 200)
             self.assertIn(
-                f'<span class="zimantic-toolbar-home-full">{ZIM_KEY}</span>'.encode(),
+                b'<span class="zimantic-toolbar-home-full">manual</span>',
                 shell.content,
             )
             self.assertIn(
-                f'title="Open this ZIM\'s homepage ({ZIM_KEY})"'.encode(),
+                b'title="Open the homepage of manual"',
                 shell.content,
             )
             # The MediaWiki first-letter container must not become a link.

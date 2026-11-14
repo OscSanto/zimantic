@@ -10,10 +10,61 @@ APP_JS = Path(__file__).resolve().parents[1] / "zimantic" / "web" / "static" / "
 NODE = shutil.which("node")
 
 
-def _function_source(source: str, start: str, end: str) -> str:
+def _function_source_raw(source: str, start: str, end: str) -> str:
     start_index = source.index(start)
     end_index = source.index(end, start_index)
     return source[start_index:end_index]
+
+
+def _variant_helper_source(source: str) -> str:
+    """Source for the source-variant grouping helpers used by several tests."""
+    return (
+        _function_source_raw(
+            source, "function libraryTitle(", "function sourceRecord("
+        )
+        + _function_source_raw(
+            source, "function sourceRecord(", "function sourceDisplayName("
+        )
+        + _function_source_raw(
+            source, "function collectionKeyFor(", "function collectionLabelFor("
+        )
+        + _function_source_raw(
+            source, "function sourceButtonVariantKeys(", "function sourceFilterButton("
+        )
+        + _function_source_raw(
+            source, "function outcomeVariantKeys(", "function sourceFilterLayout("
+        )
+    )
+
+
+def _format_helper_source(source: str) -> str:
+    return _function_source_raw(
+        source, "function uiLocale(", "function dedupeParams("
+    )
+
+
+def _function_source(source: str, start: str, end: str) -> str:
+    function = _function_source_raw(source, start, end)
+    if "sourcesLoaded" in function and "let sourcesLoaded" not in function:
+        function = "let sourcesLoaded = false;\n" + function
+    if "formatCount(" in function and "function formatCount(" not in function:
+        function = _format_helper_source(source) + function
+    if (
+        any(
+            name in function
+            for name in (
+                "sourceVariantGroupKey(",
+                "collapseSourceVariants(",
+                "collapseSourceOutcomes(",
+                "collapseSelectedSourceKeys(",
+                "sourceVariantDescriptor(",
+                "sourceButtonVariantKeys(",
+            )
+        )
+        and "function sourceVariantGroupKey(" not in function
+    ):
+        function = _variant_helper_source(source) + function
+    return function
 
 
 @unittest.skipUnless(NODE, "node is unavailable")
@@ -1213,7 +1264,7 @@ const elements = {{
 const $ = (id) => elements[id];
 const t = (text) => text;
 const libraryLanguageDisplayNames = new Map();
-const libraryTitle = (source) => source.key;
+var libraryTitle = (source) => source.key;
 const libraryHomepageUrl = () => "";
 const sourceStemName = () => "";
 const collectionLabelFor = (source) => source.collection?.label || "";
@@ -2189,6 +2240,50 @@ console.log(JSON.stringify({{loading, started}}));
                 "scopeText": "Searching only in: a",
             },
         )
+
+    def test_source_variants_collapse_to_one_representative_per_book(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+{_variant_helper_source(source)}
+const records = [
+  {{key: "zim:library:wikipedia_en_mathematics_mini_2025-09-a",
+    provider: "zim", title: "Mathematics by Wikipedia",
+    collection: {{key: "zim:library"}}, date: "2025-09-19",
+    item_count: 131731, size: 100}},
+  {{key: "zim:library:wikipedia_en_mathematics_nopic_2025-09-b",
+    provider: "zim", title: "Mathematics by Wikipedia",
+    collection: {{key: "zim:library"}}, date: "2025-09-19",
+    item_count: 385400, size: 200}},
+  {{key: "zim:library:wikipedia_en_top_mini_2025-09-c",
+    provider: "zim", title: "Best of Wikipedia",
+    collection: {{key: "zim:library"}}, date: "2025-09-19",
+    item_count: 865860, size: 300}},
+  {{key: "zim:library:wikipedia_en_top_mini_2026-09-d",
+    provider: "zim", title: "Best of Wikipedia",
+    collection: {{key: "zim:library"}}, date: "2026-09-14",
+    item_count: 705584, size: 400}},
+  {{key: "files:modules:math", provider: "files",
+    title: "Mathematics by Wikipedia", collection: {{key: "files:modules"}},
+    date: "2025-09-19", item_count: 10, size: 500}},
+];
+console.log(JSON.stringify({{
+  collapsed: collapseSourceVariants(records).map((item) => item.key),
+  descriptors: records.map(sourceVariantDescriptor),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["collapsed"], [
+            "zim:library:wikipedia_en_mathematics_nopic_2025-09-b",
+            "zim:library:wikipedia_en_top_mini_2026-09-d",
+            "files:modules:math",
+        ])
+        self.assertEqual(payload["descriptors"][:2], [
+            "mini · 2025-09-19",
+            "nopic · 2025-09-19",
+        ])
 
     def test_source_filter_layout_is_bounded_per_collection_group(self):
         source = APP_JS.read_text(encoding="utf-8")

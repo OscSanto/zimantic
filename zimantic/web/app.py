@@ -425,11 +425,16 @@ def _article_toolbar(
     show_zim_search: bool = True,
     source_previous: dict | None = None,
     source_next: dict | None = None,
+    source_title: str | None = None,
+    source_provider: str | None = None,
 ) -> str:
     zim_url = _content_url(zim, base_path=base_path)
     random_url = f"{base_path}/random?source={quote_path(zim, safe='')}"
     zim_name = html_escape(str(zim), quote=True)
-    site_name = _zim_site_name(zim)
+    site_name = str(source_title or "").strip() or _zim_site_name(zim)
+    provider = str(source_provider or "").strip()
+    is_zim = not provider or provider in {"zim", "kiwix"}
+    search_label = "Search this ZIM" if is_zim else "Search this source"
     article_url_path = str(article.get("path") or "").strip()
     trailing_slash = article_url_path.endswith("/")
     article_path = article_url_path.strip("/")
@@ -523,7 +528,7 @@ def _article_toolbar(
     if error is None or error.get("source_found"):
         home_html = (
             f'<a class="zimantic-toolbar-home" data-zimantic-home href="{zim_url}" '
-            f'title="Open this ZIM\'s homepage ({zim_name})">'
+            f'title="Open the homepage of {html_escape(site_name, quote=True)}">'
             f'<span class="zimantic-toolbar-home-full">{html_escape(site_name)}</span>'
             '<span class="zimantic-toolbar-home-short" data-i18n="Home">Home</span>'
             "</a>"
@@ -534,9 +539,9 @@ def _article_toolbar(
                 'data-zimantic-zim-search '
                 f'data-zimantic-zim="{zim_name}">'
                 '<input type="search" class="zimantic-toolbar-zim-search-input" '
-                'data-zimantic-zim-search-input placeholder="Search this ZIM" '
-                'data-i18n-placeholder="Search this ZIM" '
-                'aria-label="Search this ZIM" data-i18n-aria-label="Search this ZIM" '
+                f'data-zimantic-zim-search-input placeholder="{search_label}" '
+                f'data-i18n-placeholder="{search_label}" '
+                f'aria-label="{search_label}" data-i18n-aria-label="{search_label}" '
                 'autocomplete="off" '
                 'role="combobox" aria-autocomplete="list" aria-expanded="false" '
                 'aria-controls="zimanticZimSuggestions">'
@@ -853,6 +858,8 @@ def _content_shell(
     show_zim_search: bool = True,
     source_previous: dict | None = None,
     source_next: dict | None = None,
+    source_title: str | None = None,
+    source_provider: str | None = None,
 ) -> Response:
     """Toolbar shell page whose iframe loads the raw article from /article/.
 
@@ -889,6 +896,8 @@ def _content_shell(
         show_zim_search=show_zim_search,
         source_previous=source_previous,
         source_next=source_next,
+        source_title=source_title,
+        source_provider=source_provider,
     )
     entry_title = str((error or {}).get("title") or article.get("title") or article_path or zim)
     parsed_title = None
@@ -930,20 +939,28 @@ def _content_shell(
                 f'<h1 class="zimantic-shell-heading">{title}</h1>\n'
                 "\n<div id=\"articleStorageNotice\" class=\"article-storage-notice\" "
                 "data-zimantic-storage-notice role=\"status\" hidden>\n"
-                "<p>This article uses browser storage, which is isolated inside this "
-                "viewer. Changes may not be saved.</p>\n"
+                '<p data-i18n="This article uses browser storage, which is isolated '
+                'inside this viewer. Changes may not be saved.">This article uses '
+                "browser storage, which is isolated inside this viewer. Changes may "
+                "not be saved.</p>\n"
                 "<a id=\"articleStorageNoticeOpen\" class=\"secondary\" "
                 "data-zimantic-storage-notice-open href=\"#\" target=\"_blank\" "
-                "rel=\"noopener noreferrer\">Open in a new tab "
+                "rel=\"noopener noreferrer\"><span data-i18n=\"Open in a new tab\">"
+                "Open in a new tab</span> "
                 "<span aria-hidden=\"true\">↗</span></a>\n"
                 "<button id=\"articleStorageNoticeDismiss\" class=\"secondary\" "
-                "data-zimantic-storage-notice-dismiss type=\"button\">Dismiss</button>\n"
+                "data-zimantic-storage-notice-dismiss type=\"button\" "
+                "data-i18n=\"Dismiss\">Dismiss</button>\n"
                 "</div>\n"
                 + "\n<div data-zimantic-capture-notice hidden>"
-                "<p>This capture has no readable content. The archived page may have "
-                "been empty (for example, a parked domain), or its scripts and styles "
-                "may not have been saved.</p>"
-                '<button type="button" data-zimantic-capture-notice-dismiss>Dismiss</button>'
+                '<p data-i18n="This capture has no readable content. The archived '
+                'page may have been empty (for example, a parked domain), or its '
+                'scripts and styles may not have been saved.">This capture has no '
+                "readable content. The archived page may have been empty (for "
+                "example, a parked domain), or its scripts and styles may not have "
+                "been saved.</p>"
+                '<button type="button" data-zimantic-capture-notice-dismiss '
+                'data-i18n="Dismiss">Dismiss</button>'
                 "</div>\n"
                 + f'<iframe data-zimantic-article title="{title}" '
                 f'src="{iframe_url}" referrerpolicy="same-origin"{iframe_sandbox}></iframe>\n'

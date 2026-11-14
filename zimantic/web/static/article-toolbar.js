@@ -441,14 +441,17 @@
         option.id = `zimantic-zim-suggestion-${index}`;
         option.setAttribute("role", "option");
         option.setAttribute("aria-selected", "false");
+        const titleText = String(item.title || item.path || "(untitled)");
         const title = document.createElement("span");
         title.className = "zimantic-toolbar-suggestion-title";
-        title.textContent = String(item.title || item.path || "(untitled)");
+        title.textContent = titleText;
         const path = document.createElement("span");
         path.className = "zimantic-toolbar-suggestion-path";
         path.textContent = String(item.path || "");
         option.append(title);
-        if (path.textContent) option.append(path);
+        if (path.textContent && path.textContent !== titleText) {
+          option.append(path);
+        }
         option.addEventListener("pointerdown", event => {
           event.preventDefault();
           openZimSuggestion(index);

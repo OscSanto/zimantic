@@ -1021,6 +1021,29 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 return icon_url
         return None
 
+    def source_display(source_key: str) -> tuple[str | None, str | None]:
+        """Return the discovered title and provider for a source key."""
+        try:
+            resolve = getattr(search_class, "resolve_content_source", None)
+            source = resolve(source_key) if callable(resolve) else None
+            sources = search_class.source_dicts()
+        except Exception:
+            return None, None
+        resolved_key = source.key if source is not None else source_key
+        for candidate in sources:
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("key") == resolved_key:
+                title = candidate.get("title")
+                provider = candidate.get("provider")
+                return (
+                    str(title) if title else None,
+                    str(provider) if provider else None,
+                )
+        if source is not None:
+            return source.title, source.provider
+        return None, None
+
     def source_search_available(source_key: str) -> bool:
         """True when this identifier resolves to a searchable source."""
         try:
@@ -1076,6 +1099,7 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
     ):
         requested_path = None if path is None else path
         fallback_icon = source_icon_url(source)
+        source_title, source_provider = source_display(source)
         show_source_search = source_search_available(source)
         read_head = getattr(search_class, "read_article_head", None)
         check_path = getattr(search_class, "article_path_exists", None)
@@ -1183,6 +1207,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
                 show_zim_search=show_source_search,
                 source_previous=source_previous,
                 source_next=source_next,
+                source_title=source_title,
+                source_provider=source_provider,
             )
 
         if (requested_path or "") != article_dict["path"]:
@@ -1200,6 +1226,8 @@ def register_routes(app: FastAPI, search_class, debug: bool = False) -> None:
             show_zim_search=show_source_search,
             source_previous=source_previous,
             source_next=source_next,
+            source_title=source_title,
+            source_provider=source_provider,
         )
 
     def _safe_content_request(request: Request) -> bool:

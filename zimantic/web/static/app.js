@@ -121,6 +121,7 @@
             const LIBRARY_PAGE_CACHE_KEY = "zimantic.library-pages.v1";
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
+            let sourcesLoaded = false;
             let librarySources = [];
             let collections = [];
             let libraryCollections = [];
@@ -257,13 +258,97 @@
                 return String(source.title || source.key || "Untitled source").trim();
             }
 
+            function sourceVariantGroupKey(source) {
+                if (!source || typeof source !== "object") return "";
+                const provider = String(source.provider || "");
+                // Books can have a dated or flavoured variant under the same
+                // title. Files and Kolibri sources can legitimately share a
+                // title without being the same book, so leave them alone.
+                if (provider !== "zim" && provider !== "kiwix") return "";
+                const title = libraryTitle(source).toLocaleLowerCase();
+                if (!title) return "";
+                return [
+                    provider,
+                    collectionKeyFor(source),
+                    title,
+                ].join("\u0000");
+            }
+
+            function compareSourceVariants(left, right) {
+                const leftSearchable = left?.searchable === false ? 0 : 1;
+                const rightSearchable = right?.searchable === false ? 0 : 1;
+                if (leftSearchable !== rightSearchable) {
+                    return leftSearchable < rightSearchable ? -1 : 1;
+                }
+                const leftDate = String(left?.date || "");
+                const rightDate = String(right?.date || "");
+                if (leftDate !== rightDate) return leftDate < rightDate ? -1 : 1;
+                const leftItems = Number(left?.item_count) || 0;
+                const rightItems = Number(right?.item_count) || 0;
+                if (leftItems !== rightItems) return leftItems < rightItems ? -1 : 1;
+                const leftSize = Number(left?.size) || 0;
+                const rightSize = Number(right?.size) || 0;
+                if (leftSize !== rightSize) return leftSize < rightSize ? -1 : 1;
+                return String(left?.key || "").localeCompare(
+                    String(right?.key || ""),
+                );
+            }
+
+            function bestSourceVariant(members) {
+                return members.reduce(
+                    (best, candidate) =>
+                        compareSourceVariants(candidate, best) > 0
+                            ? candidate
+                            : best,
+                );
+            }
+
+            function collapseSourceVariants(records) {
+                const order = [];
+                const groups = new Map();
+                for (const source of records) {
+                    const groupKey = sourceVariantGroupKey(source);
+                    if (!groupKey) {
+                        order.push({source});
+                        continue;
+                    }
+                    let group = groups.get(groupKey);
+                    if (!group) {
+                        group = {members: []};
+                        groups.set(groupKey, group);
+                        order.push(group);
+                    }
+                    group.members.push(source);
+                }
+                return order.map((entry) =>
+                    entry.members ? bestSourceVariant(entry.members) : entry.source,
+                );
+            }
+
+            function sourceVariantDescriptor(source) {
+                if (!source) return "";
+                const stem = String(source.key || "").split(":").pop();
+                const flavour = (
+                    stem.match(/(?:^|_)(mini|nopic|maxi|all)(?=_|$)/) || []
+                )[1] || "";
+                return [flavour, String(source.date || "").trim()]
+                    .filter(Boolean)
+                    .join(" · ");
+            }
+
             function sourceRecord(keyOrSource) {
                 if (keyOrSource && typeof keyOrSource === "object") return keyOrSource;
                 const wanted = String(keyOrSource || "").trim();
                 if (!wanted) return null;
                 const matches = (source) =>
                     String(source.key || "") === wanted;
-                return sources.find(matches) || librarySources.find(matches) || null;
+                const known = [
+                    ...(typeof sources !== "undefined" ? sources : []),
+                    ...(typeof librarySources !== "undefined"
+                        ? librarySources
+                        : []),
+                ];
+                return known.find(matches) || null;
             }
 
             function sourceDisplayName(keyOrSource) {
@@ -651,10 +736,10 @@
                 appendInfoRow(list, "Date", source.date);
                 appendInfoRow(list, "Size", formatLibrarySize(source.size));
                 if (Number(source.item_count) > 0) {
-                    appendInfoRow(list, "Items", Number(source.item_count).toLocaleString());
+                    appendInfoRow(list, "Items", formatCount(source.item_count));
                 }
                 if (Number(source.indexed_count) > 0) {
-                    appendInfoRow(list, "Indexed", Number(source.indexed_count).toLocaleString());
+                    appendInfoRow(list, "Indexed", formatCount(source.indexed_count));
                 }
                 appendInfoRow(list, "Category", source.category);
                 appendInfoRow(list, "Provider", providerLabel(source.provider));
@@ -685,7 +770,7 @@
                     details.appendChild(summary);
                     const code = document.createElement("code");
                     code.textContent = counter
-                        .map((entry) => `${entry.mime}: ${entry.count.toLocaleString()}`)
+                        .map((entry) => `${entry.mime}: ${formatCount(entry.count)}`)
                         .join("\n");
                     details.appendChild(code);
                     content.appendChild(details);
@@ -1075,11 +1160,11 @@
                     ].filter(Boolean);
                     const inventoryDetails = [
                         Number(source.item_count) > 0
-                            ? `${Number(source.item_count).toLocaleString()} ${
+                            ? `${formatCount(source.item_count)} ${t(
                                   Number(source.item_count) === 1
                                       ? "item"
-                                      : "items"
-                              }`
+                                      : "items",
+                              )}`
                             : "",
                         formatLibrarySize(source.size),
                     ].filter(Boolean);
@@ -1133,7 +1218,7 @@
                         libraryCollectionText(collection),
                         query,
                     );
-                    const members = (state?.sources || []).filter((source) => {
+                    const filteredMembers = (state?.sources || []).filter((source) => {
                         if (source.provider === "kolibri" && source.item_count === 0) {
                             return false;
                         }
@@ -1162,7 +1247,7 @@
                         key,
                         collection,
                         state,
-                        members,
+                        members: collapseSourceVariants(filteredMembers),
                         collectionMatches,
                     });
                 }
@@ -1180,11 +1265,16 @@
                         key,
                         collection,
                         state,
-                        members: state.sources.filter(
-                            (source) =>
-                                (source.provider !== "kolibri" || source.item_count !== 0) &&
-                                (!language ||
-                                    libraryLanguageCodes(source).includes(language)),
+                        members: collapseSourceVariants(
+                            state.sources.filter(
+                                (source) =>
+                                    (source.provider !== "kolibri" ||
+                                        source.item_count !== 0) &&
+                                    (!language ||
+                                        libraryLanguageCodes(source).includes(
+                                            language,
+                                        )),
+                            ),
                         ),
                         collectionMatches: true,
                     });
@@ -1365,7 +1455,7 @@
                 const filter = $("libraryFilter");
                 if (filter) {
                     const count = loadedCount;
-                    filter.placeholder = `${t("Filter")} ${count.toLocaleString()} ${t(
+                    filter.placeholder = `${t("Filter")} ${formatCount(count)} ${t(
                         count === 1 ? "source" : "sources",
                     )}`;
                 }
@@ -1420,14 +1510,16 @@
                     const meta = document.createElement("p");
                     meta.className = "library-collection-meta";
                     const sourceCount = Number(
-                        hasFilters
-                            ? state?.total ?? members.length
-                            : collection.source_count,
+                        state && !state.hasMore && !state.loading
+                            ? members.length
+                            : hasFilters
+                              ? state?.total ?? members.length
+                              : collection.source_count,
                     );
                     meta.textContent = [
                         providerLabel(collection.provider),
                         Number.isFinite(sourceCount)
-                            ? `${sourceCount.toLocaleString()} ${t(
+                            ? `${formatCount(sourceCount)} ${t(
                                   sourceCount === 1 ? "source" : "sources",
                               )}`
                             : "",
@@ -1478,11 +1570,11 @@
                         if (state?.hasMore) {
                             const note = document.createElement("p");
                             note.className = "library-collection-note";
-                            note.textContent = `${t("Showing")} ${members.length.toLocaleString()} ${t(
-                                "of",
-                            )} ${Number(
+                            note.textContent = `${t("Showing")} ${formatCount(
+                                members.length,
+                            )} ${t("of")} ${formatCount(
                                 state.total,
-                            ).toLocaleString()} ${t("sources")}.`;
+                            )} ${t("sources")}.`;
                             section.appendChild(note);
                         }
                     }
@@ -1598,6 +1690,18 @@
                     : value;
             }
 
+            function uiLocale() {
+                const picker = typeof $ === "function" ? $("localePicker") : null;
+                return String(picker?.value || "en");
+            }
+
+            function formatCount(value) {
+                const number = Number(value);
+                return Number.isFinite(number)
+                    ? number.toLocaleString(uiLocale())
+                    : String(value);
+            }
+
             function dedupeParams(params, name) {
                 const values = [...new Set(params.getAll(name))];
                 if (!values.length) return;
@@ -1616,14 +1720,13 @@
                     (key) => current.question || (current.searchKeys || []).includes(key),
                 );
                 if (selected.length) {
-                    const known = new Set(
-                        [...current.outcomes.keys()].filter((key) =>
-                            selectedSourceKeys.has(key),
-                        ),
-                    );
+                    const groups = collapseSelectedSourceKeys(selected);
+                    const completed = groups.filter((entry) =>
+                        entry.keys.some((key) => current.outcomes.has(key)),
+                    ).length;
                     return {
-                        completed: known.size,
-                        total: selected.length,
+                        completed,
+                        total: groups.length,
                         selected: true,
                     };
                 }
@@ -1661,20 +1764,113 @@
                 keys.forEach((key) => params.append("source", key));
             }
 
+            function outcomeVariantKeys(outcome) {
+                if (
+                    Array.isArray(outcome?.variantKeys) &&
+                    outcome.variantKeys.length
+                ) {
+                    return outcome.variantKeys;
+                }
+                return outcome?.source?.key ? [outcome.source.key] : [];
+            }
+
+            function outcomeIsSelected(outcome) {
+                return outcomeVariantKeys(outcome).some((key) =>
+                    selectedSourceKeys.has(key),
+                );
+            }
+
+            function collapseSelectedSourceKeys(keys) {
+                const order = [];
+                const groups = new Map();
+                for (const key of keys) {
+                    const source = sourceRecord(key);
+                    const groupKey = source
+                        ? sourceVariantGroupKey(source)
+                        : "";
+                    if (!groupKey) {
+                        order.push({source, keys: [key]});
+                        continue;
+                    }
+                    let group = groups.get(groupKey);
+                    if (!group) {
+                        group = {sources: [], keys: []};
+                        groups.set(groupKey, group);
+                        order.push(group);
+                    }
+                    group.keys.push(key);
+                    if (source) group.sources.push(source);
+                }
+                return order.map((entry) =>
+                    entry.sources
+                        ? {
+                              source: bestSourceVariant(entry.sources),
+                              keys: entry.keys,
+                          }
+                        : entry,
+                );
+            }
+
+            function collapseSourceOutcomes(outcomes) {
+                const order = [];
+                const groups = new Map();
+                for (const outcome of outcomes) {
+                    const groupKey = sourceVariantGroupKey(outcome?.source);
+                    if (!groupKey) {
+                        order.push({outcome});
+                        continue;
+                    }
+                    let group = groups.get(groupKey);
+                    if (!group) {
+                        group = {members: []};
+                        groups.set(groupKey, group);
+                        order.push(group);
+                    }
+                    group.members.push(outcome);
+                }
+                return order.map((entry) => {
+                    if (!entry.members) return entry.outcome;
+                    const members = entry.members;
+                    const failed = members.every(
+                        (member) => member.status === "error",
+                    );
+                    return {
+                        source: bestSourceVariant(
+                            members.map((member) => member.source),
+                        ),
+                        status: failed ? "error" : "ok",
+                        error: failed ? members[0].error : "",
+                        variantKeys: [
+                            ...new Set(
+                                members.map((member) => member.source.key),
+                            ),
+                        ],
+                        memberSources: members.map(
+                            (member) => member.source,
+                        ),
+                    };
+                });
+            }
+
             function sourceFilterLayout() {
                 // Only an earlier unscoped search of this query supplies extra
                 // chips. Its counts are discovery hints, not current progress.
-                const outcomes = [...new Map([
-                    ...(current.discovery?.outcomes || []),
-                    ...current.outcomes,
-                ]).values()];
+                const outcomes = collapseSourceOutcomes([
+                    ...new Map([
+                        ...(current.discovery?.outcomes || []),
+                        ...current.outcomes,
+                    ]).values(),
+                ]);
                 const searched = new Set(current.searchKeys || []);
-                const outcomeCount = (outcome) => {
-                    const key = outcome.source.key;
-                    return searched.has(key) || current.outcomes.has(key)
+                const countForKey = (key) =>
+                    searched.has(key) || current.outcomes.has(key)
                         ? current.counts[key] || 0
                         : current.discovery?.counts[key] || 0;
-                };
+                const outcomeCount = (outcome) =>
+                    outcomeVariantKeys(outcome).reduce(
+                        (total, key) => total + countForKey(key),
+                        0,
+                    );
                 // A source is a hard failure only when it reported status
                 // "error". A "partial" source returned results, so it must stay
                 // selectable and show its count rather than an error label.
@@ -1686,8 +1882,14 @@
                 const queryTerms = query.split(/\s+/).filter(Boolean);
                 const matching = queryTerms.length
                     ? nonEmptyOutcomes.filter((outcome) => {
-                          const searchable = librarySearchText(outcome.source);
-                          return queryTerms.every((term) => searchable.includes(term));
+                          const searchable = (
+                              outcome.memberSources || [outcome.source]
+                          )
+                              .map(librarySearchText)
+                              .join(" ");
+                          return queryTerms.every((term) =>
+                              searchable.includes(term),
+                          );
                       })
                     : nonEmptyOutcomes;
                 const byCollection = new Map();
@@ -1707,7 +1909,7 @@
                 // A selected source must remain visible even when the source
                 // filter query no longer matches its metadata.
                 for (const outcome of outcomes) {
-                    if (!selectedSourceKeys.has(outcome.source.key)) continue;
+                    if (!outcomeIsSelected(outcome)) continue;
                     const collection = outcome.source.collection || null;
                     const key = collection?.key || `provider:${outcome.source.provider || ""}`;
                     if (!byCollection.has(key)) {
@@ -1739,9 +1941,7 @@
                             ? group.outcomes.length
                             : SOURCE_FILTER_QUERY_LIMIT
                         : SOURCE_FILTER_LIMIT;
-                    const selected = group.outcomes.filter((outcome) =>
-                        selectedSourceKeys.has(outcome.source.key),
-                    );
+                    const selected = group.outcomes.filter(outcomeIsSelected);
                     const showable = (outcome) =>
                         failed(outcome) || outcomeCount(outcome) > 0;
                     const nonSelected = group.outcomes.filter(
@@ -1791,6 +1991,7 @@
                     showOther: otherOutcomes.length > 0,
                     failed,
                     outcomeCount,
+                    selected: outcomeIsSelected,
                 };
             }
 
@@ -1802,6 +2003,27 @@
                 if (node.dataset.sourceAction) return `action:${node.dataset.sourceAction}`;
                 if (node.dataset.source) return `source:${node.dataset.source}`;
                 return "";
+            }
+
+            function sourceButtonVariantKeys(button) {
+                const raw = button?.dataset?.sourceVariants;
+                if (raw) {
+                    try {
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) {
+                            return [...new Set(
+                                parsed.filter(
+                                    (key) =>
+                                        typeof key === "string" && key,
+                                ),
+                            )];
+                        }
+                    } catch (_) {
+                        // Fall back to the representative source key.
+                    }
+                }
+                const key = button?.dataset?.source;
+                return key ? [key] : [];
             }
 
             function sourceFilterButton(outcome, layout) {
@@ -1817,6 +2039,10 @@
                       : "source-filter-option";
                 button.type = "button";
                 button.dataset.source = outcome.source.key;
+                const variantKeys = outcomeVariantKeys(outcome);
+                if (variantKeys.length > 1) {
+                    button.dataset.sourceVariants = JSON.stringify(variantKeys);
+                }
                 const sourceLabel = sourceDisplayName(outcome.source);
                 button.textContent = isFailed
                     ? `${sourceLabel}: ${outcome.error}`
@@ -1828,7 +2054,7 @@
                 button.setAttribute("aria-disabled", isFailed ? "true" : "false");
                 button.setAttribute(
                     "aria-pressed",
-                    selectedSourceKeys.has(outcome.source.key) ? "true" : "false",
+                    layout.selected(outcome) ? "true" : "false",
                 );
                 return button;
             }
@@ -1982,11 +2208,18 @@
                     collection.textContent = collectionDisplayName(selectedCollectionKey);
                     entries.push(collection);
                 }
-                entries.push(...[...selectedSourceKeys].map((key) => {
+                const selectedEntries = collapseSelectedSourceKeys([
+                    ...selectedSourceKeys,
+                ]);
+                entries.push(...selectedEntries.map(({source, keys}) => {
+                    const key = source?.key || keys[0];
                     const button = document.createElement("button");
                     button.className = "source-filter-option ok";
                     button.type = "button";
                     button.dataset.source = key;
+                    if (keys.length > 1) {
+                        button.dataset.sourceVariants = JSON.stringify(keys);
+                    }
                     button.setAttribute("aria-pressed", "true");
                     button.textContent = sourceDisplayName(key);
                     const stem = sourceStemName(key);
@@ -1994,7 +2227,9 @@
                     return button;
                 }));
                 options.replaceChildren(...entries);
-                const count = selectedSourceKeys.size || (selectedCollectionKey ? 1 : 0);
+                const count =
+                    selectedEntries.length ||
+                    (selectedCollectionKey ? 1 : 0);
                 const collectionMode = selectedCollectionKey && !selectedSourceKeys.size;
                 const noun = collectionMode
                     ? count === 1
@@ -2045,7 +2280,9 @@
                 if (collectionKey) {
                     const count =
                         current?.searchCollection === collectionKey
-                            ? current.searchKeys?.length || 0
+                            ? collapseSelectedSourceKeys(
+                                  current.searchKeys || [],
+                              ).length
                             : 0;
                     text.textContent =
                         `${t("Searching collection")}: ${collectionDisplayName(collectionKey)}` +
@@ -2054,7 +2291,10 @@
                             : "");
                     return;
                 }
-                const names = searchKeys.map((key) => sourceDisplayName(key));
+                const displayKeys = collapseSelectedSourceKeys(searchKeys).map(
+                    (entry) => entry.source?.key || entry.keys[0],
+                );
+                const names = displayKeys.map((key) => sourceDisplayName(key));
                 const shown = names.slice(0, 3);
                 const extra = names.length - shown.length;
                 text.textContent =
@@ -2081,12 +2321,21 @@
                 const candidates = current
                     ? [...current.outcomes.values()].map((outcome) => outcome.source)
                     : [...sources, ...librarySources];
-                const duplicate = candidates.some(
+                const duplicates = candidates.filter(
                     (candidate) =>
                         candidate.key !== source.key &&
                         libraryTitle(candidate) === name,
                 );
-                return duplicate ? `${name} · ${label}` : name;
+                if (!duplicates.length) return name;
+                const sameCollection = duplicates.some(
+                    (candidate) =>
+                        collectionKeyFor(candidate) === collectionKeyFor(source),
+                );
+                if (sameCollection) {
+                    const descriptor = sourceVariantDescriptor(source);
+                    if (descriptor) return `${name} · ${descriptor}`;
+                }
+                return `${name} · ${label}`;
             }
 
             function setSourceMeta(node, item) {
@@ -3518,7 +3767,9 @@
                 if (!total) return t("No results");
                 const from = page * PAGE_SIZE + 1;
                 const to = Math.min((page + 1) * PAGE_SIZE, total);
-                return `${from.toLocaleString()}–${to.toLocaleString()} ${t("of")} ${total.toLocaleString()} ${t(
+                return `${formatCount(from)}–${formatCount(to)} ${t(
+                    "of",
+                )} ${formatCount(total)} ${t(
                     total === 1 ? "result" : "results",
                 )}`;
             }
@@ -3650,7 +3901,9 @@
                 const label = document.createElement("span");
                 const from = total ? current.page * PAGE_SIZE + 1 : 0;
                 const to = Math.min((current.page + 1) * PAGE_SIZE, total);
-                label.textContent = `${from.toLocaleString()}–${to.toLocaleString()} ${t("of")} ${total.toLocaleString()}`;
+                label.textContent = `${formatCount(from)}–${formatCount(to)} ${t(
+                    "of",
+                )} ${formatCount(total)}`;
                 pager.append(prev, label, next);
                 if (current.page > 0) {
                     // Shortcut back to the first page from anywhere in the pager.
@@ -4135,7 +4388,12 @@
                 renderResults([]);
                 try {
                     const selected = activeSources();
-                    if (!selected.length) {
+                    // A plain unscoped query does not need discovery data:
+                    // the server searches every configured source. Allow that
+                    // early search to start before /sources finishes, so a
+                    // shared ?q= link or a reload is not mistaken for an empty
+                    // library. Explicit scopes are validated after discovery.
+                    if (!selected.length && sourcesLoaded) {
                         $("status").textContent = t(
                             "No sources are available to search.",
                         );
@@ -4607,7 +4865,8 @@
                 ) {
                     return;
                 }
-                const key = button.dataset.source || null;
+                const sourceKeys = sourceButtonVariantKeys(button);
+                const key = sourceKeys[0] || null;
                 const collectionKey = button.dataset.sourceCollection || null;
                 const focusButton = (wanted) => {
                     const buttons = [
@@ -4634,11 +4893,19 @@
                                 ? null
                                 : collectionKey;
                         selectedSourceKeys.clear();
-                    } else if (key && selectedSourceKeys.has(key)) {
-                        selectedSourceKeys.delete(key);
+                    } else if (
+                        sourceKeys.some((sourceKey) =>
+                            selectedSourceKeys.has(sourceKey),
+                        )
+                    ) {
+                        sourceKeys.forEach((sourceKey) =>
+                            selectedSourceKeys.delete(sourceKey),
+                        );
                     } else if (key) {
                         selectedCollectionKey = null;
-                        selectedSourceKeys.add(key);
+                        sourceKeys.forEach((sourceKey) =>
+                            selectedSourceKeys.add(sourceKey),
+                        );
                     }
                     const selected = [...selectedSourceKeys];
                     history.replaceState(
@@ -4699,11 +4966,19 @@
                 } else if (selectedCollectionKey) {
                     // Choosing an individual source leaves group mode.
                     selectedCollectionKey = null;
-                    selectedSourceKeys = new Set(key ? [key] : []);
-                } else if (selectedSourceKeys.has(key)) {
-                    selectedSourceKeys.delete(key);
+                    selectedSourceKeys = new Set(sourceKeys);
+                } else if (
+                    sourceKeys.some((sourceKey) =>
+                        selectedSourceKeys.has(sourceKey),
+                    )
+                ) {
+                    sourceKeys.forEach((sourceKey) =>
+                        selectedSourceKeys.delete(sourceKey),
+                    );
                 } else if (key) {
-                    selectedSourceKeys.add(key);
+                    sourceKeys.forEach((sourceKey) =>
+                        selectedSourceKeys.add(sourceKey),
+                    );
                 }
                 const selected = [...selectedSourceKeys];
                 commitAutoSearchHistory();
@@ -5130,7 +5405,7 @@
                     $("searchButton").disabled = false;
                     $("status").textContent = "";
                     $("notice").textContent =
-                        `Search queries are limited to ${MAX_QUERY_LENGTH.toLocaleString()} characters.`;
+                        `Search queries are limited to ${formatCount(MAX_QUERY_LENGTH)} characters.`;
                     return;
                 }
                 // Keep the current source or collection filter when the query
@@ -5318,6 +5593,7 @@
                     renderLibrary();
                 } else {
                     sources = payload;
+                    sourcesLoaded = true;
                     renderSourceSelectionSummary();
                 }
             }

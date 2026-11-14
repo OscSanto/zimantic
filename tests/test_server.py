@@ -903,12 +903,50 @@ class ServerTests(unittest.TestCase):
             shell.text,
         )
         self.assertIn(
-            f'title="Open this ZIM\'s homepage ({zim})"',
+            'title="Open the homepage of based.cooking"',
             shell.text,
         )
         # The captured domain is the home label, not a second breadcrumb.
         self.assertNotIn(f'href="/content/{zim}/based.cooking/"', shell.text)
         self.assertIn(f'href="/content/{zim}/based.cooking/recipe/"', shell.text)
+
+    def test_toolbar_uses_source_title_and_provider_specific_search_label(self):
+        article = lambda _zim, path: {
+            "path": path,
+            "title": "Page",
+            "mimetype": "text/html",
+            "content": b"<html><head></head><body>Page</body></html>",
+        }
+        with patch.object(self.search, "read_article", article, create=True):
+            zim_shell = self.client.get("/content/manual/page")
+            self.assertIn(
+                '<span class="zimantic-toolbar-home-full">Manual</span>',
+                zim_shell.text,
+            )
+            self.assertIn(
+                'title="Open the homepage of Manual"',
+                zim_shell.text,
+            )
+            self.assertIn('placeholder="Search this ZIM"', zim_shell.text)
+
+            files_sources = [{
+                "key": "manual",
+                "provider": "files",
+                "title": "Manual files",
+                "searchable": True,
+            }]
+            with patch.object(
+                self.search, "source_dicts", return_value=files_sources
+            ):
+                files_shell = self.client.get("/content/manual/page")
+        self.assertIn(
+            '<span class="zimantic-toolbar-home-full">Manual files</span>',
+            files_shell.text,
+        )
+        self.assertIn(
+            'placeholder="Search this source"',
+            files_shell.text,
+        )
 
     def test_toolbar_drops_breadcrumb_for_missing_container(self):
         zim = "dandwiki_en_all_nopic_2025-04"
