@@ -738,7 +738,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("data-zimantic-toolbar", shell.text)
         self.assertIn(
             '<a class="zimantic-toolbar-article-full" data-zimantic-raw-article '
-            'href="/article/manual/page">Page</a>',
+            'target="_blank" rel="noopener" href="/article/manual/page">Page</a>',
             shell.text,
         )
         self.assertIn('src="/article/manual/page"', shell.text)
@@ -768,6 +768,7 @@ class ServerTests(unittest.TestCase):
         # offline copy, and sends everything else to the external-link notice.
         self.assertIn("zimantic-article-link", shell.text)
         self.assertIn("const secureBrowsing = false;", shell.text)
+
         self.assertNotIn('sandbox="allow-scripts allow-popups', shell.text)
         self.assertIn('referrerpolicy="same-origin"', shell.text)
         self.assertIn("const offlineUrlFor = (url, route) =>", shell.text)
@@ -793,6 +794,39 @@ class ServerTests(unittest.TestCase):
             shell.text.index("<iframe data-zimantic-article"),
         )
 
+    def test_non_inline_media_keeps_download_and_raw_link(self):
+        body = b"PK\x03\x04sheet"
+        for mimetype, name in (
+            (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet",
+                "book.xlsx",
+            ),
+            ("application/octet-stream", "mystery.bin"),
+        ):
+            with self.subTest(mimetype=mimetype), patch.object(
+                self.search,
+                "read_article",
+                lambda zim, path, mimetype=mimetype: {
+                    "path": path,
+                    "title": path,
+                    "mimetype": mimetype,
+                    "content": body,
+                },
+                create=True,
+            ):
+                shell = self.client.get(f"/content/manual/{name}")
+                raw = self.client.get(f"/article/manual/{name}")
+                self.assertEqual(shell.status_code, 200)
+                self.assertIn("zimantic-shell-attachment", shell.text)
+                self.assertIn("Download file", shell.text)
+                self.assertIn(
+                    'data-zimantic-raw-article target="_blank" rel="noopener"',
+                    shell.text,
+                )
+                self.assertTrue(
+                    raw.headers["content-disposition"].startswith("attachment")
+                )
     def test_content_external_url_uses_top_level_redirect_bridge(self):
         entry = SimpleNamespace(
             path="node/topic",

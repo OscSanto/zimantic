@@ -518,6 +518,7 @@ def _article_toolbar(
             '<span class="zimantic-toolbar-separator" aria-hidden="true">›</span>'
             '<span class="zimantic-toolbar-article">'
             f'<a class="zimantic-toolbar-article-full" data-zimantic-raw-article '
+            f'target="_blank" rel="noopener" '
             f'href="{raw_url}">{article_title}</a>'
             f'<a class="zimantic-toolbar-article-short" data-zimantic-permalink '
             f'data-zimantic-action="copy" href="{permalink_url}" '
