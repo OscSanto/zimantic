@@ -119,6 +119,17 @@
             const LIBRARY_CACHE_KEY = "zimantic.library.v7";
             const COLLECTION_CACHE_KEY = "zimantic.collections.v1";
             const LIBRARY_PAGE_CACHE_KEY = "zimantic.library-pages.v1";
+            const LIBRARY_PAGE_SIZE = 48;
+            const LIBRARY_SORT_MODES = new Set([
+                "title",
+                "newest",
+                "largest",
+                "items",
+            ]);
+            let libraryPageIndex = 0;
+            let libraryPageCount = 1;
+            let librarySortMode = "title";
+            let libraryShuffled = false;
             const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
             let sources = [];
             let sourcesLoaded = false;
@@ -157,6 +168,8 @@
             let libraryInfoCurrentKey = null;
             let libraryInfoHistoryPushed = false;
             let activeModalUrl = null;
+            let pendingArticleFrameToken = 0;
+            let pendingArticleFocusRestore = null;
             let activeSearchResult = null;
             let activeLibraryArticleUrl = null;
             let previousModalArticleUrl = null;
@@ -813,7 +826,11 @@
                         (state) => state.sources,
                     ),
                 );
+                libraryShuffled = true;
+                libraryPageIndex = 0;
+                updateLibraryFilterUrl();
                 renderLibrary();
+                window.scrollTo({ top: 0, left: 0, behavior: "auto" });
             }
 
             function readJsonCache(key) {
@@ -994,9 +1011,16 @@
                 );
                 replaceQueryParam("media", $("libraryMediaFilter")?.value || null);
                 replaceQueryParam("language", $("libraryLanguageFilter")?.value || null);
+                replaceQueryParam("sort", librarySortMode === "title" ? null : librarySortMode);
+                replaceQueryParam(
+                    "page",
+                    libraryPageIndex > 0 ? String(libraryPageIndex + 1) : null,
+                );
             }
 
             function scheduleLibraryReload() {
+                libraryPageIndex = 0;
+                libraryShuffled = false;
                 updateLibraryFilterUrl();
                 renderLibraryScopeLine();
                 clearTimeout(libraryFilterTimer);
@@ -1011,6 +1035,8 @@
                 $("libraryProviderFilter").value = "";
                 $("libraryMediaFilter").value = "";
                 $("libraryLanguageFilter").value = "";
+                libraryPageIndex = 0;
+                libraryShuffled = false;
                 clearTimeout(libraryFilterTimer);
                 libraryFilterTimer = null;
                 updateLibraryFilterUrl();
@@ -1019,21 +1045,13 @@
             }
 
             function sortLibrarySources(sources) {
-                const titleCollator = new Intl.Collator(undefined, {
-                    sensitivity: "base",
-                    numeric: true,
-                });
                 return [...sources].sort((left, right) => {
-                    const byTitle = titleCollator.compare(
+                    const byTitle = libraryTitleCollator().compare(
                         libraryTitle(left),
                         libraryTitle(right),
                     );
                     if (byTitle) return byTitle;
-                    return String(
-                        left.key || "",
-                    ).localeCompare(
-                        String(right.key || ""),
-                    );
+                    return String(left.key || "").localeCompare(String(right.key || ""));
                 });
             }
 
@@ -1074,6 +1092,112 @@
                 ]
                     .filter(Boolean)
                     .join(" ");
+            }
+
+            function libraryTitleCollator() {
+                return new Intl.Collator(undefined, {
+                    sensitivity: "base",
+                    numeric: true,
+                });
+            }
+
+            function librarySortValue(source, mode) {
+                if (!source) return Number.NEGATIVE_INFINITY;
+                if (mode === "newest") {
+                    const timestamp = Date.parse(String(source.date || ""));
+                    return Number.isFinite(timestamp)
+                        ? timestamp
+                        : Number.NEGATIVE_INFINITY;
+                }
+                if (mode === "largest") {
+                    const size = Number(source.size);
+                    return Number.isFinite(size) ? size : Number.NEGATIVE_INFINITY;
+                }
+                if (mode === "items") {
+                    const items = Number(source.item_count);
+                    return Number.isFinite(items)
+                        ? items
+                        : Number.NEGATIVE_INFINITY;
+                }
+                return libraryTitle(source).toLocaleLowerCase();
+            }
+
+            function sortLibraryMembers(sources, mode) {
+                const collator = libraryTitleCollator();
+                return [...sources].sort((left, right) => {
+                    if (mode !== "title") {
+                        const leftValue = librarySortValue(left, mode);
+                        const rightValue = librarySortValue(right, mode);
+                        if (leftValue !== rightValue) {
+                            return rightValue > leftValue ? 1 : -1;
+                        }
+                    }
+                    const byTitle = collator.compare(
+                        libraryTitle(left),
+                        libraryTitle(right),
+                    );
+                    if (byTitle) return byTitle;
+                    return String(left.key || "").localeCompare(String(right.key || ""));
+                });
+            }
+
+            function currentLibrarySortMode() {
+                const value =
+                    $("librarySort")?.value ||
+                    librarySortMode ||
+                    "title";
+                return LIBRARY_SORT_MODES.has(value) ? value : "title";
+            }
+
+            function sortLibraryViews(views, mode) {
+                if (libraryShuffled) return views;
+                const sorted = views.map((view) => ({
+                    ...view,
+                    members: sortLibraryMembers(view.members, mode),
+                }));
+                if (mode === "title") return sorted;
+                const collator = libraryTitleCollator();
+                sorted.sort((left, right) => {
+                    const leftValue = librarySortValue(left.members[0], mode);
+                    const rightValue = librarySortValue(right.members[0], mode);
+                    if (leftValue !== rightValue) {
+                        return rightValue > leftValue ? 1 : -1;
+                    }
+                    const byName = collator.compare(
+                        collectionDisplayName(left.collection),
+                        collectionDisplayName(right.collection),
+                    );
+                    if (byName) return byName;
+                    return String(left.key || "").localeCompare(String(right.key || ""));
+                });
+                return sorted;
+            }
+
+            function libraryPageSlice(items, page) {
+                const total = items.length;
+                const pageCount = Math.max(
+                    1,
+                    Math.ceil(total / LIBRARY_PAGE_SIZE),
+                );
+                const safePage = Math.min(
+                    Math.max(0, Number.isInteger(page) ? page : 0),
+                    pageCount - 1,
+                );
+                return {
+                    items: items.slice(
+                        safePage * LIBRARY_PAGE_SIZE,
+                        (safePage + 1) * LIBRARY_PAGE_SIZE,
+                    ),
+                    page: safePage,
+                    pageCount,
+                    total,
+                };
+            }
+
+            function readLibrarySortMode() {
+                const value =
+                    new URLSearchParams(location.search).get("sort") || "";
+                return LIBRARY_SORT_MODES.has(value) ? value : "title";
             }
 
             function libraryCardsFor(sources) {
@@ -1279,24 +1403,27 @@
                         collectionMatches: true,
                     });
                 }
-                return views.filter((view) => {
-                    if (!query && !provider && !media && !language) return true;
-                    if (view.collectionMatches) {
-                        if (!provider && !media && !language) return true;
-                        if (
-                            provider &&
-                            view.collection?.provider &&
-                            view.collection.provider !== provider
-                        ) {
-                            return false;
+                return sortLibraryViews(
+                    views.filter((view) => {
+                        if (!query && !provider && !media && !language) return true;
+                        if (view.collectionMatches) {
+                            if (!provider && !media && !language) return true;
+                            if (
+                                provider &&
+                                view.collection?.provider &&
+                                view.collection.provider !== provider
+                            ) {
+                                return false;
+                            }
+                            if (media || language) {
+                                return view.members.length > 0 || !view.state || view.state.loading;
+                            }
+                            return true;
                         }
-                        if (media || language) {
-                            return view.members.length > 0 || !view.state || view.state.loading;
-                        }
-                        return true;
-                    }
-                    return view.members.length > 0;
-                });
+                        return view.members.length > 0;
+                    }),
+                    currentLibrarySortMode(),
+                );
             }
 
             function libraryStateMessage(view) {
@@ -1445,6 +1572,208 @@
                 if (select) select.value = language;
             }
 
+            function librarySectionFor(view, members, hasFilters) {
+                const { key, collection, state } = view;
+                const section = document.createElement("section");
+                section.className = "library-collection";
+                section.dataset.libraryCollection = key;
+                const header = document.createElement("div");
+                header.className = "library-collection-header";
+                const heading = document.createElement("div");
+                heading.className = "library-collection-heading";
+                const title = document.createElement("h3");
+                title.textContent = collectionDisplayName(collection);
+                heading.appendChild(title);
+                const meta = document.createElement("p");
+                meta.className = "library-collection-meta";
+                const availableCount = view.members.length;
+                const sourceCount = Number(
+                    state && !state.hasMore && !state.loading
+                        ? availableCount
+                        : hasFilters
+                          ? state?.total ?? availableCount
+                          : collection.source_count,
+                );
+                meta.textContent = [
+                    providerLabel(collection.provider),
+                    Number.isFinite(sourceCount)
+                        ? `${formatCount(sourceCount)} ${t(
+                              sourceCount === 1 ? "source" : "sources",
+                          )}`
+                        : "",
+                ]
+                    .filter(Boolean)
+                    .join(" · ");
+                heading.appendChild(meta);
+                header.appendChild(heading);
+                if (collection.description) {
+                    const description = document.createElement("p");
+                    description.className = "library-collection-description";
+                    description.textContent = collection.description;
+                    header.appendChild(description);
+                }
+                const actions = document.createElement("div");
+                actions.className = "library-collection-actions";
+                if (Number(collection.source_count) > 0) {
+                    const search = document.createElement("button");
+                    search.type = "button";
+                    search.className = "library-button";
+                    search.textContent = "Search collection";
+                    search.dataset.i18n = "Search collection";
+                    search.dataset.librarySearchCollection = key;
+                    actions.appendChild(search);
+                }
+                if (state?.hasMore) {
+                    const more = document.createElement("button");
+                    more.type = "button";
+                    more.className = "library-button";
+                    more.textContent = t("Load more sources");
+                    more.dataset.libraryMoreCollection = key;
+                    more.disabled = state.loading;
+                    actions.appendChild(more);
+                }
+                header.appendChild(actions);
+                section.appendChild(header);
+
+                if (!members.length) {
+                    const message = document.createElement("p");
+                    message.className = "empty";
+                    message.textContent = libraryStateMessage(view);
+                    section.appendChild(message);
+                } else {
+                    const groupGrid = document.createElement("div");
+                    groupGrid.className = "library-grid library-collection-grid";
+                    groupGrid.append(...libraryCardsFor(members));
+                    section.appendChild(groupGrid);
+                    if (state?.hasMore) {
+                        const note = document.createElement("p");
+                        note.className = "library-collection-note";
+                        note.textContent = `${t("Showing")} ${formatCount(
+                            availableCount,
+                        )} ${t("of")} ${formatCount(
+                            state.total,
+                        )} ${t("sources")}.`;
+                        section.appendChild(note);
+                    }
+                }
+                return section;
+            }
+
+            function libraryPageUrl(page) {
+                const url = new URL(location.href);
+                if (page > 0) {
+                    url.searchParams.set("page", String(page + 1));
+                } else {
+                    url.searchParams.delete("page");
+                }
+                return url.pathname + url.search;
+            }
+
+            function syncLibraryPageUrl(page, { replace = true } = {}) {
+                const target = libraryPageUrl(page);
+                const current = location.pathname + location.search;
+                if (target === current) return;
+                try {
+                    history[replace ? "replaceState" : "pushState"](
+                        history.state,
+                        "",
+                        target,
+                    );
+                } catch (_) {
+                    // Keep the current page if the browser refuses a history
+                    // write; the pager still works.
+                }
+            }
+
+            function setLibraryPage(page) {
+                const safePage = Math.min(
+                    Math.max(0, Number.isInteger(page) ? page : 0),
+                    Math.max(0, libraryPageCount - 1),
+                );
+                if (safePage === libraryPageIndex) return;
+                libraryPageIndex = safePage;
+                syncLibraryPageUrl(safePage, { replace: false });
+                renderLibrary();
+                window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+            }
+
+            function renderLibraryPager(total, pageCount) {
+                const pager = $("libraryPager");
+                if (!pager) return;
+                const focused = document.activeElement;
+                const focusAction =
+                    focused &&
+                    typeof pager.contains === "function" &&
+                    pager.contains(focused)
+                        ? focused.dataset?.libraryPageAction || ""
+                        : "";
+                pager.innerHTML = "";
+                libraryPageCount = Math.max(1, pageCount);
+                if (libraryPageCount <= 1) return;
+                const pageLink = (action, text, page, disabled) => {
+                    const link = document.createElement(disabled ? "span" : "a");
+                    link.dataset.libraryPageAction = action;
+                    link.textContent = text;
+                    if (disabled) {
+                        link.className = "disabled";
+                        link.setAttribute("aria-disabled", "true");
+                    } else {
+                        link.href = libraryPageUrl(page);
+                        link.dataset.libraryPage = String(page);
+                    }
+                    return link;
+                };
+                const start = document.createElement("div");
+                start.className = "pager-controls pager-controls-start";
+                const end = document.createElement("div");
+                end.className = "pager-controls pager-controls-end";
+                if (libraryPageIndex > 1) {
+                    start.append(pageLink("first", `« ${t("First")}`, 0, false));
+                }
+                if (libraryPageIndex > 0) {
+                    start.append(
+                        pageLink(
+                            "prev",
+                            `← ${t("Previous")}`,
+                            libraryPageIndex - 1,
+                            false,
+                        ),
+                    );
+                }
+                end.append(
+                    pageLink(
+                        "next",
+                        `${t("Next")} →`,
+                        libraryPageIndex + 1,
+                        libraryPageIndex >= libraryPageCount - 1,
+                    ),
+                );
+                const label = document.createElement("span");
+                const from = total
+                    ? libraryPageIndex * LIBRARY_PAGE_SIZE + 1
+                    : 0;
+                const to = Math.min(
+                    (libraryPageIndex + 1) * LIBRARY_PAGE_SIZE,
+                    total,
+                );
+                label.textContent = `${formatCount(from)}–${formatCount(to)} ${t(
+                    "of",
+                )} ${formatCount(total)}`;
+                pager.append(start, label, end);
+                if (focusAction) {
+                    const links = [...pager.querySelectorAll("a[data-library-page]")];
+                    const target =
+                        links.find(
+                            (link) =>
+                                link.dataset.libraryPageAction === focusAction,
+                        ) ||
+                        (focusAction === "next"
+                            ? links[links.length - 1]
+                            : links[0]);
+                    if (target) target.focus({ preventScroll: true });
+                }
+            }
+
             function renderLibrary() {
                 const grid = $("libraryGrid");
                 const status = $("libraryStatus");
@@ -1460,6 +1789,8 @@
                     )}`;
                 }
                 grid.replaceChildren();
+                const pager = $("libraryPager");
+                if (pager) pager.innerHTML = "";
                 const hasFilters = Boolean(
                     libraryFilterTerms() ||
                         $("libraryProviderFilter")?.value ||
@@ -1467,6 +1798,8 @@
                         $("libraryLanguageFilter")?.value,
                 );
                 if (!views.length) {
+                    libraryPageIndex = 0;
+                    libraryPageCount = 1;
                     status.textContent = hasFilters
                         ? `0 ${t("collections")} · 0 ${t("loaded sources")}`
                         : "";
@@ -1495,91 +1828,43 @@
                         ? "loaded source"
                         : "loaded sources",
                 )}`;
+                const allMembers = [];
                 for (const view of views) {
-                    const { key, collection, state, members } = view;
-                    const section = document.createElement("section");
-                    section.className = "library-collection";
-                    section.dataset.libraryCollection = key;
-                    const header = document.createElement("div");
-                    header.className = "library-collection-header";
-                    const heading = document.createElement("div");
-                    heading.className = "library-collection-heading";
-                    const title = document.createElement("h3");
-                    title.textContent = collectionDisplayName(collection);
-                    heading.appendChild(title);
-                    const meta = document.createElement("p");
-                    meta.className = "library-collection-meta";
-                    const sourceCount = Number(
-                        state && !state.hasMore && !state.loading
-                            ? members.length
-                            : hasFilters
-                              ? state?.total ?? members.length
-                              : collection.source_count,
-                    );
-                    meta.textContent = [
-                        providerLabel(collection.provider),
-                        Number.isFinite(sourceCount)
-                            ? `${formatCount(sourceCount)} ${t(
-                                  sourceCount === 1 ? "source" : "sources",
-                              )}`
-                            : "",
-                    ]
-                        .filter(Boolean)
-                        .join(" · ");
-                    heading.appendChild(meta);
-                    header.appendChild(heading);
-                    if (collection.description) {
-                        const description = document.createElement("p");
-                        description.className = "library-collection-description";
-                        description.textContent = collection.description;
-                        header.appendChild(description);
+                    for (const source of view.members) {
+                        allMembers.push({ view, source });
                     }
-                    const actions = document.createElement("div");
-                    actions.className = "library-collection-actions";
-                    if (Number(collection.source_count) > 0) {
-                        const search = document.createElement("button");
-                        search.type = "button";
-                        search.className = "library-button";
-                        search.textContent = "Search collection";
-                        search.dataset.i18n = "Search collection";
-                        search.dataset.librarySearchCollection = key;
-                        actions.appendChild(search);
-                    }
-                    if (state?.hasMore) {
-                        const more = document.createElement("button");
-                        more.type = "button";
-                        more.className = "library-button";
-                        more.textContent = t("Load more sources");
-                        more.dataset.libraryMoreCollection = key;
-                        more.disabled = state.loading;
-                        actions.appendChild(more);
-                    }
-                    header.appendChild(actions);
-                    section.appendChild(header);
-
-                    if (!members.length) {
-                        const message = document.createElement("p");
-                        message.className = "empty";
-                        message.textContent = libraryStateMessage(view);
-                        section.appendChild(message);
-                    } else {
-                        const groupGrid = document.createElement("div");
-                        groupGrid.className = "library-grid library-collection-grid";
-                        groupGrid.append(...libraryCardsFor(members));
-                        section.appendChild(groupGrid);
-                        if (state?.hasMore) {
-                            const note = document.createElement("p");
-                            note.className = "library-collection-note";
-                            note.textContent = `${t("Showing")} ${formatCount(
-                                members.length,
-                            )} ${t("of")} ${formatCount(
-                                state.total,
-                            )} ${t("sources")}.`;
-                            section.appendChild(note);
-                        }
-                    }
-                    grid.appendChild(section);
                 }
+                if (!allMembers.length) {
+                    // Discovery may still be in flight. Keep the requested
+                    // page in the URL instead of clamping an empty list to
+                    // page 1 before its sources arrive.
+                    for (const view of views) {
+                        grid.appendChild(librarySectionFor(view, [], hasFilters));
+                    }
+                    renderLibraryPager(0, 1);
+                    return;
+                }
+                const requestedPage = libraryPageIndex;
+                const page = libraryPageSlice(allMembers, requestedPage);
+                libraryPageIndex = page.page;
+                libraryPageCount = page.pageCount;
+                if (page.page !== requestedPage) {
+                    syncLibraryPageUrl(page.page, { replace: true });
+                }
+                const groups = [];
+                for (const entry of page.items) {
+                    const last = groups[groups.length - 1];
+                    if (!last || last.view.key !== entry.view.key) {
+                        groups.push({ view: entry.view, members: [] });
+                    }
+                    groups[groups.length - 1].members.push(entry.source);
+                }
+                for (const group of groups) {
+                    grid.appendChild(
+                        librarySectionFor(group.view, group.members, hasFilters),
+                    );
+                }
+                renderLibraryPager(page.total, page.pageCount);
             }
 
             function resultKey(item) {
@@ -2705,7 +2990,7 @@
                     }
                     // A fresh browsing context keeps child-frame history and
                     // late messages from the previous article out of Back/Forward.
-                    frame = replaceArticleFrame(articleUrl);
+                    frame = replaceArticleFrame(articleUrl, { buffer: !wasHidden });
                 }
                 modal.hidden = false;
                 document.documentElement.classList.add("modal-open");
@@ -2714,7 +2999,8 @@
                 // and the accessibility tree while the dialog is open.
                 const wrap = document.querySelector(".wrap");
                 if (wrap) wrap.inert = true;
-                frame.focus();
+                const focusFrame = $("articleModalFrame") || frame;
+                focusFrame.focus();
             }
 
             function modalStateEntry(articleUrl, navigationKind, parentUrl = null) {
@@ -3282,20 +3568,145 @@
                 });
             }
 
-            function replaceArticleFrame(articleUrl = null) {
+            function clearPendingArticleFrame() {
+                pendingArticleFrameToken += 1;
+                const pending =
+                    typeof document.getElementById === "function"
+                        ? document.getElementById("articleModalFramePending")
+                        : null;
+                if (pending) pending.remove();
+            }
+
+            function promoteArticleFrame(pending) {
+                if (!pending || pending.id !== "articleModalFramePending") {
+                    return null;
+                }
+                const modal = $("articleModal");
+                const old = $("articleModalFrame");
+                if (!modal || modal.hidden) {
+                    pending.remove();
+                    return null;
+                }
+                pending.id = "articleModalFrame";
+                pending.classList.remove("article-modal-frame-pending");
+                pending.removeAttribute("aria-hidden");
+                pending.__zimanticArticleLoaded = true;
+                if (old && old !== pending) old.remove();
+                bindArticleFrameLoad(pending);
+                postArticleModalNavigation();
+                if (
+                    document.activeElement === document.body ||
+                    document.activeElement === old
+                ) {
+                    pending.focus();
+                }
+                return pending;
+            }
+
+            function replaceArticleFrame(articleUrl = null, { buffer = false } = {}) {
                 const old = $("articleModalFrame");
                 if (!old) return;
+                clearPendingArticleFrame();
                 const fresh = old.cloneNode(false);
                 fresh.removeAttribute("src");
+                if (fresh.classList?.remove) {
+                    fresh.classList.remove("article-modal-frame-pending");
+                }
+                const canBuffer =
+                    typeof old.after === "function" &&
+                    typeof document.getElementById === "function" &&
+                    typeof document.contains === "function";
+                if (articleUrl && buffer && canBuffer) {
+                    // Keep the current toolbar and article visible while the
+                    // next shell loads. The pending frame is promoted only
+                    // after its toolbar has initialized, so navigating between
+                    // articles no longer flashes an empty white pane.
+                    fresh.id = "articleModalFramePending";
+                    fresh.classList.add("article-modal-frame-pending");
+                    fresh.setAttribute("aria-hidden", "true");
+                    const token = ++pendingArticleFrameToken;
+                    fresh.addEventListener(
+                        "load",
+                        () => {
+                            if (token !== pendingArticleFrameToken) return;
+                            if (!document.contains(fresh)) return;
+                            promoteArticleFrame(fresh);
+                        },
+                        { once: true },
+                    );
+                    old.after(fresh);
+                    fresh.src = articleUrl;
+                    return fresh;
+                }
                 if (articleUrl) fresh.src = articleUrl;
                 bindArticleFrameLoad(fresh);
                 old.replaceWith(fresh);
                 return fresh;
             }
 
+            function articleFocusTarget() {
+                const target = modalPreviousFocus;
+                if (!target || typeof target.focus !== "function") return null;
+                const link = typeof target.closest === "function"
+                    ? target.closest("a[href]")
+                    : null;
+                return {
+                    element: target,
+                    href: link ? link.getAttribute("href") || "" : "",
+                };
+            }
+
+            function findArticleFocusTarget(target) {
+                const href = String(target?.href || "").trim();
+                if (href) {
+                    const absolute = (value) => {
+                        try {
+                            return new URL(value, location.href).href;
+                        } catch (_) {
+                            return value;
+                        }
+                    };
+                    const wanted = absolute(href);
+                    for (const scope of [$("results"), $("libraryGrid")]) {
+                        if (!scope?.querySelectorAll) continue;
+                        for (const link of scope.querySelectorAll("a[href]")) {
+                            if (absolute(link.getAttribute("href") || "") === wanted) {
+                                return link;
+                            }
+                        }
+                    }
+                }
+                return target?.element && document.contains(target.element)
+                    ? target.element
+                    : null;
+            }
+
+            function restoreArticleFocus(target) {
+                const element = findArticleFocusTarget(target);
+                if (element) element.focus();
+            }
+
+            function restorePendingArticleFocus() {
+                const target = pendingArticleFocusRestore;
+                pendingArticleFocusRestore = null;
+                if (!target) return;
+                const active = document.activeElement;
+                // Do not steal focus from a control the reader reached while
+                // the history traversal was finishing.
+                if (
+                    active &&
+                    active !== document.body &&
+                    active.isConnected !== false
+                ) {
+                    return;
+                }
+                restoreArticleFocus(target);
+            }
+
             function hideArticleModal() {
                 const modal = $("articleModal");
                 if (!modal || modal.hidden) return;
+                const focusTarget = articleFocusTarget();
                 modal.hidden = true;
                 document.documentElement.classList.remove("modal-open");
                 document.body.classList.remove("modal-open");
@@ -3313,9 +3724,16 @@
                 parentNavigationSequence++;
                 resetArticleDocumentMeta();
                 replaceArticleFrame();
-                if (modalPreviousFocus instanceof HTMLElement && document.contains(modalPreviousFocus)) {
-                    modalPreviousFocus.focus();
+                if (focusTarget?.element && document.contains(focusTarget.element)) {
+                    focusTarget.element.focus();
                 }
+                // Closing walks history back, and the popstate handler rebuilds
+                // the result list. Focus the equivalent link after that rebuild
+                // instead of leaving the next Tab at the top of the page.
+                // Keep the target until popstate finishes; focusing here is
+                // enough for closes that do not traverse history, while the
+                // popstate handler restores it after Back/Forward.
+                pendingArticleFocusRestore = focusTarget;
                 modalPreviousFocus = null;
             }
 
@@ -3349,8 +3767,21 @@
 
             bindArticleFrameLoad();
             window.addEventListener("message", (event) => {
-                const frame = $("articleModalFrame");
-                if (event.source !== frame.contentWindow) return;
+                let frame = $("articleModalFrame");
+                const pending =
+                    typeof document.getElementById === "function"
+                        ? document.getElementById("articleModalFramePending")
+                        : null;
+                if (pending && event.source === pending.contentWindow) {
+                    if (event.data?.type === "zimantic-article-ready") {
+                        frame = promoteArticleFrame(pending) || frame;
+                    } else {
+                        // The previous shell stays visible until the pending
+                        // shell reports ready; ignore its early messages.
+                        return;
+                    }
+                }
+                if (!frame || event.source !== frame.contentWindow) return;
                 if (event.data?.type === "zimantic-article-copy") {
                     let url;
                     try {
@@ -4748,6 +5179,19 @@
                     if (provider) url.searchParams.set("provider", provider);
                     if (media) url.searchParams.set("media", media);
                     if (language) url.searchParams.set("language", language);
+                    if (librarySortMode !== "title") {
+                        url.searchParams.set("sort", librarySortMode);
+                    } else {
+                        url.searchParams.delete("sort");
+                    }
+                    if (libraryPageIndex > 0) {
+                        url.searchParams.set(
+                            "page",
+                            String(libraryPageIndex + 1),
+                        );
+                    } else {
+                        url.searchParams.delete("page");
+                    }
                 }
                 return url.pathname + url.search;
             }
@@ -4792,6 +5236,20 @@
                 const params = new URLSearchParams(location.search);
                 if (!params.has("sort")) return;
                 const raw = params.get("sort");
+                const onLibrary =
+                    location.pathname === "/library" ||
+                    (typeof appPath === "function" &&
+                        location.pathname === appPath("/library"));
+                if (onLibrary) {
+                    if (
+                        !raw ||
+                        raw === "title" ||
+                        !LIBRARY_SORT_MODES.has(raw)
+                    ) {
+                        replaceQueryParam("sort", null);
+                    }
+                    return;
+                }
                 if (raw === "relevance") {
                     replaceQueryParam("sort", null);
                     return;
@@ -5098,6 +5556,23 @@
             $("libraryLanguageFilter").addEventListener("change", scheduleLibraryReload);
             $("libraryScopeLineReset").addEventListener("click", resetLibraryFilters);
             $("libraryShuffle").addEventListener("click", shuffleLibrary);
+            $("librarySort")?.addEventListener("change", () => {
+                const value = $("librarySort").value;
+                librarySortMode = LIBRARY_SORT_MODES.has(value)
+                    ? value
+                    : "title";
+                libraryShuffled = false;
+                libraryPageIndex = 0;
+                updateLibraryFilterUrl();
+                renderLibrary();
+                window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+            });
+            $("libraryPager")?.addEventListener("click", (event) => {
+                const link = event.target.closest("a[data-library-page]");
+                if (!link) return;
+                event.preventDefault();
+                setLibraryPage(Number(link.dataset.libraryPage));
+            });
 
             $("pager").addEventListener("click", (event) => {
                 const link = event.target.closest("a[data-page]");
@@ -5515,6 +5990,10 @@
             }
 
             window.addEventListener("popstate", () => {
+                // A history traversal can move focus to <body> after the
+                // article frame is removed. Restore the saved result link after
+                // the handler has rebuilt the page.
+                setTimeout(restorePendingArticleFocus, 100);
                 cancelAutoSearchHistory();
                 const libraryView = location.pathname === appPath("/library");
                 if (libraryView) {
@@ -5523,16 +6002,36 @@
                     const provider = params.get("provider") || "";
                     const media = params.get("media") || "";
                     const language = params.get("language") || "";
+                    const pageNumber = Number.parseInt(
+                        params.get("page") || "1",
+                        10,
+                    );
+                    const pageIndex =
+                        Number.isInteger(pageNumber) && pageNumber >= 1
+                            ? pageNumber - 1
+                            : 0;
+                    const sortMode = readLibrarySortMode();
                     const changed =
                         $("libraryFilter").value !== filter ||
                         $("libraryProviderFilter").value !== provider ||
                         $("libraryMediaFilter").value !== media ||
                         $("libraryLanguageFilter").value !== language;
+                    const pageChanged = pageIndex !== libraryPageIndex;
+                    const sortChanged = sortMode !== librarySortMode;
                     $("libraryFilter").value = filter;
                     $("libraryProviderFilter").value = provider;
                     $("libraryMediaFilter").value = media;
                     setLibraryLanguageFilter(language);
-                    if (changed) loadLibraryData();
+                    libraryPageIndex = pageIndex;
+                    librarySortMode = sortMode;
+                    libraryShuffled = false;
+                    const sortSelect = $("librarySort");
+                    if (sortSelect) sortSelect.value = sortMode;
+                    if (changed) {
+                        loadLibraryData();
+                    } else if (pageChanged || sortChanged) {
+                        renderLibrary();
+                    }
                 }
                 const state = readLocationState();
                 syncArticleModal(state.modal);
@@ -5955,6 +6454,12 @@
                     setLibraryLanguageFilter(libraryParams.get("language") || "");
                 }
                 const state = readLocationState();
+                if (libraryView) {
+                    librarySortMode = readLibrarySortMode();
+                    libraryPageIndex = state.page;
+                    const sortSelect = $("librarySort");
+                    if (sortSelect) sortSelect.value = librarySortMode;
+                }
                 if (state.browse === "random" && !new URLSearchParams(location.search).has("seed")) {
                     state.seed = Math.floor(Math.random() * 2 ** 32);
                     replaceQueryParam("seed", String(state.seed));

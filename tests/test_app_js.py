@@ -993,6 +993,115 @@ console.log(JSON.stringify({{
         )
         self.assertNotIn("zimanticLibraryInfo", replace_call[1])
 
+    def test_article_close_restores_focus_to_rerendered_result_link(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const location = new URL("http://example.test/?q=x");
+const oldLink = {{
+  href: "http://example.test/content/a",
+  getAttribute() {{ return "/content/a"; }},
+  closest() {{ return this; }},
+  focus() {{ this.focused = true; }},
+}};
+const newLink = {{
+  href: "http://example.test/content/a",
+  getAttribute() {{ return "/content/a"; }},
+  focus() {{ this.focused = true; }},
+}};
+const elements = {{
+  results: {{querySelectorAll() {{ return [newLink]; }}}},
+  libraryGrid: null,
+}};
+const $ = (id) => elements[id];
+const document = {{contains: (node) => node === oldLink}};
+let modalPreviousFocus = oldLink;
+{_function_source(source, "function articleFocusTarget(", "function hideArticleModal(")}
+
+const target = articleFocusTarget();
+restoreArticleFocus(target);
+const replaced = {{newFocused: Boolean(newLink.focused), oldFocused: Boolean(oldLink.focused)}};
+
+newLink.focused = false;
+oldLink.focused = false;
+elements.results.querySelectorAll = () => [];
+restoreArticleFocus({{element: oldLink, href: "/content/a"}});
+const fallback = {{newFocused: Boolean(newLink.focused), oldFocused: Boolean(oldLink.focused)}};
+
+console.log(JSON.stringify({{target, replaced, fallback}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["target"]["href"], "/content/a")
+        self.assertEqual(
+            payload["target"]["element"]["href"],
+            "http://example.test/content/a",
+        )
+        self.assertEqual(
+            payload["replaced"], {"newFocused": True, "oldFocused": False}
+        )
+        self.assertEqual(
+            payload["fallback"], {"newFocused": False, "oldFocused": True}
+        )
+
+    def test_clearing_query_keeps_current_results_and_url(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const AUTO_SUBMIT_DELAY = 800;
+let autoSubmitTimer = null;
+let composing = false;
+let submitted = 0;
+let resets = 0;
+let urlWrites = 0;
+const elements = {{question: {{value: ""}}}};
+const $ = (id) => elements[id];
+const renderSortControls = () => {{}};
+const submitSearch = (_pushHistory, options) => {{
+  submitted += 1;
+  globalThis.lastSubmit = options;
+}};
+const resetResults = () => {{ resets += 1; }};
+const history = {{replaceState() {{ urlWrites += 1; }}}};
+{_function_source(source, "function scheduleAutoSubmit(", "function submitSearch(")}
+
+scheduleAutoSubmit();
+const empty = {{
+  timer: autoSubmitTimer, submitted, resets, urlWrites,
+  value: elements.question.value,
+}};
+
+elements.question.value = "water";
+const timers = [];
+const originalSetTimeout = setTimeout;
+setTimeout = (callback, delay) => {{ timers.push({{callback, delay}}); return timers.length; }};
+scheduleAutoSubmit();
+const scheduled = {{timer: autoSubmitTimer, timers: timers.length}};
+timers[0].callback();
+const fired = {{submitted, resets, urlWrites, options: globalThis.lastSubmit, timer: autoSubmitTimer}};
+setTimeout = originalSetTimeout;
+console.log(JSON.stringify({{empty, scheduled, fired}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["empty"],
+            {"timer": None, "submitted": 0, "resets": 0, "urlWrites": 0, "value": ""},
+        )
+        self.assertEqual(payload["scheduled"], {"timer": 1, "timers": 1})
+        self.assertEqual(
+            payload["fired"],
+            {
+                "submitted": 1,
+                "resets": 0,
+                "urlWrites": 0,
+                "options": {"auto": True},
+                "timer": None,
+            },
+        )
+
     def test_modal_tab_focus_cycles_within_the_dialog(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -1049,6 +1158,13 @@ const elements = {{articleModal: {{hidden: true}}, question: {{value: ""}}}};
 const $ = (id) => elements[id];
 const history = {{state: null}};
 const cancelAutoSearchHistory = () => {{}};
+const restorePendingArticleFocus = () => {{}};
+const readLibraryFilter = () => "";
+const readLibrarySortMode = () => "title";
+const setLibraryLanguageFilter = () => {{}};
+let libraryPageIndex = 0, librarySortMode = "title", libraryShuffled = false;
+const loadLibraryData = () => {{}};
+const renderLibrary = () => {{}};
 const syncArticleModal = () => {{}};
 const syncLibraryInfo = () => {{}};
 const searches = [];
@@ -1255,7 +1371,7 @@ class Node {{
 }}
 const document = {{createElement: () => new Node()}};
 const elements = {{
-  libraryGrid: new Node(), libraryStatus: new Node(),
+  libraryGrid: new Node(), libraryStatus: new Node(), libraryPager: new Node(),
   libraryScopeLine: new Node(), libraryScopeLineText: new Node(),
   libraryFilter: {{value: ""}}, libraryProviderFilter: {{value: ""}},
   libraryMediaFilter: {{value: ""}}, libraryLanguageFilter: {{value: ""}},
@@ -1275,8 +1391,8 @@ const collectionDisplayName = (collection) => collection.title;
 const libraryLanguageCodes = (source) =>
   String(source?.language || "").split(",").map((part) => part.trim().toLowerCase()).filter(Boolean);
 const collections = [
-  {{key: "small", title: "Small", provider: "files", source_count: 766}},
-  {{key: "large", title: "Large", provider: "files", source_count: 1001, media_types: ["other"]}},
+  {{key: "small", title: "Small", provider: "files", source_count: 12}},
+  {{key: "large", title: "Large", provider: "files", source_count: 21, media_types: ["other"]}},
 ];
 const libraryCollections = collections;
 const makeSources = (count, media) => Array.from({{length: count}}, (_, i) => ({{
@@ -1286,12 +1402,15 @@ const makeSources = (count, media) => Array.from({{length: count}}, (_, i) => ({
   size: 109 * 1024 * 1024, item_count: 34448,
   description: "Short <summary>", long_description: "Long description",
 }}));
-const small = makeSources(766, "text"), large = makeSources(1001, "video");
+const small = makeSources(12, "text"), large = makeSources(21, "video");
 const libraryCollectionPages = new Map([
-  ["small", {{sources: small, total: 766, hasMore: false}}],
-  ["large", {{sources: large.slice(0, 1000), total: 1001, hasMore: true, loading: false}}],
+  ["small", {{sources: small, total: 12, hasMore: false}}],
+  ["large", {{sources: large.slice(0, 20), total: 21, hasMore: true, loading: false}}],
 ]);
-const librarySources = [...small, ...large.slice(0, 1000)];
+const librarySources = [...small, ...large.slice(0, 20)];
+const LIBRARY_PAGE_SIZE = 48;
+const LIBRARY_SORT_MODES = new Set(["title", "newest", "largest", "items"]);
+let libraryPageIndex = 0, libraryPageCount = 1, librarySortMode = "title", libraryShuffled = false;
 const libraryCardCache = new WeakMap();
 {_function_source(source, "function providerLabel(", "function collectionFor(")}
 {_function_source(source, "function libraryFilterTerms()", "function resultKey(")}
@@ -1315,7 +1434,7 @@ libraryCollectionPages.get("large").loading = true;
 renderLibrary();
 const reusedCard = find(elements.libraryGrid.children[0], "library-grid library-collection-grid").children[0] === firstCard;
 const loadingDisabled = find(elements.libraryGrid.children[1], "library-collection-actions").children[1].disabled;
-libraryCollectionPages.set("large", {{sources: large, total: 1001, hasMore: false}});
+libraryCollectionPages.set("large", {{sources: large, total: 21, hasMore: false}});
 renderLibrary();
 const appended = summarize();
 elements.libraryMediaFilter.value = "video";
@@ -1334,13 +1453,13 @@ console.log(JSON.stringify({{
             [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
         )
         payload = json.loads(result.stdout)
-        self.assertEqual([item["count"] for item in payload["initial"]], [766, 1000])
+        self.assertEqual([item["count"] for item in payload["initial"]], [12, 20])
         self.assertEqual(payload["initial"][0]["description"], "Short <summary>")
         self.assertEqual(payload["initial"][0]["buttons"], ["Search collection"])
         self.assertEqual(
             payload["initial"][1]["buttons"], ["Search collection", "Load more sources"]
         )
-        self.assertEqual(payload["initial"][1]["meta"], "Files · 1,001 sources")
+        self.assertEqual(payload["initial"][1]["meta"], "Files · 21 sources")
         self.assertEqual(
             payload["initial"][1]["collection"], "Files · video collection"
         )
@@ -1349,11 +1468,11 @@ console.log(JSON.stringify({{
             "English (ENG) · 2025-08-27\n34,448 items · 109 MB",
         )
         self.assertEqual(
-            payload["initial"][1]["note"], "Showing 1,000 of 1,001 sources."
+            payload["initial"][1]["note"], "Showing 20 of 21 sources."
         )
         self.assertTrue(payload["loadingDisabled"])
         self.assertTrue(payload["reusedCard"])
-        self.assertEqual(payload["appended"][1]["count"], 1001)
+        self.assertEqual(payload["appended"][1]["count"], 21)
         self.assertEqual(payload["appended"][1]["buttons"], ["Search collection"])
         self.assertEqual([item["key"] for item in payload["filtered"]], ["large"])
         self.assertEqual(payload["filtered"][0]["note"], "Showing 1 of 11 sources.")
@@ -1379,6 +1498,12 @@ const collections = [
   {{key: "khan", provider: "kolibri"}},
   {{key: "files", provider: "files"}},
 ];
+const collectionDisplayName = (collection) =>
+  collection.title || collection.label || collection.key;
+const LIBRARY_PAGE_SIZE = 48;
+const LIBRARY_SORT_MODES = new Set(["title", "newest", "largest", "items"]);
+let libraryPageIndex = 0, libraryPageCount = 1;
+let librarySortMode = "title", libraryShuffled = false;
 let libraryCollections = collections;
 const makeSource = (key, provider, item_count) => ({{
   key, provider, item_count, searchable: false,
@@ -1410,6 +1535,75 @@ console.log(JSON.stringify({{configured, cached}}));
         self.assertEqual(payload["configured"], [khan, files])
         self.assertEqual(payload["cached"], [files, khan])
 
+    def test_library_pages_48_sources_and_sorts_by_metadata(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        script = f"""
+const LIBRARY_PAGE_SIZE = 48;
+const LIBRARY_SORT_MODES = new Set(["title", "newest", "largest", "items"]);
+let librarySortMode = "title", libraryShuffled = false;
+const $ = () => null;
+const collectionDisplayName = (collection) => collection.title;
+const libraryTitle = (item) => item.title || item.key;
+{_function_source(source, "function libraryTitleCollator(", "function libraryCardsFor(")}
+const many = Array.from({{length: 100}}, (_, index) => ({{
+  key: `source-${{String(index).padStart(3, "0")}}`,
+  title: `Source ${{String(index).padStart(3, "0")}}`,
+  date: `2025-01-${{String((index % 28) + 1).padStart(2, "0")}}`,
+  size: 1000 - index,
+  item_count: index,
+}}));
+const pages = [0, 1, 2, 99].map((page) => {{
+  const result = libraryPageSlice(many, page);
+  return {{page: result.page, pageCount: result.pageCount, count: result.items.length}};
+}});
+const metadata = [
+  {{key: "old-small", title: "Old small", date: "2024-01-01", size: 10, item_count: 1}},
+  {{key: "new-large", title: "New large", date: "2026-01-01", size: 300, item_count: 9}},
+  {{key: "middle", title: "Middle", date: "2025-01-01", size: 100, item_count: 5}},
+];
+const order = (mode) => sortLibraryMembers(metadata, mode).map((item) => item.key);
+const titleView = sortLibraryViews([
+  {{key: "z", collection: {{title: "Zeta"}}, members: [metadata[2], metadata[0]]}},
+  {{key: "a", collection: {{title: "Alpha"}}, members: [metadata[1]]}},
+], "title");
+const largestView = sortLibraryViews([
+  {{key: "small", collection: {{title: "Small"}}, members: [metadata[0]]}},
+  {{key: "big", collection: {{title: "Big"}}, members: [metadata[1], metadata[2]]}},
+], "largest");
+console.log(JSON.stringify({{
+  pages,
+  newest: order("newest"),
+  largest: order("largest"),
+  items: order("items"),
+  titleViews: titleView.map((view) => view.key),
+  largestViews: largestView.map((view) => view.key),
+}}));
+"""
+        result = subprocess.run(
+            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["pages"],
+            [
+                {"page": 0, "pageCount": 3, "count": 48},
+                {"page": 1, "pageCount": 3, "count": 48},
+                {"page": 2, "pageCount": 3, "count": 4},
+                {"page": 2, "pageCount": 3, "count": 4},
+            ],
+        )
+        self.assertEqual(
+            payload["newest"], ["new-large", "middle", "old-small"]
+        )
+        self.assertEqual(
+            payload["largest"], ["new-large", "middle", "old-small"]
+        )
+        self.assertEqual(
+            payload["items"], ["new-large", "middle", "old-small"]
+        )
+        self.assertEqual(payload["titleViews"], ["z", "a"])
+        self.assertEqual(payload["largestViews"], ["big", "small"])
+
     def test_library_scope_reset_clears_all_filters_and_pending_reload(self):
         source = APP_JS.read_text(encoding="utf-8")
         script = f"""
@@ -1424,6 +1618,9 @@ const $ = (id) => elements[id];
 const appPath = (path) => path;
 const t = (text) => text;
 const libraryLanguageDisplayNames = new Map();
+const LIBRARY_PAGE_SIZE = 48;
+const LIBRARY_SORT_MODES = new Set(["title", "newest", "largest", "items"]);
+let libraryPageIndex = 0, librarySortMode = "title", libraryShuffled = false;
 const replaceQueryParam = (key, value) => {{
   if (value) location.searchParams.set(key, value);
   else location.searchParams.delete(key);

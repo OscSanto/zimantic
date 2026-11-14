@@ -134,6 +134,15 @@
                             <option value="" data-i18n="All languages">All languages</option>
                         </select>
                     </label>
+                    <label class="library-filter-select">
+                        <span data-i18n="Sort by">Sort by</span>
+                        <select id="librarySort" aria-label="Sort library" data-i18n-aria-label="Sort library">
+                            <option value="title" data-i18n="Title">Title</option>
+                            <option value="newest" data-i18n="Newest">Newest</option>
+                            <option value="largest" data-i18n="Largest">Largest</option>
+                            <option value="items" data-i18n="Most items">Most items</option>
+                        </select>
+                    </label>
                     <div class="library-search-row">
                         <input
                             id="libraryFilter"
@@ -159,6 +168,7 @@
                     </button>
                 </div>
                 <div id="libraryGrid"></div>
+                <nav class="pager" id="libraryPager" aria-label="Library pagination" data-i18n-aria-label="Library pagination"></nav>
             </section>
 
             <details id="settingsDetails" class="settings">

@@ -427,6 +427,9 @@ button.source-filter-collection[aria-pressed="true"] {
 .pager .disabled {
     color: var(--muted);
 }
+#libraryPager {
+    margin-top: 18px;
+}
 .notice {
     background: var(--panel);
     border: 1px solid var(--err-border);
@@ -688,9 +691,14 @@ ol.results {
     justify-content: space-between;
     margin-bottom: 12px;
 }
+.library-collection-heading {
+    min-width: 0;
+    max-width: 100%;
+}
 .library-collection-heading h3 {
     font-size: 1.1rem;
     margin: 0;
+    overflow-wrap: anywhere;
 }
 .library-collection-meta,
 .library-collection-description,
@@ -1036,6 +1044,15 @@ body.modal-open {
     min-height: 0;
     min-width: 0;
     width: 100%;
+}
+.article-modal-frame-pending {
+    height: 100%;
+    inset: 0;
+    pointer-events: none;
+    position: absolute;
+    visibility: hidden;
+    width: 100%;
+    z-index: -1;
 }
 .external-link-notice {
     align-items: center;

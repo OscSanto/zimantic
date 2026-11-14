@@ -645,6 +645,7 @@ const location = new URL("http://example.test/?q=teaching");
 const appPath = (path) => path;
 let activeModalUrl = null, activeLibraryArticleUrl = null, modalPreviousFocus = null;
 let previousModalArticleUrl = null, pendingModalArticleUrl = null, pendingModalNavigation = null;
+let pendingArticleFrameToken = 0;
 let activeParentNavigation = null, parentNavigationSequence = 0;
 const hideExternalLinkNotice = () => {{}};
 const postArticleModalNavigation = () => {{ navigationPosts++; }};
@@ -695,6 +696,79 @@ console.log(JSON.stringify({{
         self.assertTrue(payload["modalOpen"])
         self.assertTrue(payload["inert"])
 
+    def test_buffered_article_navigation_keeps_old_frame_until_ready(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        payload = _run_node(f"""
+const frames = [];
+let navigationPosts = 0;
+class Frame {{
+  constructor(src = "", id = "articleModalFrame") {{
+    this.src = src;
+    this.id = id;
+    this.handlers = {{}};
+    this.classList = {{add() {{}}, remove() {{}}}};
+  }}
+  cloneNode() {{ return new Frame(this.src, this.id); }}
+  removeAttribute(name) {{ if (name === "src") this.src = ""; }}
+  setAttribute() {{}}
+  addEventListener(name, fn) {{ this.handlers[name] = fn; }}
+  after(frame) {{ frames.push(frame); }}
+  remove() {{
+    const index = frames.indexOf(this);
+    if (index >= 0) frames.splice(index, 1);
+  }}
+  focus() {{}}
+}}
+const oldFrame = new Frame("http://example.test/content/manual/One");
+frames.push(oldFrame);
+const document = {{
+  body: {{}},
+  activeElement: {{}},
+  getElementById(id) {{ return frames.find((frame) => frame.id === id) || null; }},
+  contains(node) {{ return frames.includes(node); }},
+}};
+let pendingArticleFrameToken = 0;
+const elements = {{articleModal: {{hidden: false}}}};
+const $ = (id) =>
+  id === "articleModal"
+    ? elements.articleModal
+    : frames.find((frame) => frame.id === id) || null;
+const bindArticleFrameLoad = (frame) => {{ frame.bound = true; }};
+const postArticleModalNavigation = () => {{ navigationPosts += 1; }};
+{_section(source, "function clearPendingArticleFrame(", "function articleFocusTarget(")}
+const pending = replaceArticleFrame(
+  "http://example.test/content/manual/Two",
+  {{buffer: true}},
+);
+const during = {{
+  oldVisible: frames.includes(oldFrame),
+  pendingVisible: frames.includes(pending),
+  pendingId: pending.id,
+  oldHasLoadingClass: oldFrame.loadingClass,
+}};
+pending.handlers.load();
+const after = {{
+  active: $("articleModalFrame") === pending,
+  oldRemoved: !frames.includes(oldFrame),
+  pendingId: pending.id,
+  bound: Boolean(pending.bound),
+  navigationPosts,
+}};
+console.log(JSON.stringify({{during, after}}));
+""")
+        self.assertEqual(payload["during"], {
+            "oldVisible": True,
+            "pendingVisible": True,
+            "pendingId": "articleModalFramePending",
+        })
+        self.assertEqual(payload["after"], {
+            "active": True,
+            "oldRemoved": True,
+            "pendingId": "articleModalFrame",
+            "bound": True,
+            "navigationPosts": 1,
+        })
+
     def test_blank_modal_frame_after_a_real_article_closes_the_modal(self):
         source = APP_JS.read_text(encoding="utf-8")
         payload = _run_node(f"""
@@ -733,6 +807,7 @@ const appPath = (path) => path;
 let activeLibraryArticleUrl = null, modalPreviousFocus = null;
 let activeModalUrl = null, previousModalArticleUrl = null;
 let pendingModalArticleUrl = null, pendingModalNavigation = null;
+let pendingArticleFrameToken = 0;
 let activeParentNavigation = null, parentNavigationSequence = 0;
 const hideExternalLinkNotice = () => {{}};
 const postArticleModalNavigation = () => {{ navigationPosts++; }};
