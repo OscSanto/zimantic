@@ -114,7 +114,7 @@ The Community Building ZIM file is too small, and its synthetic labels too spars
 
 Positions, not stored text, carry the gain: contentless positional matches stored BM25 on **every top-20 list** at 30% of its bytes. `detail=column` keeps document lengths but no positions and ties `detail=none` exactly, so it is not a middle ground. The +11.8-point English #1 gain supports the production contentless positional layout.
 
-Tantivy ties FTS5-BM25 on quality (65.5% versus 65.3% #1) in a smaller index with a somewhat faster build. Zimantic does not adopt it: PyPI publishes `tantivy` wheels for x86_64 and aarch64 only, which would break the documented 32-bit armhf install path, and the quality difference is inside this sample's noise. Staying on SQLite also avoids a second index format, a second query implementation, and a build-time dependency.
+Tantivy ties FTS5-BM25 on quality (65.5% versus 65.3% #1) in a smaller index with a somewhat faster build. Zimantic uses SQLite instead: PyPI publishes `tantivy` wheels for x86_64 and aarch64 only, which breaks the documented 32-bit armhf install path, and the quality difference is inside this sample's noise. SQLite also avoids a second index format, a second query implementation, and a build-time dependency.
 
 Bleve's default BM25 returns 54.1% #1 and 67.1% top-20, below compact FTS5 despite a larger index. Combining several fuzzy term variants with AND recovers 57.9% / 78.2%, below exact BM25; combining them with OR collapses quality to 12.5% / 53.8%. Bleve is lexical-only, so replacement of the SQLite stack means a Go sidecar on every platform in addition to FAISS.
 
