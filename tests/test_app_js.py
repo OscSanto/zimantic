@@ -1,13 +1,12 @@
 import json
-import shutil
-import subprocess
 import unittest
 from pathlib import Path
+
+from js_runner import NODE, run_node
 
 from zimantic.providers.files.listing import directory_page
 
 APP_JS = Path(__file__).resolve().parents[1] / "zimantic" / "web" / "static" / "app.js"
-NODE = shutil.which("node")
 
 
 def _function_source_raw(source: str, start: str, end: str) -> str:
@@ -110,9 +109,7 @@ console.log(JSON.stringify({{
   empty: resourceDetails({{}}),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["label"], "Math › Unit 1 › Counting › Count with small numbers")
         self.assertEqual(payload["badge"], {"icon": "Exercise", "label": "Exercise"})
@@ -215,9 +212,7 @@ console.log(JSON.stringify({{
   dirtyTitle: parts[".result-title"].children[0].children.map((child) => child.textContent),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["initial"], {
             "details": "Author: <script>unsafe()</script>",
@@ -308,9 +303,7 @@ link.href = "https://other.example/article";
 handler(event("title"));
 console.log(JSON.stringify({{cardTaps, ignored, desktopSnippet, desktopPadding, titleTap, thumbnailTap, pdf, external: counts()}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(json.loads(result.stdout), {
             "cardTaps": [2, 2, 2],
             "ignored": [2, 2, 2],
@@ -364,9 +357,7 @@ controls.sort.value = "name";
 controls.sort.change();
 console.log(JSON.stringify({filtered, noMatches, bySize, byName: names()}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(json.loads(result.stdout), {
             "filtered": {"names": ["notes.txt"], "count": "1 of 3 items"},
             "noMatches": True,
@@ -390,9 +381,7 @@ const cases = [
 ];
 console.log(JSON.stringify(cases.map(libraryHomepageUrl)));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(json.loads(result.stdout), [
             "/zimantic/content/files%3Amodules%3Aroot",
             "/zimantic/content/files%3Amodules%3Aroot",
@@ -466,9 +455,7 @@ for (const control of ["scopeLineReset"]) {{
 }}
 console.log(JSON.stringify(results));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         for payload in json.loads(result.stdout):
             with self.subTest(control=payload["control"], scope=payload["scope"]):
                 self.assertTrue(payload["visibleBefore"])
@@ -609,9 +596,7 @@ const snapshot = () => ({{
   }}));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         return json.loads(result.stdout)
 
     def test_collection_scope_is_visible_before_parallel_startup_requests_finish(self):
@@ -724,9 +709,7 @@ location.href = "http://example.test/?q=topic&seed=7";
 const queryState = readLocationState();
 console.log(JSON.stringify({{empty, browsing, paged, modal, query, rare, searches, pages, queryState}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["empty"]["browse"], "diverse")
         self.assertEqual(payload["browsing"]["browse"], "random")
@@ -776,9 +759,7 @@ const dedupeParams = () => {{}};
 {_function_source(source, "async function loadPage(", "function applySourceSelection(")}
 loadPage(1).then(() => console.log(JSON.stringify({{requests, current}})));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["requests"],
@@ -819,9 +800,7 @@ console.log(JSON.stringify(states.map((state) => {{
   }};
 }})));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(json.loads(result.stdout), [
             {"hidden": True, "relevanceHidden": True},
             {"hidden": True, "relevanceHidden": False},
@@ -894,9 +873,7 @@ console.log(JSON.stringify({{
   ).every((option) => !option.hidden && !option.disabled),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["emptyDefault"], "diverse")
         self.assertTrue(payload["relevanceDisabled"])
@@ -995,9 +972,7 @@ console.log(JSON.stringify({{
   openArticle, closedOverArticle, closedAlone, usedBack, usedReplace,
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=False, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertTrue(payload["openArticle"]["hidden"])
@@ -1048,9 +1023,7 @@ const fallback = {{newFocused: Boolean(newLink.focused), oldFocused: Boolean(old
 
 console.log(JSON.stringify({{target, replaced, fallback}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["target"]["href"], "/content/a")
         self.assertEqual(
@@ -1101,9 +1074,7 @@ const fired = {{submitted, resets, urlWrites, options: globalThis.lastSubmit, ti
 setTimeout = originalSetTimeout;
 console.log(JSON.stringify({{empty, scheduled, fired}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["empty"],
@@ -1156,9 +1127,7 @@ trapModalTabFocus(container, event("Tab"));
 const fromOutside = document.activeElement.name;
 console.log(JSON.stringify({{forward, backward, fromOutside, prevented}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["forward"], "first")
         self.assertEqual(payload["backward"], "last")
@@ -1200,9 +1169,7 @@ location.search = "?q=topic&sort=random&seed=7&source=manual&page=2";
 window.popstate();
 console.log(JSON.stringify({{resets, searches}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(json.loads(result.stdout), {
             "resets": 1,
             "searches": [
@@ -1224,9 +1191,7 @@ console.log(JSON.stringify([
   matchesLibraryTerms("Illustrated guide", "-ted"),
 ]));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(json.loads(result.stdout), [True, False, False, True, False, True])
 
     def test_library_filter_options_hide_empty_facets_and_name_remote_kiwix(self):
@@ -1258,9 +1223,7 @@ console.log(JSON.stringify({{
   kiwix: providerLabel("kiwix"),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(
             json.loads(result.stdout),
             {
@@ -1311,9 +1274,7 @@ console.log(JSON.stringify({{
   initial, spanish, selected: elements.libraryLanguageFilter.value,
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["initial"]["selected"], "eng")
         self.assertEqual(
@@ -1361,9 +1322,7 @@ Intl.DisplayNames = class {{ of() {{ return "Browser name"; }} }};
 libraryLanguageDisplayNames.clear();
 console.log(JSON.stringify({{results, native: libraryLanguageLabel("lao")}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["results"],
@@ -1468,9 +1427,7 @@ console.log(JSON.stringify({{
   placeholder: elements.libraryFilter.placeholder,
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual([item["count"] for item in payload["initial"]], [12, 20])
         self.assertEqual(payload["initial"][0]["description"], "Short <summary>")
@@ -1545,9 +1502,7 @@ libraryCollections = [collections[1]];
 const cached = summarize();
 console.log(JSON.stringify({{configured, cached}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         khan = {"key": "khan", "cards": ["math", "unknown"]}
         files = {"key": "files", "cards": ["file"]}
@@ -1598,9 +1553,7 @@ console.log(JSON.stringify({{
   largestViews: largestView.map((view) => view.key),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["pages"],
@@ -1668,9 +1621,7 @@ console.log(JSON.stringify({{
   }},
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertFalse(payload["active"]["hidden"])
         self.assertEqual(
@@ -1746,9 +1697,7 @@ const fetch = async (url) => {{
   console.log(JSON.stringify({{initial, restarted, count: state.sources.length, hasMore: state.hasMore, requests}}));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["initial"], 1000)
         self.assertEqual(payload["restarted"], 1000)
@@ -1862,9 +1811,7 @@ const fetchJsonPage = (path, options) => {{
   }}));
 }})().catch((error) => {{console.error(error); process.exitCode = 1;}});
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["beforeFetch"], ["cached", "removed"])
         self.assertEqual(payload["cachedState"]["version"], "old")
@@ -1929,12 +1876,7 @@ console.log(JSON.stringify({{
   noMatches: renderCase("missing", []),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["unconfigured"]["message"],
@@ -1986,12 +1928,7 @@ console.log(JSON.stringify({{
   expandedCollection,
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["full"], "/?q=q&source=a")
         self.assertEqual(payload["selective"], "/?q=q&source=a")
@@ -2110,9 +2047,7 @@ const summarize = () => {{
     }}));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
-        result = subprocess.run(
-            [NODE, "-e", script], encoding="utf-8", capture_output=True, check=False
-        )
+        result = run_node(script, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["first"]["counts"], {"a": 20, "b": 4, "c": 3})
@@ -2222,9 +2157,7 @@ const clickSource = (key) => $("sourceFilterOptions").handlers.click({{
   console.log(JSON.stringify({{afterSelection, afterSearch}}));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 """
-        result = subprocess.run(
-            [NODE, "-e", script], encoding="utf-8", capture_output=True, check=False
-        )
+        result = run_node(script, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertTrue(payload["afterSelection"]["showOther"])
@@ -2268,12 +2201,7 @@ console.log(JSON.stringify({{
   freshNext,
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["locationScope"],
@@ -2304,12 +2232,7 @@ const display = makeStateUrl("q", ["a"], 0, null, [], undefined);
 const collection = makeStateUrl("q", [], 0, null, [], "files:media");
 console.log(JSON.stringify({{full, display, collection}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["full"], "/?q=q")
         self.assertEqual(payload["display"], "/?q=q&source=a")
@@ -2363,12 +2286,7 @@ renderSourceFilters();
 const noMatch = status();
 console.log(JSON.stringify({{streaming, finishedEmpty, reported, noSources, noMatch}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["streaming"], "")
         self.assertEqual(payload["finishedEmpty"], "No sources returned results.")
@@ -2431,12 +2349,7 @@ renderScopeLine();
 const started = snapshot();
 console.log(JSON.stringify({{loading, started}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["loading"],
@@ -2489,9 +2402,7 @@ console.log(JSON.stringify({{
   descriptors: records.map(sourceVariantDescriptor),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["collapsed"], [
             "zim:library:wikipedia_en_mathematics_nopic_2025-09-b",
@@ -2533,9 +2444,7 @@ const sourceVariantDescriptor = (record) => record.descriptor;
 {helper}
 console.log(JSON.stringify(records.map(sourceDisplayNameWithCollection)));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         self.assertEqual(json.loads(result.stdout), [
             "WikiMed Medical Encyclopedia · mini · 2025-10",
             "WikiMed Medical Encyclopedia · maxi · 2026-04",
@@ -2587,12 +2496,7 @@ console.log(JSON.stringify(layout.groups.map((group) => ({{
   other: group.other.map((item) => item.source.key),
 }}))));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload,
@@ -2630,12 +2534,7 @@ normalizePageParam();
 const high = replaced;
 console.log(JSON.stringify({{zero, one, decimal, high}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["zero"], "/?q=q")
         self.assertEqual(payload["one"], "/?q=q")
@@ -2672,12 +2571,7 @@ applySourceSelection("q", [], 0);
 const cleared = calls.at(-1);
 console.log(JSON.stringify({{inside, outside, narrowed, same, cleared}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["inside"], ["run", "q", ["inside"], 0, ["inside"]])
         self.assertEqual(
@@ -2727,12 +2621,7 @@ renderSortControls();
 const idle = snapshot();
 console.log(JSON.stringify({{clearedQuery, typed, browsing, idle}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         # Clearing the box while the q=water page is still rendered must not
         # pretend the results are now an empty-query Diversity browse.
@@ -2772,12 +2661,7 @@ console.log(JSON.stringify({{
   explicitRelevance: read("?q=diabetes&sort=relevance"),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(
             payload["badQuery"],
@@ -2806,12 +2690,7 @@ console.log(JSON.stringify({{
   none: pageRangeText(0, 0),
 }}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["many"], "1–10 de 65 resultados")
         self.assertEqual(payload["one"], "1–1 de 1 resultado")
@@ -2835,12 +2714,7 @@ const meta = opened.slice();
 activateHomeHeading({{button: 0}});
 console.log(JSON.stringify({{ctrl, meta, opened, celebrated, toggled}}));
 """
-        result = subprocess.run(
-            [NODE, "-e", script],
-            check=True,
-            encoding="utf-8",
-            capture_output=True,
-        )
+        result = run_node(script)
         payload = json.loads(result.stdout)
         newTab = [["/zimantic/", "_blank", "noopener"]]
         self.assertEqual(payload["ctrl"], newTab)

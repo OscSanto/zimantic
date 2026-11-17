@@ -1,11 +1,10 @@
 import json
-import shutil
-import subprocess
 import unittest
 from pathlib import Path
 
+from js_runner import NODE, run_node
+
 THEME_JS = Path(__file__).resolve().parents[1] / "zimantic" / "web" / "static" / "theme.js"
-NODE = shutil.which("node")
 
 
 @unittest.skipUnless(NODE, "node is unavailable")
@@ -48,9 +47,7 @@ results.ignoredMessage = (() => {{
 }})();
 console.log(JSON.stringify(results));
 """
-        result = subprocess.run(
-            [NODE, "-e", script], check=True, encoding="utf-8", capture_output=True
-        )
+        result = run_node(script)
         return json.loads(result.stdout)
 
     def test_missing_setting_follows_system_scheme(self):

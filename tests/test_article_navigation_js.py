@@ -1,13 +1,12 @@
 import json
 import re
-import shutil
-import subprocess
 import unittest
 from pathlib import Path
 
+from js_runner import NODE, run_node
+
 from zimantic.web import app as web_app
 
-NODE = shutil.which("node")
 APP_JS = Path(__file__).resolve().parents[1] / "zimantic" / "web" / "static" / "app.js"
 
 
@@ -28,12 +27,7 @@ def _run_node(script: str) -> dict:
 const originalSetTimeout = setTimeout;
 globalThis.setTimeout = (...args) => originalSetTimeout(...args).unref();
 """ + script
-    result = subprocess.run(
-        [NODE, "-e", script],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
+    result = run_node(script)
     return json.loads(result.stdout)
 
 
