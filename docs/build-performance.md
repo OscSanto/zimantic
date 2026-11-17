@@ -192,6 +192,64 @@ NIFE's initialization alone is much weaker than model2vec's PCA + SIF (6.2% vers
 
 These distillation numbers are therefore a floor, not a ceiling: they exclude Tokenlearn, which is part of every published potion model.
 
+### End-to-end model comparisons, November 2026
+
+The static table earlier measures semantic retrieval alone. A separate run used the production hybrid ranker and `evaluation/run.py` on `cooking.stackexchange.com_en_all_2026-07` (158,642 indexed entries, 1,450 queries, 1,056 in the test split, 12 languages) at commit `2c2069e`. Each model built its own index with default settings and 256-token inputs.
+
+| Model | Dim | #1 | Top 5 | Top 20 | MRR | Median / p95 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| `static-similarity-mrl-multilingual-v1` (default) | 256 | 40.4% | 53.1% | 60.8% | 0.460 | 86 / 165 |
+| `bekko-static-embedding-v1` | 256 | 41.5% | 52.1% | 59.8% | 0.464 | 96 / 181 |
+| `bekko-static-embedding-v1` | 1,024 | 42.4% | 56.4% | 66.6% | 0.488 | 114 / 221 |
+| `Jarbas/m2v-256-multilingual-e5-small` | 256 | 37.6% | 47.4% | 50.8% | 0.420 | 85 / 171 |
+
+The default and bekko rows use published int8 ONNX graphs; bekko ships one graph per Matryoshka dimension. The m2v row uses a custom fp32 export that maps the Model2Vec token table into the teacher's XLM-R ids, verified against model2vec's own encoder at cosine 1.000000. Each row uses its own vector dimension in the standard IVF-SQ8 layout.
+
+| Model | Encode docs/s | Build | Build peak RSS | Server RSS | ONNX |
+|---|---:|---:|---:|---:|---:|
+| Default, 256d | 7,856 | 19.5 s | 494 MB | 269 MB | 108 MB |
+| Bekko, 256d | 12,468 | 21.1 s | 448 MB | 286 MB | 52 MB |
+| Bekko, 1,024d | 5,044 | 38.3 s | 1.17 GB | 377 MB | 206 MB |
+| m2v, 256d | 14,369 | 17.5 s | 622 MB | 447 MB | 256 MB |
+
+Encode rates use 2,048 excerpts from the same ZIM (mean 968 characters). Build time and peak RSS include extraction, lexical indexing, vector creation, and publication; server RSS is the resident set after the evaluation run.
+
+Bekko at 256 dimensions is within noise of the default at the same 256 B per vector and a 96 MB index, and encodes about 1.6 times faster. At 1,024 dimensions it gains 2.0 points of #1, 3.3 of top-5, and 5.8 of top-20, at four times the vector bytes, a 145 MB index, and 28-56 ms more search time. English retrieval is nearly flat (69% / 87% / 93% versus 68% / 85% / 91%); Spanish, Hindi, Swahili, and Russian improve, while Portuguese drops. The m2v model is 2.8 points behind on #1 and 10.0 behind on top-20; its non-English #1 rate is 0.2%, versus 3.8% for the default, the same cross-language collapse recorded in the distillation experiment above.
+
+These are one-ZIM, synthetic-query, hybrid-ranking measurements, not a release gate.
+
+The transformer alternatives cannot embed the 158k-article corpus in a practical time on this CPU, so they were screened on `wikipedia_en_100_2026-08` (5,051 indexed entries, 1,323 embedded articles, 600 generated English queries, 420 in the test split). This corpus is small and English-only: #1 is the meaningful column, and cross-lingual behavior is not measured.
+
+| Model | Dim | #1 | Top 5 | Top 20 | MRR |
+|---|---:|---:|---:|---:|---:|
+| `jina-embeddings-v5-text-small` | 1,024 | 95.7% | 99.8% | 99.8% | 0.975 |
+| `embeddinggemma-300m` | 768 | 95.5% | 99.3% | 100.0% | 0.972 |
+| `Qwen3-Embedding-0.6B` | 1,024 | 94.5% | 99.0% | 100.0% | 0.965 |
+| `nomic-embed-text-v2-moe` | 768 | 94.3% | 99.0% | 99.0% | 0.962 |
+| `bekko-static-embedding-v1` | 256 | 93.3% | 99.5% | 100.0% | 0.959 |
+| `bekko-static-embedding-v1` | 1,024 | 92.9% | 100.0% | 100.0% | 0.956 |
+| `static-similarity-mrl-multilingual-v1` (default) | 256 | 91.7% | 99.0% | 100.0% | 0.948 |
+| `Jarbas/m2v-256-multilingual-e5-small` | 256 | 89.3% | 95.5% | 97.6% | 0.922 |
+| `gte-multilingual-base` | 768 | 82.9% | 91.9% | 95.7% | 0.869 |
+
+The 95% margin on #1 is ±1.9-2.4 points for the top entries and ±3.6 for GTE at 420 queries, so the top four are not ordered by this run.
+
+| Model | ONNX | Build | Build peak RSS | Server RSS | Encode docs/s |
+|---|---:|---:|---:|---:|---:|
+| Jina v5 small | 1.07 GB | 13.8 s | 1.05 GB | 671 MB | 2.7 |
+| EmbeddingGemma-300m | 296 MB | 11.9 s | 7.78 GB | 422 MB | 7.0 |
+| Qwen3-Embedding-0.6B | 573 MB | 14.1 s | 1.38 GB | 996 MB | 2.4 |
+| Nomic v2 MoE | 456 MB | 10.0 s | 2.17 GB | 914 MB | 3.6 |
+| GTE multilingual base | 340 MB | 4.9 s | 0.77 GB | 535 MB | 10.5 |
+| Bekko, 256d | 52 MB | 1.2 s | 0.25 GB | 221 MB | 12,468 |
+| Bekko, 1,024d | 206 MB | 1.4 s | 0.49 GB | 391 MB | 5,044 |
+| Default, 256d | 108 MB | 1.2 s | 0.30 GB | 263 MB | 7,856 |
+| m2v, 256d | 256 MB | 1.5 s | 0.58 GB | 415 MB | 14,369 |
+
+Build time and peak RSS are for that 5,051-entry corpus (1,323 embedded articles). Encode rates use the cooking excerpts (mean 968 characters), not the shorter small-ZIM articles; the transformer rates were measured one input per call. The m2v ONNX file is fp32; the other transformer entries are int8.
+
+EmbeddingGemma's build peak (7.78 GB) is far above its 422 MB serving RSS. On a 1.5 GB host, the static models, GTE, Jina, and Qwen3 stay within the measured build peak; Gemma and Nomic exceed it during the build, although every row fits the serving budget. GTE's published int8 export was not batch-safe, so it was rebuilt from the fp32 graph with per-channel dynamic int8 and run one input per call; the 82.9% #1 measures that quantized path, not the fp32 model. Qwen3 used a single-pass export (`use_cache=False`) with per-channel dynamic int8, because the published int8 graph keeps a KV cache; its single-pass int8 also differed from fp32 (cosine 0.89 on a long passage). Jina and Nomic use their published int8 exports, also run one input per call: spot checks showed their int8 graphs change vectors when padded (cosine 0.93-0.997 between a batched and a single input). The EmbeddingGemma and static exports were batch-equivalent. At these encode rates the transformer models would need roughly 4-18 hours to embed the cooking corpus on this host, which is why only the static models have full-corpus results.
+
 ## ZIM iteration and resource limits
 
 ZIM builds require python-libzim 4.1.0 or later and use its `iter_efficient()` iterator. This iterator follows storage order; its exact order is not part of the public contract. `iter_by_path()` and `iter_by_title()` do not follow storage order. The build records the selected order and its digest. A staged build from a pre-4.1 release can resume in ID order; a build that starts with python-libzim 4.1 or later does not use that fallback. Resume rejects a different order or an incomplete manifest instead of applying saved row positions to a different sequence. Completed indexes stay valid.

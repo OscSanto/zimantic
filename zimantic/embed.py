@@ -248,17 +248,19 @@ def _tokenizer_json_is_wordpiece(path: Path) -> bool:
 
 
 def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
-    """Choose SentencePiece or WordPiece from the files in ``model_dir``.
+    """Choose the tokenizer from the files in ``model_dir``.
 
-    The ONNX graph itself does not identify its tokenizer: both e5 families
-    accept the same input_ids/attention_mask tensors. The vocabulary artifact
-    does, reliably: multilingual-e5 ships ``sentencepiece.bpe.model`` and the
-    English e5-v2 models ship BERT's ``vocab.txt``. When a directory contains
-    both (for example a precision folder reused after switching models), honor
-    tokenizer_config.json if it is present, then a WordPiece tokenizer.json,
-    then the static model's config, and otherwise keep the historical
-    SentencePiece choice. The e5 and static vocabularies are not interchangeable:
-    SentencePiece ids exceed the static graph's 105,879-row embedding table.
+    The ONNX graph itself does not identify its tokenizer: every supported
+    model accepts the same input_ids/attention_mask tensors. The vocabulary
+    artifact does, reliably: multilingual-e5 ships ``sentencepiece.bpe.model``,
+    the English e5-v2 models ship BERT's ``vocab.txt``, and other architectures
+    (Qwen, Gemma, and hand-built exports) ship only ``tokenizer.json``. When a
+    directory contains both vocabulary files (for example a precision folder
+    reused after switching models), honor tokenizer_config.json if it is
+    present, then a WordPiece tokenizer.json, then the static model's config,
+    and otherwise keep the historical SentencePiece choice. The e5 and static
+    vocabularies are not interchangeable: SentencePiece ids exceed the static
+    graph's 105,879-row embedding table.
     """
     sentencepiece_path = Path(model_dir) / "sentencepiece.bpe.model"
     wordpiece_path = Path(model_dir) / "vocab.txt"
@@ -279,10 +281,14 @@ def _resolve_tokenizer(model_dir) -> tuple[str, Path]:
         return "sentencepiece", sentencepiece_path
     if wordpiece_path.is_file():
         return "wordpiece", wordpiece_path
+    tokenizer_json_path = Path(model_dir) / "tokenizer.json"
+    if tokenizer_json_path.is_file():
+        return "tokenizer_json", tokenizer_json_path
     raise FileNotFoundError(
         f"{model_dir} must contain model.onnx and either "
-        "sentencepiece.bpe.model (multilingual-e5) or vocab.txt (English e5-v2 "
-        "and static WordPiece models; generate it from tokenizer.json)"
+        "sentencepiece.bpe.model (multilingual-e5), vocab.txt (English e5-v2 "
+        "and static WordPiece models; generate it from tokenizer.json), or "
+        "tokenizer.json"
     )
 
 
@@ -639,7 +645,7 @@ class Embedder:
             )
             # XLM-RoBERTa reserves 0 for <s>, 1 for <pad> and 2 for </s>.
             self.pad_id = 1
-        else:
+        elif self.tokenizer_kind == "wordpiece":
             fast_path = Path(model_dir) / "tokenizer.json"
             if fast_path.is_file():
                 try:
@@ -663,6 +669,29 @@ class Embedder:
             # BERT uses [PAD] = 0, unlike XLM-R. Do not hard-code 1 here: it is
             # [unused0] in a standard BERT vocabulary.
             self.pad_id = self.tokenizer.pad_id
+        else:
+            # A model-specific tokenizer.json (Qwen, Gemma, and similar
+            # architectures). The Rust tokenizer applies its own normalizer,
+            # pre-tokenizer, post-processor, and special tokens, so the ids are
+            # used exactly as the model expects. Truncation is enabled here, not
+            # applied after encoding, so the post-processor still sees the
+            # truncated sequence and can keep its end-of-sequence token.
+            try:
+                from tokenizers import Tokenizer
+            except ImportError as error:
+                raise RuntimeError(
+                    f"{model_dir} uses tokenizer.json, which requires the "
+                    "tokenizers package"
+                ) from error
+            self.tokenizer = Tokenizer.from_file(str(tokenizer_path))
+            self.tokenizer.no_padding()
+            self.tokenizer.enable_truncation(max_length=self.embedding_tokens)
+            self.pad_id = 0
+            for name in ("[PAD]", "<pad>", "<|endoftext|>", "[pad]"):
+                token_id = self.tokenizer.token_to_id(name)
+                if token_id is not None:
+                    self.pad_id = int(token_id)
+                    break
         # The Rust tokenizer and the read-only Python WordPiece fallback are
         # thread-safe. SentencePiece's Python binding is not documented as such,
         # and loading one processor per thread would cost ~45 MB each on the
@@ -687,6 +716,11 @@ class Embedder:
         # RAM to spare, but on small hosts a batch_size=32 build can retain
         # hundreds of MB; disable it there and malloc per call instead.
         opts.enable_cpu_mem_arena = not self.low_memory
+        if self.low_memory:
+            # ORT also caches allocation plans for dynamic shapes. On long
+            # passages that cache can dwarf the weights, so rebuild the plan
+            # when the batch changes instead of retaining every shape.
+            opts.enable_mem_pattern = False
         if DML_PROVIDER in self.providers:
             # DirectML rejects ONNX Runtime's memory-pattern optimisation and
             # parallel execution; without this the session fails to initialize
@@ -828,11 +862,20 @@ class Embedder:
 
     def token_count(self, text: str, prefix: str = "") -> int:
         """Count special tokens and tokenizer pieces for the full input."""
+        if self.tokenizer_kind == "tokenizer_json":
+            # The tokenizer counts its own special tokens and caps at the model
+            # budget, so no separate two-token allowance applies.
+            return len(self.tokenizer.encode(prefix + text).ids)
         pieces = self._locked_tokenizer_encode(prefix + text)
         return SPECIAL_TOKEN_COUNT + len(pieces)
 
     def truncate(self, text: str, prefix: str = "") -> str:
         """Keep text within the model budget without cutting through a word."""
+        if self.tokenizer_kind == "tokenizer_json":
+            # Truncation is enabled on the tokenizer itself, which preserves
+            # its post-processor's end-of-sequence token. Cutting the text here
+            # would only risk a word boundary without changing the token cap.
+            return text
         if self.token_count(text, prefix) <= self.embedding_tokens:
             return text
         words = text.split()
@@ -860,6 +903,8 @@ class Embedder:
         return text[:low]
 
     def _ids(self, text: str) -> list[int]:
+        if self.tokenizer_kind == "tokenizer_json":
+            return self.tokenizer.encode(text).ids
         pieces = self._locked_tokenizer_encode(text)[
             : self.embedding_tokens - SPECIAL_TOKEN_COUNT
         ]
@@ -875,6 +920,8 @@ class Embedder:
 
     def encode(self, texts: list[str]) -> list[list[int]]:
         """Prepare capped model inputs once, before scheduling build batches."""
+        if self.tokenizer_kind == "tokenizer_json":
+            return [encoding.ids for encoding in self.tokenizer.encode_batch(texts)]
         if self._fast_tokenizer:
             limit = self.embedding_tokens - SPECIAL_TOKEN_COUNT
             return [
@@ -915,7 +962,14 @@ class Embedder:
         rows = [e + [self.pad_id] * (width - len(e)) for e in encoded]
         rows.extend([rows[0]] * (batch_size - item_count))
         ids = np.array(rows, dtype=np.int64)
-        mask = (ids != self.pad_id).astype(np.int64)
+        # Build the mask from the real lengths rather than from the pad id. Some
+        # tokenizers (Qwen) use the same token for padding and for a real
+        # end-of-sequence marker, so comparing ids would hide the last token.
+        mask = np.zeros((batch_size, width), dtype=np.int64)
+        for index, row in enumerate(encoded):
+            mask[index, : len(row)] = 1
+        if batch_size > item_count:
+            mask[item_count:] = mask[0]
         inputs = {"input_ids": ids, "attention_mask": mask}
         if "token_type_ids" in self._input_names:
             inputs["token_type_ids"] = np.zeros_like(ids)

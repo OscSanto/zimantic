@@ -108,6 +108,46 @@ class ModelFingerprintTests(unittest.TestCase):
             self.assertTrue(embed.model_fingerprint(root))
             self.assertEqual(embed.model_fingerprint(root / "int8"), "")
 
+    def test_tokenizer_json_is_selected_without_a_vocabulary_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "model.onnx").write_bytes(b"model")
+            (Path(tmp) / "tokenizer.json").write_text(
+                json.dumps({"model": {"type": "BPE", "vocab": {}, "merges": []}}),
+                encoding="utf-8",
+            )
+            kind, path = embed._resolve_tokenizer(tmp)
+            self.assertEqual(kind, "tokenizer_json")
+            self.assertEqual(path.name, "tokenizer.json")
+
+    def test_tokenizer_json_encodes_with_its_own_special_tokens(self):
+        from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+
+        tokenizer = Tokenizer(models.BPE())
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        tokenizer.train_from_iterator(
+            ["alpha beta gamma delta epsilon zeta eta theta"],
+            trainers.BpeTrainer(special_tokens=["<pad>", "<eos>"], vocab_size=20),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "model.onnx").write_bytes(b"model")
+            tokenizer.save(str(Path(tmp) / "tokenizer.json"))
+            output = MagicMock()
+            output.shape = [None, 4]
+            session = MagicMock()
+            session.get_inputs.return_value = []
+            session.get_outputs.return_value = [output]
+            session.get_providers.return_value = ["CPUExecutionProvider"]
+            with (
+                patch.object(embed.ort, "InferenceSession", return_value=session),
+                patch.object(embed, "verify_model_files", return_value={}),
+            ):
+                embedder = embed.Embedder(tmp, device="cpu", embedding_tokens=8)
+            self.assertEqual(embedder.tokenizer_kind, "tokenizer_json")
+            self.assertEqual(embedder.pad_id, tokenizer.token_to_id("<pad>"))
+            encoded = embedder.encode(["alpha beta gamma delta epsilon zeta"])
+            self.assertLessEqual(len(encoded[0]), 8)
+            self.assertGreaterEqual(len(encoded[0]), 1)
+
     def test_embedder_does_not_load_model_from_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
