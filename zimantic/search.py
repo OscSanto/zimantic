@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .cache import DEFAULT_CACHE_BYTES, DEFAULT_CACHE_SIZE, QueryCache
+from .content.defaults import DEFAULT_MAX_HTML_BYTES, DEFAULT_PREVIEW_CHARS
 from .content.path import normalize_article_path
-from .content.reader import DEFAULT_MAX_HTML_BYTES, DEFAULT_PREVIEW_CHARS
 from .content.store import (
     ArticleData,
     ArticleNotFoundError,

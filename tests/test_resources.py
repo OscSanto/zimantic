@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import resource
+import pytest
 
 from zimantic import resources
+
+resource = pytest.importorskip("resource")
 
 
 def test_raise_nofile_limit_uses_the_hard_limit(monkeypatch):

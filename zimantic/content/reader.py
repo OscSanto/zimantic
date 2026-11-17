@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from ..indexing.types import EntryRecord
 from ..libzim_compat import get_entry_by_id
 from ..redirects import RedirectError, resolve_redirect_entry
+from .defaults import DEFAULT_MAX_HTML_BYTES, DEFAULT_PREVIEW_CHARS
 from .path import normalize_archive_path
 
 logger = logging.getLogger(__name__)
@@ -76,8 +77,6 @@ class EntrySource(Protocol):
 
 
 MIN_BLOCK_CHARS = 50    # shorter blocks are ignored; the page remains searchable by title
-DEFAULT_PREVIEW_CHARS = 1000
-DEFAULT_MAX_HTML_BYTES = 4 << 20
 # Per-item lexical body cap.  It is separate from the short embedding/preview
 # excerpt and defaults to 1 MiB, matching the phase-04 global setting.
 DEFAULT_MAX_BODY_TEXT_BYTES = 1 << 20

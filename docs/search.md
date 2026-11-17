@@ -63,7 +63,7 @@ These measurements use 256-token passages, batch size 32, and 4 CPU threads on o
 | `multilingual-e5-large` | 562 MB | 1,024 | ~730 MB | 9/s (0.13×) | 100+ languages; ~7.8× slower |
 | `e5-small-v2` | 34 MB | 384 | ~65 MB | 64/s (0.93×) | English only; WordPiece |
 
-¹ Additional resident memory for the model and vocabulary after loading, excluding ONNX Runtime's batch arena. Add this to the server's baseline footprint (see [Measured memory use](search.md#measured-memory-use)); leave about 0.5 GB of headroom for base and 1 GB for large. On hosts with 2 GB RAM or less the arena is disabled, so builds stay closer to these figures.
+¹ Additional resident memory for the model and vocabulary after loading, excluding ONNX Runtime's batch arena. Add this to the server's baseline footprint (see [Measured memory use](search.md#measured-memory-use)); leave about 0.5 GB of headroom for base and 1 GB for large. On hosts with 2 GB RAM or less the arena is disabled, so builds stay closer to these figures. `Jarbas/m2v-256-multilingual-e5-small` (Model2Vec PCA+SIF distillation, natively 256d) was also tried but has worse quality than `static-similarity-mrl-multilingual-v1`.
 
 ² Passages per second while embedding 256 passages in batches of 32. The static model's rate is measured with the production encoder and depends on the ONNX graph. A single query embedding takes about 0.04 ms with the static default, 14 ms with either e5 small model, 39 ms with base, and 110 ms with large.
 
