@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import types
 from pathlib import Path
 
 from zimantic.__main__ import _run_configured_build
+from zimantic.config_writer import render_collection_entry
 from zimantic.indexing.locator import IndexLocator
 from zimantic.settings import load_config
 
@@ -18,15 +20,20 @@ def test_configured_kolibri_build_uses_the_generic_pipeline(tmp_path):
     config = kolibri_config(fixture)
     index_dir = tmp_path / "indexes"
     path = Path(tmp_path) / "config.toml"
+    # json.dumps escapes backslashes the same way the config writer does, so
+    # absolute Windows paths stay valid TOML basic strings.
     path.write_text(
-        f'index_dir = "{index_dir}"\n'
-        "[[collections]]\n"
-        'type = "kolibri"\n'
-        'name = "kolibri"\n'
-        f'path = "{fixture.home}"\n'
-        'granularity = "children"\n'
-        "max_sources = 64\n"
-        "max_entries = 500000\n",
+        f"index_dir = {json.dumps(str(index_dir), ensure_ascii=False)}\n"
+        + render_collection_entry(
+            {
+                "type": "kolibri",
+                "name": "kolibri",
+                "path": str(fixture.home),
+                "granularity": "children",
+                "max_sources": 64,
+                "max_entries": 500000,
+            }
+        ),
         encoding="utf-8",
     )
     cfg = load_config(path, warn=lambda _: None)
