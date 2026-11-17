@@ -194,7 +194,7 @@ Install the accelerated wheel after every `uv sync`, because the lockfile reinst
 
 Supported values are `auto`, `gpu` (prefer an accelerated provider), `cpu`, `cuda` (NVIDIA), `rocm` (AMD), `migraphx` (AMD through a MIGraphX-enabled ONNX Runtime build), `directml`/`dml` (Windows), `openvino` (Intel, using OpenVINO `AUTO` device selection), and `coreml` (Apple). `--device` overrides the setting for one `build` or `serve` run. CoreML is never selected by `auto`: stock macOS `onnxruntime` wheels include it, and its dynamic-shape handling is slower than the CPU for this model.
 
-Use the fp16 export of `multilingual-e5-small`. Download it with `zimantic model fp16 --model multilingual-e5-small` and point `model_dir` at `model/multilingual-e5-small/fp16`. Accelerated providers usually run fp16 faster than the quantized int8 export, which is tuned for CPUs. Keep the static default on CPU-only hosts and small devices, and keep `e5-small-v2` only for English-only libraries.
+Use the fp16 export of `multilingual-e5-small`. Download it with `zimantic model fp16 --model multilingual-e5-small` and point `model_dir` at `model/multilingual-e5-small/fp16`. Accelerated providers usually run fp16 faster than the quantized int8 export, which is tuned for CPUs. Keep the static default on CPU-only hosts and small devices, and keep `e5-small-v2` only for English-only libraries. On a small or shared GPU, `e5-small` is also the better choice than the larger quality-GPU models; see [Quality-GPU](#quality-gpu-e5-small-vs-qwen3-embedding-06b).
 
 The provider comes from the ONNX Runtime package, not from Zimantic. Replace the plain `onnxruntime` wheel with `onnxruntime-gpu` (CUDA), `onnxruntime-rocm`, `onnxruntime-directml`, or `onnxruntime-openvino`; MIGraphX requires an ONNX Runtime build that includes `MIGraphXExecutionProvider` (for example, a ROCm build for gfx803). If the requested provider is missing or cannot initialize (for example because a CUDA library is absent), Zimantic warns and embeds on the CPU, so the same configuration also runs on machines without a GPU. If a run fails on the device after initialization (for example a GPU out-of-memory error), Zimantic warns and retries on the CPU instead of failing the build.
 
@@ -205,6 +205,30 @@ zimantic build --device cuda   # or embed_device = "cuda" in config.toml
 ```
 
 When Zimantic is managed with `uv`, `uv sync` reinstalls the plain `onnxruntime` dependency, so install the GPU wheel after you sync (or change the dependency in the project environment).
+
+### Quality-GPU: e5-small vs Qwen3-Embedding-0.6B
+
+`multilingual-e5-small` is the GPU recommendation for a small or shared device. `Qwen3-Embedding-0.6B` is the likely quality-GPU step when the GPU is large enough and multilingual retrieval matters more than throughput. This repository did not measure GPU throughput for either model, and its transformer comparison is English-only; the weight footprints are from their fp16 ONNX exports, and the quality numbers are published multilingual scores from different benchmark snapshots, not a head-to-head run.
+
+| | multilingual-e5-small | Qwen3-Embedding-0.6B |
+|---|---:|---:|
+| Parameters | 118M | 0.6B |
+| Vector dimensions | 384 | 1,024 (MRL to 32) |
+| Context | 512 tokens | 32K tokens |
+| fp16 ONNX weights | ~235 MB | ~1.2 GB |
+| Published multilingual mean / retrieval¹ | 56.4 / 50.9 | 64.33 / 64.64 |
+| Query prefix | `query: ` | optional English instruction |
+| Index bytes per article | 384 B | 1 KB |
+
+¹ `multilingual-e5-small` values are its reported MMTEB v2 scores; Qwen3 values are from its MTEB Multilingual model card. The snapshots differ, so treat the gap as directional, not as a same-run measurement.
+
+**Small GPU, integrated GPU, or a GPU shared with other services: use `e5-small`.** Qwen3-0.6B's fp16 weights alone are about 1.2 GB. Add activations, the provider's context, the KV cache, and a 1 KB-per-article index, and a 4 GB budget leaves little headroom or forces tiny batches. e5-small's fp16 weights are about 235 MB, it has a 512-token limit, and its 384-dimensional index is 2.7 times smaller than Qwen3's. It is also roughly five times cheaper per token, so it wins on query throughput and on GPUs that are also serving FAISS or other work.
+
+**Large GPU and multilingual quality first: use `Qwen3-Embedding-0.6B`.** About 4-6 GB of VRAM can run it with short passages and small batches; 8 GB or more is comfortable, and 16 GB or more allows longer contexts and larger batches. The model covers 100+ languages, uses 32K context, and supports an optional English query instruction. It is the right choice when cross-lingual retrieval quality matters more than per-query cost and the 1,024-dimensional index is acceptable. A GPU does not make FAISS faster: vector search stays on the CPU, so the larger index still costs RAM and disk. The same family has 4B and 8B variants for still larger GPUs; they were not measured here.
+
+If 0.6B is more than the GPU can hold, `EmbeddingGemma-300m` is the smaller quality step: 768 dimensions, about 617 MB of fp16 weights, and a published multilingual mean of 61.15. Use it when e5-small is not enough but a 0.6B model is too large.
+
+`Qwen3-Embedding-0.6B` is not a `zimantic model` download yet. Point `model_dir` at an ONNX export with `tokenizer.json` and a `zimantic_model.json` that sets dimension 1,024 and the query instruction. The published ONNX export keeps a KV cache; Zimantic needs a single-pass export with last-token pooling. `EmbeddingGemma-300m` also needs a 2-D `sentence_embedding` output and its query/document prefixes.
 
 GPU acceleration helps full index builds the most, because they embed every article. A higher `embedding_batch_tokens` (and, if necessary, the `batch_size` read window) uses the device more efficiently. Lower the token budget if a call exhausts GPU memory. Query embedding also runs on the device, but a single short query is too small to gain much. Vector search (FAISS) stays on the CPU: the indexes are memory-mapped, and a copy to GPU memory to search a single query vector costs more than the search itself.
 
