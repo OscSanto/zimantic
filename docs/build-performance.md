@@ -250,6 +250,35 @@ Build time and peak RSS are for that 5,051-entry corpus (1,323 embedded articles
 
 EmbeddingGemma's build peak (7.78 GB) is far above its 422 MB serving RSS. On a 1.5 GB host, the static models, GTE, Jina, and Qwen3 stay within the measured build peak; Gemma and Nomic exceed it during the build, although every row fits the serving budget. GTE's published int8 export was not batch-safe, so it was rebuilt from the fp32 graph with per-channel dynamic int8 and run one input per call; the 82.9% #1 measures that quantized path, not the fp32 model. Qwen3 used a single-pass export (`use_cache=False`) with per-channel dynamic int8, because the published int8 graph keeps a KV cache; its single-pass int8 also differed from fp32 (cosine 0.89 on a long passage). Jina and Nomic use their published int8 exports, also run one input per call: spot checks showed their int8 graphs change vectors when padded (cosine 0.93-0.997 between a batched and a single input). The EmbeddingGemma and static exports were batch-equivalent. At these encode rates the transformer models would need roughly 4-18 hours to embed the cooking corpus on this host, which is why only the static models have full-corpus results.
 
+### Bekko static embedding: 256d, 512d, 1024d
+
+Bekko ships Matryoshka variants of the same model. The end-to-end comparison includes 256 and 1,024 dimensions; 512 dimensions is the useful middle. These rows use the cooking corpus and its 1,056 test queries.
+
+| Variant | #1 | Top 5 | Top 20 | MRR | Median / p95 | FAISS | Total index | Server RSS | Build peak | Download |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Default `static-similarity-mrl-multilingual-v1`, 256d | 40.4% | 53.1% | 60.8% | 0.460 | 86 / 165 ms | 18 MB | 96 MB | 269 MB | 494 MB | 108 MB |
+| Bekko, 256d | 41.5% | 52.1% | 59.8% | 0.464 | 96 / 181 ms | 18 MB | 96 MB | 286 MB | 448 MB | 52 MB |
+| Bekko, 512d | 41.7% | 54.7% | 62.6% | 0.476 | 97 / 184 ms | 34 MB | 112 MB | 277 MB | 694 MB | 103 MB |
+| Bekko, 1,024d | 42.4% | 56.4% | 66.6% | 0.488 | 114 / 221 ms | 67 MB | 145 MB | 377 MB | 1.17 GB | 206 MB |
+
+The lexical SQLite table is 79 MB in every row, so four times the vector bytes is about 1.5 times the total index here. A source with little body text moves closer to the full four times.
+
+**Quality.** The 1,024d variant gains 2.0 points of #1, 3.3 of top-5, and 5.8 of top-20 over the default; the #1 gain is inside the ±3-point margin, and the top-20 gain is the reliable one. The 512d variant gains 1.3, 1.6, and 1.8 points on the same columns: about two-thirds of the #1 gain, half the top-5 gain, and a third of the top-20 gain, at half the vector growth. Fixed/broken counts against the default are 48/37 for 256d, 46/33 for 512d, and 55/34 for 1,024d.
+
+**Languages.** English is nearly flat: the default scores 68/85/91, 512d scores 70/86/93, and 1,024d scores 69/87/93. Spanish, Hindi, Swahili, and Russian improve. Portuguese falls from 9/18/45 to 0/0/9, and German and Italian are weaker in their small samples. Bekko lists 40 languages versus the default's 50.
+
+**Search time.** The 1,024d index is about 33% slower than the default at the default probe count. The 512d index is within about 1 ms of 256d (11 ms of the default). The 1,024d vectors separate better, so lowering `nprobe` can recover part of the difference.
+
+**Build memory.** The 1,024d build peaks at 1.17 GB on this corpus versus 494 MB for the production default; 512d peaks at 694 MB. The production default is chosen to run on the smallest supported hosts.
+
+**Migration.** Changing the default dimension requires rebuilding every index. Vectors cannot be reused across dimensions.
+
+**Provenance.** Adding Bekko as a bundled or default model means a new model spec, pinned checksums, a derived 200k-token `vocab.txt`, tests, and docs. The current default is an official pinned sentence-transformers model.
+
+**Storage goal.** The project aims to keep a published index below 10% of the source size. Four times the vector bytes can exceed that goal for vector-heavy sources.
+
+The 1,024d variant is therefore a reasonable optional quality tier, not the universal default. The 512d variant is the cheaper step if the default changes: 2 times the vector bytes, search latency close to 256d (+1 ms median), and +1.8 points of top-20. The 1,024d step buys the remaining +4.0 points of top-20 over 512d at another 2 times the vector bytes, with median search 114 ms versus 97 ms. For a true quality-first default, `multilingual-e5-small` remains the larger jump at +8.3 points of hybrid #1, with its own build cost. The 512d latency and build figures were measured while the host carried unrelated load; re-run them on a quiet host before treating them as precise.
+
 ## ZIM iteration and resource limits
 
 ZIM builds require python-libzim 4.1.0 or later and use its `iter_efficient()` iterator. This iterator follows storage order; its exact order is not part of the public contract. `iter_by_path()` and `iter_by_title()` do not follow storage order. The build records the selected order and its digest. A staged build from a pre-4.1 release can resume in ID order; a build that starts with python-libzim 4.1 or later does not use that fallback. Resume rejects a different order or an incomplete manifest instead of applying saved row positions to a different sequence. Completed indexes stay valid.
