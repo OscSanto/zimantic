@@ -1,5 +1,6 @@
 import argparse
 import importlib
+import os
 import tempfile
 import threading
 import types
@@ -747,6 +748,56 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(seen[0][0], "static-similarity-mrl-multilingual-v1")
         self.assertEqual(seen[0][1], ["int8"])
         self.assertEqual(seen[0][2], Path(config["model_dir"]))
+
+
+class OfflineRuntimeTests(unittest.TestCase):
+    _variables = (
+        "HF_HUB_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+        "ORT_DISABLE_TELEMETRY",
+    )
+
+    def test_defaults_block_network_and_telemetry(self):
+        import zimantic.__main__ as main_module
+
+        with patch.dict(os.environ, {}, clear=True):
+            main_module._configure_offline_runtime()
+
+            for name in self._variables:
+                with self.subTest(name=name):
+                    self.assertEqual(os.environ[name], "1")
+
+    def test_explicit_environment_values_are_kept(self):
+        import zimantic.__main__ as main_module
+
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ["ORT_DISABLE_TELEMETRY"] = "0"
+
+            main_module._configure_offline_runtime()
+
+            self.assertEqual(os.environ["ORT_DISABLE_TELEMETRY"], "0")
+            self.assertEqual(os.environ["HF_HUB_OFFLINE"], "1")
+
+    def test_serve_sets_offline_runtime_before_dispatch(self):
+        import zimantic.__main__ as main_module
+        from zimantic import settings
+
+        seen = {}
+
+        def fake_serve(_args, _cfg):
+            seen.update({name: os.environ.get(name) for name in self._variables})
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(settings, "load_config", return_value={}),
+            patch.object(main_module, "_configure_logging"),
+            patch.object(main_module, "_run_serve", side_effect=fake_serve),
+        ):
+            main_module.main(["serve"])
+
+        for name in self._variables:
+            with self.subTest(name=name):
+                self.assertEqual(seen[name], "1")
 
 
 if __name__ == "__main__":

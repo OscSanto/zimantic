@@ -2090,12 +2090,6 @@ def _run_open(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         flush=True,
     )
 
-    # Model loading must not contact the network, write caches, or emit
-    # telemetry from an ephemeral process.
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
-
     search = Search(open_config, semantic=not args.fast, scope=scope)
     try:
         if not args.fast:
@@ -2312,7 +2306,21 @@ def _run_build_locked(args, cfg: dict, parser: argparse.ArgumentParser) -> None:
         lock.release()
 
 
+def _configure_offline_runtime() -> None:
+    """Keep model loading off the network and out of telemetry.
+
+    ONNX Runtime's official builds ship telemetry enabled and read
+    ``ORT_DISABLE_TELEMETRY`` when the library first initializes, so every
+    command that can load a model sets it before dispatching. ``setdefault``
+    keeps an explicit value from the environment.
+    """
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
+
 def main(argv: list[str] | None = None) -> None:
+    _configure_offline_runtime()
     parser = _make_parser()
 
     args = parser.parse_args(argv)
