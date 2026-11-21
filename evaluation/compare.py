@@ -1,7 +1,7 @@
 """Compare one or more evaluation runs. The first results file is the baseline.
 
     python evaluation/compare.py results/v0.1.0-lite.json results/kiwix.json
-    python evaluation/compare.py results/main.json results/my-branch.json --by lang set --split test
+    python evaluation/compare.py results/main.json results/my-branch.json --by lang type --split test
 
 For each run: share of queries with the right article at #1, in the top 5 and in the top 20, mean
 reciprocal rank (MRR: 1 for #1, 1/2 for #2, ... 0 when not in the results), a 95% margin of error on #1,
@@ -38,15 +38,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("results", nargs="+", help="results JSON files; the first is the baseline")
     ap.add_argument("--queries", default=str(Q.QUERIES))
-    ap.add_argument("--zims", nargs="*"); ap.add_argument("--suites", nargs="*"); ap.add_argument("--sets", nargs="*"); ap.add_argument("--langs", nargs="*")
+    ap.add_argument("--zims", nargs="*"); ap.add_argument("--suites", nargs="*"); ap.add_argument("--types", nargs="*"); ap.add_argument("--langs", nargs="*")
     ap.add_argument("--split", choices=("all", "dev", "test"), default="all")
-    ap.add_argument("--by", nargs="*", default=["lang", "set", "zim"],
-                    help="breakdowns, each a field or fields joined by '+', e.g. lang set zim zim+lang suite+set+lang")
+    ap.add_argument("--by", nargs="*", default=["lang", "type", "zim"],
+                    help="breakdowns, each a field or fields joined by '+', e.g. lang type zim zim+lang suite+type+lang")
     ap.add_argument("--out", help="also write the report to this file")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
-    qs, _ = Q.load(Path(args.queries), args.zims, args.suites, args.sets, args.langs, args.split)
+    qs, _ = Q.load(Path(args.queries), args.zims, args.suites, args.types, args.langs, args.split)
     runs = []
     for path in args.results:
         data = json.loads(Path(path).read_text(encoding="utf-8"))

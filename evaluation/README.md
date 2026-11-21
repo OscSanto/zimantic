@@ -28,30 +28,59 @@ For every query: the position of the right article in the first 20 results. From
 | **Fixed / broken** | queries a run gets right at #1 that the baseline didn't, and the reverse. An average can hide a change that fixes 40 searches and breaks 69 |
 | **Median / p95 ms** | search time over HTTP |
 
-Every number can be broken down by **language**, **query type** (`set`), **ZIM** and **suite**, or any
-combination (`--by lang set zim zim+lang`).
+Every number can be broken down by **language**, **query type** (`type`), **ZIM** and **suite**, or any
+combination (`--by lang type zim zim+lang`).
 
 ## The queries
 
 `queries/<zim name>/<suite>.<lang>.jsonl`, one query per line:
 
 ```json
-{"id": "readme/question/019", "zim": "wikipedia_en_medicine_maxi_2026-04", "suite": "readme", "set": "question",
- "lang": "en", "query": "what causes lockjaw", "answers": ["Tetanus"], "source": "hand"}
+{"id": "curated/question/019", "zim": "wikipedia_en_medicine_maxi_2026-04", "suite": "curated", "type": "question",
+ "lang": "en", "query": "what causes lockjaw", "answers": ["Tetanus"], "source": "hand", "split": "test"}
 ```
 
-`answers` lists the article path(s) that count as correct (several when a ZIM has near-duplicates).
-`source` says how the query was made: `hand`, `translated` or `generated`.
+| Field | Meaning |
+|---|---|
+| `id` | `<suite>/<type>/<number>`, unique within the ZIM. A translation adds `@<lang>` to the English id |
+| `suite` | how the target articles were picked: **`curated`** (by hand: well-known topics, the README examples, popular questions) or **`random`** (picked at random from the ZIM) |
+| `type` | what kind of query it is (table below) |
+| `answers` | the article path(s) that count as correct (several when a ZIM has near-duplicates) |
+| `source` | how the query was written: `hand`, `translated` or `generated` (taken from the article) |
+| `split` | `dev` or `test` (see [dev and test](#dev-and-test)) |
+
+Query types:
+
+| Type | What the query is |
+|---|---|
+| `exact-title` | the article's exact title |
+| `name` | the article's name, or a short phrase naming it |
+| `keywords` | a few words a person might type |
+| `misspelled` | a title or keywords with typing mistakes |
+| `question` | a plain-language question the article answers |
+| `reworded-question` | a question asked with different words than the title |
+| `description` | a description of the subject without its name |
+| `alternate-name` | another name for the subject (often a redirect's title) |
+| `single-word` | one common word, asked in many languages |
+| `mixed-language` | queries in several languages in one set (`lang` is `mul`) |
+| `first-sentence` | the article's first sentence, title words removed |
+| `deep-sentence` | a sentence from the middle of the article |
+| `copied-sentence` | a sentence copied from the article |
+| `question-body-sentence` | a sentence from a Q&A question's body |
+| `best-answer-sentence` | a sentence from a Q&A question's best answer |
+| `other-answer-sentence` | a sentence from another answer to the question |
+
+The list lives in `queries.py` (`TYPES`); a query file with an unknown suite or type fails to load.
 
 Included (6,132 queries, 5 ZIMs, up to 20 languages):
 
 | ZIM | Suites | What they cover |
 |---|---|---|
-| `wikipedia_en_medicine_maxi_2026-04` (WikiMed) | `readme`, `words`, `random-targets` | the README's sets (titles, questions, misspellings, descriptions without the name, alternate names, first sentences, sentences deep in an article) in 7 languages; 15 common words in 15 languages; random articles in 7 languages |
-| `wikipedia_en_astronomy_maxi_2025-11` | `random-targets` | 70 random articles: names, questions, descriptions in 7 languages, plus misspellings and copied sentences |
-| `cooking.stackexchange.com_en_all_2026-07` | `original`, `random-targets` | titles, keywords, reworded questions, misspellings, 12 languages, sentences from questions and answers |
-| `ted_mul_ocean_2026-09` | `random-targets` | 70 random talks, 7 languages |
-| `wikibooks_en_all_nopic_2026-01` | `hand`, `generated` | hand-written questions, keywords, misspellings; generated sets |
+| `wikipedia_en_medicine_maxi_2026-04` (WikiMed) | `curated`, `random` | curated: the README's examples (titles, questions, misspellings, descriptions without the name, alternate names, first sentences, sentences deep in an article) in 7 languages, 15 common words in 15 languages, 30 mixed-language queries; random: random articles in 7 languages |
+| `wikipedia_en_astronomy_maxi_2025-11` | `random` | 70 random articles: names, questions, descriptions in 7 languages, plus misspellings and copied sentences |
+| `cooking.stackexchange.com_en_all_2026-07` | `curated`, `random` | curated: titles, keywords, questions and reworded questions, misspellings, 12 languages, sentences from questions and answers; random: random questions in 7 languages |
+| `ted_mul_ocean_2026-09` | `random` | 70 random talks, 7 languages |
+| `wikibooks_en_all_nopic_2026-01` | `curated`, `random` | curated: hand-written questions, keywords, misspellings; random: generated alternate names, first sentences and deep sentences |
 
 Languages: en, es, fr, pt, de, it, zh, ja, ru, ar, hi, sw, ha, am, so, af, yo, ig, zu, rw, plus `mul`
 (30 mixed-language queries).
@@ -64,10 +93,10 @@ difference between two versions smaller than this number can't be told apart fro
 | Languages | Queries (dev / test) | Where they come from | #1 score could vary by chance (±) |
 |---|---|---|---|
 | en | 707 / 1,696 | every ZIM and suite | ±2 points |
-| es, fr, ar, hi, sw, zh | ~150 / ~430 each | translations of the WikiMed `readme` sets, `random-targets` on WikiMed, cooking and TED, 15 cooking titles, 15 single words | ±5 points |
+| es, fr, ar, hi, sw, zh | ~150 / ~430 each | translations of the WikiMed curated queries, the random queries on WikiMed, cooking and TED, 15 cooking titles, 15 single words | ±5 points |
 | pt | 11 / 19 | 15 cooking titles + 15 single words | ±25 points |
 | de, it, ja, ru | 4 / 11 each | 15 cooking titles only | ±30 points |
-| af, am, ha, ig, rw, so, yo, zu | 7 / 8 each | 15 single medical words only (`words` suite) | ±35 points |
+| af, am, ha, ig, rw, so, yo, zu | 7 / 8 each | 15 single medical words only (`single-word`) | ±35 points |
 | mul | 12 / 18 | 30 mixed-language WikiMed queries | ±25 points |
 
 Only English and the six large languages (es, fr, ar, hi, sw, zh) support conclusions on their own. The
@@ -79,8 +108,9 @@ Query sources: 3,699 translated, 1,658 generated from the articles, 775 hand-wri
 
 ### dev and test
 
-Every query is assigned to **dev** (~30%) or **test** (~70%) by its id; all language versions of a query
-share one split. Tune settings while looking at `--split dev`; report results with `--split test`. This
+Every query is assigned to **dev** (~30%) or **test** (~70%) by its id, and the result is stored in the
+query's `split` field, so renaming an id never moves a query between splits. All language versions of a
+query share one split. Tune settings while looking at `--split dev`; report results with `--split test`. This
 keeps a setting from being fitted to the very queries used to judge it.
 
 ## Running it
@@ -98,7 +128,7 @@ python evaluation/run.py --engine kiwix --url http://localhost:8080 --label kiwi
 python evaluation/compare.py evaluation/results/main.json evaluation/results/my-branch.json --split test
 ```
 
-Useful options for `run.py`: `--zims`, `--suites`, `--sets`, `--langs` (run a subset), `--split`,
+Useful options for `run.py`: `--zims`, `--suites`, `--types`, `--langs` (run a subset), `--split`,
 `--k` (results requested, default 20), `--append` (add ZIMs served by another server to the same
 results file). Results are saved as `evaluation/results/<label>.json`.
 
@@ -140,7 +170,7 @@ settings:
 
 - **Tune on dev, report on test.** Look only at `--split dev` while trying settings, then report
   `--split test` once. If you tune again after seeing test results, say so.
-- **Run everything:** every ZIM and every language, with `--by zim lang set`, not only English.
+- **Run everything:** every ZIM and every language, with `--by zim lang type`, not only English.
 - **Report fixed / broken counts** and results by language and ZIM, not only averages. Call out anything
   that got worse.
 - If a change filters results (e.g. a score cutoff), report how often queries return fewer results than
@@ -154,34 +184,36 @@ server listening on IPv4 only every request then waits ~2 seconds, which would d
 
 ## Adding a ZIM
 
-1. Generate automatic sets (alternate names, first sentences, sentences deep in an article). It samples
+1. Generate automatic queries (alternate names, first sentences, sentences deep in an article). It samples
    random entries rather than reading the whole file, so it also works on very large ZIMs (e.g. the
    full English Wikipedia, ~100 GB):
    ```bash
    python evaluation/make_queries.py generate --zim zims/<name>.zim --n 200
    ```
-   Use `--lang` if the ZIM's text isn't English, and `--seed` for a different sample.
-2. Optionally add hand-written queries as `queries/<name>/hand.en.jsonl`. These matter most: real
-   questions, descriptions without the name, misspellings. Ids must be unique within the ZIM.
+   They go in `queries/<name>/random.en.jsonl`. Use `--lang` if the ZIM's text isn't English, and
+   `--seed` for a different sample.
+2. Optionally add hand-written queries as `queries/<name>/curated.en.jsonl`. These matter most: real
+   questions, descriptions without the name, misspellings. Use the types above; ids must be unique
+   within the ZIM.
 3. Check every answer exists in the ZIM:
    ```bash
    python evaluation/make_queries.py check --zim-dir zims
    ```
 
 **Very large ZIMs:** the evaluation itself is light (it only sends queries over HTTP). The slow part is
-building the Zimantic index for the ZIM. Use `--zims`, `--sets` or `--split dev` for quick checks.
+building the Zimantic index for the ZIM. Use `--zims`, `--types` or `--split dev` for quick checks.
 
 **New ZIM versions:** queries are tied to an exact ZIM file name, because article paths can change
-between releases. For a new release, regenerate the generated sets and run `check` on the hand-written
+between releases. For a new release, regenerate the generated queries and run `check` on the hand-written
 ones; copy over those whose answers still exist.
 
 ## Adding a language
 
 ```bash
-python evaluation/make_queries.py translate --zim wikipedia_en_medicine_maxi_2026-04 --suite readme --to pt
+python evaluation/make_queries.py translate --zim wikipedia_en_medicine_maxi_2026-04 --suite curated --to pt
 ```
 
-This writes `queries/<zim>/readme.pt.jsonl` with each English query in `source_query` and an empty
+This writes `queries/<zim>/curated.pt.jsonl` with each English query in `source_query` and an empty
 `query` to fill in. Empty lines are skipped (and counted) until they are translated, so the file can be
 filled in gradually. Translations keep the English query's id with `@pt` appended, so results can be
 compared query by query across languages. Language codes are free-form; reports group by whatever

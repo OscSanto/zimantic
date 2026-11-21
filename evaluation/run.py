@@ -123,7 +123,7 @@ def main():
     ap.add_argument("--commit", default="", help="optional: version or git commit being measured")
     ap.add_argument("--queries", default=str(Q.QUERIES), help="queries folder")
     ap.add_argument("--zims", nargs="*", help="only these ZIMs (default: all with query files)")
-    ap.add_argument("--suites", nargs="*"); ap.add_argument("--sets", nargs="*"); ap.add_argument("--langs", nargs="*")
+    ap.add_argument("--suites", nargs="*"); ap.add_argument("--types", nargs="*"); ap.add_argument("--langs", nargs="*")
     ap.add_argument("--split", choices=("all", "dev", "test"), default="all")
     ap.add_argument("--k", type=int, default=20, help="results requested per query (default 20)")
     ap.add_argument("--keep", type=int, default=20, help="results stored per query in the output (default 20)")
@@ -133,7 +133,7 @@ def main():
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
-    todo, skipped = Q.load(Path(args.queries), args.zims, args.suites, args.sets, args.langs, args.split)
+    todo, skipped = Q.load(Path(args.queries), args.zims, args.suites, args.types, args.langs, args.split)
     if not todo:
         sys.exit("no queries match the filters")
     out_path = RESULTS / f"{args.label}.json"

@@ -4,15 +4,16 @@
     python evaluation/make_queries.py generate --zim zims/wikipedia_en_all_maxi_2026-09.zim --n 200
 
     # a translation template for a new language: fill in each "query", empty lines are skipped until then
-    python evaluation/make_queries.py translate --zim wikipedia_en_medicine_maxi_2026-04 --suite readme --to pt
+    python evaluation/make_queries.py translate --zim wikipedia_en_medicine_maxi_2026-04 --suite curated --to pt
 
     # validate every query file; with --zim-dir also check that every answer still exists in its ZIM
     python evaluation/make_queries.py check --zim-dir zims
 
-Generated sets (English sentences taken from the articles themselves, the article's title words removed):
-  alias           a redirect's title, which should find the article it points to (alternate names)
-  first sentence  the article's first sentence
-  deep in article a sentence from the middle of the article (tests full-text style matching)
+Generated query types (from random articles, so they go in the "random" suite; sentences have the
+article's title words removed):
+  alternate-name  a redirect's title, which should find the article it points to
+  first-sentence  the article's first sentence
+  deep-sentence   a sentence from the middle of the article (tests full-text style matching)
 """
 import argparse
 import html as htmllib
@@ -28,7 +29,7 @@ import queries as Q  # noqa: E402
 
 PARAGRAPH = re.compile(r"<p[^>]*>(.*?)</p>", re.S)
 JUNK = re.compile(r"[{}]|mw-parser-output|display\s*:|function\s*\(|https?://")
-SETS = ("alias", "first sentence", "deep in article")
+GENERATED = ("alternate-name", "first-sentence", "deep-sentence")
 
 
 def paragraphs(html: str):
@@ -66,37 +67,37 @@ def generate(args):
     zim_path = Path(args.zim)
     zim, name, rng = Archive(str(zim_path)), zim_path.stem, random.Random(args.seed)
     rows, counts, budget = [], Counter(), args.n * args.attempts
-    wanted = [s for s in SETS if s in args.sets]
+    wanted = [t for t in GENERATED if t in args.types]
     while budget and any(counts[s] < args.n for s in wanted):
         budget -= 1
         entry = zim._get_entry_by_id(rng.randrange(zim.entry_count))
         if entry.is_redirect:
-            if "alias" not in wanted or counts["alias"] >= args.n:
+            if "alternate-name" not in wanted or counts["alternate-name"] >= args.n:
                 continue
             title = entry.title.strip()
             target = follow(entry)
             if (not target or not is_article(target) or "/" in title or title.isdigit()
                     or title.casefold() == target.title.casefold() or title == target.path):
                 continue
-            rows.append({"set": "alias", "query": title, "answers": [target.path]}); counts["alias"] += 1
+            rows.append({"type": "alternate-name", "query": title, "answers": [target.path]}); counts["alternate-name"] += 1
             continue
-        if not is_article(entry) or not ({"first sentence", "deep in article"} & set(wanted)):
+        if not is_article(entry) or not ({"first-sentence", "deep-sentence"} & set(wanted)):
             continue
         paras = paragraphs(bytes(entry.get_item().content).decode("utf-8", "ignore"))
-        if "first sentence" in wanted and counts["first sentence"] < args.n and paras:
+        if "first-sentence" in wanted and counts["first-sentence"] < args.n and paras:
             q = without_title(first_sentence(paras[0]), entry.title)
             if len(q) >= 30:
-                rows.append({"set": "first sentence", "query": q[:200], "answers": [entry.path]}); counts["first sentence"] += 1
+                rows.append({"type": "first-sentence", "query": q[:200], "answers": [entry.path]}); counts["first-sentence"] += 1
         deep = paras[3:]
-        if "deep in article" in wanted and counts["deep in article"] < args.n and deep:
+        if "deep-sentence" in wanted and counts["deep-sentence"] < args.n and deep:
             q = without_title(first_sentence(deep[len(deep) // 2]), entry.title)
             if len(q) >= 40:
-                rows.append({"set": "deep in article", "query": q[:200], "answers": [entry.path]}); counts["deep in article"] += 1
-    per_set = Counter()
+                rows.append({"type": "deep-sentence", "query": q[:200], "answers": [entry.path]}); counts["deep-sentence"] += 1
+    per_type = Counter()
     for row in rows:
-        row.update({"id": f"{args.suite}/{row['set']}/{per_set[row['set']]:03d}", "zim": name, "suite": args.suite,
+        row.update({"id": f"{args.suite}/{row['type']}/{per_type[row['type']]:03d}", "zim": name, "suite": args.suite,
                     "lang": args.lang, "source": "generated"})
-        per_set[row["set"]] += 1
+        per_type[row["type"]] += 1
     out = Path(args.queries) / name / f"{args.suite}.{args.lang}.jsonl"
     Q.write(out, rows)
     print(f"wrote {out}: " + ", ".join(f"{s} {counts[s]}" for s in wanted)
@@ -106,8 +107,8 @@ def generate(args):
 def translate(args):
     folder = Path(args.queries) / args.zim
     source = [json.loads(l) for l in (folder / f"{args.suite}.{args.source_lang}.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-    if args.sets:
-        source = [r for r in source if r["set"] in args.sets]
+    if args.types:
+        source = [r for r in source if r["type"] in args.types]
     out = folder / f"{args.suite}.{args.to}.jsonl"
     existing = {}
     if out.exists():
@@ -116,8 +117,9 @@ def translate(args):
     for r in source:
         rid = f"{Q.base_id(r['id'])}@{args.to}"
         done = existing.get(rid, {}).get("query", "")
-        rows.append({"id": rid, "zim": r["zim"], "suite": r["suite"], "set": r["set"], "lang": args.to,
-                     "query": done, "answers": r["answers"], "source": "translated", "source_query": r["query"]})
+        rows.append({"id": rid, "zim": r["zim"], "suite": r["suite"], "type": r["type"], "lang": args.to,
+                     "query": done, "answers": r["answers"], "source": "translated", "split": r.get("split") or Q.split_of(r["id"]),
+                     "source_query": r["query"]})
     Q.write(out, rows)
     todo = sum(1 for r in rows if not r["query"])
     print(f"wrote {out}: {len(rows)} lines, {todo} still to translate (fill in \"query\"; empty lines are skipped)")
@@ -152,18 +154,18 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate", help="automatic query sets from a ZIM file")
     g.add_argument("--zim", required=True, help="path to the .zim file")
-    g.add_argument("--n", type=int, default=200, help="queries per set (default 200)")
-    g.add_argument("--sets", nargs="*", default=list(SETS), choices=SETS)
-    g.add_argument("--suite", default="generated")
+    g.add_argument("--n", type=int, default=200, help="queries per type (default 200)")
+    g.add_argument("--types", nargs="*", default=list(GENERATED), choices=GENERATED)
+    g.add_argument("--suite", default="random", choices=Q.SUITES)
     g.add_argument("--lang", default="en", help="language of the ZIM's text (default en)")
     g.add_argument("--seed", type=int, default=0)
     g.add_argument("--attempts", type=int, default=400, help="random entries tried per wanted query before giving up")
     t = sub.add_parser("translate", help="translation template for a new language")
     t.add_argument("--zim", required=True, help="ZIM name (folder under queries/)")
-    t.add_argument("--suite", required=True)
+    t.add_argument("--suite", required=True, choices=Q.SUITES)
     t.add_argument("--to", required=True, help="language code of the new language, e.g. pt")
     t.add_argument("--source-lang", default="en")
-    t.add_argument("--sets", nargs="*", help="only these sets")
+    t.add_argument("--types", nargs="*", help="only these query types")
     c = sub.add_parser("check", help="validate query files")
     c.add_argument("--zim-dir", help="folder with the .zim files, to check that answers exist")
     args = ap.parse_args()
