@@ -70,7 +70,13 @@ Input is capped at 256 tokens.
 The `.faiss` file is memory-mapped: the operating system reads only the **clusters** a search touches instead of loading
 the whole index into RAM. Clusters are found relative to the distance of query-to-cluster centres in vector space.
 
-If a build stops, running it again resumes from the last saved batch.
+**Speed.** A build reads the ZIM in the order its articles are stored, sorts them by length, and embeds small
+batches on several worker threads at once while the next articles are being read. On an 8-core laptop that's
+about 3× faster than one batch at a time. `embedding_workers`, `embed_threads` and `batch_size` in
+`config.yaml` default to `auto`/8. See [docs/optimization.md](docs/optimization.md) for how it works and
+`scripts/bench_embed.py` to measure your machine.
+
+If a build stops, running it again resumes from the last saved window of articles.
 
 ### 2. Starting the server (`serve`, once)
 
@@ -160,7 +166,8 @@ languages may contain mistakes.
 - **Smaller footprint.** Zimantic adds a `.sqlite` and `.faiss` per ZIM and needs more RAM.
 
 ## Requirements
-- Python 3.12, 3.13 or 3.14 (the pinned numpy needs 3.12+; libzim doesn't support 3.15 yet)
+- Python 3.12, 3.13 or 3.14 (the pinned numpy needs 3.12+; onnxruntime doesn't support 3.15 yet)
+- A 64-bit OS (libzim has no 32-bit builds; on a Raspberry Pi, use 64-bit Raspberry Pi OS)
 - About 120 MB for the embedding model, plus your ZIM files
 - Wikipedia-style ZIM files (Zimantic relies on their predictable HTML structure to find the first paragraph)
 - *Searching does not require Kiwix.* To open the articles from the result links, run

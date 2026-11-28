@@ -67,8 +67,8 @@ class Search:
                     keyword.append((bm25, name, rowid))
 
             if searcher:
-                paths = searcher.search(Query().set_query(query)).getResults(0, extrafetch)
-                fulltext += [(rank, name, zimArchive.get_entry_by_path(p)._index) for rank, p in enumerate(paths)]
+                hits = searcher.search(Query().set_query(query)).get_results(0, extrafetch)  # libzim 4: objects with .path
+                fulltext += [(rank, name, zimArchive.get_entry_by_path(hit.path)._index) for rank, hit in enumerate(hits)]
 
         semantic.sort(reverse=True)  # higher similarity is better
         keyword.sort()               # lower bm25 is better
