@@ -105,6 +105,20 @@ With one thread per call, that overhead is small, and small batches win instead:
 | 32 | 65.3 |
 | **8** | **93.5** |
 
+**Batches by tokens, not by count.** A fixed 8 texts per call still made some calls far heavier than others: 8
+long texts are 2,048 tokens, 8 short ones under 300. The most expensive batch cost 1.8–6.9× the median one, so
+some workers were still busy after the rest had finished, and the heaviest calls set peak RAM. Now each call gets
+as many texts as fit in `embedding_batch_tokens` (default 1,000), counting padding: with the window sorted, a
+batch of n texts whose longest is w tokens costs n × w. The most expensive batch is now 1.0–1.1× the median.
+
+| `embedding_batch_tokens` (sorted by tokens) | wikipedia_en_top | WikiMed | cooking |
+|---|---|---|---|
+| fixed 8 texts | 73.0 | 120.8 | 186.3 |
+| **1,000** | **79.3** | **122.6** | 182.7 |
+| 2,000 | 22% slower than 1,000 | 15% slower | 7% slower |
+
+Articles/s from the prototype, 40,000-entry slices. A 2,000-token budget brings back padding (2.5–17.8%).
+
 ## 4. Reading while embedding
 
 ```mermaid
@@ -203,6 +217,18 @@ during a build (`bench_embed.py`, 15,000 entries, Windows):
 | 15 | 8 | 0.67 GB |
 | 15 | 32 | **1.39 GB** |
 
+These were measured before token budgets. With `embedding_batch_tokens: 1000` (15 workers, 40,000-entry slices):
+
+| ZIM | 8 texts per call | 1,000 tokens per call |
+|---|---|---|
+| wikipedia_en_top | 0.88 GB | **0.58 GB** |
+| WikiMed | 0.90 GB | **0.60 GB** |
+| cooking | 0.69 GB | **0.52 GB** |
+
+A call's working memory grows with texts × width, plus attention tables of width × width per text. A budget caps
+every call, and peak RAM is roughly all workers' calls at once, so capping the biggest call lowers the peak.
+On a Raspberry Pi 5 (3 workers): 0.70 → 0.47 GB.
+
 ```mermaid
 xychart-beta
     title "Peak build RAM (GB) by worker threads, batch_size 8"
@@ -214,10 +240,11 @@ xychart-beta
 So `embedding_workers: auto` also checks the RAM **free when the build starts**:
 
 ```
-workers = min(hardware threads - 1,  (free RAM - 300 MB model - 128 MB reserve) / (4 MB x batch_size))
+workers = min(hardware threads - 1,  (free RAM - 300 MB model - 128 MB reserve) / (24 KB x embedding_batch_tokens))
 ```
 
-- **Cost per worker:** 4 MB × `batch_size` is 32 MB at batch 8, on the cautious side of the 25–45 MB measured.
+- **Cost per worker:** 24 KB × `embedding_batch_tokens` is 24 MB at 1,000, on the cautious side of the 15–19 MB
+  measured.
 - **The reserve:** 128 MB is left for the OS and a search server on the same machine.
 - **When even one worker doesn't fit:** the build prints a warning, for example on a Pi Zero 2 W with other
   programs running.
@@ -225,7 +252,7 @@ workers = min(hardware threads - 1,  (free RAM - 300 MB model - 128 MB reserve) 
 The build start line says why it chose its worker count, for example:
 
 ```
-settings: 8 embedding workers (limited by free RAM (700 MB free, ~32 MB per worker)) x 1 threads, batch_size 8
+settings: 8 embedding workers (limited by free RAM (700 MB free, ~24 MB per worker)) x 1 threads, 1000 tokens per model call
 ```
 
 After each ZIM, `release_memory()` gives freed memory back to the OS. On Linux, glibc otherwise keeps it reserved
@@ -238,7 +265,7 @@ Batch 8 also saves RAM. At 15 worker threads, batch 32 needed 2.1× the peak RAM
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `batch_size` | 8 | articles with text per model call |
+| `embedding_batch_tokens` | 1000 | tokens per model call, counting padding (replaces `batch_size`) |
 | `embedding_workers` | auto = hardware threads − 1, capped by free RAM | model calls running at once while building |
 | `embed_threads` | auto = 1 with several workers, else all cores | threads inside one model call |
 
@@ -250,7 +277,7 @@ python scripts/bench_embed.py wikipedia_en_top_nopic_2026-09
 
 It runs the real build loop on a slice of the ZIM, writes nothing, and prints one Markdown row: hardware,
 settings, articles/s, peak RAM and the estimated embedding time for the whole ZIM. Flags (`--workers`,
-`--threads`, `--batch`, `--order id`) try other settings. Please share rows from machines not listed yet.
+`--threads`, `--batch-tokens`, `--order id`) try other settings. Please share rows from machines not listed yet.
 
 ## Things that made no difference
 
