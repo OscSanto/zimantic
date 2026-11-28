@@ -44,13 +44,15 @@ results: 30
 # BUILDING INDEXES. "auto" picks a value from this machine's CPU (printed when a build starts).
 # A build reads the ZIM on one thread while worker threads embed articles at the same time.
 
-# Articles (with text) embedded per model call. 8 was 1.4x faster than 32 in testing, and uses less memory.
-batch_size: 8
+# Tokens (word pieces) per model call, counting padding: about 8 Wikipedia first paragraphs, or 30 short
+# titles. Every call then costs about the same, which keeps worker threads even and peak RAM low.
+# 1,000 was faster than 2,000 in testing and used 33% less peak RAM than a fixed 8 texts per call.
+embedding_batch_tokens: 1000
 
 # Model calls running at once while building (worker threads sharing one copy of the model).
 # auto = hardware threads - 1 (one is left for reading the ZIM), e.g. 15 on an 8-core / 16-thread PC,
 # 3 on a Raspberry Pi 5, but never more than fit in the RAM free when the build starts
-# (~300 MB for the model, plus ~32 MB per worker at batch_size 8). A Raspberry Pi Zero 2 W gets 1.
+# (~300 MB for the model, plus ~24 MB per worker at 1,000 tokens per call). A Raspberry Pi Zero 2 W gets 1.
 embedding_workers: auto
 
 # CPU threads inside ONE model call. auto = 1 when several workers run (fastest in testing), or all

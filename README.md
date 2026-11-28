@@ -72,8 +72,8 @@ the whole index into RAM. Clusters are found relative to the distance of query-t
 
 **Speed.** A build reads the ZIM in the order its articles are stored, sorts them by token count, and embeds small
 batches on several worker threads at once while the next articles are being read. On an 8-core laptop that's
-about 3× faster than one batch at a time. `embedding_workers`, `embed_threads` and `batch_size` in
-`config.yaml` default to `auto`/8. See [docs/optimization.md](docs/optimization.md) for how it works and
+about 3× faster than one batch at a time. `embedding_workers` and `embed_threads` in `config.yaml` default
+to `auto`, and `embedding_batch_tokens` to 1,000. See [docs/optimization.md](docs/optimization.md) for how it works and
 `scripts/bench_embed.py` to measure your machine.
 
 If a build stops, running it again resumes from the last saved window of articles.

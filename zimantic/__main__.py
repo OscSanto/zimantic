@@ -49,14 +49,14 @@ def main() -> None:
 
         from .hardware import detect
         hw = detect()
-        workers, threads, batch_size, note = build_settings(cfg, hw)
+        workers, threads, batch_tokens, note = build_settings(cfg, hw)
         print(f"hardware: {hw.describe()}")
         print(f"settings: {workers} embedding workers ({note}) x {threads or 'default'} threads, "
-              f"batch_size {batch_size}")
+              f"{batch_tokens} tokens per model call")
 
         embedder = Embedder(cfg["model_dir"], threads=threads or None)
         for zim in zims:
-            build_zim(zim, cfg["index_dir"], embedder, batch_size, workers)
+            build_zim(zim, cfg["index_dir"], embedder, batch_tokens, workers)
 
     elif args.command == "serve":
         from .search import Search
