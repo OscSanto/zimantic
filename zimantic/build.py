@@ -17,7 +17,7 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 from libzim.reader import Archive
-from .zim import read_entry, storage_order
+from .zim import read_entry, storage_order_and_page_sizes
 
 SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
@@ -101,13 +101,19 @@ def build(zim_path: Path, index_dir, embedder, batch_size: int, workers: int) ->
     if order_name not in ("storage", "id"):  # e.g. "cluster": zimantic's own storage order before libzim 4.1
         raise SystemExit(f"zimantic: {zim_path.stem} was started in a reading order this version can't resume. "
                          f"Delete {db_path} and build again")
-    order = storage_order(zim) if order_name == "storage" else None
     with db:
         db.execute("INSERT OR REPLACE INTO meta VALUES ('order', ?)", (order_name,))
 
-    progress = tqdm(total=zim.entry_count, initial=start, desc=zim_path.stem)
+    if order_name == "storage":
+        # The bar moves with the HTML read so far (see storage_order_and_page_sizes), shown as a percentage.
+        order, sizes = storage_order_and_page_sizes(zim)
+        progress = tqdm(total=int(sizes.sum(dtype=np.int64)), initial=int(sizes[:start].sum(dtype=np.int64)),
+                        desc=zim_path.stem, bar_format="{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]")
+    else:  # an old unfinished build in id order: one step per entry, as before
+        order, sizes = None, None
+        progress = tqdm(total=zim.entry_count, initial=start, desc=zim_path.stem)
     for rows, vectors, next_position in embed_windows(zim, order, start, zim.entry_count, embedder,
-                                                      batch_size, workers, progress):
+                                                      batch_size, workers, progress, sizes):
         _save(db, rows, vectors, next_position)
     progress.close()
 
@@ -140,10 +146,12 @@ def release_memory() -> None:
     trim(0)
 
 
-def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, workers: int, progress=None):
+def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, workers: int, progress=None,
+                  steps=None):
     """Read entries order[start:stop] and yield (rows, vectors, next_position) one window at a time, in order.
 
     order: entry ids in reading order (from storage_order), or None for id order.
+    progress: a tqdm bar, advanced by steps[position] per entry (or by 1 when steps is None).
     rows: every indexable entry of the window, including redirects and title-only pages (no vector).
     vectors: {entry id: vector} for the rows that have a first paragraph.
 
@@ -180,7 +188,9 @@ def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, 
                 rows.append(row)
                 articles += bool(row[2])
             if progress is not None:
-                progress.update()
+                step = 1 if steps is None else int(steps[position])
+                if step:
+                    progress.update(step)
             if articles >= WINDOW or len(rows) >= MAX_WINDOW_ROWS:
                 if pending:
                     yield finished(*pending)  # wait for window k-1 and hand it over to be written...
