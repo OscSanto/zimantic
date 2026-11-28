@@ -70,7 +70,7 @@ Input is capped at 256 tokens.
 The `.faiss` file is memory-mapped: the operating system reads only the **clusters** a search touches instead of loading
 the whole index into RAM. Clusters are found relative to the distance of query-to-cluster centres in vector space.
 
-**Speed.** A build reads the ZIM in the order its articles are stored, sorts them by length, and embeds small
+**Speed.** A build reads the ZIM in the order its articles are stored, sorts them by token count, and embeds small
 batches on several worker threads at once while the next articles are being read. On an 8-core laptop that's
 about 3× faster than one batch at a time. `embedding_workers`, `embed_threads` and `batch_size` in
 `config.yaml` default to `auto`/8. See [docs/optimization.md](docs/optimization.md) for how it works and

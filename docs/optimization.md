@@ -68,6 +68,29 @@ Part of the model's cost (attention) grows with length², so long padded batches
 reads a **window** of 512 articles, sorts it by length, and cuts it into batches. Sorting alone was **2.6×
 faster** on full Wikipedia paragraphs, which vary more in length than first paragraphs.
 
+**Sort by tokens, not characters.** The model's cost is in tokens, and characters per token differ by language
+(counted on the evaluation queries):
+
+| Language | Characters per token |
+|---|---|
+| English, Spanish | 4.0 |
+| French, Swahili | 3.7 |
+| Hindi, Arabic | 3.1 |
+| Chinese | 1.3 |
+
+Sorting by characters still left 14–18% of the computed tokens as padding on the ZIMs below. So each text is
+tokenized once on the reading thread, the window is sorted by token count, and the workers get the token ids.
+Padding counted on 8 windows of 512 articles per ZIM:
+
+| ZIM | Sorted by characters | Sorted by tokens |
+|---|---|---|
+| wikipedia_en_top | 14.1% | 1.2% |
+| WikiMed | 13.8% | 1.6% |
+| cooking.stackexchange | 17.7% | 3.7% |
+
+That is also about 21% less attention work. Measured on 40,000-entry slices: 1.17–1.21× faster and 0.05–0.14 GB
+less peak RAM.
+
 ## 3. Batch size
 
 Big batches spread a call's fixed overhead (Python, tokenizing, starting and syncing threads) over more texts.

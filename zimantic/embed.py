@@ -26,14 +26,18 @@ class Embedder:
         # sentencepiece loads this vocabulary in ~45 MB; Hugging Face `tokenizers` needed ~250 MB.
         self.tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(Path(model_dir) / "sentencepiece.bpe.model"))
 
-    def _ids(self, text: str) -> list[int]:
+    def encode(self, text: str) -> list[int]:
+        """The token ids the model sees for one text (at most MAX_TOKENS)."""
         # XLM-RoBERTa numbering: <s>=0 <pad>=1 </s>=2 <unk>=3, other pieces are sentencepiece id + 1.
         pieces = self.tokenizer.encode(text)[:MAX_TOKENS - 2]
         return [0] + [p + 1 if p else 3 for p in pieces] + [2]
 
     def embed(self, texts: list[str]) -> np.ndarray:
         """e5 expects each text to start with "query: " or "passage: "."""
-        encoded = [self._ids(t) for t in texts]
+        return self.embed_encoded([self.encode(t) for t in texts])
+
+    def embed_encoded(self, encoded: list[list[int]]) -> np.ndarray:
+        """Vectors for texts already turned into token ids by encode()."""
         width = max(map(len, encoded))
         ids = np.array([e + [1] * (width - len(e)) for e in encoded], dtype=np.int64)
         mask = (ids != 1).astype(np.int64)
