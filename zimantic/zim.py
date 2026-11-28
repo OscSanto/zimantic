@@ -94,6 +94,27 @@ def storage_order(zim: Archive) -> np.ndarray:
     return np.fromiter((entry._index for entry in zim.iter_efficient()), dtype=np.uint32)
 
 
+def storage_order_and_page_sizes(zim: Archive) -> tuple[np.ndarray, np.ndarray]:
+    """storage_order(), plus each entry's HTML size in bytes (0 for redirects, images, CSS...), in one pass.
+
+    The build's progress bar advances by these sizes. Counting entries was far off: redirects are most of
+    a ZIM's entries, take almost no time, and come first in storage order, so on wikipedia_en_top the bar
+    showed 70% when 5% of the work was done. Counting HTML pages was off the other way, because small
+    redirect pages and title-only pages are bunched near the end. Big pages are the ones with text to embed,
+    and the size comes from the ZIM's index without decompressing anything (about 20 s for 930,000 entries).
+    """
+    ids, sizes = [], []
+    for entry in zim.iter_efficient():
+        ids.append(entry._index)
+        size = 0
+        if not entry.is_redirect:
+            item = entry.get_item()
+            if item.mimetype.startswith("text/html"):
+                size = item.size
+        sizes.append(size)
+    return np.array(ids, dtype=np.uint32), np.array(sizes, dtype=np.uint32)
+
+
 def read_entry(zim: Archive, i: int):
     """Return (id, title, lead, path, target_id) for an HTML page, or None for anything else.
 
