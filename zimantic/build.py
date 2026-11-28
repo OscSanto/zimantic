@@ -4,7 +4,8 @@ Rerunning an unfinished build resumes where it stopped. To rebuild, delete both 
 
 How a build runs (each step is explained where it happens):
     1. read entries in the order the ZIM stores them (zim.storage_order)
-    2. collect a "window" of WINDOW articles, sort it by token count, cut it into batches of batch_size
+    2. collect a "window" of WINDOW articles, sort it by token count, cut it into batches of about
+       embedding_batch_tokens tokens each
     3. worker threads embed the batches at the same time, sharing one model
     4. meanwhile the main thread already reads the next window
     5. write each window, with the point to resume from, in one transaction
@@ -28,7 +29,8 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
 """
 
 # Articles read per window. Big enough that sorting finds texts of similar length and every worker thread
-# gets many batches (512 / 8 = 64), small enough to hold in memory anywhere (~0.5 MB of text).
+# gets many batches (~60 batches of 1,000 tokens for Wikipedia first paragraphs), small enough to hold in
+# memory anywhere (~0.5 MB of text).
 WINDOW = 512
 # A window also ends after this many rows of any kind. Storage order reads redirects last, and they have no
 # text, so without this cap the article count never reaches WINDOW there: every redirect would pile up in
@@ -36,16 +38,16 @@ WINDOW = 512
 MAX_WINDOW_ROWS = 8192
 
 
-# Peak RAM measured during builds (batch 8, Windows, 2026-11-07): ~300 MB before any embedding (model,
-# tokenizer, ZIM open), then ~25-45 MB per worker thread; batch 32 needed ~3x as much per worker.
+# Peak RAM measured during builds (Windows): ~300 MB before any embedding (model, tokenizer, ZIM open), then
+# per worker thread ~25-45 MB with 8 texts per call (2026-11-07), ~15-19 MB with 1,000-token calls (2026-11-28).
 BASE_RAM = 300 << 20
-RAM_PER_WORKER_PER_TEXT = 4 << 20   # x batch_size: 32 MB per worker at batch 8, on the cautious side
+RAM_PER_WORKER_PER_TOKEN = 24 << 10  # x embedding_batch_tokens: 24 MB per worker at 1,000, on the cautious side
 RAM_RESERVE = 128 << 20             # left for the OS and a search server running on the same machine
 MB = 1 << 20
 
 
 def build_settings(cfg: dict, hw) -> tuple[int, int, int, str]:
-    """(embedding_workers, embed_threads, batch_size, note) from config.yaml, with "auto" filled in.
+    """(embedding_workers, embed_threads, batch_tokens, note) from config.yaml, with "auto" filled in.
 
     auto workers: one per hardware thread, minus one left for the main thread (it reads the ZIM),
                   and no more than fit in the RAM free right now.
@@ -60,8 +62,8 @@ def build_settings(cfg: dict, hw) -> tuple[int, int, int, str]:
             raise SystemExit(f"zimantic: {name} must be auto or a whole number of at least 1, not {value!r}")
         return value
 
-    batch_size = setting("batch_size", 8)
-    per_worker = RAM_PER_WORKER_PER_TEXT * batch_size
+    batch_tokens = setting("embedding_batch_tokens", 1000)
+    per_worker = RAM_PER_WORKER_PER_TOKEN * batch_tokens
     spare = hw.ram_available - BASE_RAM - RAM_RESERVE
     fit = max(1, spare // per_worker)
     by_threads = max(1, hw.threads - 1)
@@ -76,11 +78,13 @@ def build_settings(cfg: dict, hw) -> tuple[int, int, int, str]:
     if spare < per_worker:
         note += (f". WARNING: only {hw.ram_available // MB} MB free, about {(BASE_RAM + RAM_RESERVE + per_worker) // MB}"
                  " MB is needed; the build may run out of memory. Close other programs or build on another machine")
+    if cfg.get("batch_size") is not None:
+        note += ". batch_size in config.yaml is no longer used: embedding_batch_tokens replaced it"
     threads = setting("embed_threads", 1 if workers > 1 else 0)  # 0 = ONNX Runtime's default
-    return workers, threads, batch_size, note
+    return workers, threads, batch_tokens, note
 
 
-def build(zim_path: Path, index_dir, embedder, batch_size: int, workers: int) -> None:
+def build(zim_path: Path, index_dir, embedder, batch_tokens: int, workers: int) -> None:
     db_path = Path(index_dir) / f"{zim_path.stem}.sqlite"
     faiss_path = db_path.with_suffix(".faiss")
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +111,7 @@ def build(zim_path: Path, index_dir, embedder, batch_size: int, workers: int) ->
 
     progress = tqdm(total=zim.entry_count, initial=start, desc=zim_path.stem)
     for rows, vectors, next_position in embed_windows(zim, order, start, zim.entry_count, embedder,
-                                                      batch_size, workers, progress):
+                                                      batch_tokens, workers, progress):
         _save(db, rows, vectors, next_position)
     progress.close()
 
@@ -140,7 +144,7 @@ def release_memory() -> None:
     trim(0)
 
 
-def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, workers: int, progress=None):
+def embed_windows(zim, order, start: int, stop: int, embedder, batch_tokens: int, workers: int, progress=None):
     """Read entries order[start:stop] and yield (rows, vectors, next_position) one window at a time, in order.
 
     order: entry ids in reading order (from storage_order), or None for id order.
@@ -158,7 +162,18 @@ def embed_windows(zim, order, start: int, stop: int, embedder, batch_size: int, 
         # Tokenizing here, on the reading thread, costs little next to embedding the window.
         articles = sorted(((row, embedder.encode(f"passage: {row[1]}\n{row[2]}")) for row in rows if row[2]),
                           key=lambda article: len(article[1]))
-        batches = [articles[k:k + batch_size] for k in range(0, len(articles), batch_size)]
+        # Each batch gets as many texts as fit in batch_tokens, counting padding: a call's work and working
+        # memory grow with texts x longest text, so ~30 short texts or ~4 long ones. A fixed number of texts
+        # made long batches several times heavier than short ones: threads finished unevenly, and peak RAM
+        # was set by the heaviest batches running at once. A single text longer than the budget runs alone.
+        batches, batch = [], []
+        for article in articles:  # sorted, so this text is the longest in the batch so far
+            if batch and (len(batch) + 1) * len(article[1]) > batch_tokens:
+                batches.append(batch)
+                batch = []
+            batch.append(article)
+        if batch:
+            batches.append(batch)
         futures = [pool.submit(embedder.embed_encoded, [ids for _, ids in batch]) for batch in batches]
         return rows, [[row for row, _ in batch] for batch in batches], futures
 

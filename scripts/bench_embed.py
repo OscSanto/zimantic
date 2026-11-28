@@ -4,7 +4,7 @@ Runs the real build loop (read the ZIM + embed) on a slice of one ZIM, without w
 Run it from the project folder, with config.yaml in place:
 
     python scripts/bench_embed.py wikipedia_en_top_nopic_2026-09
-    python scripts/bench_embed.py wikipedia_en_top_nopic_2026-09 --workers 3 --batch 8 --order id
+    python scripts/bench_embed.py wikipedia_en_top_nopic_2026-09 --workers 3 --batch-tokens 1000 --order id
 
 Settings default to config.yaml (with "auto" filled in, like a real build); flags override them.
 """
@@ -24,7 +24,7 @@ from zimantic.embed import Embedder
 from zimantic.hardware import GB, detect
 from zimantic.zim import storage_order
 
-COLUMNS = ["Hardware", "Cores / threads", "RAM", "OS", "Workers x threads", "Batch", "Order",
+COLUMNS = ["Hardware", "Cores / threads", "RAM", "OS", "Workers x threads", "Batch tokens", "Order",
            "Articles/s", "Peak RAM", "Full-ZIM embed time (est.)", "ZIM"]
 
 
@@ -53,16 +53,17 @@ def main() -> None:
     parser.add_argument("--entries", type=int, default=40_000, help="entries to read (default 40,000)")
     parser.add_argument("--workers", type=int, help="embedding_workers (default: config.yaml)")
     parser.add_argument("--threads", type=int, help="embed_threads (default: config.yaml)")
-    parser.add_argument("--batch", type=int, help="batch_size (default: config.yaml)")
+    parser.add_argument("--batch-tokens", type=int, help="embedding_batch_tokens (default: config.yaml)")
     parser.add_argument("--order", choices=["storage", "id"], default="storage", help="reading order (default storage)")
     args = parser.parse_args()
 
     cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
-    for key, value in (("embedding_workers", args.workers), ("embed_threads", args.threads), ("batch_size", args.batch)):
+    for key, value in (("embedding_workers", args.workers), ("embed_threads", args.threads),
+                       ("embedding_batch_tokens", args.batch_tokens)):
         if value is not None:
             cfg[key] = value
     hw = detect()
-    workers, threads, batch_size, note = build_settings(cfg, hw)
+    workers, threads, batch_tokens, note = build_settings(cfg, hw)
 
     path = Path(args.zim) if args.zim.endswith(".zim") else Path(cfg["zim_dir"]) / f"{args.zim}.zim"
     zim = Archive(str(path))
@@ -82,17 +83,17 @@ def main() -> None:
     embedder.embed(["passage: warm up"])
     print(f"hardware: {hw.describe()}", file=sys.stderr)
     print(f"reading entries {start:,}-{stop:,} of {zim.entry_count:,}, {workers} workers x "
-          f"{threads or 'default'} threads ({note}), batch {batch_size}, {order_name} order", file=sys.stderr)
+          f"{threads or 'default'} threads ({note}), {batch_tokens} tokens per call, {order_name} order", file=sys.stderr)
 
     began = time.perf_counter()
     articles = sum(len(vectors) for _, vectors, _ in
-                   embed_windows(zim, ids, 0, len(ids), embedder, batch_size, workers))
+                   embed_windows(zim, ids, 0, len(ids), embedder, batch_tokens, workers))
     seconds = time.perf_counter() - began
     full = seconds * zim.entry_count / (stop - start)  # assumes the slice is typical of the whole ZIM
     peak = peak_ram()
 
     row = [hw.device or hw.cpu or hw.machine, f"{hw.cores} / {hw.threads}", f"{hw.ram_total / GB:.1f} GB",
-           f"{hw.system} {hw.machine}", f"{workers} x {threads or 'default'}", str(batch_size), order_name,
+           f"{hw.system} {hw.machine}", f"{workers} x {threads or 'default'}", str(batch_tokens), order_name,
            f"{articles / seconds:.1f}", f"{peak / GB:.2f} GB" if peak else "?",
            f"{full / 60:.0f} min" if full < 5400 else f"{full / 3600:.1f} h", path.stem]
     print(f"\n{articles:,} articles embedded in {seconds:.0f} s. Paste this row into the results table:\n",
